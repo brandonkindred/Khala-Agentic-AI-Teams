@@ -36,7 +36,16 @@ class _TextStubClient(DummyLLMClient):
         super().__init__()
         self._text = text
 
-    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         return self._text
 
 
@@ -48,7 +57,16 @@ class _ScriptedTextClient(DummyLLMClient):
         self._responses = list(responses)
         self._idx = 0
 
-    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         if self._idx < len(self._responses):
             resp = self._responses[self._idx]
             self._idx += 1
@@ -63,7 +81,16 @@ class _CallableTextClient(DummyLLMClient):
         super().__init__()
         self._fn = fn
 
-    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         return self._fn(prompt)
 
 
@@ -212,6 +239,76 @@ class TestFrontendRunMicrotaskReview:
         assert len([i for i in result.issues if i.severity == "critical"]) > 0
 
 
+class TestFrontendAgentReviewCache:
+    def test_run_microtask_review_reuses_cache_for_unchanged_files(self, tmp_path):
+        """A second run_microtask_review call with byte-identical files reuses
+        the QA/security verdicts instead of calling the agents again."""
+        from frontend_code_v2_team.models import Microtask
+        from frontend_code_v2_team.phases.review import run_microtask_review
+
+        from software_engineering_team.shared.agent_review import AgentReviewCache
+
+        task = _create_test_task("frontend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        files = {"src/app.ts": "const x = 1;"}
+
+        mock_llm = _TextStubClient(
+            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
+        )
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        mock_sec = MagicMock()
+        mock_sec.run.return_value = MagicMock(vulnerabilities=[], issues=[])
+        cache = AgentReviewCache()
+
+        for _ in range(2):
+            result = run_microtask_review(
+                llm=mock_llm,
+                task=task,
+                microtask=mt,
+                repo_path=tmp_path,
+                files=files,
+                qa_agent=mock_qa,
+                security_agent=mock_sec,
+                cache=cache,
+            )
+            assert result.passed
+
+        assert mock_qa.run.call_count == 1
+        assert mock_sec.run.call_count == 1
+
+    def test_run_microtask_review_without_cache_calls_agents_every_time(self, tmp_path):
+        """Omitting ``cache`` (the default) is unchanged: every call re-invokes the agents."""
+        from frontend_code_v2_team.models import Microtask
+        from frontend_code_v2_team.phases.review import run_microtask_review
+
+        task = _create_test_task("frontend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        files = {"src/app.ts": "const x = 1;"}
+
+        mock_llm = _TextStubClient(
+            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
+        )
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        mock_sec = MagicMock()
+        mock_sec.run.return_value = MagicMock(vulnerabilities=[], issues=[])
+
+        for _ in range(2):
+            run_microtask_review(
+                llm=mock_llm,
+                task=task,
+                microtask=mt,
+                repo_path=tmp_path,
+                files=files,
+                qa_agent=mock_qa,
+                security_agent=mock_sec,
+            )
+
+        assert mock_qa.run.call_count == 2
+        assert mock_sec.run.call_count == 2
+
+
 class TestFrontendRunProblemSolvingForMicrotask:
     def test_problem_solving_with_no_issues_returns_resolved(self):
         from frontend_code_v2_team.models import Microtask, ReviewResult
@@ -303,10 +400,12 @@ class TestFrontendRunExecutionWithReviewGates:
         mt = Microtask(id="mt-1", title="Failing Task", tool_agent=ToolAgentKind.GENERAL)
         planning_result = PlanningResult(microtasks=[mt], language="typescript")
 
-        mock_llm = _ScriptedTextClient([
-            "## FILES ##\n--- src/bad.ts ---\nconst x = eval('danger');\n---\n\n## SUMMARY ##\nCreated code with security issue.\n",
-            "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval is dangerous\nfile_path: src/bad.ts\nrecommendation: Fix it\n---\n## END ISSUES ##\n\n## SUMMARY ##\nSecurity issue found.\n## END SUMMARY ##",
-        ])
+        mock_llm = _ScriptedTextClient(
+            [
+                "## FILES ##\n--- src/bad.ts ---\nconst x = eval('danger');\n---\n\n## SUMMARY ##\nCreated code with security issue.\n",
+                "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval is dangerous\nfile_path: src/bad.ts\nrecommendation: Fix it\n---\n## END ISSUES ##\n\n## SUMMARY ##\nSecurity issue found.\n## END SUMMARY ##",
+            ]
+        )
 
         config = MicrotaskReviewConfig(max_retries=0, on_failure="stop")
         deps = ReviewDependencies()
@@ -382,6 +481,89 @@ class TestBackendRunMicrotaskReview:
         assert result.build_ok
 
 
+class TestBackendAgentReviewCache:
+    def test_qa_and_security_testing_phases_reuse_cache_for_unchanged_files(self, tmp_path):
+        """A second run_{qa,security}_testing_phase call with byte-identical files
+        reuses the cached verdict instead of calling the agent again."""
+        from backend_code_v2_team.models import Microtask
+        from backend_code_v2_team.phases.review import (
+            run_qa_testing_phase,
+            run_security_testing_phase,
+        )
+
+        from software_engineering_team.shared.agent_review import AgentReviewCache
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        files = {"src/main.py": "print('hello')"}
+
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        mock_sec = MagicMock()
+        mock_sec.run.return_value = MagicMock(vulnerabilities=[], issues=[])
+        cache = AgentReviewCache()
+
+        for _ in range(2):
+            qa_result = run_qa_testing_phase(
+                task=task, microtask=mt, files=files, qa_agent=mock_qa, cache=cache
+            )
+            sec_result = run_security_testing_phase(
+                task=task, microtask=mt, files=files, security_agent=mock_sec, cache=cache
+            )
+            assert qa_result.passed and sec_result.passed
+
+        assert mock_qa.run.call_count == 1
+        assert mock_sec.run.call_count == 1
+
+    def test_qa_testing_phase_without_cache_calls_agent_every_time(self, tmp_path):
+        """Omitting ``cache`` (the default) is unchanged: every call re-invokes the agent."""
+        from backend_code_v2_team.models import Microtask
+        from backend_code_v2_team.phases.review import run_qa_testing_phase
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        files = {"src/main.py": "print('hello')"}
+
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+
+        for _ in range(2):
+            run_qa_testing_phase(task=task, microtask=mt, files=files, qa_agent=mock_qa)
+
+        assert mock_qa.run.call_count == 2
+
+    def test_qa_testing_phase_recomputes_for_changed_file_content(self, tmp_path):
+        """A changed file misses the cache, so the agent is called again."""
+        from backend_code_v2_team.models import Microtask
+        from backend_code_v2_team.phases.review import run_qa_testing_phase
+
+        from software_engineering_team.shared.agent_review import AgentReviewCache
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        cache = AgentReviewCache()
+
+        run_qa_testing_phase(
+            task=task,
+            microtask=mt,
+            files={"src/main.py": "print('hello')"},
+            qa_agent=mock_qa,
+            cache=cache,
+        )
+        run_qa_testing_phase(
+            task=task,
+            microtask=mt,
+            files={"src/main.py": "print('goodbye')"},  # edited content
+            qa_agent=mock_qa,
+            cache=cache,
+        )
+
+        assert mock_qa.run.call_count == 2
+
+
 class TestBackendRunProblemSolvingForMicrotask:
     def test_problem_solving_no_issues(self):
         from backend_code_v2_team.models import Microtask, ReviewResult
@@ -440,10 +622,7 @@ class TestBackendRunExecutionWithReviewGates:
                         "## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval\n---\n## END ISSUES ##\n\n"
                         "## SUMMARY ##\nFailed.\n## END SUMMARY ##"
                     )
-            return (
-                "## FILES ##\n--- good.py ---\nprint('good')\n---\n\n"
-                "## SUMMARY ##\nGood code.\n"
-            )
+            return "## FILES ##\n--- good.py ---\nprint('good')\n---\n\n## SUMMARY ##\nGood code.\n"
 
         mock_llm = _CallableTextClient(mock_complete_text)
 
@@ -571,9 +750,7 @@ class TestBackendRunExecutionWithReviewGates:
         )
         assert True in seen
 
-    def test_code_review_phase_drops_ungrounded_when_grounding_enabled(
-        self, tmp_path, monkeypatch
-    ):
+    def test_code_review_phase_drops_ungrounded_when_grounding_enabled(self, tmp_path, monkeypatch):
         """Behavioral: enable_llm_review_grounding True drops fabricated claims;
         False keeps them."""
         from backend_code_v2_team.models import Microtask

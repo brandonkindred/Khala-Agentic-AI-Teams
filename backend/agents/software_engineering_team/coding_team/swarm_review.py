@@ -17,6 +17,9 @@ monkeypatchability of ``MAX_TASK_REVISIONS``/``ActivityBridge`` in tests).
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +27,52 @@ from software_engineering_team.coding_team import hitl
 from software_engineering_team.coding_team.models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _review_verdict_cache_key(
+    *,
+    task_title: str,
+    task_description: str,
+    acceptance_criteria: List[str],
+    evidence: str,
+    user_decisions: List[str],
+    spec_content: str,
+) -> str:
+    """Hash of every input that determines one task's Tech Lead review verdict.
+
+    Postconditions:
+        - Two calls collide only when every argument is identical — covering
+          every field ``run_code_review`` is actually called with
+          (``task_title``/``task_description``/``acceptance_criteria``/
+          ``changes_summary``/``user_decisions``/``spec_content``), so a
+          change to any one of them — not just the branch diff — misses the
+          cache. ``evidence`` already embeds the branch diff verbatim whenever
+          it is non-empty (see ``orchestrator._build_review_evidence``), so
+          this key alone also captures every diff change — a separate
+          branch-digest component is not needed.
+        - Hashes a JSON serialization (``sort_keys=True``) rather than a flat
+          separator-joined string — mirroring
+          ``code_review_agent.mapping._stable_json_digest``'s "unambiguous
+          structured hash" design (reimplemented locally rather than
+          imported, since that helper is deliberately module-private to
+          ``mapping.py``). A flat join of ``[..., *acceptance_criteria,
+          evidence, *user_decisions, ...]`` cannot distinguish where one
+          variable-length list ends and the next begins — e.g.
+          ``acceptance_criteria=["a", "b"], evidence="c", user_decisions=[]``
+          and ``acceptance_criteria=["a"], evidence="b", user_decisions=["c"]``
+          would flatten to the same sequence — whereas JSON's array/object
+          delimiters make every field's boundary explicit.
+    """
+    payload = {
+        "task_title": task_title,
+        "task_description": task_description,
+        "acceptance_criteria": acceptance_criteria,
+        "evidence": evidence,
+        "user_decisions": user_decisions,
+        "spec_content": spec_content,
+    }
+    body = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 class _ReviewMixin:
@@ -148,6 +197,16 @@ class _ReviewMixin:
         concurrently across tasks. The merge/revision decision is applied separately and serially by
         ``_apply_review_decision``; the caller owns any progress-bar lifecycle.
 
+        A task whose review inputs are byte-identical to its last-cached call (``_review_verdict_cache``,
+        keyed by ``_review_verdict_cache_key`` over every field ``run_code_review`` actually sees —
+        title/description/acceptance criteria, ``changes_summary``/``user_decisions``, and
+        ``spec_content`` — not the branch diff alone) reuses that verdict instead of calling
+        ``run_code_review`` again — the complementary, per-task counterpart to ``AgentReviewCache``'s
+        per-file cache in the code-v2 execution loop. This only removes the redundant LLM call: the
+        no-change bookkeeping downstream (``_escalate_if_no_change``/``_note_revision_progress``, driven
+        by the separate, diff-only ``_branch_digest``) still sees the same rejected verdict every round
+        on an unchanged branch and escalates to Tech Lead adjudication at the same cap as before caching.
+
         Preconditions:
             - ``task`` is IN_REVIEW with a recorded feature branch (or the default ``feature/{id}``).
             - ``progress_callback`` is None (the concurrent fan-out, which suppresses per-task
@@ -159,6 +218,12 @@ class _ReviewMixin:
               exception is contained and converted into an ``error=True`` review (with an empty diff),
               so one task's failure fails only that task once (via ``_apply_review_decision``) and
               never aborts the round; no graph or git state is changed here.
+            - A cache hit returns an independent deep copy of the stored verdict, never the shared
+              instance, so the caller may mutate it freely. A fresh, non-``error`` verdict is stored
+              under ``task.id`` keyed by this round's cache key, overwriting any prior entry for that
+              task — an ``error`` verdict is never cached (mirrors
+              ``code_review_agent.mapping``'s chunk cache: a review that could not run must be
+              retried for real, not frozen).
         """
         from software_engineering_team.coding_team import orchestrator as _orch
 
@@ -168,16 +233,43 @@ class _ReviewMixin:
             branch = _orch._feature_branch_name(task)
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
+            # Computed unconditionally (cheap: pure string/list ops, no I/O) because both feed the
+            # cache key below — a byte-identical branch with a changed changes_summary (every
+            # run_implement call overwrites it, whether or not the diff moved) or a newly answered
+            # HITL decision (_escalate_decision appends to revision_feedback without necessarily
+            # changing the branch) must still miss the cache, since either can change what the
+            # reviewer is shown and thus the verdict.
             evidence = _orch._build_review_evidence(summary, diff)
+            user_decisions = self._user_decisions_for(task)
+            cache_key = _review_verdict_cache_key(
+                task_title=task.title,
+                task_description=task.description,
+                acceptance_criteria=task.acceptance_criteria,
+                evidence=evidence,
+                user_decisions=user_decisions,
+                spec_content=self.spec_content,
+            )
+            with self._review_verdict_cache_lock:
+                cached = self._review_verdict_cache.get(task.id)
+            if cached is not None and cached[0] == cache_key:
+                logger.info(
+                    "Task %s: review inputs unchanged since last review; reusing cached verdict",
+                    task.id,
+                )
+                return diff, copy.deepcopy(cached[1])
+
             review = self.tech_lead.run_code_review(
                 task_title=task.title,
                 task_description=task.description,
                 acceptance_criteria=task.acceptance_criteria,
                 changes_summary=evidence,
-                user_decisions=self._user_decisions_for(task),
+                user_decisions=user_decisions,
                 progress_callback=progress_callback,
                 spec_content=self.spec_content,
             )
+            if not review.get("error"):
+                with self._review_verdict_cache_lock:
+                    self._review_verdict_cache[task.id] = (cache_key, copy.deepcopy(review))
             return diff, review
         except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
             logger.warning("Tech Lead review preparation failed for %s: %s", task.id, e)
