@@ -1037,6 +1037,30 @@ class TestReviewEndpoint:
         # No pull request review is created on the outage path.
         assert gh.reviews == []
 
+    def test_reviewer_bare_timeout_error_records_type_name_not_empty_string(
+        self, review_app
+    ) -> None:
+        # A bare TimeoutError() (e.g. the durable-review client-side wait timing
+        # out with no attached detail) has an empty str() — recording
+        # "code review failed: " would be useless for triage. The except block
+        # must fall back to naming the exception type when it carries no message.
+        review_app["github"]["agent_output"] = TimeoutError()
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert job.get("error") == "code review failed: TimeoutError (no error message)"
+        gh = review_app["github"]["client"]
+        # Never leaks onto the PR either.
+        assert not any("code review failed" in body for _n, body in gh.comments)
+        outage_notes = [
+            body
+            for _n, body in gh.comments
+            if "could not complete and did not post findings" in body
+        ]
+        assert len(outage_notes) == 1
+        assert gh.reviews == []
+
     def test_outage_notice_suppressed_when_disabled(self, review_app, monkeypatch) -> None:
         # With PR_REVIEW_POST_OUTAGE_NOTICE off, a reviewer outage posts NOTHING on
         # the PR but still marks the job failed (detail preserved in the store).
@@ -4090,9 +4114,7 @@ class TestCreateReviewIssuesUnit:
         job = {
             "status": "completed",
             "github_context": {"owner": "o", "repo": "r", "pr_number": 5, "pr_url": "u"},
-            "review_summary": {
-                "pending_issue_proposals": [{"id": "p0", "issue_url": None}]
-            },
+            "review_summary": {"pending_issue_proposals": [{"id": "p0", "issue_url": None}]},
         }
         row = {
             "review_summary": {
