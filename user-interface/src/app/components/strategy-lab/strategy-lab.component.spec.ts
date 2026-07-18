@@ -1,10 +1,12 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { NEVER, of, throwError } from 'rxjs';
+import { NEVER, Subject, of, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { MatDialog } from '@angular/material/dialog';
 import { vi } from 'vitest';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { NotificationService } from '../../core/notification.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import type { RunStrategyLabRequest, StrategyLabRunStartResponse } from '../../models';
 
@@ -63,7 +65,13 @@ describe('StrategyLabComponent — asset categories', () => {
         { provide: InvestmentApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
-    }).compileComponents();
+    })
+      // Component injects MatDialog (Material provides it at component level);
+      // override so construction resolves without opening real dialogs.
+      .overrideProvider(MatDialog, {
+        useValue: { open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }) },
+      })
+      .compileComponents();
 
     fixture = TestBed.createComponent(StrategyLabComponent);
     component = fixture.componentInstance;
@@ -294,7 +302,11 @@ describe('StrategyLabComponent — publishability gating', () => {
           },
         },
       ],
-    }).compileComponents();
+    })
+      .overrideProvider(MatDialog, {
+        useValue: { open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }) },
+      })
+      .compileComponents();
 
     component = TestBed.createComponent(StrategyLabComponent).componentInstance;
   });
@@ -331,5 +343,150 @@ describe('StrategyLabComponent — publishability gating', () => {
     expect(apiSpy.runPaperTrading).not.toHaveBeenCalled();
     expect(component.error).toContain('not publishable');
     expect(component.error).toContain('realism_failed');
+  });
+});
+
+describe('StrategyLabComponent — destructive confirmations', () => {
+  let component: StrategyLabComponent;
+  let apiSpy: {
+    deleteStrategyLabRecord: ReturnType<typeof vi.fn>;
+    clearStrategyLabStorage: ReturnType<typeof vi.fn>;
+    getStrategyLabResults: ReturnType<typeof vi.fn>;
+  };
+  let notifySpy: { saved: ReturnType<typeof vi.fn> };
+  let dialogSpy: { open: ReturnType<typeof vi.fn> };
+  // Read lazily by the dialog stub's afterClosed(), so a test can set the
+  // outcome before invoking the action under test.
+  let confirmResult: boolean;
+
+  const record = {
+    lab_record_id: 'rec-1',
+    strategy: { hypothesis: 'Buy dips in a strong uptrend' },
+  } as unknown as Parameters<typeof component.deleteRecord>[0];
+
+  beforeEach(async () => {
+    confirmResult = true;
+    apiSpy = {
+      deleteStrategyLabRecord: vi.fn().mockReturnValue(of({})),
+      clearStrategyLabStorage: vi.fn().mockReturnValue(of({})),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+    };
+    notifySpy = { saved: vi.fn() };
+    dialogSpy = {
+      open: vi.fn().mockReturnValue({ afterClosed: () => of(confirmResult) }),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        {
+          provide: IntegrationsApiService,
+          useValue: {
+            getTradingViewConfig: vi.fn().mockReturnValue(
+              of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+            ),
+          },
+        },
+        { provide: NotificationService, useValue: notifySpy },
+      ],
+    })
+      .overrideProvider(MatDialog, { useValue: dialogSpy })
+      .compileComponents();
+
+    // No detectChanges(): keeps ngOnInit's data loads out of these focused tests.
+    component = TestBed.createComponent(StrategyLabComponent).componentInstance;
+  });
+
+  it('opens a danger confirm dialog and deletes when confirmed', () => {
+    confirmResult = true;
+
+    component.deleteRecord(record);
+
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+    expect(dialogSpy.open.mock.calls[0][1].data).toMatchObject({ variant: 'danger' });
+    expect(apiSpy.deleteStrategyLabRecord).toHaveBeenCalledWith('rec-1');
+    expect(apiSpy.getStrategyLabResults).toHaveBeenCalled(); // loadResults() ran
+    expect(notifySpy.saved).toHaveBeenCalledWith('Strategy lab run deleted.');
+  });
+
+  it('does not delete when the dialog is cancelled', () => {
+    confirmResult = false;
+
+    component.deleteRecord(record);
+
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+    expect(apiSpy.deleteStrategyLabRecord).not.toHaveBeenCalled();
+    expect(notifySpy.saved).not.toHaveBeenCalled();
+  });
+
+  it('opens a danger confirm dialog and clears all data when confirmed', () => {
+    confirmResult = true;
+
+    component.clearAllLabData();
+
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+    expect(dialogSpy.open.mock.calls[0][1].data).toMatchObject({ variant: 'danger' });
+    expect(apiSpy.clearStrategyLabStorage).toHaveBeenCalled();
+    expect(apiSpy.getStrategyLabResults).toHaveBeenCalled(); // loadResults() ran
+    expect(notifySpy.saved).toHaveBeenCalledWith('Strategy lab data cleared.');
+  });
+
+  it('does not clear data when the dialog is cancelled', () => {
+    confirmResult = false;
+
+    component.clearAllLabData();
+
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+    expect(apiSpy.clearStrategyLabStorage).not.toHaveBeenCalled();
+    expect(notifySpy.saved).not.toHaveBeenCalled();
+  });
+
+  it('surfaces an error and skips the toast when delete fails after confirm', () => {
+    confirmResult = true;
+    apiSpy.deleteStrategyLabRecord.mockReturnValueOnce(
+      throwError(() => ({ error: { detail: 'boom' } })),
+    );
+
+    component.deleteRecord(record);
+
+    expect(component.error).toBe('boom');
+    expect(component.deletingLabRecordId).toBeNull();
+    expect(notifySpy.saved).not.toHaveBeenCalled();
+  });
+
+  it('surfaces an error and skips the toast when clear-all fails after confirm', () => {
+    confirmResult = true;
+    apiSpy.clearStrategyLabStorage.mockReturnValueOnce(
+      throwError(() => ({ error: { detail: 'kaboom' } })),
+    );
+
+    component.clearAllLabData();
+
+    expect(component.error).toBe('kaboom');
+    expect(component.clearingAll).toBe(false);
+    expect(notifySpy.saved).not.toHaveBeenCalled();
+  });
+
+  it('does not open a second confirmation while one dialog is still pending', () => {
+    // A dialog that has not resolved yet (afterClosed has not emitted), so the
+    // re-entrancy guard should stay engaged across a rapid second activation.
+    const closed$ = new Subject<boolean>();
+    dialogSpy.open.mockReturnValue({ afterClosed: () => closed$.asObservable() });
+
+    component.deleteRecord(record);
+    component.deleteRecord(record); // rapid second activation before the first closes
+
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+    expect(apiSpy.deleteStrategyLabRecord).not.toHaveBeenCalled();
+
+    // Closing the first dialog releases the guard so later actions work again.
+    closed$.next(false);
+    closed$.complete();
+    component.clearAllLabData();
+    expect(dialogSpy.open).toHaveBeenCalledTimes(2);
   });
 });
