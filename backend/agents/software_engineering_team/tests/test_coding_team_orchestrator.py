@@ -43,6 +43,26 @@ GIT_UTILS = "shared_git.git_utils"
 # --------------------------------------------------------------------------- stubs
 
 
+class _DefaultGroomTaskMixin:
+    """Ungroomed-default ``run_groom_task`` for Tech-Lead stubs that don't care about grooming.
+
+    Mirrors the real ``run_groom_task``'s own default/fallback shape, so mixing this in changes no
+    existing assertion for a stub that doesn't otherwise override it.
+    """
+
+    def run_groom_task(
+        self, task_id, task_title, task_description, task_dependencies, plan_context
+    ):
+        return {
+            "acceptance_criteria": [],
+            "out_of_scope": "",
+            "description_enriched": task_description,
+            "priority": "medium",
+            "subtasks": [],
+            "task_dependencies": task_dependencies,
+        }
+
+
 class StubTechLead:
     """Duck-typed Tech Lead: records the review evidence and returns a fixed verdict."""
 
@@ -906,7 +926,7 @@ def test_branch_diff_bad_branch_returns_empty(tmp_path):
 
 
 def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -914,18 +934,6 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
             return {
                 "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -975,7 +983,7 @@ def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, mon
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -983,18 +991,6 @@ def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, mon
             return {
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -1052,7 +1048,7 @@ def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, 
     job-service write that carries a task_graph_snapshot and asserts the retried write
     still lands with the correct (merged) state."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1060,18 +1056,6 @@ def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, 
             return {
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -1143,7 +1127,7 @@ def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkey
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1151,18 +1135,6 @@ def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkey
             return {
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     pause_write_started = threading.Event()
@@ -1258,7 +1230,7 @@ def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1266,18 +1238,6 @@ def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding
             return {
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     pause_write_started = threading.Event()
@@ -1362,7 +1322,7 @@ def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_pat
     actually confirmed on the wire, even though the rest of the failed call's fields (e.g. HITL
     pending-question metadata on a real pause) never landed either."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1370,18 +1330,6 @@ def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_pat
             return {
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -2300,7 +2248,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     """The fresh (non-resume) path persists the stacks so a later retry can resume without
     re-planning."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2308,18 +2256,6 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
             return {
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": ["pytest"]}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -2357,7 +2293,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
 def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     """Malformed Tech Lead task output without an id becomes a stable fallback task."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2365,18 +2301,6 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
             return {
                 "tasks": [{"title": "Untitled task"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     captured: Dict[str, TaskGraphService] = {}
@@ -2695,7 +2619,7 @@ def test_reset_in_flight_demotes_only_nonterminal():
 
 
 def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2703,18 +2627,6 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
             return {
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -3091,7 +3003,7 @@ def test_changing_diff_keeps_revising_without_escalation(tmp_path, monkeypatch):
 def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, monkeypatch):
     """A job whose only terminal tasks are already-done resolutions reports already_complete."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -3101,18 +3013,6 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
                 "stacks": [{"name": "backend", "tools_services": []}],
                 "already_complete": False,
                 "completion_evidence": "",
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -3152,7 +3052,7 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
     still-pending (TO_DO) task is a normal completion, not an 'already complete, recommend closing'
     no-op — the swarm can exit at max_rounds with unfinished work and must not abandon it."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -3162,18 +3062,6 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
                 "stacks": [{"name": "backend", "tools_services": []}],
                 "already_complete": False,
                 "completion_evidence": "",
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class StubSwarm:
@@ -3573,23 +3461,11 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
     start, per-snapshot updates from the task graph, and 100 on terminal completion."""
     updates: List[Dict[str, Any]] = []
 
-    class _PlanningTechLead:
+    class _PlanningTechLead(_DefaultGroomTaskMixin):
         def run_plan_to_task_graph(self, plan_input):
             return {
                 "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class _MergingSwarm:

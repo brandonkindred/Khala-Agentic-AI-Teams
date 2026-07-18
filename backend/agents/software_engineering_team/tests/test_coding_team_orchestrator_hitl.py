@@ -23,6 +23,26 @@ GIT_UTILS = "shared_git.git_utils"
 # --------------------------------------------------------------------------- helpers / stubs
 
 
+class _DefaultGroomTaskMixin:
+    """Ungroomed-default ``run_groom_task`` for Tech-Lead stubs that don't care about grooming.
+
+    Mirrors the real ``run_groom_task``'s own default/fallback shape, so mixing this in changes no
+    existing assertion for a stub that doesn't otherwise override it.
+    """
+
+    def run_groom_task(
+        self, task_id, task_title, task_description, task_dependencies, plan_context
+    ):
+        return {
+            "acceptance_criteria": [],
+            "out_of_scope": "",
+            "description_enriched": task_description,
+            "priority": "medium",
+            "subtasks": [],
+            "task_dependencies": task_dependencies,
+        }
+
+
 class StubTechLead:
     def __init__(self, approved: bool = True) -> None:
         self.approved = approved
@@ -594,7 +614,7 @@ def test_entry_gate_pauses_then_resumes_and_threads_answers(tmp_path, monkeypatc
 
     seen: Dict[str, Any] = {}
 
-    class TL:
+    class TL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -605,18 +625,6 @@ def test_entry_gate_pauses_then_resumes_and_threads_answers(tmp_path, monkeypatc
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "backend", "tools_services": []}],
                 "open_questions": [],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class Swarm:
@@ -725,7 +733,7 @@ def test_already_resolved_entry_questions_do_not_pause(tmp_path, monkeypatch):
 
     monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", no_wait)
 
-    class TL:
+    class TL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -734,18 +742,6 @@ def test_already_resolved_entry_questions_do_not_pause(tmp_path, monkeypatch):
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "b", "tools_services": []}],
                 "open_questions": [],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class Swarm:
@@ -893,7 +889,7 @@ def test_tech_lead_question_pause_without_answers_aborts(tmp_path, monkeypatch):
     job: Dict[str, Any] = {}
     monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", lambda *a, **k: False)
 
-    class TL:
+    class TL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -933,18 +929,6 @@ def test_orchestrator_returns_when_swarm_aborts(tmp_path, monkeypatch):
                 "tasks": [{"id": "t1", "title": "T1"}],
                 "stacks": [{"name": "b", "tools_services": []}],
                 "open_questions": [],
-            }
-
-        def run_groom_task(
-            self, task_id, task_title, task_description, task_dependencies, plan_context
-        ):
-            return {
-                "acceptance_criteria": [],
-                "out_of_scope": "",
-                "description_enriched": task_description,
-                "priority": "medium",
-                "subtasks": [],
-                "task_dependencies": task_dependencies,
             }
 
     class Swarm:
