@@ -397,12 +397,11 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
-  it('announces a humanized raw phase name for phases outside STRATEGY_LAB_PHASES instead of "Preparing next strategy"', async () => {
+  it('announces a humanized raw phase name for phases outside STRATEGY_LAB_PHASES instead of the between-cycles text', async () => {
     // Regression: real backend progress events include phases beyond the 4
     // known ids (design_review, aligning, telemetry-related, ...). Work is
     // actively progressing then, so falling back to the between-cycles
-    // "Preparing next strategy" text would misleadingly suggest the run is
-    // idle.
+    // "Run in progress" text would lose the phase detail unnecessarily.
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
     fixture.componentInstance.runStatus = {
@@ -424,7 +423,12 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
-  it('announces "Preparing next strategy" between cycles (no current_cycle yet)', async () => {
+  it('announces "Run in progress" between cycles (no current_cycle yet)', async () => {
+    // Waves run up to max_parallel (default 3) cycles concurrently, and the
+    // backend clears the shared current_cycle as soon as any one sibling
+    // finishes — even while the rest of the wave is still active. Nothing
+    // in the wire data says whether siblings remain running, so this state
+    // must not claim genuine idleness ("Preparing next strategy").
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
     fixture.componentInstance.runStatus = {
@@ -438,7 +442,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     };
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5 — Preparing next strategy.');
+    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5 — Run in progress.');
     // Same pre-existing gaps as the other in-progress-section tests above
     // (run-btn spinner, phase progress-bar/spinner lack accessible names;
     // the running run-btn nests a focusable spinner) — unrelated to the
@@ -493,7 +497,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     };
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Preparing next strategy.');
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Run in progress.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -505,7 +509,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // completed), completed_cycles stays at 2 and never reaches
     // total_cycles on its own, so the "Finishing up" terminal gap would
     // never trigger — the live region would announce a "Strategy 3 of 3 —
-    // Preparing next strategy" that never resolves until the terminal event.
+    // Run in progress" that never resolves until the terminal event.
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
     fixture.componentInstance.runStatus = {
@@ -585,7 +589,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     fixture.componentInstance.runNewStrategy();
     fixture.detectChanges();
-    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Preparing next strategy.');
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Run in progress.');
 
     stream$.next({
       type: 'complete',

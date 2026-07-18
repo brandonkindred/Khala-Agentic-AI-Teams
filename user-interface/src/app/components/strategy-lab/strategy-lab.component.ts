@@ -988,14 +988,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         segments.push(`Strategy ${status.current_cycle.cycle_index} of ${status.total_cycles}`);
         const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
         // Real backend phases (design_review, aligning, telemetry, ...) go
-        // beyond STRATEGY_LAB_PHASES' 4 known ids. Work is still actively
-        // progressing then, so fall back to the raw phase name rather than
-        // "Preparing next strategy" — that phrase means genuinely idle
-        // between cycles, which this is not.
+        // beyond STRATEGY_LAB_PHASES' 4 known ids. current_cycle is
+        // populated here, so fall back to the raw phase name rather than
+        // the "no current_cycle" branch's text below — this cycle has a
+        // known phase to report, unlike that genuinely-uncertain gap.
         segments.push(phaseLabel ? `${phaseLabel} phase` : `${humanizePhase(status.current_cycle.phase)} phase`);
       } else {
+        // Waves run up to max_parallel cycles concurrently (default 3, per
+        // main.py's RunStrategyLabRequest), and the backend clears the
+        // shared current_cycle on each individual cycle_complete as soon as
+        // any one sibling finishes — even while the rest of the wave is
+        // still actively running. Neither the run status nor any stream
+        // event exposes how many siblings remain active, so "no
+        // current_cycle" cannot be read as "genuinely idle": say something
+        // true in both cases rather than claiming idleness that likely
+        // isn't real.
         segments.push(`Strategy ${attemptedCycles + 1} of ${status.total_cycles}`);
-        segments.push('Preparing next strategy');
+        segments.push('Run in progress');
       }
       return segments.join(' — ') + '.';
     }
