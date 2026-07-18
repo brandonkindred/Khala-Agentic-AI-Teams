@@ -179,6 +179,19 @@ export class StrategyLabRunService implements OnDestroy {
   // ---------------------------------------------------------------------------
 
   /**
+   * Drop all known paper-trading sessions (e.g. after "Clear all lab data"
+   * deletes them server-side). Does not unsubscribe in-flight polls for
+   * previously-tracked sessions — matching the pre-extraction component's
+   * own behavior, where a still-running poll simply errors on its next tick
+   * against the now-deleted session.
+   *
+   * Postconditions: `paperTradingSessions()` is `{}`.
+   */
+  clearPaperTradingSessions(): void {
+    this._paperTradingSessions.set({});
+  }
+
+  /**
    * Adopt a batch of previously-run paper-trading sessions (e.g. on page
    * load) and resume polling for any still `running`. Does not touch
    * `paperTradingLabRecordId` — this is a silent resume, not a

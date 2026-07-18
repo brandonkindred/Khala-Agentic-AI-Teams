@@ -1,11 +1,15 @@
 import {
+  ChangeDetectionStrategy,
   Component,
   DestroyRef,
   ElementRef,
   OnDestroy,
   OnInit,
   ViewChild,
+  computed,
+  effect,
   inject,
+  signal,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
@@ -27,11 +31,12 @@ import { MatSortModule } from '@angular/material/sort';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
-import { Subscription, of, timer, switchMap, takeWhile } from 'rxjs';
+import { of } from 'rxjs';
 import { finalize, map } from 'rxjs/operators';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { NotificationService } from '../../core/notification.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import {
@@ -49,7 +54,6 @@ import type {
   StrategyLabProgressEvent,
   TradeRecord,
 } from '../../models';
-import { reduce as reduceStrategyLabRun } from '../../services/strategy-lab-run.reducer';
 
 type FilterMode = 'all' | 'winning' | 'losing';
 
@@ -125,6 +129,8 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
 @Component({
   selector: 'app-strategy-lab',
   standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  providers: [StrategyLabRunService],
   imports: [
     CommonModule,
     DecimalPipe,
@@ -159,6 +165,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
   private readonly dialog = inject(MatDialog);
   private readonly notify = inject(NotificationService);
+  /** Owns SSE/polling/active-run tracking and per-record paper-trading polling. */
+  readonly runService = inject(StrategyLabRunService);
 
   /** True while a destructive confirm dialog is open — blocks re-entrant opens. */
   private confirmingDestructive = false;
@@ -169,17 +177,26 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * until we've confirmed the status (and stays hidden if the status call fails —
    * we never nag when we can't tell).
    */
-  tradingViewStatusKnown = false;
-  tradingViewConfigured = false;
+  readonly tradingViewStatusKnown = signal(false);
+  readonly tradingViewConfigured = signal(false);
 
-  running = false;
-  loading = false;
-  clearingAll = false;
-  error: string | null = null;
+  /** True while a "start new run" POST is in flight, before runService begins tracking it. */
+  private readonly startingRun = signal(false);
+  /**
+   * True while starting a new run OR `runService` is actively tracking one.
+   * Mirrors the pre-extraction component's single `running` flag: the button
+   * must disable (and show "Starting…") for the whole window from click to
+   * the first run-status update, not just once the service takes over.
+   */
+  readonly running = computed(() => this.startingRun() || this.runService.running());
+
+  readonly loading = signal(false);
+  readonly clearingAll = signal(false);
+  readonly error = signal<string | null>(null);
   /** Non-fatal warning banner shown when a run finishes with errored/skipped cycles. */
-  completionWarning: string | null = null;
+  readonly completionWarning = signal<string | null>(null);
   /** Lab record id currently being deleted (disables actions on that card). */
-  deletingLabRecordId: string | null = null;
+  readonly deletingLabRecordId = signal<string | null>(null);
 
   // User-configurable batch settings (mirror backend Field bounds).
   // BATCH_COUNT_MAX is hydrated from GET /strategy-lab/config on init so the
@@ -188,7 +205,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   readonly BATCH_SIZE_MIN = 1;
   readonly BATCH_SIZE_MAX = 25;
   readonly BATCH_COUNT_MIN = 1;
-  BATCH_COUNT_MAX = 100;
+  readonly BATCH_COUNT_MAX = signal(100);
   batchSize = 10;
   batchCount = 1;
 
@@ -197,10 +214,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // (single source of truth). Defaults to every category selected (equivalent to
   // no constraint); the user narrows it to steer the design agent. At least one
   // category must stay selected — a run with zero categories is invalid.
-  // `selectedCategories` is a plain array so it binds directly to the multi-
-  // select toggle group's ngModel; canonical order is reasserted at payload time.
-  categoryOptions: AssetCategoryOption[] = DEFAULT_STRATEGY_LAB_CATEGORIES;
-  selectedCategories: string[] = DEFAULT_STRATEGY_LAB_CATEGORIES.map((c) => c.value);
+  // `selectedCategories` binds directly to the multi-select toggle group's
+  // ngModel; canonical order is reasserted at payload time.
+  readonly categoryOptions = signal<AssetCategoryOption[]>(DEFAULT_STRATEGY_LAB_CATEGORIES);
+  readonly selectedCategories = signal<string[]>(DEFAULT_STRATEGY_LAB_CATEGORIES.map((c) => c.value));
   // Set once the user touches the category toggles. Distinguishes an explicit
   // "I want exactly these" selection (even when that happens to be all of them)
   // from the untouched default, so a late backend category list reconciles
@@ -209,22 +226,22 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   /** A run requires at least one selected category. */
   get categoriesValid(): boolean {
-    return this.selectedCategories.length > 0;
+    return this.selectedCategories().length > 0;
   }
 
   /** Toggle-group change handler: record the user's selection and mark it explicit. */
   onCategoriesChanged(values: string[]): void {
-    this.selectedCategories = values;
+    this.selectedCategories.set(values);
     this.userAdjustedCategories = true;
   }
 
   filter: FilterMode = 'all';
-  results: StrategyLabResultsResponse | null = null;
-  displayedItems: StrategyLabRecord[] = [];
+  readonly results = signal<StrategyLabResultsResponse | null>(null);
+  readonly displayedItems = signal<StrategyLabRecord[]>([]);
 
-  totalCount = 0;
-  winningCount = 0;
-  losingCount = 0;
+  readonly totalCount = signal(0);
+  readonly winningCount = signal(0);
+  readonly losingCount = signal(0);
 
   // Per-card expand/collapse state (collapsed by default)
   expandedCards = new Set<string>();
@@ -310,22 +327,16 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   ];
 
   // Paper trading state
-  /** Lab record id currently being paper traded. */
-  paperTradingLabRecordId: string | null = null;
-  /** Paper trading sessions keyed by lab_record_id for quick lookup. */
-  paperTradingSessions: Record<string, PaperTradingSession> = {};
-  /** Active polling subscriptions per lab_record_id (so we can cancel on destroy). */
-  private paperTradingPollSubs: Record<string, Subscription> = {};
-
-  // Run progress tracking
-  activeRunId: string | null = null;
-  runStatus: StrategyLabRunStatus | null = null;
-  private sseSub: Subscription | null = null;
-  private pollSub: Subscription | null = null;
+  /** True while a "run paper trading" POST is in flight for this record, before runService takes over. */
+  private readonly startingPaperTrade = signal<string | null>(null);
+  /** Lab record id currently being paper traded — see `running`'s doc comment for why this merges two sources. */
+  readonly paperTradingLabRecordId = computed(
+    () => this.startingPaperTrade() ?? this.runService.paperTradingLabRecordId(),
+  );
 
   // Phase stepper + activity log
   readonly STRATEGY_LAB_PHASES = STRATEGY_LAB_PHASES;
-  activityLog: ActivityLogEntry[] = [];
+  readonly activityLog = signal<ActivityLogEntry[]>([]);
   private lastCycleIndex = -1;
 
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
@@ -333,12 +344,37 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   /** Pending auto-scroll timer id, cleared on destroy. */
   private autoScrollTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
+  /** Tracks the previous `runService.running()` value so the effect below can detect a true→false transition. */
+  private wasRunning = false;
+
+  /**
+   * Refreshes the results list exactly once whenever `runService.running()`
+   * transitions from true to false — covering every way a run ends (an
+   * explicit `complete`/`error` event, the SSE stream's own `done`-then-close,
+   * or the REST-polling fallback detecting a terminal status) with one rule,
+   * rather than duplicating a `loadResults()` call at each of those call sites.
+   */
+  private readonly refreshResultsOnRunFinish = effect(() => {
+    const isRunning = this.runService.running();
+    if (!isRunning && this.wasRunning) {
+      this.loadResults();
+    }
+    this.wasRunning = isRunning;
+  });
+
   ngOnInit(): void {
     this.loadConfig();
     this.loadResults();
     this.loadPaperTradingResults();
-    this.checkForActiveRun();
+    this.runService.checkForActiveRun();
     this.loadTradingViewStatus();
+
+    this.runService.events$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((event) => this.handleStreamEvent(event));
+    this.runService.errors$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((message) => this.error.set(message));
   }
 
   /**
@@ -355,12 +391,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (cfg) => {
-          this.tradingViewConfigured = cfg.enabled && !!cfg.mcp_server_url;
-          this.tradingViewStatusKnown = true;
+          this.tradingViewConfigured.set(cfg.enabled && !!cfg.mcp_server_url);
+          this.tradingViewStatusKnown.set(true);
         },
         error: () => {
           // Can't determine status → don't nag.
-          this.tradingViewStatusKnown = false;
+          this.tradingViewStatusKnown.set(false);
         },
       });
   }
@@ -372,7 +408,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       .subscribe({
       next: (cfg) => {
         if (cfg.batch_count_max >= this.BATCH_COUNT_MIN) {
-          this.BATCH_COUNT_MAX = cfg.batch_count_max;
+          this.BATCH_COUNT_MAX.set(cfg.batch_count_max);
         }
         this.applyCategoryConfig(cfg.asset_categories);
       },
@@ -400,26 +436,20 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     if (!categories?.length) {
       return;
     }
-    const selected = new Set(this.selectedCategories);
-    this.categoryOptions = buildCategoryOptions(categories);
-    const available = this.categoryOptions.map((c) => c.value);
+    const selected = new Set(this.selectedCategories());
+    const options = buildCategoryOptions(categories);
+    this.categoryOptions.set(options);
+    const available = options.map((c) => c.value);
 
     if (!this.userAdjustedCategories) {
-      this.selectedCategories = available;
+      this.selectedCategories.set(available);
       return;
     }
     const preserved = available.filter((v) => selected.has(v));
-    this.selectedCategories = preserved.length ? preserved : available;
+    this.selectedCategories.set(preserved.length ? preserved : available);
   }
 
   ngOnDestroy(): void {
-    this.sseSub?.unsubscribe();
-    this.pollSub?.unsubscribe();
-    this.activeRunCheckSub?.unsubscribe();
-    for (const sub of Object.values(this.paperTradingPollSubs)) {
-      sub.unsubscribe();
-    }
-    this.paperTradingPollSubs = {};
     if (this.autoScrollTimeoutId !== null) {
       clearTimeout(this.autoScrollTimeoutId);
       this.autoScrollTimeoutId = null;
@@ -427,81 +457,36 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   // ---------------------------------------------------------------------------
-  // Active run detection (for navigate-away-and-back)
+  // SSE stream event side effects (run-status folding itself is runService's job)
   // ---------------------------------------------------------------------------
-
-  private activeRunCheckSub: Subscription | null = null;
 
   /**
-   * Poll for active runs a few times on page load so that a running job
-   * is always picked up — even if the first request races with the
-   * backend becoming ready or the in-memory cache being repopulated.
-   */
-  private checkForActiveRun(): void {
-    // Poll up to 4 times (0s, 3s, 6s, 9s), stop as soon as we find one
-    // or if a run was started locally via runNewStrategy().
-    this.activeRunCheckSub?.unsubscribe();
-    let attempts = 0;
-    this.activeRunCheckSub = timer(0, 3000).pipe(
-      takeWhile(() => attempts < 4 && !this.running),
-      switchMap(() => {
-        attempts++;
-        return this.api.getActiveRuns();
-      }),
-    ).subscribe({
-      next: (res) => {
-        const active = res.runs.find((r) => r.status === 'running');
-        if (active) {
-          this.activeRunId = active.run_id;
-          this.runStatus = active;
-          this.running = true;
-          this.connectToStream(active.run_id);
-          this.activeRunCheckSub?.unsubscribe();
-        }
-      },
-    });
-  }
-
-  // ---------------------------------------------------------------------------
-  // SSE streaming + polling fallback
-  // ---------------------------------------------------------------------------
-
-  private connectToStream(runId: string): void {
-    this.sseSub?.unsubscribe();
-    this.sseSub = this.api.streamRunStatus(runId).subscribe({
-      next: (event) => this.handleStreamEvent(event),
-      error: () => this.fallbackToPolling(runId),
-      complete: () => this.onRunComplete(),
-    });
-  }
-
-  /**
-   * Folds one SSE stream event into `runStatus` (via the pure
-   * `reduceStrategyLabRun` reducer) and handles the event's remaining
-   * side effects that aren't run-status fields: activity-log bookkeeping,
+   * Reacts to a `runService.events$` emission for the side effects that
+   * aren't `StrategyLabRunStatus` fields: activity-log bookkeeping,
    * refreshing results after a completed cycle, and the completion/error
-   * banners.
+   * banners. Run-status folding already happened inside `runService` before
+   * this fires.
    *
-   * Preconditions: none — every branch is safe on any `runStatus`, including
-   *   `null`.
-   * Postconditions: `runStatus` reflects the event; `activityLog`,
-   *   `completionWarning`, and `error` are updated for event types that
-   *   carry them; `loadResults()` runs after a completed cycle.
+   * Preconditions: none — every branch is safe regardless of `runService`
+   *   state.
+   * Postconditions: `activityLog`, `completionWarning`, and `error` are
+   *   updated for event types that carry them; `loadResults()` runs after a
+   *   completed cycle (in addition to `refreshResultsOnRunFinish`'s
+   *   once-per-run refresh — a multi-cycle run's earlier cycles need this
+   *   mid-run call since `running()` stays true until the whole run ends).
    */
   private handleStreamEvent(event: StrategyLabStreamEvent): void {
-    this.runStatus = reduceStrategyLabRun(this.runStatus, event);
-
-    if (event.type === 'progress' && this.runStatus) {
+    if (event.type === 'progress' && this.runService.runStatus()) {
       // Reset activity log when a new cycle starts.
       if (event.cycle_index !== this.lastCycleIndex) {
-        this.activityLog = [];
+        this.activityLog.set([]);
         this.lastCycleIndex = event.cycle_index;
       }
       this.addLogEntry(event.phase, event.sub_phase, event);
     }
 
-    if (event.type === 'cycle_complete' && this.runStatus) {
-      this.activityLog = [];
+    if (event.type === 'cycle_complete' && this.runService.runStatus()) {
+      this.activityLog.set([]);
       this.lastCycleIndex = -1;
       this.loadResults();
     }
@@ -509,56 +494,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     if (event.type === 'batch_warning') {
       // Non-fatal pre-batch issue (e.g. signal-brief failure). Surface as a
       // gentle warning; the run is still progressing.
-      this.completionWarning =
+      this.completionWarning.set(
         event.reason === 'signal_brief_failed'
           ? 'Signal brief unavailable for a batch; strategies continued without it.'
-          : event.reason || 'A non-fatal warning occurred during a batch.';
+          : event.reason || 'A non-fatal warning occurred during a batch.',
+      );
     }
 
-    if (event.type === 'complete') {
-      if (event.errored_count > 0 || event.status === 'completed_with_errors') {
-        const parts: string[] = [];
-        if (event.errored_count > 0) parts.push(`${event.errored_count} cycle(s) errored`);
-        if (event.skipped_count > 0) parts.push(`${event.skipped_count} cycle(s) skipped`);
-        this.completionWarning = `Run finished with ${parts.join(' and ')}. See details below.`;
-      }
-      this.onRunComplete();
+    if (event.type === 'complete' && (event.errored_count > 0 || event.status === 'completed_with_errors')) {
+      const parts: string[] = [];
+      if (event.errored_count > 0) parts.push(`${event.errored_count} cycle(s) errored`);
+      if (event.skipped_count > 0) parts.push(`${event.skipped_count} cycle(s) skipped`);
+      this.completionWarning.set(`Run finished with ${parts.join(' and ')}. See details below.`);
     }
 
     if (event.type === 'error') {
-      this.error = event.detail || 'Run failed';
-      this.onRunComplete();
+      this.error.set(event.detail || 'Run failed');
     }
-  }
-
-  private onRunComplete(): void {
-    this.running = false;
-    this.activeRunId = null;
-    this.runStatus = null;
-    this.sseSub?.unsubscribe();
-    this.sseSub = null;
-    this.pollSub?.unsubscribe();
-    this.pollSub = null;
-    this.loadResults();
-  }
-
-  private fallbackToPolling(runId: string): void {
-    this.pollSub?.unsubscribe();
-    this.pollSub = timer(0, 5000).pipe(
-      switchMap(() => this.api.getRunStatus(runId)),
-      takeWhile((status) => status.status === 'running', true),
-    ).subscribe({
-      next: (status) => {
-        this.runStatus = status;
-        if (status.status !== 'running') {
-          this.onRunComplete();
-        }
-      },
-      error: () => {
-        // Polling also failed — stop tracking
-        this.onRunComplete();
-      },
-    });
   }
 
   // ---------------------------------------------------------------------------
@@ -566,23 +518,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // ---------------------------------------------------------------------------
 
   loadResults(): void {
-    this.loading = true;
-    this.error = null;
+    this.loading.set(true);
+    this.error.set(null);
     this.api
       .getStrategyLabResults()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (res) => {
-        this.results = res;
-        this.totalCount = res.count;
-        this.winningCount = res.winning_count;
-        this.losingCount = res.losing_count;
+        this.results.set(res);
+        this.totalCount.set(res.count);
+        this.winningCount.set(res.winning_count);
+        this.losingCount.set(res.losing_count);
         this.applyFilter();
-        this.loading = false;
+        this.loading.set(false);
       },
       error: (err) => {
-        this.error = err?.error?.detail || err?.message || 'Failed to load results.';
-        this.loading = false;
+        this.error.set(err?.error?.detail || err?.message || 'Failed to load results.');
+        this.loading.set(false);
       },
     });
   }
@@ -590,50 +542,52 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   /**
    * Start a new Strategy Lab run with the current form configuration.
    *
-   * Preconditions: no run is already in progress (`running` is false — a
+   * Preconditions: no run is already in progress (`running()` is false — a
    *   re-entrant call is ignored) and at least one asset category is selected
    *   (`categoriesValid` is true; when violated this sets `error` and returns
    *   without calling the API).
    * Postconditions: clamps batch size/count into range and reflects them back to
-   *   the form; sets `running = true` and clears `error`/`completionWarning`;
-   *   POSTs a `RunStrategyLabRequest`. `allowed_asset_classes` is sent in
-   *   canonical (`categoryOptions`) order only when the selection is a strict
-   *   subset — when every category is selected the field is omitted, matching the
-   *   backend's "no constraint" semantics and trimming the payload. On success it
-   *   subscribes to the run's status stream; on error it resets `running` and
-   *   surfaces the message.
+   *   the form; `running()` reads true (via `startingRun`) and `error`/
+   *   `completionWarning` clear; POSTs a `RunStrategyLabRequest`.
+   *   `allowed_asset_classes` is sent in canonical (`categoryOptions`) order
+   *   only when the selection is a strict subset — when every category is
+   *   selected the field is omitted, matching the backend's "no constraint"
+   *   semantics and trimming the payload. On success `runService` begins
+   *   tracking the run; on error `startingRun` clears and the message surfaces.
    */
   runNewStrategy(): void {
     // Re-entrancy guard: the run button is disabled while a run is active, but a
     // programmatic call or double-click must not start a second run — that would
     // orphan the first run and open a duplicate status stream.
-    if (this.running) {
+    if (this.running()) {
       return;
     }
     // Guard the invalid-zero-categories case (the button is also disabled, but
     // a programmatic call must not start a run constrained to nothing).
     if (!this.categoriesValid) {
-      this.error = 'Select at least one asset category to generate strategies for.';
+      this.error.set('Select at least one asset category to generate strategies for.');
       return;
     }
 
     const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
-    const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
+    const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX());
     // Reflect any clamping back into the form so the user sees what was sent.
     this.batchSize = batchSize;
     this.batchCount = batchCount;
 
     // Preserve canonical order so the payload is stable regardless of click order.
-    const allowedAssetClasses = this.categoryOptions
+    const categoryOptions = this.categoryOptions();
+    const selectedCategories = this.selectedCategories();
+    const allowedAssetClasses = categoryOptions
       .map((c) => c.value)
-      .filter((v) => this.selectedCategories.includes(v));
+      .filter((v) => selectedCategories.includes(v));
     // Omit the field when every category is selected — equivalent to "no
     // constraint" server-side, and a smaller payload.
-    const allConstraintsOff = allowedAssetClasses.length === this.categoryOptions.length;
+    const allConstraintsOff = allowedAssetClasses.length === categoryOptions.length;
 
-    this.running = true;
-    this.error = null;
-    this.completionWarning = null;
+    this.startingRun.set(true);
+    this.error.set(null);
+    this.completionWarning.set(null);
     this.api
       .runStrategyLab({
         batch_size: batchSize,
@@ -642,8 +596,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       })
       .subscribe({
       next: (res) => {
-        this.activeRunId = res.run_id;
-        this.runStatus = {
+        const initialStatus: StrategyLabRunStatus = {
           run_id: res.run_id,
           status: 'running',
           started_at: new Date().toISOString(),
@@ -658,11 +611,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
           completed_batches: 0,
           current_batch: batchCount > 1 ? 1 : null,
         };
-        this.connectToStream(res.run_id);
+        this.runService.startRun(res.run_id, initialStatus);
+        this.startingRun.set(false);
       },
       error: (err) => {
-        this.error = err?.error?.detail || err?.message || 'Strategy run failed.';
-        this.running = false;
+        this.startingRun.set(false);
+        this.error.set(err?.error?.detail || err?.message || 'Strategy run failed.');
       },
     });
   }
@@ -676,7 +630,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   runButtonLabel(): string {
     if (this.batchCount > 1) {
       const total = this.batchSize * this.batchCount;
-      return `Run ${this.batchSize} \u00d7 ${this.batchCount} = ${total} strategies`;
+      return `Run ${this.batchSize} × ${this.batchCount} = ${total} strategies`;
     }
     return `Run ${this.batchSize} strateg${this.batchSize === 1 ? 'y' : 'ies'}`;
   }
@@ -687,13 +641,13 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   private applyFilter(): void {
-    const all = this.results?.items ?? [];
+    const all = this.results()?.items ?? [];
     if (this.filter === 'winning') {
-      this.displayedItems = all.filter((r) => r.is_winning);
+      this.displayedItems.set(all.filter((r) => r.is_winning));
     } else if (this.filter === 'losing') {
-      this.displayedItems = all.filter((r) => !r.is_winning);
+      this.displayedItems.set(all.filter((r) => !r.is_winning));
     } else {
-      this.displayedItems = all;
+      this.displayedItems.set(all);
     }
   }
 
@@ -708,7 +662,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // ---------------------------------------------------------------------------
 
   isPhaseCompleted(phaseId: string): boolean {
-    const current = this.runStatus?.current_cycle?.phase;
+    const current = this.runService.runStatus()?.current_cycle?.phase;
     if (!current) return false;
     const currentIdx = PHASE_ORDER.indexOf(current);
     const phaseIdx = PHASE_ORDER.indexOf(phaseId);
@@ -717,7 +671,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   isCurrentPhase(phaseId: string): boolean {
-    return this.runStatus?.current_cycle?.phase === phaseId;
+    return this.runService.runStatus()?.current_cycle?.phase === phaseId;
   }
 
   isPhasePending(phaseId: string): boolean {
@@ -735,23 +689,25 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   private addLogEntry(phase: string, subPhase: string | undefined, data: StrategyLabProgressEvent): void {
     const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    // Mark previous active entry as done (if it's still active when a new entry arrives)
-    for (let i = this.activityLog.length - 1; i >= 0; i--) {
-      if (this.activityLog[i].status === 'active') {
-        this.activityLog[i].status = 'done';
-        break;
-      }
-    }
-
     const msg = this.buildLogMessage(phase, subPhase, data);
     if (!msg) return;
 
     const isTerminal = subPhase === 'completed' || subPhase === 'data_loaded';
+    const newEntry: ActivityLogEntry = { time: now, status: isTerminal ? 'done' : 'active', message: msg };
 
-    this.activityLog.push({
-      time: now,
-      status: isTerminal ? 'done' : 'active',
-      message: msg,
+    this.activityLog.update((log) => {
+      // Mark the previous active entry as done (if it's still active when a new entry arrives).
+      let lastActiveIndex = -1;
+      for (let i = log.length - 1; i >= 0; i--) {
+        if (log[i].status === 'active') {
+          lastActiveIndex = i;
+          break;
+        }
+      }
+      const closed = lastActiveIndex === -1
+        ? log
+        : log.map((entry, i) => (i === lastActiveIndex ? { ...entry, status: 'done' as const } : entry));
+      return [...closed, newEntry];
     });
 
     // Auto-scroll the log container. Track the timer so a destroy mid-wait
@@ -772,39 +728,40 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     switch (phase) {
       case 'ideating':
         if (subPhase === 'started') return 'Ideating new trading strategy & generating code...';
-        if (subPhase === 'completed') return `Strategy ideated \u2014 ${strategy?.asset_class ?? 'unknown'} asset class`;
+        if (subPhase === 'completed') return `Strategy ideated — ${strategy?.asset_class ?? 'unknown'} asset class`;
         return 'Ideating...';
       case 'coding':
         if (subPhase === 'started') return 'Validating strategy spec and code safety...';
         if (subPhase === 'completed') return `Code validated (${data['checks_total'] ?? '?'} checks, ${data['checks_passed'] ?? '?'} passed)`;
         if (subPhase === 'failed') return `Validation failed (${(data['checks_total'] as number ?? 0) - (data['checks_passed'] as number ?? 0)} critical issue(s))`;
-        if (subPhase === 'refining') return `Refining code (round ${(round ?? 0) + 1}/10) \u2014 fixing ${data['failure_phase'] ?? 'issues'}...`;
-        if (subPhase === 'refined') return `Code refined \u2014 ${data['changes_made'] ?? 'code updated'}`;
+        if (subPhase === 'refining') return `Refining code (round ${(round ?? 0) + 1}/10) — fixing ${data['failure_phase'] ?? 'issues'}...`;
+        if (subPhase === 'refined') return `Code refined — ${data['changes_made'] ?? 'code updated'}`;
         return 'Coding...';
       case 'backtesting':
         if (subPhase === 'fetching_data') return 'Fetching historical market data...';
         if (subPhase === 'data_loaded') return `Market data loaded (${data['symbols_count'] ?? '?'} symbols, ${(data['bars_count'] as number ?? 0).toLocaleString()} bars)`;
         if (subPhase === 'running_code') return 'Executing strategy backtest in sandbox...';
-        if (subPhase === 'completed') return `Backtest complete \u2014 ${data['trades_count'] ?? '?'} trades in ${((data['execution_time'] as number) ?? 0).toFixed(1)}s`;
+        if (subPhase === 'completed') return `Backtest complete — ${data['trades_count'] ?? '?'} trades in ${((data['execution_time'] as number) ?? 0).toFixed(1)}s`;
         return 'Backtesting...';
       case 'analyzing':
         if (subPhase === 'draft') return 'Generating analysis narrative...';
         if (subPhase === 'review') return 'Self-reviewing analysis against metrics...';
-        if (subPhase === 'completed') return `Analysis complete \u2014 ${data['is_winning'] ? 'WINNING' : 'LOSING'}`;
+        if (subPhase === 'completed') return `Analysis complete — ${data['is_winning'] ? 'WINNING' : 'LOSING'}`;
         return 'Analyzing...';
       default:
-        return `${phase} \u2014 ${subPhase ?? 'processing'}`;
+        return `${phase} — ${subPhase ?? 'processing'}`;
     }
   }
 
   progressPercent(): number {
-    if (!this.runStatus || this.runStatus.total_cycles === 0) return 0;
-    return Math.round((this.runStatus.completed_cycles / this.runStatus.total_cycles) * 100);
+    const status = this.runService.runStatus();
+    if (!status || status.total_cycles === 0) return 0;
+    return Math.round((status.completed_cycles / status.total_cycles) * 100);
   }
 
   /** Short multi-line tooltip summarizing recent errored cycles for hover. */
   erroredTooltip(): string {
-    const details = this.runStatus?.errored_details ?? [];
+    const details = this.runService.runStatus()?.errored_details ?? [];
     if (!details.length) return '';
     return details
       .slice(-10)
@@ -883,13 +840,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * - Standard refinement-loop gates (refinement_round >= 0): remedied
    *   when the gate's round is earlier than the cycle's last round
    *   (the existing same-round-as-failure rule).
-   * - Pre-synthesis gates (refinement_round = -1, #547 item 1):
-   *   refinement itself is code-only and cannot fix them, but the
-   *   zero-trade repair path (#547 review) re-runs the spec validator
-   *   after committing whitelisted spec updates and emits gates with
-   *   gate_name `zero_trade_repair_<original>`. If any such later
-   *   validator pass produced a passing result for the same logical
-   *   check, the original pre-synthesis warning is remedied.
+   * - Pre-synthesis gates (refinement_round = -1): refinement itself is
+   *   code-only and cannot fix them, but the zero-trade repair path
+   *   re-runs the spec validator after committing whitelisted spec
+   *   updates and emits gates with gate_name `zero_trade_repair_<original>`.
+   *   If any such later validator pass produced a passing result for the
+   *   same logical check, the original pre-synthesis warning is remedied.
    */
   isRemedied(gate: QualityGateResult, record: StrategyLabRecord): boolean {
     if (gate.passed) return false;
@@ -966,20 +922,20 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((confirmed) => {
         if (!confirmed) return;
-        this.error = null;
-        this.deletingLabRecordId = id;
+        this.error.set(null);
+        this.deletingLabRecordId.set(id);
         this.api
           .deleteStrategyLabRecord(id)
           .pipe(takeUntilDestroyed(this.destroyRef))
           .subscribe({
             next: () => {
-              this.deletingLabRecordId = null;
+              this.deletingLabRecordId.set(null);
               this.loadResults();
               this.notify.saved('Strategy lab run deleted.');
             },
             error: (err) => {
-              this.deletingLabRecordId = null;
-              this.error = err?.error?.detail || err?.message || 'Failed to delete strategy.';
+              this.deletingLabRecordId.set(null);
+              this.error.set(err?.error?.detail || err?.message || 'Failed to delete strategy.');
             },
           });
       });
@@ -996,21 +952,21 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((confirmed) => {
         if (!confirmed) return;
-        this.error = null;
-        this.clearingAll = true;
+        this.error.set(null);
+        this.clearingAll.set(true);
         this.api
           .clearStrategyLabStorage()
           .pipe(takeUntilDestroyed(this.destroyRef))
           .subscribe({
             next: () => {
-              this.clearingAll = false;
-              this.paperTradingSessions = {};
+              this.clearingAll.set(false);
+              this.runService.clearPaperTradingSessions();
               this.loadResults();
               this.notify.saved('Strategy lab data cleared.');
             },
             error: (err) => {
-              this.clearingAll = false;
-              this.error = err?.error?.detail || err?.message || 'Failed to clear strategy lab data.';
+              this.clearingAll.set(false);
+              this.error.set(err?.error?.detail || err?.message || 'Failed to clear strategy lab data.');
             },
           });
       });
@@ -1036,13 +992,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
             sessions[s.lab_record_id] = s;
           }
         }
-        this.paperTradingSessions = sessions;
-        // Resume polling for any sessions still running (e.g. after a page reload).
-        for (const [labRecordId, s] of Object.entries(sessions)) {
-          if (s.status === 'running') {
-            this.pollPaperTradingSession(labRecordId, s.session_id);
-          }
-        }
+        // Resumes polling for any sessions still running (e.g. after a page reload).
+        this.runService.hydratePaperTradingSessions(sessions);
       },
     });
   }
@@ -1055,26 +1006,27 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   runPaperTrading(record: StrategyLabRecord): void {
     if (!record.is_publishable) {
       const reason = this.publishabilitySkipLabel(record);
-      this.error =
+      this.error.set(
         'This strategy is not publishable and cannot be paper traded' +
-        (reason ? ` (${reason})` : '.');
+        (reason ? ` (${reason})` : '.'),
+      );
       return;
     }
-    this.error = null;
-    this.paperTradingLabRecordId = record.lab_record_id;
+    this.error.set(null);
+    this.startingPaperTrade.set(record.lab_record_id);
     this.api
       .runPaperTrading({ lab_record_id: record.lab_record_id })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (res) => {
-        // Backend returns a "running" session immediately; store it so the UI
-        // shows in-progress state, then poll until the worker finishes.
-        this.paperTradingSessions[record.lab_record_id] = res.session;
-        this.pollPaperTradingSession(record.lab_record_id, res.session.session_id);
+        // Backend returns a "running" session immediately; runService stores it
+        // so the UI shows in-progress state, then polls until the worker finishes.
+        this.runService.trackPaperTradingSession(record.lab_record_id, res.session);
+        this.startingPaperTrade.set(null);
       },
       error: (err) => {
-        this.paperTradingLabRecordId = null;
-        this.error = err?.error?.detail || err?.message || 'Paper trading failed.';
+        this.startingPaperTrade.set(null);
+        this.error.set(err?.error?.detail || err?.message || 'Paper trading failed.');
       },
     });
   }
@@ -1096,32 +1048,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return reason || null;
   }
 
-  /** Poll GET /strategy-lab/paper-trade/{session_id} until status is terminal. */
-  private pollPaperTradingSession(labRecordId: string, sessionId: string): void {
-    this.paperTradingPollSubs[labRecordId]?.unsubscribe();
-    this.paperTradingPollSubs[labRecordId] = timer(3000, 3000)
-      .pipe(
-        switchMap(() => this.api.getPaperTradingSession(sessionId)),
-        takeWhile((res) => res.session.status === 'running', true),
-      )
-      .subscribe({
-        next: (res) => {
-          this.paperTradingSessions[labRecordId] = res.session;
-          if (res.session.status !== 'running') {
-            this.paperTradingLabRecordId = null;
-            delete this.paperTradingPollSubs[labRecordId];
-          }
-        },
-        error: (err) => {
-          this.paperTradingLabRecordId = null;
-          delete this.paperTradingPollSubs[labRecordId];
-          this.error = err?.error?.detail || err?.message || 'Paper trading polling failed.';
-        },
-      });
-  }
-
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
-    return this.paperTradingSessions[record.lab_record_id] ?? null;
+    return this.runService.paperTradingSessions()[record.lab_record_id] ?? null;
   }
 
   verdictLabel(verdict: string | undefined | null): string {

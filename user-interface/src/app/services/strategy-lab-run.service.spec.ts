@@ -345,6 +345,15 @@ describe('StrategyLabRunService', () => {
       expect(errors).toEqual(['network down', 'Paper trading polling failed.']);
     });
 
+    it('clearPaperTradingSessions drops all known sessions', () => {
+      service.trackPaperTradingSession('rec-1', runningSession);
+      expect(service.paperTradingSessions()).toEqual({ 'rec-1': runningSession });
+
+      service.clearPaperTradingSessions();
+
+      expect(service.paperTradingSessions()).toEqual({});
+    });
+
     it('hydratePaperTradingSessions adopts a batch, resumes polling only for running ones, and never sets paperTradingLabRecordId', async () => {
       vi.useFakeTimers();
       const completedSession: PaperTradingSession = {
