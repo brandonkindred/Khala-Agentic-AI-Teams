@@ -497,11 +497,11 @@
                       <span class="ls-label">Net P&amp;L</span>
                     </div>
                     <div class="ledger-stat">
-                      <span class="ls-value">{{ record.backtest.config.start_date | slice:0:10 }}</span>
+                      <span class="ls-value">{{ record.backtest.config.start_date | dateOnly }}</span>
                       <span class="ls-label">Start</span>
                     </div>
                     <div class="ledger-stat">
-                      <span class="ls-value">{{ record.backtest.config.end_date | slice:0:10 }}</span>
+                      <span class="ls-value">{{ record.backtest.config.end_date | dateOnly }}</span>
                       <span class="ls-label">End</span>
                     </div>
                     <div class="ledger-stat">
@@ -528,13 +528,13 @@
                       <!-- Entry Date -->
                       <ng-container matColumnDef="entry_date">
                         <th mat-header-cell *matHeaderCellDef>Entry</th>
-                        <td mat-cell *matCellDef="let t">{{ t.entry_date | slice:0:10 }}</td>
+                        <td mat-cell *matCellDef="let t">{{ t.entry_date | dateOnly }}</td>
                       </ng-container>
 
                       <!-- Exit Date -->
                       <ng-container matColumnDef="exit_date">
                         <th mat-header-cell *matHeaderCellDef>Exit</th>
-                        <td mat-cell *matCellDef="let t">{{ t.exit_date | slice:0:10 }}</td>
+                        <td mat-cell *matCellDef="let t">{{ t.exit_date | dateOnly }}</td>
                       </ng-container>
 
                       <!-- Symbol -->
@@ -740,7 +740,7 @@
                         </div>
                         <span class="paper-meta">
                           {{ session.trades.length }} trades &bull;
-                          {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
+                          {{ session.data_period_start | dateOnly }} to {{ session.data_period_end | dateOnly }}
                         </span>
                         @if (record.is_publishable) {
                           @if (paperTradingLabRecordId() === record.lab_record_id) {
