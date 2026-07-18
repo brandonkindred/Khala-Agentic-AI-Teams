@@ -14,6 +14,7 @@ so consumers import a single module (mirrors ``alignment.py``).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ from ._llm_budget import charge_active_budget
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import extract_json_object
 from ._prompt_context import spec_prompt_fields
+from ._response_schemas import CRITIQUE_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,10 @@ _SYSTEM_PROMPT = (
     + "\n\n"
     + _STOP_ORDER_SEMANTICS
 )
+
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
+_CRITIQUE_SCHEMA_JSON = json.dumps(CRITIQUE_SCHEMA, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +410,14 @@ issue you raise is advisory only), and there is NO max-drawdown
 constraint: a strategy may lose up to 100% by design, so never flag
 drawdown reachability.
 
-Return ONLY a JSON object — no markdown — with this shape:
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
+
+Return ONLY a JSON object — no markdown — with this shape (a
+representative example — the schema above is authoritative):
 
 {{
   "ready": false,
@@ -471,6 +484,7 @@ class DesignReviewAgent:
             readiness_block=readiness_block,
             n_prior_critiques=len(prior_critiques or []),
             prior_critiques_block=prior_block,
+            response_schema_json=_CRITIQUE_SCHEMA_JSON,
         )
 
         agent = Agent(
