@@ -87,6 +87,27 @@ def test_list_files_is_capped(tmp_path) -> None:
     assert len(reader.list_files()) == 4
 
 
+def test_listing_truncated_false_before_first_list_files_call(tmp_path) -> None:
+    reader = DiskRepoReader(str(tmp_path))
+    assert reader.listing_truncated() is False
+
+
+def test_listing_truncated_false_when_under_the_cap(tmp_path) -> None:
+    for i in range(3):
+        _write(tmp_path, f"f{i}.py", "x")
+    reader = DiskRepoReader(str(tmp_path), max_listed_files=10)
+    reader.list_files()
+    assert reader.listing_truncated() is False
+
+
+def test_listing_truncated_true_when_the_cap_is_hit(tmp_path) -> None:
+    for i in range(10):
+        _write(tmp_path, f"f{i}.py", "x")
+    reader = DiskRepoReader(str(tmp_path), max_listed_files=4)
+    reader.list_files()
+    assert reader.listing_truncated() is True
+
+
 def test_read_cache_uses_own_cap_not_listing_cap(tmp_path) -> None:
     """The read cache evicts by max_read_cache, independent of the (large) listing cap."""
     for i in range(6):

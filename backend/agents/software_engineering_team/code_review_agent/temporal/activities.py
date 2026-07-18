@@ -299,17 +299,32 @@ def find_architecture_and_redundancy_activity(
           ``existing_codebase`` excerpt.
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, no architecture document, or any setup/LLM failure all degrade
-          to an empty list), so an activity failure here would only ever be an
-          unexpected defect, not an expected outcome.
+          to an empty list) -- and so is this activity as a whole, including
+          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
+          the wrapped function's own env/profile early-return checks run, so
+          without this activity's own try/except a client-resolution failure
+          (e.g. no LLM provider configured) would raise even when this
+          optional, additive pass would have no-op'd anyway -- turning an
+          inapplicable pass into a failure of the whole durable review. An
+          activity failure here would only ever be an unexpected defect, not
+          an expected outcome.
     """
     from ..architecture_consistency_pass import find_architecture_and_redundancy_issues
     from ..models import CodeReviewInput
 
     input_data = CodeReviewInput.model_validate(review_input)
-    llm = _resolve_llm()
-    findings = find_architecture_and_redundancy_issues(
-        llm, input_data, repo_reader=_repo_reader_from_input(input_data)
-    )
+    try:
+        llm = _resolve_llm()
+        findings = find_architecture_and_redundancy_issues(
+            llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
+        logger.warning(
+            "ArchitectureConsistencyPass: activity failed (%s: %s); returning no additional findings",
+            type(exc).__name__,
+            exc,
+        )
+        return []
     return [i.model_dump(mode="json") for i in findings]
 
 
@@ -344,17 +359,33 @@ def find_side_effect_impact_activity(
           receives the live reader directly.
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, wrong profile, or any setup/LLM failure all degrade to an empty
-          list), so an activity failure here would only ever be an unexpected
-          defect, not an expected outcome.
+          list) -- and so is this activity as a whole, including
+          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
+          the wrapped function's own env/profile/``pre_numbered`` early-return
+          checks run, so without this activity's own try/except a
+          client-resolution failure (e.g. no LLM provider configured) would
+          raise even when this optional, additive pass would have no-op'd
+          anyway (``CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS=false``, a non-default
+          profile, or hunk-mode input) -- turning an inapplicable pass into a
+          failure of the whole durable review. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
     """
     from ..models import CodeReviewInput
     from ..side_effect_impact_pass import find_side_effect_impact_issues
 
     input_data = CodeReviewInput.model_validate(review_input)
-    llm = _resolve_llm()
-    findings = find_side_effect_impact_issues(
-        llm, input_data, repo_reader=_repo_reader_from_input(input_data)
-    )
+    try:
+        llm = _resolve_llm()
+        findings = find_side_effect_impact_issues(
+            llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
+        logger.warning(
+            "SideEffectImpactPass: activity failed (%s: %s); returning no additional findings",
+            type(exc).__name__,
+            exc,
+        )
+        return []
     return [i.model_dump(mode="json") for i in findings]
 
 

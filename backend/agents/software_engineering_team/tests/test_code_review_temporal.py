@@ -319,6 +319,23 @@ def test_architecture_activity_returns_empty_with_no_architecture() -> None:
     assert out == []
 
 
+def test_architecture_activity_fails_safe_when_llm_resolution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_llm()`` runs BEFORE the wrapped pass's own env/no-op checks, so a
+    client-resolution failure (e.g. no LLM provider configured) must not raise --
+    this activity is purely additive and must degrade to no findings like every
+    other failure mode the wrapped pass itself already handles."""
+    from code_review_agent.temporal import activities as A
+
+    def _raise() -> Any:
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(A, "_resolve_llm", _raise)
+    out = A.find_architecture_and_redundancy_activity(_input().model_dump(mode="json"))
+    assert out == []
+
+
 # ---------------------------------------------------------------------------
 # 3b. repo_root reconstructs a whole-repo reader across the Temporal boundary
 # ---------------------------------------------------------------------------
@@ -459,6 +476,24 @@ def test_side_effect_activity_reconstructs_reader_from_repo_root(
     captured.clear()
     A.find_side_effect_impact_activity(_input().model_dump(mode="json"))
     assert captured["repo_reader"] is None
+
+
+def test_side_effect_activity_fails_safe_when_llm_resolution_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resolve_llm()`` runs BEFORE the wrapped pass's own env/profile/
+    ``pre_numbered`` early-return checks, so a client-resolution failure must
+    not raise -- this activity is purely additive and must degrade to no
+    findings, matching the wrapped pass's own fail-safe contract, even when
+    the failure happens before that pass's internals ever run."""
+    from code_review_agent.temporal import activities as A
+
+    def _raise() -> Any:
+        raise RuntimeError("no provider configured")
+
+    monkeypatch.setattr(A, "_resolve_llm", _raise)
+    out = A.find_side_effect_impact_activity(_input().model_dump(mode="json"))
+    assert out == []
 
 
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:

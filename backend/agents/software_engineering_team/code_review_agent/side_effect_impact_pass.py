@@ -142,13 +142,15 @@ def _search_repository(
           list-then-line order, alongside a ``truncated`` flag.
         - ``truncated`` is ``True`` whenever the scan did not actually inspect
           the full content of every candidate path -- the file-scan cap was
-          hit, ``max_matches`` was reached first, OR a candidate file was
-          skipped because ``read_file`` raised or returned ``None`` (e.g. a
-          shared ``GitHubRepoReader`` fetch budget already exhausted by an
-          earlier pass). A caller must not treat an empty result list as proof
-          the substring is absent anywhere in the repository when
-          ``truncated`` is ``True``; it only proves the substring is absent
-          from the files this call actually managed to read.
+          hit, ``max_matches`` was reached first, a candidate file was skipped
+          because ``read_file`` raised or returned ``None`` (e.g. a shared
+          ``GitHubRepoReader`` fetch budget already exhausted by an earlier
+          pass), OR (``DiskRepoReader`` only) the reader's own ``list_files()``
+          listing cap was hit, meaning ``paths`` itself omits repository files
+          this call never even saw. A caller must not treat an empty result
+          list as proof the substring is absent anywhere in the repository
+          when ``truncated`` is ``True``; it only proves the substring is
+          absent from the files this call actually managed to read.
         - Never raises: a reader ``list_files``/``read_file`` failure is
           logged and treated as "no matches from that path/call" (folded into
           ``truncated``, never dropped silently) -- a broken reader must only
@@ -175,7 +177,14 @@ def _search_repository(
 
     results: List[Tuple[str, int, str]] = []
     scanned = 0
-    incomplete = False
+    # DiskRepoReader.list_files() has its own listing cap (DEFAULT_MAX_LISTED_FILES),
+    # independent of max_files_scanned above -- for a DiskRepoReader the two are set
+    # equal (see _DISK_REPO_SEARCH_FILE_SCAN_LIMIT), so a repository with more paths
+    # than the listing cap would have every returned path scanned without the
+    # per-file-scan cap ever tripping, silently missing the reader's own truncation.
+    incomplete = (
+        isinstance(index.repo_reader, DiskRepoReader) and index.repo_reader.listing_truncated()
+    )
     for path in paths:
         if path in index.files:
             continue

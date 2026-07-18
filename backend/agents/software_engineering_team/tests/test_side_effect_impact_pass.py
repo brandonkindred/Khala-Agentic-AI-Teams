@@ -196,6 +196,23 @@ def test_search_repository_disk_reader_scans_beyond_the_conservative_cap(
     assert truncated is False
 
 
+def test_search_repository_reports_truncated_when_disk_reader_listing_itself_is_capped(
+    tmp_path: Path,
+) -> None:
+    """Regression test: for a DiskRepoReader, max_files_scanned is set equal to
+    the reader's own listing cap, so a repository with MORE paths than that cap
+    would have every returned (already-truncated) path scanned without the
+    per-file-scan cap ever tripping -- the only way to detect this is asking the
+    reader itself whether its listing was capped."""
+    for i in range(10):
+        (tmp_path / f"f{i}.py").write_text("no match\n")
+    reader = DiskRepoReader(str(tmp_path), max_listed_files=4)
+    index = CodebaseIndex(files={}, repo_reader=reader)
+    matches, truncated = _search_repository(index, "needle")
+    assert matches == []
+    assert truncated is True
+
+
 def test_search_repository_fails_safe_on_reader_error() -> None:
     class _RaisingReader:
         def list_files(self):
