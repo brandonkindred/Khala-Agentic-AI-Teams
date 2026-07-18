@@ -445,6 +445,56 @@ class GitHubClient:
             return response
         raise GitHubAPIError(response.status_code, response.text)
 
+    # ----- pagination ----------------------------------------------------------
+
+    def _paginate(
+        self,
+        path: str,
+        params: Optional[dict[str, Any]] = None,
+        *,
+        cap: Optional[int] = None,
+        cap_label: Optional[str] = None,
+        not_found_ok: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield raw item payloads across every page of a ``Link``-header-paginated
+        GitHub list endpoint.
+
+        Preconditions:
+            - ``path`` is a repo-relative API path; ``params`` is sent on the first
+              request only (later pages are driven entirely by the ``Link`` header's
+              ``rel="next"`` URL).
+            - When ``cap`` is not None, ``cap_label`` is a %-style format string
+              containing exactly one ``%d``, matching the call site's own warning text.
+        Postconditions:
+            - Yields one raw payload ``dict`` per item, across all pages, in GitHub's
+              response order.
+            - When ``not_found_ok`` is True and the first response is a 404, returns
+              immediately without yielding anything and without raising. Any other
+              non-2xx response, regardless of ``not_found_ok``, raises
+              ``GitHubAPIError`` via ``self._check``.
+            - When ``cap`` is not None, every item pulled off a page counts toward it
+              before it is yielded (i.e. before any caller-side filtering). Once the
+              count exceeds ``cap``, logs ``cap_label`` and stops -- the item that
+              tipped it over is never yielded, and the caller's own comprehension or
+              loop then ends with whatever partial result it already accumulated.
+        """
+        seen = 0
+        url: Optional[str] = path
+        while url:
+            response = self._request("GET", url, params=params)
+            params = None  # only on first page
+            if not_found_ok and response.status_code == 404:
+                return
+            response = self._check(response)
+            for item in response.json() or []:
+                if cap is not None:
+                    seen += 1
+                    if seen > cap:
+                        logger.warning(cap_label, cap)
+                        return
+                yield item
+            url = _parse_next_link(response.headers.get("Link"))
+
     # ----- public methods ----------------------------------------------------
 
     def get_repo(self, owner: str, repo: str) -> Repo:
@@ -498,23 +548,15 @@ class GitHubClient:
         params: dict[str, Any] = {"state": "open", "per_page": 100}
         if label:
             params["labels"] = label
-        url: Optional[str] = path
-        seen = 0
-        while url:
-            response = self._check(self._request("GET", url, params=params))
-            params = None  # only on first page
-            for item in response.json() or []:
-                seen += 1
-                if seen > MAX_ISSUES_TRAVERSED:
-                    logger.warning(
-                        "list_open_issues hit MAX_ISSUES_TRAVERSED=%d; stopping",
-                        MAX_ISSUES_TRAVERSED,
-                    )
-                    return
-                if "pull_request" in item:
-                    continue
-                yield _issue_from_payload(item)
-            url = _parse_next_link(response.headers.get("Link"))
+        for item in self._paginate(
+            path,
+            params,
+            cap=MAX_ISSUES_TRAVERSED,
+            cap_label="list_open_issues hit MAX_ISSUES_TRAVERSED=%d; stopping",
+        ):
+            if "pull_request" in item:
+                continue
+            yield _issue_from_payload(item)
 
     def get_issue(self, owner: str, repo: str, number: int) -> Issue:
         """Fetch a single issue (``GET /repos/{owner}/{repo}/issues/{number}``).
@@ -549,18 +591,10 @@ class GitHubClient:
         """
         path = f"/repos/{owner}/{repo}/issues/{number}/sub_issues"
         params: dict[str, Any] = {"per_page": 100}
-        url: Optional[str] = path
-        out: list[SubIssue] = []
-        while url:
-            response = self._request("GET", url, params=params)
-            params = None
-            if response.status_code == 404:
-                return []
-            response = self._check(response)
-            for item in response.json() or []:
-                out.append(_sub_issue_from_payload(item))
-            url = _parse_next_link(response.headers.get("Link"))
-        return out
+        return [
+            _sub_issue_from_payload(item)
+            for item in self._paginate(path, params, not_found_ok=True)
+        ]
 
     def add_issue_comment(self, owner: str, repo: str, number: int, body: str) -> None:
         """Post an issue/PR conversation comment, tagged as Khala-generated.
@@ -753,22 +787,14 @@ class GitHubClient:
               bounded by ``MAX_ISSUES_TRAVERSED`` to cap an unbounded traversal.
         """
         path = f"/repos/{owner}/{repo}/pulls"
-        params: Optional[dict[str, Any]] = {"state": "open", "per_page": 100}
-        url: Optional[str] = path
-        seen = 0
-        while url:
-            response = self._check(self._request("GET", url, params=params))
-            params = None  # only on first page
-            for item in response.json() or []:
-                seen += 1
-                if seen > MAX_ISSUES_TRAVERSED:
-                    logger.warning(
-                        "list_open_pull_requests hit MAX_ISSUES_TRAVERSED=%d; stopping",
-                        MAX_ISSUES_TRAVERSED,
-                    )
-                    return
-                yield _pr_from_payload(item)
-            url = _parse_next_link(response.headers.get("Link"))
+        params: dict[str, Any] = {"state": "open", "per_page": 100}
+        for item in self._paginate(
+            path,
+            params,
+            cap=MAX_ISSUES_TRAVERSED,
+            cap_label="list_open_pull_requests hit MAX_ISSUES_TRAVERSED=%d; stopping",
+        ):
+            yield _pr_from_payload(item)
 
     def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
         """Fetch full detail for one pull request, including its head commit SHA.
@@ -791,16 +817,8 @@ class GitHubClient:
               files carry an empty ``patch``), bounded by GitHub's own 3000-file cap.
         """
         path = f"/repos/{owner}/{repo}/pulls/{number}/files"
-        params: Optional[dict[str, Any]] = {"per_page": 100}
-        url: Optional[str] = path
-        out: list[PullRequestFile] = []
-        while url:
-            response = self._check(self._request("GET", url, params=params))
-            params = None
-            for item in response.json() or []:
-                out.append(_pr_file_from_payload(item))
-            url = _parse_next_link(response.headers.get("Link"))
-        return out
+        params: dict[str, Any] = {"per_page": 100}
+        return [_pr_file_from_payload(item) for item in self._paginate(path, params)]
 
     def list_review_comments(self, owner: str, repo: str, number: int) -> list[ReviewComment]:
         """List every existing review comment on a pull request, following ``Link`` pagination.
@@ -825,24 +843,16 @@ class GitHubClient:
               Raises ``GitHubAPIError`` on any non-2xx.
         """
         path = f"/repos/{owner}/{repo}/pulls/{number}/comments"
-        params: Optional[dict[str, Any]] = {"per_page": 100}
-        url: Optional[str] = path
-        out: list[ReviewComment] = []
-        seen = 0
-        while url:
-            response = self._check(self._request("GET", url, params=params))
-            params = None
-            for item in response.json() or []:
-                seen += 1
-                if seen > MAX_REVIEW_COMMENTS_TRAVERSED:
-                    logger.warning(
-                        "list_review_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
-                        MAX_REVIEW_COMMENTS_TRAVERSED,
-                    )
-                    return out
-                out.append(_review_comment_from_payload(item))
-            url = _parse_next_link(response.headers.get("Link"))
-        return out
+        params: dict[str, Any] = {"per_page": 100}
+        return [
+            _review_comment_from_payload(item)
+            for item in self._paginate(
+                path,
+                params,
+                cap=MAX_REVIEW_COMMENTS_TRAVERSED,
+                cap_label="list_review_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
+            )
+        ]
 
     def list_issue_comments(self, owner: str, repo: str, number: int) -> list[IssueComment]:
         """List every existing standalone conversation comment, following ``Link`` pagination.
@@ -862,24 +872,16 @@ class GitHubClient:
               Raises ``GitHubAPIError`` on any non-2xx.
         """
         path = f"/repos/{owner}/{repo}/issues/{number}/comments"
-        params: Optional[dict[str, Any]] = {"per_page": 100}
-        url: Optional[str] = path
-        out: list[IssueComment] = []
-        seen = 0
-        while url:
-            response = self._check(self._request("GET", url, params=params))
-            params = None
-            for item in response.json() or []:
-                seen += 1
-                if seen > MAX_REVIEW_COMMENTS_TRAVERSED:
-                    logger.warning(
-                        "list_issue_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
-                        MAX_REVIEW_COMMENTS_TRAVERSED,
-                    )
-                    return out
-                out.append(_issue_comment_from_payload(item))
-            url = _parse_next_link(response.headers.get("Link"))
-        return out
+        params: dict[str, Any] = {"per_page": 100}
+        return [
+            _issue_comment_from_payload(item)
+            for item in self._paginate(
+                path,
+                params,
+                cap=MAX_REVIEW_COMMENTS_TRAVERSED,
+                cap_label="list_issue_comments hit MAX_REVIEW_COMMENTS_TRAVERSED=%d; stopping",
+            )
+        ]
 
     def get_resolved_review_thread_comment_ids(
         self, owner: str, repo: str, number: int
