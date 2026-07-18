@@ -8,7 +8,6 @@ naming and review-evidence helpers that the mixins late-bind.
 
 Extracted collaborators (import those modules for the concerns they own):
 - ``progress_config`` — concurrency/cap env parsers, progress-band math
-- ``repo_context`` — file-ceiling repo briefing and incremental ``_RepoContextCache``
 - ``graph_persist`` — ``GraphPersistCoordinator``: the task graph plus its single-writer
   persist/flush state machine (background flusher, snapshot diffing, live phase/status_text)
 - ``pause_cycle``, ``reasoning_capture``, ``team_routing``, ``worker_factory``,
@@ -71,7 +70,6 @@ from software_engineering_team.coding_team.reasoning_capture import (
     _thinking_flush_interval_s,
     _ThinkingBuffer,
 )
-from software_engineering_team.coding_team.repo_context import _RepoContextCache
 from software_engineering_team.coding_team.swarm_assignment import _AssignmentMixin
 from software_engineering_team.coding_team.swarm_implementation import _ImplementationMixin
 from software_engineering_team.coding_team.swarm_review import _ReviewMixin
@@ -535,22 +533,14 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
         # the orchestrator not to overwrite the failure status with "completed".
         self.aborted = False
-        # Incremental repo-context cache: re-reads only files whose (mtime, size) changed instead of
-        # re-reading every eligible file on each refresh (see _RepoContextCache and run()).
-        self._repo_context_cache = _RepoContextCache()
-        self.repo_context = self._repo_context_cache.read(path)
-        # Repo context only changes when merged work lands new files on the working tree, so cache
-        # the merged-task count the context reflects and re-read only when it advances (see run()).
-        self._context_merged_count = self._merged_count()
         # Per-task Tech Lead review-verdict cache: task.id -> (cache_key, verdict), where cache_key
         # (see swarm_review._review_verdict_cache_key) covers every input run_code_review actually
         # sees (changes_summary/evidence, which embeds the branch diff, plus user_decisions) — not
         # the branch diff alone, so a changed changes_summary or a newly answered HITL decision still
         # misses the cache even when the branch itself is unchanged. Reusing the cached verdict skips
         # paying for another run_code_review call (see swarm_review._compute_review). Scoped to this
-        # swarm instance's own run — never persisted/restored across a resume, matching
-        # _repo_context_cache. Locked because _review_and_merge fans _compute_review out across
-        # multiple in-review tasks via parallel_map.
+        # swarm instance's own run — never persisted/restored across a resume. Locked because
+        # _review_and_merge fans _compute_review out across multiple in-review tasks via parallel_map.
         self._review_verdict_cache: Dict[str, tuple[str, Dict[str, Any]]] = {}
         self._review_verdict_cache_lock = threading.Lock()
         # One isolated git worktree per worker (see coding_team.worktree_manager) — created up
@@ -615,18 +605,6 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
                 if check_cancel and check_cancel():
                     _update(status=JobStatus.CANCELLED.value, status_text="Cancelled by user")
                     return
-
-                # Refresh the repo context when merged work has landed since the last read. The
-                # merged count is the right signal here: a task's files become part of the
-                # shared/integrated tree only once it merges (work in progress lives on per-worker
-                # feature branches), and a dependent task is not assignable until its dependencies
-                # are MERGED — so it always sees its prerequisites' code. This avoids a full repo
-                # walk on every idle round (e.g. while tasks sit in review or blocked); a one-time
-                # snapshot at construction would make a worker blind to earlier merged work.
-                merged_now = self._merged_count()
-                if merged_now != self._context_merged_count:
-                    self.repo_context = self._repo_context_cache.read(self.path)
-                    self._context_merged_count = merged_now
 
                 # Coordinator: assign ready tasks to free workers
                 ready = self._find_ready_tasks()
