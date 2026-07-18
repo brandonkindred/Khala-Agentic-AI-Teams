@@ -47,9 +47,9 @@ import type {
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
   StrategyLabProgressEvent,
-  StrategyLabPhase,
   TradeRecord,
 } from '../../models';
+import { reduce as reduceStrategyLabRun } from './strategy-lab-run.reducer';
 
 type FilterMode = 'all' | 'winning' | 'losing';
 
@@ -475,121 +475,58 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Folds one SSE stream event into `runStatus` (via the pure
+   * `reduceStrategyLabRun` reducer) and handles the event's remaining
+   * side effects that aren't run-status fields: activity-log bookkeeping,
+   * refreshing results after a completed cycle, and the completion/error
+   * banners.
+   *
+   * Preconditions: none — every branch is safe on any `runStatus`, including
+   *   `null`.
+   * Postconditions: `runStatus` reflects the event; `activityLog`,
+   *   `completionWarning`, and `error` are updated for event types that
+   *   carry them; `loadResults()` runs after a completed cycle.
+   */
   private handleStreamEvent(event: StrategyLabStreamEvent): void {
-    if (event.type === 'snapshot' && this.runStatus) {
-      // Merge snapshot fields into runStatus
-      Object.assign(this.runStatus, {
-        status: event['status'] ?? this.runStatus.status,
-        completed_cycles: event['completed_cycles'] ?? this.runStatus.completed_cycles,
-        skipped_cycles: event['skipped_cycles'] ?? this.runStatus.skipped_cycles,
-        errored_cycles: event['errored_cycles'] ?? this.runStatus.errored_cycles,
-        errored_details: event['errored_details'] ?? this.runStatus.errored_details,
-        current_cycle: event['current_cycle'] ?? this.runStatus.current_cycle,
-        completed_record_ids: event['completed_record_ids'] ?? this.runStatus.completed_record_ids,
-        error: event['error'] ?? this.runStatus.error,
-        batch_size: event['batch_size'] ?? this.runStatus.batch_size,
-        batch_count: event['batch_count'] ?? this.runStatus.batch_count,
-        completed_batches: event['completed_batches'] ?? this.runStatus.completed_batches,
-        current_batch: event['current_batch'] ?? this.runStatus.current_batch,
-      });
-    }
-
-    if (event.type === 'batch_start' && this.runStatus) {
-      this.runStatus.current_batch = (event['batch_index'] as number) ?? this.runStatus.current_batch;
-      this.runStatus.batch_count = (event['total_batches'] as number) ?? this.runStatus.batch_count;
-      this.runStatus.completed_batches = (event['completed_batches'] as number) ?? this.runStatus.completed_batches;
-    }
-
-    if (event.type === 'batch_complete' && this.runStatus) {
-      this.runStatus.completed_batches = (event['completed_batches'] as number) ?? this.runStatus.completed_batches;
-      this.runStatus.current_batch = null;
-    }
+    this.runStatus = reduceStrategyLabRun(this.runStatus, event);
 
     if (event.type === 'progress' && this.runStatus) {
-      const cycleIndex = (event['cycle_index'] as number) ?? 0;
-      const phase = (event['phase'] as StrategyLabPhase) ?? 'ideating';
-      const subPhase = event['sub_phase'] as string | undefined;
-
-      // Reset activity log when a new cycle starts
-      if (cycleIndex !== this.lastCycleIndex) {
+      // Reset activity log when a new cycle starts.
+      if (event.cycle_index !== this.lastCycleIndex) {
         this.activityLog = [];
-        this.lastCycleIndex = cycleIndex;
+        this.lastCycleIndex = event.cycle_index;
       }
-
-      // Merge strategy from completed ideation into current_cycle
-      const prevStrategy = this.runStatus.current_cycle?.strategy;
-      const newStrategy = event['strategy'] as { asset_class: string; hypothesis: string } | undefined;
-
-      this.runStatus.current_cycle = {
-        cycle_index: cycleIndex,
-        phase,
-        sub_phase: subPhase,
-        refinement_round: event['refinement_round'] as number | undefined,
-        strategy: newStrategy ?? prevStrategy,
-        metrics: (event['metrics'] as Record<string, number> | undefined) ?? this.runStatus.current_cycle?.metrics,
-        checks_passed: event['checks_passed'] as number | undefined,
-        checks_total: event['checks_total'] as number | undefined,
-        symbols_count: event['symbols_count'] as number | undefined,
-        bars_count: event['bars_count'] as number | undefined,
-        trades_count: event['trades_count'] as number | undefined,
-        execution_time: event['execution_time'] as number | undefined,
-        failure_phase: event['failure_phase'] as string | undefined,
-        changes_made: event['changes_made'] as string | undefined,
-        is_winning: event['is_winning'] as boolean | undefined,
-      };
-
-      this.addLogEntry(phase, subPhase, event);
+      this.addLogEntry(event.phase, event.sub_phase, event);
     }
 
     if (event.type === 'cycle_complete' && this.runStatus) {
-      this.runStatus.completed_cycles = (event['completed_cycles'] as number) ?? this.runStatus.completed_cycles + 1;
-      this.runStatus.current_cycle = undefined;
       this.activityLog = [];
       this.lastCycleIndex = -1;
       this.loadResults();
-    }
-
-    if (event.type === 'cycle_skipped' && this.runStatus) {
-      this.runStatus.skipped_cycles = (this.runStatus.skipped_cycles ?? 0) + 1;
-      this.runStatus.current_cycle = undefined;
-    }
-
-    if (event.type === 'cycle_errored' && this.runStatus) {
-      this.runStatus.errored_cycles = (this.runStatus.errored_cycles ?? 0) + 1;
-      const detail = {
-        cycle_index: (event['cycle_index'] as number) ?? 0,
-        batch_index: event['batch_index'] as number | undefined,
-        error: (event['error'] as string) || '',
-        exception_type: event['reason'] as string | undefined,
-      };
-      const existing = this.runStatus.errored_details ?? [];
-      this.runStatus.errored_details = [...existing, detail].slice(-50);
-      this.runStatus.current_cycle = undefined;
     }
 
     if (event.type === 'batch_warning') {
       // Non-fatal pre-batch issue (e.g. signal-brief failure). Surface as a
       // gentle warning; the run is still progressing.
       this.completionWarning =
-        (event['reason'] as string) === 'signal_brief_failed'
+        event.reason === 'signal_brief_failed'
           ? 'Signal brief unavailable for a batch; strategies continued without it.'
-          : (event['reason'] as string) || 'A non-fatal warning occurred during a batch.';
+          : event.reason || 'A non-fatal warning occurred during a batch.';
     }
 
     if (event.type === 'complete') {
-      const erroredCount = (event['errored_count'] as number) ?? this.runStatus?.errored_cycles ?? 0;
-      const skippedCount = (event['skipped_count'] as number) ?? this.runStatus?.skipped_cycles ?? 0;
-      if (erroredCount > 0 || (event['status'] as string) === 'completed_with_errors') {
+      if (event.errored_count > 0 || event.status === 'completed_with_errors') {
         const parts: string[] = [];
-        if (erroredCount > 0) parts.push(`${erroredCount} cycle(s) errored`);
-        if (skippedCount > 0) parts.push(`${skippedCount} cycle(s) skipped`);
+        if (event.errored_count > 0) parts.push(`${event.errored_count} cycle(s) errored`);
+        if (event.skipped_count > 0) parts.push(`${event.skipped_count} cycle(s) skipped`);
         this.completionWarning = `Run finished with ${parts.join(' and ')}. See details below.`;
       }
       this.onRunComplete();
     }
 
     if (event.type === 'error') {
-      this.error = (event['detail'] as string) || 'Run failed';
+      this.error = event.detail || 'Run failed';
       this.onRunComplete();
     }
   }

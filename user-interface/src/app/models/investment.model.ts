@@ -793,10 +793,6 @@ export interface ClearStrategyLabStorageResponse {
 
 // Strategy Lab — real-time run tracking
 
-export type StrategyLabPhase =
-  | 'ideating' | 'coding' | 'backtesting'
-  | 'analyzing' | 'complete';
-
 export interface QualityGateResult {
   gate_name: string;
   passed: boolean;
@@ -807,11 +803,25 @@ export interface QualityGateResult {
 
 export interface StrategyLabCycleProgress {
   cycle_index: number;
-  phase: StrategyLabPhase;
+  /**
+   * Not the closed 4-value UI stepper set (`STRATEGY_LAB_PHASES` in
+   * strategy-lab.component.ts): the backend's real phase vocabulary is
+   * open-ended (`designing`, `aligning`, `telemetry`, paper-trading phases,
+   * ...) — same reasoning as `StrategyLabProgressEvent.phase` below, which
+   * is this field's sole source.
+   */
+  phase: string;
   sub_phase?: string;
   refinement_round?: number;
-  strategy?: { asset_class: string; hypothesis: string };
-  metrics?: Partial<BacktestResult>;
+  /**
+   * `| null`, not just optional: `_run_state_to_response(...)
+   * .model_dump(mode="json")` (backend) serializes an unset Optional[...]
+   * as JSON `null`, and both the REST run-status poll and the SSE snapshot
+   * event share that one serializer — so a real `null` can reach this field
+   * via either transport, not just an omitted key.
+   */
+  strategy?: { asset_class: string; hypothesis: string } | null;
+  metrics?: Partial<BacktestResult> | null;
   checks_passed?: number;
   checks_total?: number;
   symbols_count?: number;
@@ -833,7 +843,17 @@ export interface StrategyLabErroredDetail {
 
 export interface StrategyLabRunStatus {
   run_id: string;
-  status: 'running' | 'completed' | 'completed_with_errors' | 'failed' | 'cancelled';
+  /**
+   * Includes `'interrupted'`, a real, tested backend status
+   * (`_STRATEGY_LAB_CANCEL_STATUSES` in main.py) that both the REST
+   * run-status poll and the SSE snapshot event can report — e.g. after a
+   * server restart reclaims an in-flight job via `mark_all_active_jobs_
+   * interrupted`. Previously widened only locally on the SSE snapshot
+   * event's `status`; merged in here since `_run_state_to_response()`
+   * backs both the REST poll and the SSE snapshot with the same
+   * unconstrained-string field, so the REST path can report it too.
+   */
+  status: 'running' | 'completed' | 'completed_with_errors' | 'failed' | 'cancelled' | 'interrupted';
   started_at: string;
   total_cycles: number;
   completed_cycles: number;
@@ -841,7 +861,8 @@ export interface StrategyLabRunStatus {
   /** Non-fatal per-cycle failures — run kept going but user should see the count. */
   errored_cycles?: number;
   errored_details?: StrategyLabErroredDetail[];
-  current_cycle?: StrategyLabCycleProgress;
+  /** `| null`: see `StrategyLabCycleProgress`'s own field doc for why. */
+  current_cycle?: StrategyLabCycleProgress | null;
   completed_record_ids: string[];
   error?: string;
   /** Strategies-per-batch (default 1 for legacy single-batch runs). */
@@ -887,41 +908,28 @@ export interface InvestmentJobsListResponse {
 // (an ISO timestamp publish() stamps on most, but not all, frames) is
 // deliberately omitted — nothing reads it and its presence isn't uniform.
 
-type StrategyLabSnapshotCycleProgress = Omit<StrategyLabCycleProgress, 'phase' | 'strategy' | 'metrics'> & {
-  phase: string;
-  strategy: StrategyLabCycleProgress['strategy'] | null;
-  metrics: StrategyLabCycleProgress['metrics'] | null;
-};
-
 /**
- * Initial/refresh snapshot — wire shape matches the polling endpoint 1:1,
- * with three widenings confirmed against the backend (every Optional[...]
- * field on StrategyLabRunStatusResponse was audited against its Python
- * default — completed_cycles/skipped_cycles/errored_cycles/batch_size/
- * batch_count/completed_batches all default to a real 0/1, never None, so
- * they're correctly typed as-is; current_cycle/error are the only two
- * `Optional[X] = None` fields, hence the widenings below):
- *  - `current_cycle` (and nested `strategy`/`metrics`) can be a real
- *    `null`, not just an omitted key: `_run_state_to_response(...)
- *    .model_dump(mode="json")` serializes unset Optional[...] fields as
- *    JSON `null`, and StrategyLabCycleProgress (main.py:322-328) declares
- *    all three as Optional. `phase` stays widened to `string` per
- *    StrategyLabProgressEvent's reasoning below.
- *  - `status` additionally allows `'interrupted'`, a real, tested backend
- *    status (`_STRATEGY_LAB_CANCEL_STATUSES` in main.py) the shared
- *    StrategyLabRunStatus.status union doesn't have. Widened locally here,
- *    not on StrategyLabRunStatus itself — that type also backs the REST
- *    polling endpoint and has other UI consumers not audited for a 6th
- *    status value (see PR description).
- *  - `error` (`Optional[str] = None`, main.py:346) is the same
- *    always-present/nullable pattern as `current_cycle` — widened to
- *    `string | null` and made required (not `?:`) since model_dump always
- *    emits the key (main.py:386: `error=state.get("error")`).
+ * Initial/refresh snapshot — wire shape matches the polling endpoint 1:1
+ * (`_run_state_to_response(...).model_dump(mode="json")` backs both). Every
+ * Optional[...] field on StrategyLabRunStatusResponse was audited against
+ * its Python default: completed_cycles/skipped_cycles/errored_cycles/
+ * batch_size/batch_count/completed_batches all default to a real 0/1,
+ * never None, so they're correctly typed as-is. `current_cycle`/`status`/
+ * `phase`/nested `strategy`/`metrics` needed widening to admit a real
+ * `null` current_cycle, `'interrupted'` status, and an open-ended phase
+ * vocabulary — applied on `StrategyLabRunStatus`/`StrategyLabCycleProgress`
+ * themselves (not locally here) since the REST poll endpoint shares this
+ * exact serializer and so shares the same wire truth.
+ *
+ * `error` is the one field still widened locally: `Optional[str] = None`
+ * (main.py:346) is the same always-present/nullable pattern, but
+ * `StrategyLabRunStatus.error` stays `string | undefined` since nothing
+ * else in the frontend reads it and no other call site was audited for the
+ * same `null`-vs-omitted guarantee. Required (not `?:`) here since
+ * model_dump always emits the key (main.py:386: `error=state.get("error")`).
  */
-export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'current_cycle' | 'status' | 'error'> {
+export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'error'> {
   type: 'snapshot';
-  status: StrategyLabRunStatus['status'] | 'interrupted';
-  current_cycle?: StrategyLabSnapshotCycleProgress | null;
   error: string | null;
 }
 
@@ -929,17 +937,17 @@ export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'cu
  * Per-cycle progress ping. `cycle_index` and `phase` are the only fields the
  * backend guarantees on every progress event; the rest are sent on some (not
  * all) events depending on which phase/sub_phase is reporting, so they stay
- * optional here — same as handleStreamEvent() already assumes. `phase` is
- * `string`, not the narrower StrategyLabPhase: the backend's real phase set
+ * optional here. `phase` is `string`: the backend's real phase set
  * (`designing`, `design_review`, `aligning`, `telemetry`, `phase_transition`,
- * paper-trading phases, ...) is open-ended and already broader than that enum.
+ * paper-trading phases, ...) is open-ended, well beyond the 4-value UI
+ * stepper set (`STRATEGY_LAB_PHASES` in strategy-lab.component.ts).
  *
  * Deliberately incomplete: some real phases carry fields not modeled here
  * (`phase_transition`: from_phase/to_phase/spec_hash/code_hash/attempt;
- * `telemetry`: scope/kind + counters). #1656's acceptance criteria requires
- * no catch-all index signature on this union, so reading them needs a
- * future, explicit field addition rather than an escape hatch — tracked
- * separately from cataloguing the full phase/sub_phase payload matrix.
+ * `telemetry`: scope/kind + counters). This union intentionally carries no
+ * catch-all index signature, so reading them needs a future, explicit field
+ * addition rather than an escape hatch — tracked separately from
+ * cataloguing the full phase/sub_phase payload matrix.
  */
 export interface StrategyLabProgressEvent {
   type: 'progress';
