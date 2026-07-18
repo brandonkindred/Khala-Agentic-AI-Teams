@@ -35,8 +35,8 @@ from ...strategy_lab_context import (
     format_prior_results,
 )
 from ..market_regime import RegimeSummary, regime_to_prompt_block
-from ._llm_budget import DesignBudgetExhausted, charge_active_budget
-from ._llm_envelope import invoke_agent
+from ._llm_budget import DesignBudgetExhausted
+from ._llm_envelope import run_structured_agent
 from ._parse_helpers import (
     StrategySpecParseError,
     build_json_correction_prompt,
@@ -392,10 +392,7 @@ class DesignAgent:
             # Charge before the call so the cycle stops *before* exceeding
             # the per-cycle budget. Each parse-retry is a real LLM call and
             # so counts individually.
-            charge_active_budget()
-            raw = invoke_agent(
-                agent, prompt, agent_key="strategy_design", phase="design_generate", logger=logger
-            )
+            #
             # Malformed JSON is a retriable parse failure, not a fatal cycle
             # abort: with schema-constrained decoding it should be rare, but
             # when the decoder is unconstrained (toggle off / Bedrock / a
@@ -403,7 +400,15 @@ class DesignAgent:
             # otherwise burn the whole cycle. Re-prompt with the same budget
             # as a structured-DSL slip so the model gets a clean retry.
             try:
-                parsed = extract_json_object(raw)
+                parsed = run_structured_agent(
+                    agent,
+                    prompt,
+                    agent_key="strategy_design",
+                    phase="design_generate",
+                    parse=extract_json_object,
+                    charge=True,
+                    logger=logger,
+                )
             except ValueError as exc:
                 logger.warning(
                     "DesignAgent emitted unparseable JSON (attempt %d/%d): %s",
@@ -593,15 +598,15 @@ class DesignAgent:
             "verdict, no markdown.\n\n"
             f"```json\n{spec_json}\n```\n"
         )
-        charge_active_budget()
-        raw = invoke_agent(
+        parsed = run_structured_agent(
             agent,
             user_prompt,
             agent_key="strategy_design",
             phase="design_self_review",
+            parse=extract_json_object,
+            charge=True,
             logger=logger,
         )
-        parsed = extract_json_object(raw)
         # Self-review tolerates advisory warnings on an otherwise-ready
         # verdict: the self-review LLM routinely flags minor notes as
         # warnings while still satisfied with the spec. Only a *critical*

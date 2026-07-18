@@ -919,6 +919,262 @@ def test_docker_on_reuse_proceeds_when_existence_unknown(tmp_path: Path) -> None
     assert prov._state.get("a1") is not None
 
 
+def test_docker_provisioner_stamps_job_id_label_when_config_key_present(tmp_path: Path) -> None:
+    """A job_id present in config under JOB_ID_CONFIG_KEY is stamped as a
+    khala.job_id Docker label -- the attempt-scoped identity marker
+    compensate_activity/check_existing_environment_activity read back to
+    disambiguate a self-leaked container from a pre-existing one.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "job-42"}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--label" in run_cmd
+    assert run_cmd[run_cmd.index("--label") + 1] == "khala.job_id=job-42"
+
+
+def test_docker_provisioner_omits_label_when_no_job_id_in_config(tmp_path: Path) -> None:
+    """No JOB_ID_CONFIG_KEY in config means no --label flag at all -- keeps
+    non-Temporal / job_id-less callers behaving exactly as before this
+    labeling primitive existed.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--label" not in run_cmd
+
+
+def test_inspect_existence_and_owner_returns_exists_and_label() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    labeled = SimpleNamespace(returncode=0, stdout="abc123|||job-42\n", stderr="")
+    with patch("subprocess.run", return_value=labeled):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (True, "job-42")
+
+
+def test_inspect_existence_and_owner_returns_exists_and_none_when_unlabeled() -> None:
+    """Docker's Go-template `index` on a missing label key yields an empty
+    string, not an error -- must be treated the same as "no ownership signal".
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    unlabeled = SimpleNamespace(returncode=0, stdout="abc123|||\n", stderr="")
+    with patch("subprocess.run", return_value=unlabeled):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (True, None)
+
+
+def test_inspect_existence_and_owner_returns_absent() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    absent = SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object")
+    with patch("subprocess.run", return_value=absent):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (False, None)
+
+
+def test_inspect_existence_and_owner_returns_unknown_on_probe_error() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch("subprocess.run", side_effect=OSError("daemon unreachable")):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (None, None)
+
+
+def test_inspect_existence_and_owner_returns_unknown_on_ambiguous_failure() -> None:
+    """A nonzero exit that isn't the daemon's specific absence response is
+    inconclusive, not confirmed-absent (e.g. a transient daemon error)."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    ambiguous = SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+    with patch("subprocess.run", return_value=ambiguous):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (None, None)
+
+
+def test_is_pre_existing_false_when_confirmed_absent() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(False, None)
+    ) as mock_probe:
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is False
+
+    mock_probe.assert_called_once_with("agent-a1")
+
+
+def test_is_pre_existing_false_when_label_matches_job_id() -> None:
+    """Confirmed self-leak: the container's own label matches this run's
+    job_id, so it cannot predate this run."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, "job-42")
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is False
+
+
+def test_is_pre_existing_true_when_label_is_foreign_job(caplog) -> None:
+    """A different job's label stays protected, same as no label -- and is
+    logged informationally rather than as an alarming/unexpected finding."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with (
+        patch.object(
+            DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, "job-99")
+        ),
+        caplog.at_level("INFO"),
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is True
+
+    assert "job-99" in caplog.text
+    assert "job-42" in caplog.text
+
+
+def test_is_pre_existing_true_when_no_label_and_job_id_given() -> None:
+    """The container exists but carries no label at all (e.g. predates this
+    labeling primitive) -- must stay conservative even though job_id was
+    given to compare against."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, None)
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is True
+
+
+def test_is_pre_existing_true_when_job_id_not_given() -> None:
+    """No job_id to compare against at all -- unchanged conservative fallback,
+    matching behavior from before this labeling primitive existed."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, "job-1")
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", None) is True
+
+
+def test_is_pre_existing_true_when_inconclusive() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(None, None)
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is True
+
+
+def test_docker_provisioner_normalizes_job_id_whitespace_before_stamping(tmp_path: Path) -> None:
+    """job_id is stripped before being stamped, so it can never disagree with
+    the also-stripped value _inspect_existence_and_owner reads back."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "  job-42  "}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert run_cmd[run_cmd.index("--label") + 1] == "khala.job_id=job-42"
+
+
+def test_docker_provisioner_reclaims_container_on_name_conflict_from_same_job_id(
+    tmp_path: Path,
+) -> None:
+    """A container blocking the name, labeled with THIS SAME job_id, is a
+    self-leak from an earlier attempt (e.g. local idempotency state lost
+    after a retried activity) -- reclaimed before docker run, so a retry of
+    the same job_id can converge cleanly instead of hard-failing."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+
+    def _inspect_existing_self_owned(cmd, *a, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout="oldid|||job-42\n", stderr="")
+        if cmd[:2] == ["docker", "run"]:
+            return success
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_inspect_existing_self_owned):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "job-42"}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is True
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+
+def test_docker_provisioner_does_not_reclaim_container_from_different_job_id(
+    tmp_path: Path,
+) -> None:
+    """A container blocking the name labeled with a DIFFERENT job's job_id
+    must not be proactively removed -- only a confirmed self-leak is safe
+    to reclaim before docker run."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    conflict = SimpleNamespace(returncode=125, stdout="", stderr="already in use by container")
+
+    def _inspect_existing_foreign_owned(cmd, *a, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout="oldid|||some-other-job\n", stderr="")
+        if cmd[:2] == ["docker", "run"]:
+            return conflict
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_inspect_existing_foreign_owned):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "job-42"}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] not in calls
+
+
 # ---------------------------------------------------------------------------
 # generic_provisioner.py
 # ---------------------------------------------------------------------------

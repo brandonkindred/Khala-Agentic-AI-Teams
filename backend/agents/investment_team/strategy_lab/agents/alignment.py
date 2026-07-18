@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 from strands import Agent
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
-from ._llm_envelope import invoke_agent
+from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import ALIGNMENT_FIX_SCHEMA
@@ -323,19 +323,20 @@ class TradeAlignmentAgent:
             entry_date=entry_date,
         )
         agent = Agent(
-            model=get_strands_model("strategy_ideation"),
+            model=get_strands_model("strategy_alignment"),
             system_prompt=system_prompt,
             tools=[],
         )
         try:
-            raw = invoke_agent(
+            parsed = run_structured_agent(
                 agent,
                 user_prompt,
-                agent_key="strategy_ideation",
+                agent_key="strategy_alignment",
                 phase="alignment_near_miss",
+                parse=extract_json_object,
+                charge=False,
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Near-miss adjudicator failed to produce parseable JSON: %s",
@@ -388,20 +389,21 @@ class TradeAlignmentAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_ideation"),
+            model=get_strands_model("strategy_alignment"),
             system_prompt=system_prompt,
             tools=[],
         )
         try:
-            raw = invoke_agent(
+            parsed = run_structured_agent(
                 agent,
                 user_prompt,
-                agent_key="strategy_ideation",
+                agent_key="strategy_alignment",
                 phase="alignment_propose_fix",
+                parse=extract_json_object,
+                charge=False,
                 max_attempts=_alignment_max_attempts(),
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Alignment fix proposer failed to produce parseable JSON: %s",

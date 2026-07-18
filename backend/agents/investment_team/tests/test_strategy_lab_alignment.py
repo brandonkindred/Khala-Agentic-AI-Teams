@@ -798,6 +798,40 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
     assert exc_info.value.__cause__ is not None
 
 
+def test_agent_key_is_strategy_alignment_not_ideation(monkeypatch) -> None:
+    """Regression guard: both call sites must identify themselves as
+    ``strategy_alignment`` (not the mislabeled ``strategy_ideation`` copied
+    from an unrelated agent) so per-agent telemetry/timeout/model routing in
+    ``model_factory._resolve_strands_timeout`` is not mis-attributed."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+
+    class _StubStrandsAgent:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __call__(self, _prompt: str) -> str:
+            return '{"legitimate": true, "rationale": "r"}'
+
+    model_keys: List[str] = []
+    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(
+        alignment_module,
+        "get_strands_model",
+        lambda key, *_a, **_k: model_keys.append(key) or None,
+    )
+
+    agent = alignment_module.TradeAlignmentAgent()
+    agent.adjudicate_near_miss(
+        rule_id="r1",
+        predicate_repr="x > 1",
+        computed_value=1.01,
+        threshold=1.0,
+        symbol="AAPL",
+        entry_date="2024-01-01",
+    )
+    assert model_keys == ["strategy_alignment"]
+
+
 def test_propose_code_fix_fails_open_preserving_patch_on_coercion_error(monkeypatch) -> None:
     """A residual report-coercion error must NOT discard a usable patch. The LLM
     returned parseable JSON with ``proposed_code``; if ``_coerce_report`` then
