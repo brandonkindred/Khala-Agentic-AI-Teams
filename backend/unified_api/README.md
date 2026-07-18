@@ -25,7 +25,6 @@ graph TB
             A11y["/api/accessibility-audit"]
             AISys["/api/ai-systems"]
             Invest["/api/investment"]
-            Nutrition["/api/nutrition-meal-planning"]
             Planning["/api/planning"]
             Coding["/api/coding-team"]
             Sales["/api/sales"]
@@ -99,7 +98,6 @@ Execution stays in agent code (e.g. `agent_git_tools` + `GitToolContext`); these
 | Accessibility Audit | `/api/accessibility-audit` | `/api/accessibility-audit/docs` |
 | AI Systems | `/api/ai-systems` | `/api/ai-systems/docs` |
 | Investment | `/api/investment` | `/api/investment/docs` |
-| Nutrition & Meal Planning | `/api/nutrition-meal-planning` | `/api/nutrition-meal-planning/docs` |
 | Planning | `/api/planning` | `/api/planning/docs` |
 | Coding Team | `/api/coding-team` | `/api/coding-team/docs` |
 | AI Sales Team | `/api/sales` | `/api/sales/docs` |

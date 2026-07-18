@@ -58,7 +58,7 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
   /**
    * Emitted after the backend launch completes. For async teams, consumers
    * typically read ``job_id`` and navigate to a jobs view. For synchronous
-   * teams (market_research, branding, nutrition, deepthought, road_trip,
+   * teams (market_research, branding, deepthought, road_trip,
    * agentic_team_provisioning, investment), ``job_id`` is ``null`` and the
    * actual results are carried in ``upstream_body`` — dashboards that
    * embed a sync team should read that directly.

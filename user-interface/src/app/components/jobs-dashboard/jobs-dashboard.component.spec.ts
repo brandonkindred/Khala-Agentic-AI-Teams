@@ -137,7 +137,7 @@ describe('JobsDashboardComponent', () => {
     expect(component.SOURCE_DISPLAY).toBeDefined();
   });
 
-  it('SOURCE_DISPLAY includes all 14 sources', () => {
+  it('SOURCE_DISPLAY includes all 13 sources', () => {
     const sources = Object.keys(component.SOURCE_DISPLAY);
     expect(sources).toContain('software_engineering');
     expect(sources).toContain('blogging');
@@ -150,7 +150,6 @@ describe('JobsDashboardComponent', () => {
     expect(sources).toContain('personal_assistant');
     expect(sources).toContain('planning');
     expect(sources).toContain('road_trip_planning');
-    expect(sources).toContain('nutrition_meal_planning');
     expect(sources).toContain('coding_team');
     expect(sources).toContain('sales');
   });
@@ -856,7 +855,6 @@ describe('JobsDashboardComponent', () => {
     it('works for any source — no allowlist', () => {
       expect(component.canResumeJob(makeJob('failed', 'soc2_compliance'))).toBe(true);
       expect(component.canResumeJob(makeJob('failed', 'sales'))).toBe(true);
-      expect(component.canResumeJob(makeJob('failed', 'nutrition_meal_planning'))).toBe(true);
       expect(component.canResumeJob(makeJob('failed', 'coding_team'))).toBe(true);
     });
   });

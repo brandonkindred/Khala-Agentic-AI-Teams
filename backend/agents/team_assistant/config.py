@@ -924,41 +924,6 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
         ),
     ),
     # -----------------------------------------------------------------------
-    "nutrition_meal_planning": TeamAssistantConfig(
-        team_key="nutrition_meal_planning",
-        team_name="Nutrition & Meal Planning",
-        system_prompt_context=(
-            "A personal nutrition and meal planning team that learns from feedback. "
-            "The user needs to provide their client id and a free-text message "
-            "describing what they want help with (a plan, a swap, an explanation)."
-        ),
-        required_fields=[
-            {"key": "client_id", "description": "Identifier for the nutrition client"},
-            {
-                "key": "message",
-                "description": "What the user is asking for (plan request, question, feedback)",
-            },
-        ],
-        optional_fields=[],
-        welcome_message=(
-            "Welcome! I'm the Nutrition & Meal Planning assistant. I can help you "
-            "build and adjust a meal plan.\n\n"
-            "What's your client id, and what would you like help with today?"
-        ),
-        default_suggested_questions=[
-            "Build me a 7-day meal plan for muscle gain.",
-            "Swap the dairy in my plan for plant-based options.",
-            "How many calories do I need to lose 1 lb per week?",
-        ],
-        launch_spec=LaunchSpec(
-            path="/api/nutrition-meal-planning/chat",
-            body_builder=declarative_builder(
-                required=["client_id", "message"],
-            ),
-            synchronous=True,
-        ),
-    ),
-    # -----------------------------------------------------------------------
     "agentic_team_provisioning": TeamAssistantConfig(
         team_key="agentic_team_provisioning",
         team_name="Agentic Team Provisioning",

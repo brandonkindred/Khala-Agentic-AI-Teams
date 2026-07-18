@@ -32,7 +32,6 @@ const SOURCE_TO_TEAM: Record<string, string> = {
   personal_assistant: 'personal_assistant_team',
   planning: 'planning_team',
   road_trip_planning: 'road_trip_planning_team',
-  nutrition_meal_planning: 'nutrition_meal_planning_team',
   coding_team: 'coding_team',
   sales: 'sales_team',
 };
