@@ -9,6 +9,8 @@ naming and review-evidence helpers that the mixins late-bind.
 Extracted collaborators (import those modules for the concerns they own):
 - ``progress_config`` — concurrency/cap env parsers, progress-band math
 - ``repo_context`` — file-ceiling repo briefing and incremental ``_RepoContextCache``
+- ``graph_persist`` — ``GraphPersistCoordinator``: the task graph plus its single-writer
+  persist/flush state machine (background flusher, snapshot diffing, live phase/status_text)
 - ``pause_cycle``, ``reasoning_capture``, ``team_routing``, ``worker_factory``,
   ``swarm_*`` — HITL pauses, thinking flush, stack routing, worker construction,
   and the assignment / implementation / review mixin bodies
@@ -38,6 +40,7 @@ from software_engineering_team.coding_team.activity import (
 )
 from software_engineering_team.coding_team.agent_status import derive_stack_roster
 from software_engineering_team.coding_team.engine_provider import get_engine_provider
+from software_engineering_team.coding_team.graph_persist import GraphPersistCoordinator
 from software_engineering_team.coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
@@ -60,7 +63,6 @@ from software_engineering_team.coding_team.pause_cycle import (
 from software_engineering_team.coding_team.progress_config import (
     _DEFAULT_PROGRESS_BASE,
     _DEFAULT_PROGRESS_SPAN,
-    _coding_progress,
     _implementation_concurrency,
 )
 from software_engineering_team.coding_team.reasoning_capture import (
@@ -73,7 +75,7 @@ from software_engineering_team.coding_team.repo_context import _RepoContextCache
 from software_engineering_team.coding_team.swarm_assignment import _AssignmentMixin
 from software_engineering_team.coding_team.swarm_implementation import _ImplementationMixin
 from software_engineering_team.coding_team.swarm_review import _ReviewMixin
-from software_engineering_team.coding_team.task_graph import TaskGraphService, create_task_graph
+from software_engineering_team.coding_team.task_graph import TaskGraphService
 from software_engineering_team.coding_team.team_routing import (
     _ensure_target_team_stack_specs,
     _worker_team_key,
@@ -182,55 +184,22 @@ def run_coding_team_orchestrator(
     _raw_update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
 
-    # Background single-writer flusher for the task-graph persist snapshot. Task-graph mutators
-    # call _persist_graph_async() (below) synchronously while holding TaskGraphService's RLock
-    # (see _maybe_persist's contract), so that path must never block on the job-service HTTP
-    # write — it hands a write-and-commit closure to this flusher instead, which runs it
-    # off-thread (the closure itself does the write and only then commits _persist_state, so a
-    # failed write is never mistaken for a delivered one — see _persist_graph_async). It also
-    # reads phase/status_text LIVE, at actual-write time, rather than baking them in when
-    # enqueued — see _persist_graph_async for why a value captured at enqueue time could
-    # otherwise go stale by the time the write executes and clobber a fresher direct write.
-    # _update (below) uses write_now() for every write it makes: a still-queued/in-flight
-    # background write can never land after — and clobber — a fresher one (most importantly a
-    # terminal or HITL-pause status write), and — unlike draining then writing directly — a
-    # payload enqueued by a DIFFERENT concurrently-running worker's graph mutation (e.g. during
-    # the implementation fan-out, where one worker escalates a decision while others are still
-    # mutating the graph) can't slip in between the drain and the write either: write_now() holds
-    # the same write lock the flusher's own background writes use for its entire duration, so
-    # that race is closed too, without blocking the other worker's own graph mutation (only the
-    # eventual background write of its payload is delayed until this write finishes). It also
-    # keeps phase/status_text in sync with what it actually wrote (see _update), so a background
-    # write that lands afterward reads the fresh values instead of stale ones.
-    from shared_concurrency import LatestValueFlusher  # noqa: PLC0415 - local, optional dep path
-
-    flusher = LatestValueFlusher(
-        lambda write: write(),
-        name=f"coding-persist-{job_id}",
-        on_error=lambda exc: logger.warning("Task graph background persist failed: %s", exc),
-    ).start()
-
-    def _update(**kw: Any) -> None:
-        def _do_write() -> None:
-            # _raw_update first, THEN commit — never the reverse. If _raw_update raises,
-            # this call's phase/status_text must never reach the outer variables: a
-            # concurrent background graph persist's LIVE read (see _persist_graph_async)
-            # would otherwise publish this call's NEW phase/status_text alongside the
-            # graph snapshot even though the rest of this call's write (e.g. HITL
-            # pending-question fields on a pause) never made it to the wire — a
-            # misleading partial state. Keeping the commit inside this write_now()-
-            # serialized closure (rather than after the write_now() call returns) still
-            # keeps it correctly ordered relative to that live read: write_now() holds
-            # _write_lock for this whole closure, so the commit below happens strictly
-            # before any concurrent background write can observe it.
-            _raw_update(**kw)
-            nonlocal phase, status_text
-            if "phase" in kw:
-                phase = kw["phase"]
-            if "status_text" in kw:
-                status_text = kw["status_text"]
-
-        flusher.write_now(_do_write)
+    # The task-graph persist/flush state machine (background single-writer flusher, the task
+    # graph it persists, the last-confirmed snapshot bookkeeping, and the live phase/status_text
+    # every write carries) is one cohesive concern owned by GraphPersistCoordinator. The
+    # entrypoint holds a plain handle and calls coord.update()/coord.persist_sync(); the graph's
+    # own mutators call coord.persist_async() via the persist_callback wired at construction. The
+    # single-writer ordering guarantees (a background graph write can never clobber a fresher
+    # direct status write; the async path reads phase/status_text live at write time) live on the
+    # coordinator's methods, next to the code they govern.
+    coord = GraphPersistCoordinator(
+        job_id,
+        _raw_update,
+        progress_base=progress_base,
+        progress_span=progress_span,
+        phase="task_graph",
+        status_text="Building task graph from plan",
+    )
 
     try:
         # Capture agents' streamed reasoning ("thinking") so the UI can show what is
@@ -243,106 +212,7 @@ def run_coding_team_orchestrator(
             data = _get_job(job_id)
             return bool(data and data.get(CANCEL_KEY))
 
-        # Create Task Graph with persist
-        # Tracks the last CONFIRMED-persisted (graph revision, phase, status_text) so a no-op
-        # call skips the snapshot + job-service write entirely. The swarm loop persists 3x per
-        # round and every graph mutation persists too, so on an idle round (or back-to-back
-        # triggers for the same state) most calls are redundant; durability is preserved because
-        # any real mutation bumps graph.revision and any phase / status change is part of the
-        # key, so every actual state change still writes. "Confirmed" is load-bearing: this dict
-        # is only updated after a write actually succeeds (see _persist_graph_async/_sync below)
-        # — never optimistically at enqueue/compute time — so a failed write is retried by
-        # whichever persist call notices next, rather than being silently mistaken for delivered.
-        _persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
-
-        # Both persist paths below write through _raw_update — the SAME store used for the
-        # resume read and cancel checks (the injected update_job_fn). On the software-
-        # engineering path that is the SE job record; the hardcoded coding_team store targets a
-        # record that is never created on that path, so the central job service's UPDATE-WHERE
-        # matches no row and the write — hence resume — is silently lost. The standalone
-        # coding_team path's default callback writes the same keys to the coding_team record
-        # exactly as before.
-        def _compute_snapshot_if_changed() -> "Optional[tuple[Dict[str, Any], int]]":
-            # Cheap in-memory work shared by _persist_graph_async: the graph-only portion of
-            # the persist payload (task_graph_snapshot/agent_task_map/progress). Deliberately
-            # excludes phase/status_text — a graph mutation always bumps graph.revision, so a
-            # revision-only check is sufficient here, and baking today's phase/status_text in
-            # at this (enqueue) point is exactly what let a stale value clobber a fresher
-            # direct write once this became a background write — see _persist_graph_async for
-            # why those fields are read live, at actual-write time, instead.
-            if graph.revision == _persist_state["revision"]:
-                return None
-            snap = graph.snapshot()
-            snap_payload = {
-                "task_graph_snapshot": snap["tasks"],
-                "agent_task_map": snap["agent_task_map"],
-                "progress": _coding_progress(snap["tasks"], progress_base, progress_span),
-            }
-            return snap_payload, graph.revision
-
-        def _persist_graph_async() -> None:
-            # persist_callback= for TaskGraphService: invoked synchronously while its RLock is
-            # held, so this must never block on I/O — cheap in-memory bookkeeping only (build
-            # the graph-only payload), then hand a write-and-commit closure to `flusher` to run
-            # off-thread. phase/status_text are read LIVE inside that closure, at actual-write
-            # time — not baked in here at enqueue time. write_now() (see _update) deliberately
-            # lets this background write land after a racing direct write (e.g. a HITL pause
-            # published via _update()) rather than blocking it; a phase/status_text value
-            # captured here at enqueue time would still describe the pre-pause state by the
-            # time the write executes, clobbering the pause's phase="paused"/status_text via
-            # the job service's shallow merge even though the pause write itself landed first.
-            # Reading live means this write always carries whatever phase/status_text is
-            # current by the time it actually reaches the wire, so it can only ever repeat or
-            # advance the authoritative state, never regress it.
-            computed = _compute_snapshot_if_changed()
-            if computed is None:
-                return
-            snap_payload, revision = computed
-
-            def _write_and_commit() -> None:
-                live_phase, live_status_text = phase, status_text
-                wire_payload = {
-                    **snap_payload,
-                    "phase": live_phase,
-                    "status_text": live_status_text,
-                }
-                _raw_update(**wire_payload)
-                _persist_state.update(
-                    {"revision": revision, "phase": live_phase, "status_text": live_status_text}
-                )
-
-            flusher.enqueue(_write_and_commit)
-
-        def _persist_graph_sync() -> None:
-            # Round-boundary / pre-loop durability checkpoint (persist_fn=). Drains first so a
-            # previously queued async write can never land after — and stomp on — this write; if
-            # that async write had failed, _persist_state was never advanced, so the check below
-            # naturally retries it here instead of silently accepting a stale snapshot. Reads
-            # phase/status_text directly (not lazily): this path writes synchronously with no
-            # enqueue-then-execute gap, so there is nothing for a live read to protect against.
-            flusher.drain()
-            if (
-                graph.revision == _persist_state["revision"]
-                and phase == _persist_state["phase"]
-                and status_text == _persist_state["status_text"]
-            ):
-                return
-            snap = graph.snapshot()
-            wire_payload = {
-                "task_graph_snapshot": snap["tasks"],
-                "agent_task_map": snap["agent_task_map"],
-                "phase": phase,
-                "status_text": status_text,
-                "progress": _coding_progress(snap["tasks"], progress_base, progress_span),
-            }
-            _raw_update(**wire_payload)
-            _persist_state.update(
-                {"revision": graph.revision, "phase": phase, "status_text": status_text}
-            )
-
-        graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph_async)
-        phase = "task_graph"
-        status_text = "Building task graph from plan"
+        graph = coord.graph
 
         # The Tech Lead object is needed for the swarm coordinator (assignments/reviews) regardless of
         # whether we plan fresh or resume, so build it unconditionally.
@@ -355,12 +225,12 @@ def run_coding_team_orchestrator(
                 questions,
                 source,
                 get_job_fn=_get_job,
-                update_fn=_update,
+                update_fn=coord.update,
                 on_pause=on_pause,
             )
 
         # Resume from a persisted snapshot (e.g. a Temporal retry of the same job_id) instead of
-        # re-running the planning LLM and re-doing finished work. `_persist_graph_async` writes the
+        # re-running the planning LLM and re-doing finished work. `coord.persist_async` writes the
         # task snapshot every round; the stacks are persisted alongside it on the fresh path below.
         existing = _get_job(job_id) or {}
         snapshot_tasks = existing.get("task_graph_snapshot") or []
@@ -407,7 +277,7 @@ def run_coding_team_orchestrator(
                 # Only set 'failed' when the job is not already terminal — a pause that ended because the
                 # job went terminal (failed/cancelled/completed) must keep that status, not be relabeled.
                 if not hitl.is_terminal(_get_job(job_id) or {}):
-                    _update(
+                    coord.update(
                         status=JobStatus.FAILED.value,
                         phase="completed",
                         status_text="Design did not converge: open questions were never resolved",
@@ -423,7 +293,7 @@ def run_coding_team_orchestrator(
                 logger.info(
                     "Job %s: Tech Lead judged the work already complete: %s", job_id, evidence
                 )
-                _update(
+                coord.update(
                     status=JobStatus.ALREADY_COMPLETE.value,
                     phase="completed",
                     status_text="Work already complete; no changes needed",
@@ -452,8 +322,8 @@ def run_coding_team_orchestrator(
         if not snapshot_tasks or stacks_raw != original_stacks_raw:
             # Persist the stacks so a later retry can rebuild the workers without re-planning. On
             # resume, only write when we repaired an old/incomplete roster from target_team hints.
-            _update(stack_specs=stacks_raw)
-        _persist_graph_sync()
+            coord.update(stack_specs=stacks_raw)
+        coord.persist_sync()
 
         # Build v2 implementation workers. derive_stack_roster is the single source of
         # truth for worker-id naming, shared with the status endpoint's roster builder so the two
@@ -490,7 +360,7 @@ def run_coding_team_orchestrator(
                 )
         except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
             logger.error("Failed to build coding-team implementation workers: %s", exc)
-            _update(
+            coord.update(
                 status=JobStatus.FAILED.value,
                 phase="completed",
                 status_text="Could not build coding-team implementation workers",
@@ -498,12 +368,15 @@ def run_coding_team_orchestrator(
             )
             return
 
-        phase = "coding"
-        status_text = "Assigning and implementing tasks"
-        # No progress write here: _persist_graph_sync above already published the band value
+        # No progress write here: coord.persist_sync above already published the band value
         # derived from the graph, which on a resume reflects previously merged tasks —
-        # an unconditional base write would regress the bar (e.g. 52 → 10 → 52).
-        _update(phase=phase, status_text=status_text, status=JobStatus.RUNNING.value)
+        # an unconditional base write would regress the bar (e.g. 52 → 10 → 52). update() commits
+        # the new phase/status_text into the coordinator so later persists carry them.
+        coord.update(
+            phase="coding",
+            status_text="Assigning and implementing tasks",
+            status=JobStatus.RUNNING.value,
+        )
 
         # Run the swarm: coordinator (Tech Lead) + v2 implementation workers.
         swarm = CodingTeamSwarm(
@@ -525,7 +398,7 @@ def run_coding_team_orchestrator(
         )
 
         thinking_hb = BackgroundHeartbeat(
-            lambda: _flush_thinking(thinking, _update),
+            lambda: _flush_thinking(thinking, coord.update),
             _thinking_flush_interval_s(),
             name=f"coding-thinking-{job_id}",
             beat_first=True,
@@ -534,12 +407,12 @@ def run_coding_team_orchestrator(
             with thinking_hb:
                 swarm.run(
                     check_cancel=_check_cancel,
-                    persist_fn=_persist_graph_sync,
-                    update_fn=_update,
+                    persist_fn=coord.persist_sync,
+                    update_fn=coord.update,
                     pause_for_questions=_pause_cycle,
                 )
         finally:
-            _flush_thinking(thinking, _update)
+            _flush_thinking(thinking, coord.update)
 
         # A worker raising a decision that ended without answers (terminal/timeout) aborts the swarm;
         # the pause cycle has already set the failure status, so do not overwrite it with "completed".
@@ -574,7 +447,7 @@ def run_coding_team_orchestrator(
         # failure of an earlier best-effort clear cannot leave a terminal job serving
         # a stale mid-review activity entry.
         if already_complete:
-            _update(
+            coord.update(
                 status=JobStatus.ALREADY_COMPLETE.value,
                 phase="completed",
                 status_text="Work already complete; no changes needed",
@@ -584,7 +457,7 @@ def run_coding_team_orchestrator(
                 current_activity=None,
             )
             return
-        _update(
+        coord.update(
             status=(
                 JobStatus.COMPLETED_WITH_FAILURES.value
                 if failed_count
@@ -599,7 +472,7 @@ def run_coding_team_orchestrator(
         # Guaranteed on every exit path (normal completion, every early return above, or an
         # unexpected exception): drains any pending write, then tears down the daemon thread so
         # a long-running process handling many jobs over its lifetime never leaks one per job.
-        flusher.stop()
+        coord.stop()
 
 
 class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):

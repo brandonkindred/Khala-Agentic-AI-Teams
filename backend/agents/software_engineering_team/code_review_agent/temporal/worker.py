@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 
+from shared_env_config import env_int
 from shared_temporal import start_team_worker
 
 from . import ACTIVITIES, WORKFLOWS
@@ -32,6 +33,44 @@ from .config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Default concurrent-activity ceiling for the code review worker. The shared
+# framework default (``start_team_worker``'s own default, 4) is sized for
+# teams with narrow, fixed-width activity fan-out; code review's map phase
+# instead fans out one activity per review chunk
+# (``temporal/workflows.py``'s ``asyncio.gather`` over ``review_chunk_activity``),
+# and a large PR can produce dozens of chunks (``chunking.build_review_chunks``
+# has no upper bound on chunk count) — at 4 concurrent slots that is many
+# sequential rounds, each potentially bounded only by a single chunk's
+# multi-hour worst-case retry budget (``temporal/workflows.py``'s
+# ``_LLM_RETRY``: 3 attempts x up to 1h ``start_to_close_timeout`` + backoff).
+# 8 mirrors ``sales_team``'s ``SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`` and
+# ``investment_team``'s ``INVESTMENT_MAX_CONCURRENT_ACTIVITIES`` defaults,
+# both raised from the same 4-slot shared default for the identical "narrow
+# default starves a wide fan-out" reason. This is independent of
+# ``CODE_REVIEW_MAP_PARALLELISM`` (also defaulting to 4) — that knob governs
+# only the in-process thread-mode fallback, not this Temporal-mode fan-out
+# (see its entry in docs/ENV_VARS.md).
+_DEFAULT_MAX_CONCURRENT_ACTIVITIES = 8
+
+
+def _max_concurrent_activities() -> int:
+    """Resolve the code review worker's concurrent-activity ceiling.
+
+    Preconditions:
+        - none (environment may be unset or garbage).
+    Postconditions:
+        - Returns ``CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`` when it parses to
+          a positive int, else :data:`_DEFAULT_MAX_CONCURRENT_ACTIVITIES`
+          (unset, garbage, or <= 0 all fall back to the default), via the
+          shared ``env_int`` parser (which warns on a set-but-unparseable
+          value). Never raises.
+    """
+    return env_int(
+        "CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES",
+        _DEFAULT_MAX_CONCURRENT_ACTIVITIES,
+        floor=1,
+    )
 
 
 def start_code_review_temporal_worker_thread() -> bool:
@@ -60,4 +99,5 @@ def start_code_review_temporal_worker_thread() -> bool:
         WORKFLOWS,
         ACTIVITIES,
         task_queue=TASK_QUEUE,
+        max_concurrent_activities=_max_concurrent_activities(),
     )
