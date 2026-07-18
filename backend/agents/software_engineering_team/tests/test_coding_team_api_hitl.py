@@ -412,6 +412,22 @@ def test_resume_400_when_plan_input_corrupted(monkeypatch):
     assert "corrupted plan_input" in r.json()["detail"]
 
 
+def test_resume_400_when_plan_input_invalid(monkeypatch):
+    """A dict plan_input that fails CodingTeamPlanInput validation (a bad field type, not a missing
+    repo_path) must be rejected with a controlled 400 naming the real cause — not the generic
+    'no plan_input/repo_path' message reserved for a genuinely missing repo_path, and not an
+    uncaught 500 from plan_from_input's ValidationError."""
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"project_overview": "not-a-dict"},  # project_overview must be a dict
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 400
+    assert "invalid plan_input" in r.json()["detail"]
+
+
 def test_resume_500_when_claim_store_errors(monkeypatch):
     """A job-store transport error during the resume claim surfaces as a controlled 500 — not a bare
     propagation, and not a misleading 'already running' (no claim was actually taken)."""
@@ -469,6 +485,20 @@ def test_resume_noop_when_thread_claim_lost(monkeypatch):
     assert r.status_code == 200
     assert "already running" in r.json()["message"]
     assert release_calls, "shared claim must be released when the local claim is lost"
+
+
+def test_resume_raises_on_unhandled_spawn_result(monkeypatch):
+    """An unrecognized ResumeSpawnResult from _claim_and_spawn_resume must fail loudly (the
+    exhaustiveness guard), not be silently treated as a successful resume."""
+    job = _job(status="waiting_for_user", plan_input={"requirements_title": "T"})
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(
+        api, "_claim_and_spawn_resume", lambda *a, **k: ("bogus-outcome", None, None)
+    )
+    local_client = TestClient(api.app, raise_server_exceptions=False)
+    r = local_client.post("/run/j1/resume")
+    assert r.status_code == 500
 
 
 def test_answers_dead_thread_claim_lost_counts_as_resuming(monkeypatch):
@@ -852,6 +882,21 @@ def test_auto_resume_refuses_non_paused_job():
     assert api._try_auto_resume("j1", _job(status="pending", waiting_for_answers=False)) is False
 
 
+def test_auto_resume_coerces_non_dict_plan_input(monkeypatch):
+    """A non-dict plan_input must be coerced to {} (not raise off .get()) so auto-resume can still
+    use the job's own top-level repo_path field."""
+    started = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(plan_input="not-a-dict"))
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(
+        api, "run_coding_team_orchestrator", lambda *a, **k: started.update({"ran": True})
+    )
+    result = api._try_auto_resume("j1", _job(plan_input="not-a-dict", repo_path="/tmp/repo"))
+    assert result is True
+    assert started.get("ran") is True
+
+
 def test_auto_resume_skips_spawn_when_another_worker_holds_claim(monkeypatch):
     """Cross-worker safety: if the shared-store claim is already held (another worker is resuming),
     this worker must NOT spawn a second orchestrator on the same checkout."""
@@ -895,6 +940,38 @@ def test_auto_resume_releases_claim_on_spawn_failure(monkeypatch):
     result = api._try_auto_resume("j1", _job(plan_input={"requirements_title": "T"}))
     assert result is False
     assert released.get("yes") is True
+
+
+def test_auto_resume_aborts_post_claim_when_job_vanishes(monkeypatch):
+    """TOCTOU: if the post-claim re-read finds no job record at all (not just a status change),
+    the spawn must still be aborted and the claim released — matching the HTTP /resume route's
+    handling of the same case rather than falling through to spawn against unknown state."""
+    released: List[str] = []
+    monkeypatch.setattr(api, "claim_resume", lambda jid: True)
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: released.append(jid))
+    monkeypatch.setattr(api, "get_job", lambda jid: None)
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn for a job that vanished after claiming")
+
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    result = api._try_auto_resume("j1", _job(plan_input={"requirements_title": "T"}))
+    assert result is False
+    assert released, "claim must be released when the post-claim re-read finds no job record"
+
+
+def test_auto_resume_raises_on_unhandled_spawn_result(monkeypatch):
+    """An unrecognized ResumeSpawnResult from _claim_and_spawn_resume must fail loudly (the
+    exhaustiveness guard), not be silently treated as a successful auto-resume. _try_auto_resume
+    calls _claim_and_spawn_resume as a same-module reference, so the patch target is the
+    orchestration module itself, not the main/api re-export."""
+    from software_engineering_team.coding_team.api import orchestration
+
+    monkeypatch.setattr(
+        orchestration, "_claim_and_spawn_resume", lambda *a, **k: ("bogus-outcome", None, None)
+    )
+    with pytest.raises(RuntimeError, match="Unhandled ResumeSpawnResult"):
+        api._try_auto_resume("j1", _job(plan_input={"requirements_title": "T"}))
 
 
 class _ImmediateTimer:

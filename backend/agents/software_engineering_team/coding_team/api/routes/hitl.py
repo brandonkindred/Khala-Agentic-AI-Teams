@@ -119,9 +119,14 @@ def resume_job(job_id: str) -> RunResponse:
         raise HTTPException(
             status_code=400, detail="Job has a corrupted plan_input and cannot be resumed."
         )
-    recovered = _main._recover_resume_plan(job_id, data)
-    if recovered is None:
+    repo_path = data.get("repo_path") or plan_raw.get("repo_path")
+    if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
+    recovered = _main._recover_resume_plan(job_id, plan_raw, repo_path)
+    if recovered is None:
+        raise HTTPException(
+            status_code=400, detail="Job has an invalid plan_input and cannot be resumed."
+        )
     repo_path, plan = recovered
 
     resolved = _main._resolve_github_job_token(job_id, data)
@@ -147,7 +152,7 @@ def resume_job(job_id: str) -> RunResponse:
         raise HTTPException(
             status_code=500, detail="Failed to acquire the resume claim due to a job-store error."
         ) from err
-    if result is ResumeSpawnResult.CLAIM_LOST:
+    if result in (ResumeSpawnResult.CLAIM_LOST, ResumeSpawnResult.THREAD_CLAIM_LOST):
         return RunResponse(
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
         )
@@ -161,12 +166,12 @@ def resume_job(job_id: str) -> RunResponse:
             status=(post_claim or data).get("status", "running"),
             message="Job already running.",
         )
-    if result is ResumeSpawnResult.THREAD_CLAIM_LOST:
-        return RunResponse(
-            job_id=job_id, status=data.get("status", "running"), message="Job already running."
-        )
     if result is ResumeSpawnResult.SPAWN_FAILED:
         # A failed spawn must release the shared claim so a later /resume can win — already done
         # inside _claim_and_spawn_resume; re-raise the original spawn failure unchanged.
         raise err
+    if result is not ResumeSpawnResult.SPAWNED:
+        # Exhaustiveness guard: a future ResumeSpawnResult member falling through here would
+        # silently report a successful resume for what is actually a new, unhandled outcome.
+        raise RuntimeError(f"Unhandled ResumeSpawnResult: {result!r}")
     return RunResponse(job_id=job_id, status="running", message="Job resumed.")

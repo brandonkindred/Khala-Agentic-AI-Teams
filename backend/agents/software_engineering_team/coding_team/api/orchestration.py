@@ -262,31 +262,30 @@ def _schedule_resume_recheck(job_id: str, delay: float = _RESUME_RECHECK_DELAY_S
 
 
 def _recover_resume_plan(
-    job_id: str, data: Dict[str, Any]
+    job_id: str, plan_raw: Dict[str, Any], repo_path: Optional[str]
 ) -> Optional[Tuple[str, CodingTeamPlanInput]]:
-    """Recover ``(repo_path, plan)`` from a job record for resume, or ``None`` if unusable.
+    """Validate a job record's ``(plan_raw, repo_path)`` into a resume plan, or ``None`` if unusable.
+
+    The caller owns deriving ``plan_raw``/``repo_path`` from the job record (each caller already
+    needs ``plan_raw`` for its own non-dict ``plan_input`` handling — the route rejects it, auto-resume
+    coerces it to ``{}`` — so this function takes the already-derived values instead of re-deriving
+    them and blurring why a ``None`` was returned).
 
     Preconditions:
-        - ``data`` is the job record for ``job_id``.
+        - ``plan_raw`` is a dict; ``repo_path`` is the job's resume repo_path, or falsy if the
+          record carries none.
     Postconditions:
-        - Returns ``(repo_path, plan)`` when the record carries a usable
-          ``repo_path`` and a validatable ``plan_input``; ``None`` when either is
-          missing/invalid (an invalid plan is logged; a missing repo_path is not).
-          A non-dict ``plan_input`` is coerced to ``{}`` so ``.get`` cannot raise.
+        - Returns ``(repo_path, plan)`` when ``repo_path`` is truthy and ``plan_raw`` validates;
+          ``None`` when ``repo_path`` is falsy (not logged — the caller can distinguish this from
+          a validation failure by checking ``repo_path`` itself) or when validation fails (logged).
           Never raises.
     """
-    plan_raw = data.get("plan_input") or {}
-    if not isinstance(plan_raw, dict):
-        # A corrupted record could carry a non-dict plan_input; .get() on it would raise
-        # AttributeError and break the "Never raises" contract. Treat it as no usable plan.
-        plan_raw = {}
-    repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         return None
     try:
         plan = plan_from_input(plan_raw, repo_path)
     except Exception:
-        logger.exception("Auto-resume for job %s skipped: invalid plan_input.", job_id)
+        logger.exception("Resume for job %s skipped: invalid plan_input.", job_id)
         return None
     return repo_path, plan
 
@@ -318,7 +317,7 @@ def _resolve_github_job_token(
         else None
     )
     if is_github_job and not token:
-        logger.warning("Auto-resume for GitHub job %s skipped: no GitHub token available.", job_id)
+        logger.warning("Resume for GitHub job %s skipped: no GitHub token available.", job_id)
         return None
     return is_github_job, ctx, token
 
@@ -420,7 +419,9 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
           was spawned here, or another caller holds the start claim); False when the job is
           terminal, the record lacks a usable ``repo_path``/``plan_input``, a GitHub-issue job
           has no token to resume its publish flow, or the thread could not be started.
-          Never raises.
+          Never raises for any documented ``ResumeSpawnResult`` outcome; raises ``RuntimeError``
+          only if ``_claim_and_spawn_resume`` ever returns an outcome this function doesn't
+          recognize (an exhaustiveness guard against future silent drift, not a normal path).
     """
     if hitl.is_terminal(data):
         logger.warning("Auto-resume for job %s skipped: job is terminal.", job_id)
@@ -438,7 +439,13 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     if _main._answer_wait_heartbeat_fresh(data):
         _main._schedule_resume_recheck(job_id)
         return True
-    recovered = _recover_resume_plan(job_id, data)
+    plan_raw = data.get("plan_input") or {}
+    if not isinstance(plan_raw, dict):
+        # A corrupted record could carry a non-dict plan_input; .get() on it would raise
+        # AttributeError and break the "Never raises" contract. Treat it as no usable plan.
+        plan_raw = {}
+    repo_path = data.get("repo_path") or plan_raw.get("repo_path")
+    recovered = _recover_resume_plan(job_id, plan_raw, repo_path)
     if recovered is None:
         return False
     repo_path, plan = recovered
@@ -490,6 +497,10 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
             "Auto-resume for job %s failed to start the orchestrator thread.", job_id, exc_info=err
         )
         return False
+    if result is not ResumeSpawnResult.SPAWNED:
+        # Exhaustiveness guard: a future ResumeSpawnResult member falling through here would
+        # silently report a successful resume for what is actually a new, unhandled outcome.
+        raise RuntimeError(f"Unhandled ResumeSpawnResult: {result!r}")
     return True
 
 
