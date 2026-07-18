@@ -878,21 +878,151 @@ export interface InvestmentJobsListResponse {
   jobs: InvestmentJobSummary[];
 }
 
-export interface StrategyLabStreamEvent {
-  type:
-    | 'snapshot'
-    | 'progress'
-    | 'cycle_complete'
-    | 'cycle_skipped'
-    | 'cycle_errored'
-    | 'batch_start'
-    | 'batch_complete'
-    | 'batch_warning'
-    | 'complete'
-    | 'error'
-    | 'done';
-  [key: string]: unknown;
+// SSE stream events. One interface per real `type` value emitted by
+// investment_team/api/main.py's _publish() calls — every field the backend
+// actually sends is modeled, not just what handleStreamEvent() reads today,
+// EXCEPT `progress`: its payload comes from 50+ on_phase() call sites across
+// the backend orchestrator and isn't exhaustively catalogued, so its field
+// set below is scoped to what handleStreamEvent() currently consumes. `ts`
+// (an ISO timestamp publish() stamps on most, but not all, frames) is
+// deliberately omitted — nothing reads it and its presence isn't uniform.
+
+type StrategyLabSnapshotCycleProgress = Omit<StrategyLabCycleProgress, 'phase' | 'strategy' | 'metrics'> & {
+  phase: string;
+  strategy: StrategyLabCycleProgress['strategy'] | null;
+  metrics: StrategyLabCycleProgress['metrics'] | null;
+};
+
+/**
+ * Initial/refresh snapshot — wire shape matches the polling endpoint 1:1,
+ * with three widenings confirmed against the backend (every Optional[...]
+ * field on StrategyLabRunStatusResponse was audited against its Python
+ * default — completed_cycles/skipped_cycles/errored_cycles/batch_size/
+ * batch_count/completed_batches all default to a real 0/1, never None, so
+ * they're correctly typed as-is; current_cycle/error are the only two
+ * `Optional[X] = None` fields, hence the widenings below):
+ *  - `current_cycle` (and nested `strategy`/`metrics`) can be a real
+ *    `null`, not just an omitted key: `_run_state_to_response(...)
+ *    .model_dump(mode="json")` serializes unset Optional[...] fields as
+ *    JSON `null`, and StrategyLabCycleProgress (main.py:322-328) declares
+ *    all three as Optional. `phase` stays widened to `string` per
+ *    StrategyLabProgressEvent's reasoning below.
+ *  - `status` additionally allows `'interrupted'`, a real, tested backend
+ *    status (`_STRATEGY_LAB_CANCEL_STATUSES` in main.py) the shared
+ *    StrategyLabRunStatus.status union doesn't have. Widened locally here,
+ *    not on StrategyLabRunStatus itself — that type also backs the REST
+ *    polling endpoint and has other UI consumers not audited for a 6th
+ *    status value (see PR description).
+ *  - `error` (`Optional[str] = None`, main.py:346) is the same
+ *    always-present/nullable pattern as `current_cycle` — widened to
+ *    `string | null` and made required (not `?:`) since model_dump always
+ *    emits the key (main.py:386: `error=state.get("error")`).
+ */
+export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'current_cycle' | 'status' | 'error'> {
+  type: 'snapshot';
+  status: StrategyLabRunStatus['status'] | 'interrupted';
+  current_cycle?: StrategyLabSnapshotCycleProgress | null;
+  error: string | null;
 }
+
+/**
+ * Per-cycle progress ping. `cycle_index` and `phase` are the only fields the
+ * backend guarantees on every progress event; the rest are sent on some (not
+ * all) events depending on which phase/sub_phase is reporting, so they stay
+ * optional here — same as handleStreamEvent() already assumes. `phase` is
+ * `string`, not the narrower StrategyLabPhase: the backend's real phase set
+ * (`designing`, `design_review`, `aligning`, `telemetry`, `phase_transition`,
+ * paper-trading phases, ...) is open-ended and already broader than that enum.
+ *
+ * Deliberately incomplete: some real phases carry fields not modeled here
+ * (`phase_transition`: from_phase/to_phase/spec_hash/code_hash/attempt;
+ * `telemetry`: scope/kind + counters). #1656's acceptance criteria requires
+ * no catch-all index signature on this union, so reading them needs a
+ * future, explicit field addition rather than an escape hatch — tracked
+ * separately from cataloguing the full phase/sub_phase payload matrix.
+ */
+export interface StrategyLabProgressEvent {
+  type: 'progress';
+  cycle_index: number;
+  phase: string;
+  sub_phase?: string;
+  refinement_round?: number;
+  strategy?: { asset_class: string; hypothesis: string };
+  /**
+   * Not numeric-only: a cycle's "complete" sub-phase republishes a full
+   * BacktestResult.model_dump() here (orchestrator.py:4020-4026), which
+   * includes non-numeric fields (terminated_reason, cost_stress_results,
+   * execution_diagnostics, ...). `Record<string, unknown>` reflects that
+   * honestly rather than asserting a numeric shape most events don't have.
+   */
+  metrics?: Record<string, unknown>;
+  checks_passed?: number;
+  checks_total?: number;
+  symbols_count?: number;
+  bars_count?: number;
+  trades_count?: number;
+  execution_time?: number;
+  failure_phase?: string;
+  changes_made?: string;
+  is_winning?: boolean;
+}
+
+export interface StrategyLabCycleCompleteEvent { type: 'cycle_complete'; cycle_index: number; record_id: string; completed_cycles: number; batch_index: number; }
+/** `reason` is an ordinary backend string, not a closed enum (only "no_market_data" occurs today). */
+export interface StrategyLabCycleSkippedEvent  { type: 'cycle_skipped'; cycle_index: number; reason: string; batch_index: number; }
+/** `reason` is an ordinary backend string (an exception class name, or "tracker_merge_failed"), not a closed enum. */
+export interface StrategyLabCycleErroredEvent  { type: 'cycle_errored'; cycle_index: number; batch_index: number; reason: string; error: string; }
+
+export interface StrategyLabBatchStartEvent    { type: 'batch_start'; batch_index: number; total_batches: number; batch_size: number; completed_batches: number; }
+export interface StrategyLabBatchCompleteEvent { type: 'batch_complete'; batch_index: number; total_batches: number; completed_batches: number; }
+/** `reason` is an ordinary backend string, not a closed enum (only "signal_brief_failed" occurs today). */
+export interface StrategyLabBatchWarningEvent  { type: 'batch_warning'; batch_index: number; reason: string; }
+
+export interface StrategyLabCompleteEvent {
+  type: 'complete';
+  message: string;
+  status: 'completed' | 'completed_with_errors';
+  completed_count: number;
+  skipped_count: number;
+  errored_count: number;
+  errored_details: StrategyLabErroredDetail[];
+  completed_batches: number;
+  total_batches: number;
+}
+
+export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; }
+export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; }
+/**
+ * Two mutually-exclusive wire shapes: three strategy-lab call sites always
+ * send `detail`; one shared-infra "subscription reclaimed" call site always
+ * sends `error` instead. Each branch declares the other field as optional
+ * `undefined` (rather than omitting it) so handleStreamEvent()'s existing
+ * `event['detail'] as string` read still type-checks uniformly across the
+ * union as `string | undefined`, without needing body changes here.
+ */
+export type StrategyLabErrorEvent = StrategyLabErrorDetailEvent | StrategyLabErrorReclaimEvent;
+
+/**
+ * Sole terminal frame — always exactly `{ type: 'done' }`. The investment-api
+ * service's streamRunStatus() forwards it via `subscriber.next(data)` before
+ * completing the observable (`data.type === 'done'` only triggers *after*
+ * the forward), so handleStreamEvent() does receive one — it just has no
+ * branch that matches `'done'`, so the call is a silent no-op today.
+ */
+export interface StrategyLabDoneEvent { type: 'done'; }
+
+export type StrategyLabStreamEvent =
+  | StrategyLabSnapshotEvent
+  | StrategyLabProgressEvent
+  | StrategyLabCycleCompleteEvent
+  | StrategyLabCycleSkippedEvent
+  | StrategyLabCycleErroredEvent
+  | StrategyLabBatchStartEvent
+  | StrategyLabBatchCompleteEvent
+  | StrategyLabBatchWarningEvent
+  | StrategyLabCompleteEvent
+  | StrategyLabErrorEvent
+  | StrategyLabDoneEvent;
 
 // ---------------------------------------------------------------------------
 // Paper Trading Models
