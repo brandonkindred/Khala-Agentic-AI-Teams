@@ -15,9 +15,10 @@ worker. This test proves that registering every schema in that set (not just
 the team's own primary schema) closes the race, with a negative control proving
 the harness actually detects the bug it exists to catch.
 
-Requires POSTGRES_HOST (skipped otherwise). Run with:
-    POSTGRES_HOST=localhost POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \\
-        POSTGRES_DB=postgres pytest -m integration test_schema_registration.py -v
+Requires POSTGRES_HOST (skipped otherwise). Run against a local Postgres with:
+    POSTGRES_HOST=localhost POSTGRES_USER=postgres POSTGRES_DB=postgres \\
+        pytest -m integration test_schema_registration.py -v
+(set POSTGRES_PORT / POSTGRES_PASSWORD too if your local instance needs them).
 """
 
 from __future__ import annotations
