@@ -236,6 +236,29 @@ def test_agent_accepts_files_dict_input() -> None:
     assert result.approved is True
 
 
+def test_repo_root_defaults_none_and_round_trips_through_json() -> None:
+    """``repo_root`` defaults to None, is JSON-native (so it survives the Temporal
+    boundary), and does not disturb the code/files validator."""
+    default = CodeReviewInput(files={"a.py": "x = 1\n"})
+    assert default.repo_root is None
+
+    with_root = CodeReviewInput(files={"a.py": "x = 1\n"}, repo_root="/tmp/checkout")
+    dumped = with_root.model_dump(mode="json")
+    assert dumped["repo_root"] == "/tmp/checkout"
+    restored = CodeReviewInput.model_validate(dumped)
+    assert restored.repo_root == "/tmp/checkout"
+    assert restored.files == {"a.py": "x = 1\n"}
+
+
+def test_repo_root_does_not_satisfy_code_or_files_requirement() -> None:
+    """``repo_root`` is not a code source: an input with only ``repo_root`` and no
+    files/code still fails the ``_require_code_or_files`` validator."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        CodeReviewInput(repo_root="/tmp/checkout")
+
+
 def test_run_raises_unavailable_when_review_cannot_complete() -> None:
     """Contract: a review that cannot be completed raises — callers must treat
     it as a failed run, never as feedback for the coding agent."""

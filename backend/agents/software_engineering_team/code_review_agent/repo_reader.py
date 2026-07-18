@@ -221,3 +221,39 @@ class DiskRepoReader:
             logger.debug("DiskRepoReader: walk failed under %s: %s", self._root, exc)
             return []
         return sorted(found)
+
+
+def disk_repo_reader_from_root(repo_root: Optional[str]) -> Optional["DiskRepoReader"]:
+    """Build a :class:`DiskRepoReader` from a checkout path, fail-safe.
+
+    The single, package-level place that turns a *serializable* ``repo_root``
+    string (the channel that survives ``CodeReviewInput.model_dump(mode="json")``,
+    so it can rebuild a reader inside a durable Temporal activity) into a live
+    reader. Reused by the in-process agent path, the Temporal activities, and
+    :func:`software_engineering_team.shared.review_progress.build_disk_repo_reader`,
+    so the fail-safe construction rule lives in exactly one spot.
+
+    Preconditions:
+        - ``repo_root`` is ``None``, or a path string that may or may not exist
+          on this worker's filesystem.
+
+    Postconditions:
+        - Returns a ``DiskRepoReader`` rooted at ``repo_root`` for a non-blank
+          path; returns ``None`` for ``None``/blank input or if the reader cannot
+          be constructed (best-effort, logged). Never raises. A ``None`` result —
+          including a ``repo_root`` that no longer exists on this worker — leaves
+          the verifier without off-diff read access, which only ever *keeps* a
+          finding (fail-safe), never drops a real one.
+    """
+    if repo_root is None:
+        return None
+    stripped = repo_root.strip()
+    if not stripped:
+        return None
+    try:
+        return DiskRepoReader(stripped)
+    except Exception as exc:  # noqa: BLE001 - the reader is an optional enhancement
+        logger.debug(
+            "disk_repo_reader_from_root: could not build reader for %r: %s", repo_root, exc
+        )
+        return None

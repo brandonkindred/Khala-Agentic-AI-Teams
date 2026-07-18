@@ -118,6 +118,16 @@ class SECodeEngineProvider:
         # Forward the reader only when present: passing ``repo_reader=None`` is a
         # no-op for the real agent, and omitting it keeps duck-typed reviewer
         # stubs (which may not declare the kwarg) working.
+        #
+        # The PR reader is a live ``GitHubRepoReader`` — it cannot be rebuilt from a
+        # serializable field (its auth token is a per-request secret), so it would
+        # be dropped on the agent's default Temporal path. Force the in-process
+        # coordinator whenever a reader is supplied so the reader is actually used
+        # for false-positive verification; the only cost is forfeiting Temporal
+        # durability for that one review. Reader-less reviews keep the default
+        # (Temporal-durable) dispatch.
+        force_in_process = False
         if repo_reader is not None:
             run_kwargs["repo_reader"] = repo_reader
-        return CodeReviewAgent().run(review_input, **run_kwargs)
+            force_in_process = True
+        return CodeReviewAgent(force_in_process=force_in_process).run(review_input, **run_kwargs)

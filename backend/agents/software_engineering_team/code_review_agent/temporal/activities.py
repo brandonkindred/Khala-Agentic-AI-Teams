@@ -57,6 +57,28 @@ def _resolve_llm() -> Any:
     return get_client("code_review")
 
 
+def _repo_reader_from_input(input_data: Any) -> Optional[Any]:
+    """Rebuild a whole-repo reader inside a worker activity, fail-safe.
+
+    A live ``RepoReader`` cannot cross the Temporal serialization boundary, so
+    the review carries only ``CodeReviewInput.repo_root`` — a disk checkout path
+    that survives ``model_dump(mode="json")``. This reconstructs a
+    ``DiskRepoReader`` from it worker-side so the false-positive and
+    architecture/redundancy passes regain the off-diff read access they have in
+    thread mode.
+
+    Postconditions:
+        - Returns a ``DiskRepoReader`` when ``input_data.repo_root`` is a non-blank
+          path; returns ``None`` when it is unset/blank, when the path is not
+          present on this worker, or the reader cannot be built. A ``None`` reader
+          is the pre-existing conservative behavior: the passes then keep more
+          findings (fail-safe), never fewer. Never raises.
+    """
+    from ..repo_reader import disk_repo_reader_from_root
+
+    return disk_repo_reader_from_root(getattr(input_data, "repo_root", None))
+
+
 @activity.defn(name="code_review_prepare")
 def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
     """Prepare a submission for the map phase: compact context + build chunks.
@@ -232,9 +254,11 @@ def filter_false_positives_activity(
           returned unchanged — skipping can only keep more findings.
         - Otherwise each finding is re-checked against the whole submission and
           confirmed false positives are dropped; the pass is fail-safe (any
-          failure keeps the findings). ``repo_reader`` is not available across the
-          Temporal boundary, so out-of-diff "missing file" confirmations are not
-          performed here — a strictly more conservative (keep-more) behavior.
+          failure keeps the findings). When ``review_input.repo_root`` names a
+          disk checkout reachable by this worker, a ``DiskRepoReader`` is rebuilt
+          from it so out-of-diff "missing file" confirmations run just as they do
+          in thread mode; otherwise the reader is ``None`` and those confirmations
+          are skipped — a strictly more conservative (keep-more) behavior.
     """
     from ..coordinator import _dedupe_issues
     from ..false_positive_filter import filter_false_positives
@@ -246,7 +270,9 @@ def filter_false_positives_activity(
         return [i.model_dump(mode="json") for i in genuine]
 
     llm = _resolve_llm()
-    verified = filter_false_positives(llm, input_data, genuine, repo_reader=None)
+    verified = filter_false_positives(
+        llm, input_data, genuine, repo_reader=_repo_reader_from_input(input_data)
+    )
     return [i.model_dump(mode="json") for i in verified]
 
 
@@ -265,10 +291,12 @@ def find_architecture_and_redundancy_activity(
           ``"architecture"`` or ``"refactor"``); never mutates or removes any
           finding from the caller's perspective — this activity is purely
           additive, mirroring ``find_architecture_and_redundancy_issues``'s own
-          contract. ``repo_reader`` is not available across the Temporal
-          boundary (same limitation as ``filter_false_positives_activity``), so
-          this pass can confirm redundancy only within the submission's own
-          files plus the ``existing_codebase`` excerpt.
+          contract. When ``review_input.repo_root`` names a disk checkout
+          reachable by this worker, a ``DiskRepoReader`` is rebuilt from it so the
+          cross-codebase-redundancy check can search the whole repository as it
+          does in thread mode; otherwise the reader is ``None`` and this pass
+          confirms redundancy only within the submission's own files plus the
+          ``existing_codebase`` excerpt.
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, no architecture document, or any setup/LLM failure all degrade
           to an empty list), so an activity failure here would only ever be an
@@ -279,7 +307,9 @@ def find_architecture_and_redundancy_activity(
 
     input_data = CodeReviewInput.model_validate(review_input)
     llm = _resolve_llm()
-    findings = find_architecture_and_redundancy_issues(llm, input_data, repo_reader=None)
+    findings = find_architecture_and_redundancy_issues(
+        llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+    )
     return [i.model_dump(mode="json") for i in findings]
 
 

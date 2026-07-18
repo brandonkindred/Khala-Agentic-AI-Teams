@@ -45,6 +45,7 @@ from software_engineering_team.discovery import (
 )
 from software_engineering_team.shared import (
     cost_tracker,
+    planning_audit,
     se_events,
 )
 from software_engineering_team.shared.execution_tracker import execution_tracker
@@ -959,6 +960,8 @@ def run_orchestrator(
             )
             logger.error("Planning failed: %s", err)
             return _fail_job(job_id, err)
+
+        planning_audit.record_se_planning_run(job_id, planning_result)
 
         try:
             adapter_result: PlanningAdapterResult = adapt_planning_result(

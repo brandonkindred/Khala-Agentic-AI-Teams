@@ -413,6 +413,17 @@ class CodeReviewInput(BaseModel):
         "filter on for every existing caller; an escape hatch for gates whose findings must "
         "not be silently dropped.",
     )
+    repo_root: Optional[str] = Field(
+        default=None,
+        description="Absolute path to a materialized disk checkout of the whole repository, used "
+        "to reconstruct a fail-safe ``DiskRepoReader`` for the false-positive and "
+        "architecture/redundancy passes. Unlike a live ``RepoReader`` object, this string "
+        "survives ``model_dump(mode='json')``, so it is the channel that gives those passes "
+        "off-diff read access when the review runs as a durable Temporal workflow. ``None`` (or a "
+        "path that no longer exists) means no off-diff read access — the passes then keep more "
+        "findings (fail-safe), never fewer. GitHub-backed reviews leave this unset (their reader "
+        "cannot be rebuilt from a path); they honor the live reader via the in-process path.",
+    )
 
     @model_validator(mode="after")
     def _require_code_or_files(self) -> "CodeReviewInput":
