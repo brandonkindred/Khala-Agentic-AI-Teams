@@ -49,7 +49,19 @@ def test_run_team_without_temporal_starts_thread(
     temp_work_path: Path,
 ) -> None:
     """When Temporal is not enabled, POST /run-team starts a background thread."""
-    with patch("threading.Thread", wraps=_api_main.threading.Thread) as mock_thread_class:
+    # ``wraps=`` makes the Thread mock a spy, not a stub: the real Thread still
+    # gets constructed AND started. Left on its own that runs the real
+    # multi-phase pipeline in the background — outliving this test (and the
+    # monkeypatch-scoped job-store patch it depends on) by a wide margin, so a
+    # later, unrelated test can observe it fall through to a real HTTP call
+    # against the unroutable placeholder JOB_SERVICE_URL. Stubbing the
+    # orchestrator entry point itself keeps the "was Thread constructed with
+    # the right target" assertion below meaningful while making that thread's
+    # actual run a no-op.
+    with (
+        patch("threading.Thread", wraps=_api_main.threading.Thread) as mock_thread_class,
+        patch.object(_api_main, "_run_orchestrator_background"),
+    ):
         r = client.post("/run-team", json={"repo_path": str(temp_work_path)})
         assert r.status_code == 200
         assert "job_id" in r.json()
