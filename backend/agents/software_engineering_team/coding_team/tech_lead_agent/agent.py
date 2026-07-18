@@ -152,6 +152,56 @@ def _agent_call_json(
     return agent_call_json(agent, prompt, required_keys)
 
 
+_JSON_ONLY_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
+
+
+def _call_json(
+    agent: Agent,
+    template: str,
+    fmt_kwargs: Dict[str, Any],
+    *,
+    required_keys: Optional[Collection[str]] = None,
+    default: Dict[str, Any],
+    retries: bool = True,
+    extra: str = "",
+    label: str = "",
+) -> Dict[str, Any]:
+    """Format a prompt template, call the agent for JSON, and own the shared retry/fallback contract.
+
+    Collapses the "format -> append JSON instruction -> call -> except: return default" scaffold
+    duplicated across every Tech Lead JSON call site into one place, and is the single spot
+    ``_JSON_ONLY_INSTRUCTION`` is appended.
+
+    Preconditions:
+        - ``template`` is one of the ``prompts.*_USER`` format strings; ``fmt_kwargs`` supplies
+          exactly its placeholders.
+        - ``extra`` is literal text the caller has already assembled (e.g. optional prompt
+          sections) appended after formatting — it is NOT passed through ``.format()``, so
+          caller-controlled content containing ``{``/``}`` (spec text, diffs) can never break
+          formatting.
+        - ``default`` is the dict this call site falls back to; consulted only when ``retries``
+          is True.
+    Postconditions:
+        - When ``retries`` is True: wraps the call in ``call_llm_with_retries``
+          (``max_attempts=_review_retry_attempts()``); on any exception surviving retries, logs a
+          warning (annotated with ``label`` when given) and returns ``default`` unmodified — the
+          caller never sees the exception.
+        - When ``retries`` is False: makes exactly one attempt and does not catch — any exception
+          propagates to the caller, which owns its own retry policy and failure shaping (used by
+          call sites that already wrap this call in their own retry/backoff and need the raw
+          exception for diagnostics). ``default`` is unused in this path.
+    """
+    prompt = template.format(**fmt_kwargs) + extra + _JSON_ONLY_INSTRUCTION
+    call = lambda: _agent_call_json(agent, prompt, required_keys=required_keys)  # noqa: E731
+    if not retries:
+        return call()
+    try:
+        return call_llm_with_retries(call, max_attempts=_review_retry_attempts())
+    except Exception as e:  # noqa: BLE001 — a failed call must fall back to a safe default
+        logger.warning("Tech Lead %sLLM failed: %s", f"{label} " if label else "", e)
+        return default
+
+
 class TechLeadAgent:
     """Tech Lead: given plan, produce tasks + stacks; groom tasks; suggest assignments; code review."""
 
@@ -185,23 +235,20 @@ class TechLeadAgent:
               the caller short-circuits to a clean terminal outcome instead of building tasks.
         """
         plan_text = _plan_text(plan)
-        user = prompts.PLAN_TO_TASK_GRAPH_USER.format(plan_text=plan_text)
-        user += "\n\nRespond with valid JSON only, no markdown fences."
-        try:
-            data = _agent_call_json(
-                self._plan_agent,
-                user,
-                required_keys=("tasks", "stacks", "open_questions", "already_complete"),
-            )
-        except Exception as e:
-            logger.warning("Tech Lead plan_to_task_graph LLM failed: %s", e)
-            return {
+        data = _call_json(
+            self._plan_agent,
+            prompts.PLAN_TO_TASK_GRAPH_USER,
+            {"plan_text": plan_text},
+            required_keys=("tasks", "stacks", "open_questions", "already_complete"),
+            default={
                 "tasks": [],
                 "stacks": [{"name": "default", "tools_services": []}],
                 "open_questions": [],
                 "already_complete": False,
                 "completion_evidence": "",
-            }
+            },
+            label="plan_to_task_graph",
+        )
         tasks_raw = data.get("tasks") or []
         stacks_raw = data.get("stacks") or []
         tasks = []
@@ -270,18 +317,22 @@ class TechLeadAgent:
               that cannot even be adjudicated must not be re-fed into the loop.
         """
         feedback_text = json.dumps(revision_feedback or [], indent=2)
-        user = prompts.REVISION_ADJUDICATION_USER.format(
-            task_title=task_title,
-            task_description=task_description,
-            acceptance_criteria=json.dumps(acceptance_criteria),
-            changes_summary=changes_summary or "(no changes recorded)",
-            revision_feedback=feedback_text,
-        )
-        user += "\n\nRespond with valid JSON only, no markdown fences."
+        fmt_kwargs = {
+            "task_title": task_title,
+            "task_description": task_description,
+            "acceptance_criteria": json.dumps(acceptance_criteria),
+            "changes_summary": changes_summary or "(no changes recorded)",
+            "revision_feedback": feedback_text,
+        }
         try:
             data = call_llm_with_retries(
-                lambda: _agent_call_json(
-                    self._adjudication_agent, user, required_keys=("verdict",)
+                lambda: _call_json(
+                    self._adjudication_agent,
+                    prompts.REVISION_ADJUDICATION_USER,
+                    fmt_kwargs,
+                    required_keys=("verdict",),
+                    default={},
+                    retries=False,
                 ),
                 max_attempts=_review_retry_attempts(),
             )
@@ -311,35 +362,32 @@ class TechLeadAgent:
         plan_context: str,
     ) -> Dict[str, Any]:
         """Groom one task: acceptance criteria, out of scope, enriched description, priority, subtasks."""
-        user = prompts.GROOM_TASK_USER.format(
-            task_id=task_id,
-            task_title=task_title,
-            task_description=task_description,
-            task_dependencies=json.dumps(task_dependencies),
-            plan_context=plan_context,
-        )
-        user += "\n\nRespond with valid JSON only, no markdown fences."
-        try:
-            data = _agent_call_json(
-                self._groom_agent,
-                user,
-                required_keys=(
-                    "acceptance_criteria",
-                    "description_enriched",
-                    "subtasks",
-                    "out_of_scope",
-                ),
-            )
-        except Exception as e:
-            logger.warning("Tech Lead groom_task LLM failed: %s", e)
-            return {
+        data = _call_json(
+            self._groom_agent,
+            prompts.GROOM_TASK_USER,
+            {
+                "task_id": task_id,
+                "task_title": task_title,
+                "task_description": task_description,
+                "task_dependencies": json.dumps(task_dependencies),
+                "plan_context": plan_context,
+            },
+            required_keys=(
+                "acceptance_criteria",
+                "description_enriched",
+                "subtasks",
+                "out_of_scope",
+            ),
+            default={
                 "acceptance_criteria": [],
                 "out_of_scope": "",
                 "description_enriched": task_description,
                 "priority": "medium",
                 "subtasks": [],
                 "task_dependencies": task_dependencies,
-            }
+            },
+            label="groom_task",
+        )
         return {
             "acceptance_criteria": list(data.get("acceptance_criteria") or []),
             "out_of_scope": str(data.get("out_of_scope") or ""),
@@ -356,17 +404,18 @@ class TechLeadAgent:
         free_agents: List[str],
     ) -> Dict[str, Any]:
         """Suggest assignments: list of { agent_id, task_id }. Orchestrator calls Task Graph assign."""
-        user = prompts.ASSIGNMENT_USER.format(
-            agent_ids=json.dumps(agent_ids),
-            ready_tasks=json.dumps(ready_tasks),
-            free_agents=json.dumps(free_agents),
+        data = _call_json(
+            self._assignment_agent,
+            prompts.ASSIGNMENT_USER,
+            {
+                "agent_ids": json.dumps(agent_ids),
+                "ready_tasks": json.dumps(ready_tasks),
+                "free_agents": json.dumps(free_agents),
+            },
+            required_keys=("assignments",),
+            default={"assignments": []},
+            label="assignments",
         )
-        user += "\n\nRespond with valid JSON only, no markdown fences."
-        try:
-            data = _agent_call_json(self._assignment_agent, user, required_keys=("assignments",))
-        except Exception as e:
-            logger.warning("Tech Lead assignments LLM failed: %s", e)
-            return {"assignments": []}
         assignments = data.get("assignments") or []
         return {
             "assignments": [
@@ -408,16 +457,17 @@ class TechLeadAgent:
               emitted on both the success and the exhausted-retries paths.
             - The review result is identical whether or not a callback is provided.
         """
-        user = prompts.CODE_REVIEW_USER.format(
-            task_title=task_title,
-            task_description=task_description,
-            acceptance_criteria=json.dumps(acceptance_criteria),
-            changes_summary=changes_summary,
-        )
+        fmt_kwargs = {
+            "task_title": task_title,
+            "task_description": task_description,
+            "acceptance_criteria": json.dumps(acceptance_criteria),
+            "changes_summary": changes_summary,
+        }
+        extra = ""
         if spec_content.strip():
             # Appended (not a CODE_REVIEW_USER placeholder) so the template's .format() keys are
             # untouched, mirroring the user-decisions block below.
-            user += (
+            extra += (
                 "\n\nProject specification (check the change complies with any constraints here "
                 "beyond the task's own description/acceptance criteria):\n" + spec_content
             )
@@ -425,12 +475,11 @@ class TechLeadAgent:
         if decisions:
             # Appended (not a CODE_REVIEW_USER placeholder) so the template's .format() keys are
             # untouched. Mirrors the planning path's "User decisions" block in _plan_text.
-            user += (
+            extra += (
                 "\n\nUser decisions already made (answered by the user — these are settled; "
                 "do NOT request changes to revisit them or treat them as open/unanswered "
                 "questions):\n" + "\n".join(f"- {d}" for d in decisions)
             )
-        user += "\n\nRespond with valid JSON only, no markdown fences."
         attempts = _review_retry_attempts()
 
         def _report(step: str, detail: str, fraction: float) -> None:
@@ -461,7 +510,15 @@ class TechLeadAgent:
                 f"attempt {attempt_no}/{attempts}",
                 min(0.1 + 0.8 * (attempt_no - 1) / attempts, 0.9),
             )
-            data = _agent_call_json(review_agent, user, required_keys=("approved",))
+            data = _call_json(
+                review_agent,
+                prompts.CODE_REVIEW_USER,
+                fmt_kwargs,
+                required_keys=("approved",),
+                default={},
+                retries=False,
+                extra=extra,
+            )
             # A response that parses as JSON but carries no usable verdict is not a substantive
             # rejection — it's an unusable review. ``approved`` must be a real boolean: a missing or
             # null verdict, or a fabricated non-bool that tolerant repair completed from a truncated

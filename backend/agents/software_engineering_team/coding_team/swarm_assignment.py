@@ -20,9 +20,6 @@ logger = logging.getLogger(__name__)
 class _AssignmentMixin:
     """Ready-task discovery and coordinator-driven assignment for CodingTeamSwarm."""
 
-    def _merged_count(self) -> int:
-        return self.graph.count_with_status(TaskStatus.MERGED)
-
     def _find_ready_tasks(self) -> List[Task]:
         return [
             t
