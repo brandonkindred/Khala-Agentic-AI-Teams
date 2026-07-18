@@ -1,7 +1,9 @@
 import { vi } from 'vitest';
 import {
   badgeClass,
+  badgeIcon,
   badgeLabel,
+  friendlyBadgeLabel,
   isLatestRunning,
   reviewDuration,
   severityEntries,
@@ -151,6 +153,71 @@ describe('review-metrics', () => {
 
     it('is empty while still running', () => {
       expect(badgeClass(record({ status: 'running' }))).toBe('');
+    });
+  });
+
+  describe('friendlyBadgeLabel', () => {
+    it('is null when there is no badge label', () => {
+      expect(friendlyBadgeLabel(null)).toBeNull();
+    });
+
+    it('maps every GitHub review event to a friendly label', () => {
+      expect(friendlyBadgeLabel('APPROVE')).toBe('Approved');
+      expect(friendlyBadgeLabel('REQUEST_CHANGES')).toBe('Changes requested');
+      expect(friendlyBadgeLabel('COMMENT')).toBe('Commented');
+    });
+
+    it('maps every non-terminal job status to a friendly label', () => {
+      expect(friendlyBadgeLabel('pending')).toBe('Starting…');
+      expect(friendlyBadgeLabel('running')).toBe('Reviewing…');
+      expect(friendlyBadgeLabel('waiting_for_user')).toBe('Waiting for input');
+    });
+
+    it('maps every terminal job status to a friendly label', () => {
+      expect(friendlyBadgeLabel('completed')).toBe('Completed');
+      expect(friendlyBadgeLabel('completed_with_failures')).toBe('Completed with failures');
+      expect(friendlyBadgeLabel('already_complete')).toBe('Already complete');
+      expect(friendlyBadgeLabel('failed')).toBe('Failed');
+      expect(friendlyBadgeLabel('cancelled')).toBe('Cancelled');
+    });
+
+    it('maps the error sentinel to a friendly label', () => {
+      expect(friendlyBadgeLabel('error')).toBe('Failed');
+    });
+
+    it('humanizes an unmapped value instead of returning it raw', () => {
+      expect(friendlyBadgeLabel('some_future_status')).toBe('Some future status');
+    });
+  });
+
+  describe('badgeIcon', () => {
+    it('is empty when there is no badge label', () => {
+      expect(badgeIcon(null)).toBe('');
+    });
+
+    it('maps every GitHub review event to an icon', () => {
+      expect(badgeIcon('APPROVE')).toBe('check_circle');
+      expect(badgeIcon('REQUEST_CHANGES')).toBe('edit_note');
+      expect(badgeIcon('COMMENT')).toBe('add_comment');
+    });
+
+    it('maps every non-terminal job status to an icon', () => {
+      expect(badgeIcon('pending')).toBe('hourglass_empty');
+      expect(badgeIcon('running')).toBe('sync');
+      expect(badgeIcon('waiting_for_user')).toBe('pending_actions');
+    });
+
+    it('maps every terminal job status and the error sentinel to an icon', () => {
+      expect(badgeIcon('completed')).toBe('check_circle');
+      expect(badgeIcon('completed_with_failures')).toBe('warning');
+      expect(badgeIcon('already_complete')).toBe('check_circle');
+      expect(badgeIcon('failed')).toBe('error');
+      expect(badgeIcon('cancelled')).toBe('cancel');
+      expect(badgeIcon('error')).toBe('error');
+    });
+
+    it('falls back to a generic icon for an unmapped value', () => {
+      expect(badgeIcon('some_future_status')).toBe('info');
     });
   });
 });

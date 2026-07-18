@@ -400,15 +400,63 @@ describe('CodeReviewDashboardComponent', () => {
     component['reviewRuns'].startReview(component.pulls[0]);
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
-    // Before the first poll the row badge shows the initial (pending) status.
-    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('pending');
+    // Before the first poll the row badge shows the initial (pending) status, as its
+    // friendly label (Group E4) rather than the raw wire value.
+    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('Starting…');
 
     vi.advanceTimersByTime(5000); // one poll tick -> completed
     fixture.detectChanges();
-    // The row badge now reflects the terminal outcome and the table row updated.
-    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('REQUEST_CHANGES');
+    // The row badge now reflects the terminal outcome (friendly text) and the table row updated.
+    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('Changes requested');
     const statusCell = el.querySelector('.cr-reviews-table tbody tr td');
     expect(statusCell?.textContent).toContain('completed');
+  });
+
+  it("exposes the badge's full friendly status via aria-label (Group E4)", async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 2, inline_comments: 1, comment_findings: 1, event: 'REQUEST_CHANGES' },
+      }),
+    );
+    const el: HTMLElement = fixture.nativeElement;
+    component['reviewRuns'].startReview(component.pulls[0]);
+    fixture.detectChanges();
+    expect(el.querySelector('.cr-row-badge')?.getAttribute('aria-label')).toBe('Starting…');
+
+    vi.advanceTimersByTime(5000); // one poll tick -> completed
+    fixture.detectChanges();
+    expect(el.querySelector('.cr-row-badge')?.getAttribute('aria-label')).toBe('Changes requested');
+  });
+
+  it('shows the spinner (not the status icon) while running, and the icon once terminal (Group E4)', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'running' })); // stays non-terminal
+    const el: HTMLElement = fixture.nativeElement;
+    component['reviewRuns'].startReview(component.pulls[0]);
+    fixture.detectChanges();
+    vi.advanceTimersByTime(5000); // one poll tick, still running
+    fixture.detectChanges();
+    let badge = el.querySelector('.cr-row-badge');
+    expect(badge?.querySelector('mat-spinner')).not.toBeNull();
+    expect(badge?.querySelector('.cr-row-badge__icon')).toBeNull();
+
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'APPROVE' },
+      }),
+    );
+    vi.advanceTimersByTime(5000); // next poll tick -> completed
+    fixture.detectChanges();
+    badge = el.querySelector('.cr-row-badge');
+    expect(badge?.querySelector('mat-spinner')).toBeNull();
+    const icon = badge?.querySelector('.cr-row-badge__icon');
+    expect(icon?.getAttribute('aria-hidden')).toBe('true');
+    expect(icon?.textContent?.trim()).toBe('check_circle');
   });
 
   it('renders the per-PR start-review error inside the expanded detail', async () => {

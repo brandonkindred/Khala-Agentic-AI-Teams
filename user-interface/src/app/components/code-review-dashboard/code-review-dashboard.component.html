@@ -125,11 +125,16 @@
 
                 <!-- Live status badge from the PR's latest review run -->
                 @if (reviewRuns.badgeLabel(pull.number); as label) {
-                  <span class="cr-row-badge cr-job-status {{ reviewRuns.badgeClass(pull.number) }}">
+                  <span
+                    class="cr-row-badge cr-job-status {{ reviewRuns.badgeClass(pull.number) }}"
+                    [attr.aria-label]="friendlyBadgeLabel(label)"
+                  >
                     @if (reviewRuns.isLatestRunning(pull.number)) {
                       <mat-spinner diameter="14" aria-hidden="true"></mat-spinner>
+                    } @else {
+                      <mat-icon aria-hidden="true" class="cr-row-badge__icon">{{ badgeIcon(label) }}</mat-icon>
                     }
-                    {{ label }}
+                    {{ friendlyBadgeLabel(label) }}
                   </span>
                 }
 

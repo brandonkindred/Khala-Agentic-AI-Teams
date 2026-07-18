@@ -297,6 +297,15 @@
   mat-spinner {
     flex: 0 0 auto;
   }
+
+  // Sized to match the spinner's 14px diameter — mat-icon defaults to 24x24, which
+  // would blow out this small pill.
+  &__icon {
+    flex: 0 0 auto;
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
 }
 
 // The expanded PR detail panel (`.cr-pull-detail`, `.cr-reviews-table`,

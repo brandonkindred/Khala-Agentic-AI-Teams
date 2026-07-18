@@ -13,6 +13,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { PrReviewDetailComponent } from './pr-review-detail/pr-review-detail.component';
 import { PrReviewRunsService } from './pr-review-runs.service';
+import { badgeIcon, friendlyBadgeLabel } from './review-metrics';
 import type { GitHubPullRequestItem, GitHubRepoItem } from '../../models/integrations.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
@@ -62,6 +63,12 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   private readonly integrationsApi = inject(IntegrationsApiService);
   /** Exposed (not private) so the template can bind to it directly, e.g. `reviewRuns.badgeLabel(...)`. */
   protected readonly reviewRuns = inject(PrReviewRunsService);
+
+  // Friendly badge text/icon are pure functions in `review-metrics.ts` (unit-tested
+  // there in isolation), applied to `reviewRuns.badgeLabel(...)`'s raw output. Exposed
+  // as fields so the template calls them unchanged.
+  readonly friendlyBadgeLabel = friendlyBadgeLabel;
+  readonly badgeIcon = badgeIcon;
 
   /**
    * Latest review completion/failure/connection-lost sentence for the visually-hidden

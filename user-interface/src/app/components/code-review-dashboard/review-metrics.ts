@@ -141,3 +141,80 @@ export function badgeClass(latest: PrReviewRecord | null): string {
   if (isCodingTeamTerminalStatus(latest.status)) return 'cr-job-status--completed';
   return '';
 }
+
+/**
+ * Friendly text for every raw value `badgeLabel` can return: the three uppercase GitHub
+ * review events (a terminal review with a posted summary), the coding-team job's
+ * non-terminal and terminal status strings, and the `'error'` sentinel `badgeLabel`
+ * itself invents. Keyed by the exact `badgeLabel` output.
+ */
+const STATUS_LABELS: Record<string, string> = {
+  APPROVE: 'Approved',
+  REQUEST_CHANGES: 'Changes requested',
+  COMMENT: 'Commented',
+  pending: 'Starting…',
+  running: 'Reviewing…',
+  waiting_for_user: 'Waiting for input',
+  completed: 'Completed',
+  completed_with_failures: 'Completed with failures',
+  already_complete: 'Already complete',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  error: 'Failed',
+};
+
+/** Material icon name paired with each `STATUS_LABELS` entry. */
+const STATUS_ICONS: Record<string, string> = {
+  APPROVE: 'check_circle',
+  REQUEST_CHANGES: 'edit_note',
+  COMMENT: 'add_comment',
+  pending: 'hourglass_empty',
+  running: 'sync',
+  waiting_for_user: 'pending_actions',
+  completed: 'check_circle',
+  completed_with_failures: 'warning',
+  already_complete: 'check_circle',
+  failed: 'error',
+  cancelled: 'cancel',
+  error: 'error',
+};
+
+/** Underscore-to-space, first-letter-capitalized fallback for an unmapped raw value. */
+function humanize(value: string): string {
+  return value.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+}
+
+/**
+ * Friendly, human-readable text for a row status badge, or null when there is none.
+ *
+ * Preconditions: `label` is the output of `badgeLabel` — a raw job-status string
+ * (`'pending'`/`'running'`/`'waiting_for_user'`, or a `CODING_TEAM_TERMINAL_STATUSES`
+ * value), an uppercase GitHub review event (`'APPROVE'`/`'REQUEST_CHANGES'`/`'COMMENT'`),
+ * the `'error'` sentinel, or null.
+ * Postconditions: returns null when `label` is null. Returns the mapped friendly text for
+ * every value above. For any other (unmapped) value, returns a humanized fallback —
+ * underscores replaced with spaces, first letter capitalized — rather than the raw value,
+ * so a future/unrecognized status still reads as prose instead of a wire literal. Pure —
+ * no side effects.
+ */
+export function friendlyBadgeLabel(label: string | null): string | null {
+  if (label === null) return null;
+  return STATUS_LABELS[label] ?? humanize(label);
+}
+
+/**
+ * Material icon name illustrating a row status badge, paired with `friendlyBadgeLabel`.
+ * Rendered `aria-hidden` in the template — the badge's own `aria-label` carries the
+ * accessible status text, so this icon is decorative only.
+ *
+ * Preconditions: `label` is the output of `badgeLabel` (see `friendlyBadgeLabel`).
+ * Postconditions: returns the mapped icon name for every value `friendlyBadgeLabel` maps
+ * explicitly; `'info'` for any other non-null, unmapped value; `''` when `label` is null
+ * (nothing to render — in practice the template only calls this from inside a truthy
+ * `@if (badgeLabel(...); as label)` guard, so null does not occur there, but the function
+ * stays total rather than throwing). Pure — no side effects.
+ */
+export function badgeIcon(label: string | null): string {
+  if (label === null) return '';
+  return STATUS_ICONS[label] ?? 'info';
+}
