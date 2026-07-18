@@ -365,22 +365,17 @@ class V2TeamWorker:
         self,
         task: Any,
         repo_path: str | Path,
-        repo_context: str = "",
     ) -> Dict[str, Any]:
         """Execute the task via the v2 team and return a coding-team handoff result.
 
         Args:
             task: Coding-team task-like object to implement.
             repo_path: Repository root where the task should be implemented.
-            repo_context: Legacy coding-team context string. V2 workflows inspect
-                the repository directly, so this parameter is accepted for API
-                compatibility and intentionally ignored.
 
         Returns:
             A dict containing status, feature_branch, changes_summary,
             files_to_create_or_edit, commands_run, open_questions, and error.
         """
-        del repo_context  # v2 teams read repository context themselves.
         path = Path(repo_path).resolve()
         task_id = str(getattr(task, "id", "") or "unknown-task")
         try:

@@ -17,7 +17,6 @@ import pytest
 
 from software_engineering_team.coding_team import orchestrator as orch_mod
 from software_engineering_team.coding_team import progress_config as progress_mod
-from software_engineering_team.coding_team import repo_context as repo_ctx
 from software_engineering_team.coding_team.models import (
     CodingTeamPlanInput,
     StackSpec,
@@ -103,7 +102,7 @@ class StubWorker:
         self.stack_spec = StackSpec(name=agent_id, tools_services=[])
         self.implement_calls: List[Task] = []
 
-    def run_implement(self, task: Task, path, repo_context: str = "") -> Dict[str, Any]:
+    def run_implement(self, task: Task, path) -> Dict[str, Any]:
         self.implement_calls.append(task)
         return {
             "status": "in_review",
@@ -743,7 +742,7 @@ def test_persistent_implement_failure_fails_task(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
 
     class FailingWorker(StubWorker):
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.implement_calls.append(task)
             return {
                 "status": "failed",
@@ -2158,100 +2157,6 @@ def test_in_review_task_is_not_reimplemented(tmp_path):
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
 
 
-# ----------------------------------------------------- repo context visibility / refresh
-
-
-def test_read_repo_context_includes_markdown(tmp_path):
-    """Markdown docs must be visible in repo context so a docs task does not see an 'empty' repo."""
-    (tmp_path / "spec.md").write_text("# Spec\nThe plan lives here.")
-    ctx = repo_ctx._read_repo_context(tmp_path)
-    assert "spec.md" in ctx
-    assert "The plan lives here." in ctx
-
-
-def test_read_repo_context_is_not_truncated(tmp_path):
-    """The briefing renders each included file in full and never drops a file to fit a size budget.
-
-    Guards against reintroducing the old per-file 500-char slice and the 4000-char total budget:
-    the engineer's repo context is an LLM input and is never truncated. The 80-file scan ceiling is
-    a deliberate cap, not truncation, so this stays within it.
-    """
-    # A single file well past the old 500-char per-file slice — its tail must survive.
-    big_tail = "TAIL_MARKER_" + ("Z" * 4000)
-    (tmp_path / "big.py").write_text("# header\n" + big_tail)
-
-    # Several files whose combined size blows past the old 4000-char budget; a late file (by sorted
-    # order) must still appear rather than being dropped once the budget filled.
-    for i in range(10):
-        (tmp_path / f"mod_{i:02d}.py").write_text(f"VALUE_{i:02d} = " + "'" + ("x" * 1000) + "'\n")
-
-    ctx = repo_ctx._read_repo_context(tmp_path)
-
-    assert big_tail in ctx  # full file contents, not a 500-char prefix
-    assert len(ctx) > 4000  # no total-size budget cut the briefing short
-    assert "mod_09.py" in ctx  # the last file survived; no file dropped to fit a budget
-    assert "VALUE_09" in ctx
-
-
-def test_read_repo_context_prunes_excluded_dirs(tmp_path):
-    """Files under excluded dirs (node_modules/.git) must not be walked or included,
-    and must not consume the 80-file budget ahead of real source files."""
-    (tmp_path / "real.py").write_text("REAL_SOURCE = 1")
-    nm = tmp_path / "node_modules" / "pkg"
-    nm.mkdir(parents=True)
-    (nm / "index.py").write_text("VENDORED = 1")
-    git = tmp_path / ".git"
-    git.mkdir()
-    (git / "config.py").write_text("GIT_INTERNAL = 1")
-
-    ctx = repo_ctx._read_repo_context(tmp_path)
-
-    assert "real.py" in ctx
-    assert "REAL_SOURCE" in ctx
-    assert "VENDORED" not in ctx
-    assert "GIT_INTERNAL" not in ctx
-
-
-def test_read_repo_context_skips_special_files_without_hanging(tmp_path):
-    """A FIFO/special file with a code suffix must be skipped via is_file(), not read
-    — read_text() on a FIFO blocks forever (a hang the try/except cannot catch)."""
-    import os
-
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("mkfifo not available on this platform")
-    (tmp_path / "real.py").write_text("REAL = 1")
-    os.mkfifo(str(tmp_path / "pipe.py"))  # code-suffixed special file
-
-    # If the is_file() guard regressed, this call would block forever on the FIFO.
-    ctx = repo_ctx._read_repo_context(tmp_path)
-
-    assert "REAL = 1" in ctx
-    assert "pipe.py" not in ctx
-
-
-def test_repo_context_refreshed_between_rounds(tmp_path, monkeypatch):
-    """The swarm re-reads repo context each round so files written in earlier rounds become visible
-    to later implementations (instead of being recreated)."""
-    _patch_git(monkeypatch)
-    seen: List[str] = []
-
-    class ContextWorker(StubWorker):
-        def run_implement(self, task, path, repo_context=""):
-            seen.append(repo_context)
-            (Path(path) / "notes.md").write_text("notes round content")
-            return super().run_implement(task, path, repo_context=repo_context)
-
-    worker = ContextWorker("a1")
-    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
-    graph.add_task("t1", title="T1")
-    graph.add_task("t2", title="T2", dependencies=["t1"])
-
-    swarm.run(max_rounds=20)
-
-    # notes.md (written while implementing t1) is picked up by a later round's context refresh.
-    assert any("notes.md" in ctx for ctx in seen)
-
-
 # ----------------------------------------------------- resume from snapshot (no re-planning)
 
 
@@ -2500,7 +2405,7 @@ def test_in_progress_implementation_is_bounded(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
 
     class NeverReadyWorker(StubWorker):
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.implement_calls.append(task)
             return {
                 "status": "in_progress",  # model set ready_for_review=false
@@ -3861,7 +3766,7 @@ def test_implementation_fanout_runs_concurrently(tmp_path, monkeypatch):
             self.agent_id = agent_id
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             # Blocks until both workers reach here; serial execution never releases it.
             barrier.wait()
             return {
@@ -3904,7 +3809,7 @@ def test_implementation_fanout_serializes_hitl_pauses(tmp_path, monkeypatch):
             self.agent_id = agent_id
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             return {
                 "status": "needs_decision",
                 "open_questions": [{"question_text": f"Q for {task.id}?"}],
@@ -3954,7 +3859,7 @@ def test_implementation_fanout_uses_distinct_worktree_paths(tmp_path):
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
             self.paths_seen: List[Any] = []
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.paths_seen.append(path)
             return {
                 "status": "in_review",
@@ -3994,7 +3899,7 @@ def test_implementation_fanout_exception_fails_only_that_task_once(tmp_path, mon
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
             self.calls = 0
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.calls += 1
             raise RuntimeError("implementation blew up")
 
@@ -4003,7 +3908,7 @@ def test_implementation_fanout_exception_fails_only_that_task_once(tmp_path, mon
             self.agent_id = agent_id
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             return {
                 "status": "in_review",
                 "feature_branch": f"feature/{task.id}",
@@ -4159,146 +4064,6 @@ def test_run_checks_cancellation_before_preparing_worktrees(tmp_path):
     assert updates[-1]["status"] == "cancelled"
     assert swarm.aborted is False  # cancellation is not the same as an abort
     assert graph.get_task("t1").status == TaskStatus.TO_DO  # never even attempted
-
-
-# ----------------------------------------------------- repo-context incremental cache
-
-
-def test_repo_context_cache_matches_read_repo_context(tmp_path):
-    """The cache renders the same briefing string as the full-read function for the same state."""
-    (tmp_path / "a.py").write_text("A = 1")
-    (tmp_path / "b.md").write_text("# doc")
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == repo_ctx._read_repo_context(tmp_path)
-
-
-def test_repo_context_cache_empty_repo(tmp_path):
-    """An empty repo yields the sentinel, identical to _read_repo_context."""
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == "No files found"
-
-
-def test_repo_context_cache_reuses_unchanged_rereads_changed(tmp_path, monkeypatch):
-    """A second read re-renders only files whose (mtime, size) changed; unchanged files are reused."""
-    (tmp_path / "a.py").write_text("A = 1")
-    (tmp_path / "b.py").write_text("B = 1")
-    cache = repo_ctx._RepoContextCache()
-    first = cache.read(tmp_path)  # populates the cache (renders both)
-
-    # Instrument renders that happen AFTER the cache is warm.
-    rendered: List[str] = []
-    real_render = repo_ctx._render_context_file
-
-    def _counting_render(f, repo_path):
-        rendered.append(f.name)
-        return real_render(f, repo_path)
-
-    monkeypatch.setattr(repo_ctx, "_render_context_file", _counting_render)
-
-    second = cache.read(tmp_path)
-    assert second == first
-    assert rendered == []  # nothing changed → no file re-read
-
-    # Change one file's content (and size) → only it is re-rendered on the next read.
-    (tmp_path / "a.py").write_text("A = 222  # changed and longer")
-    third = cache.read(tmp_path)
-    assert rendered == ["a.py"]
-    assert "A = 222" in third
-    assert "B = 1" in third  # unchanged file still present, served from cache
-
-
-def test_repo_context_cache_drops_removed_files(tmp_path):
-    """A file removed between reads leaves the briefing and the internal cache."""
-    (tmp_path / "a.py").write_text("A = 1")
-    (tmp_path / "b.py").write_text("B = 1")
-    cache = repo_ctx._RepoContextCache()
-    cache.read(tmp_path)
-
-    (tmp_path / "b.py").unlink()
-    out = cache.read(tmp_path)
-
-    assert "A = 1" in out
-    assert "B = 1" not in out
-    assert all(p.name != "b.py" for p in cache._entries)
-
-
-def test_repo_context_cache_reflects_new_files(tmp_path):
-    """A file added between reads appears in the next briefing (mirrors the round-refresh contract)."""
-    (tmp_path / "a.py").write_text("A = 1")
-    cache = repo_ctx._RepoContextCache()
-    cache.read(tmp_path)
-
-    (tmp_path / "notes.md").write_text("fresh notes")
-    out = cache.read(tmp_path)
-
-    assert "notes.md" in out
-    assert "fresh notes" in out
-
-
-def test_render_context_file_returns_none_on_read_error(tmp_path, monkeypatch):
-    """A file that cannot be read renders to None (the caller then skips it)."""
-    f = tmp_path / "a.py"
-    f.write_text("A = 1")
-
-    def _boom(self, *a, **k):
-        raise OSError("unreadable")
-
-    monkeypatch.setattr(Path, "read_text", _boom)
-    assert repo_ctx._render_context_file(f, tmp_path) is None
-
-
-def test_render_context_file_logs_debug_on_read_error(tmp_path, monkeypatch, caplog):
-    """A read failure is logged at DEBUG with exc_info, not silently swallowed."""
-    f = tmp_path / "a.py"
-    f.write_text("A = 1")
-
-    def _boom(self, *a, **k):
-        raise OSError("unreadable")
-
-    monkeypatch.setattr(Path, "read_text", _boom)
-    with caplog.at_level(logging.DEBUG, logger=repo_ctx.logger.name):
-        assert repo_ctx._render_context_file(f, tmp_path) is None
-
-    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
-    assert any(str(f) in r.getMessage() for r in debug_records)
-    assert any(r.exc_info for r in debug_records)
-
-
-def test_enumerate_context_files_survives_walk_error(tmp_path, monkeypatch):
-    """An os.walk failure is best-effort: it yields no files rather than raising."""
-    monkeypatch.setattr(
-        repo_ctx.os, "walk", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope"))
-    )
-    assert repo_ctx._enumerate_context_files(tmp_path) == []
-
-
-def test_repo_context_cache_skips_unstattable_file(tmp_path, monkeypatch):
-    """A file that cannot be stat-ed between walk and read is skipped (best-effort)."""
-    monkeypatch.setattr(repo_ctx, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == "No files found"  # ghost stat raises → skipped
-    assert cache._entries == {}
-
-
-def test_repo_context_cache_logs_debug_on_stat_error(tmp_path, monkeypatch, caplog):
-    """A stat failure between walk and stat is logged at DEBUG with exc_info."""
-    monkeypatch.setattr(repo_ctx, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
-    cache = repo_ctx._RepoContextCache()
-    with caplog.at_level(logging.DEBUG, logger=repo_ctx.logger.name):
-        assert cache.read(tmp_path) == "No files found"
-
-    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
-    assert any("ghost.py" in r.getMessage() for r in debug_records)
-    assert any(r.exc_info for r in debug_records)
-
-
-def test_repo_context_cache_skips_unrenderable_file(tmp_path, monkeypatch):
-    """A file whose render fails is skipped and not cached, even when its stat succeeds."""
-    (tmp_path / "a.py").write_text("A = 1")
-    monkeypatch.setattr(repo_ctx, "_render_context_file", lambda f, root: None)
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == "No files found"
-    assert cache._entries == {}
 
 
 def test_review_uses_fresh_agent_per_call_not_shared(monkeypatch):
