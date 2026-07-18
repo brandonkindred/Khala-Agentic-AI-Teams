@@ -17,7 +17,9 @@ from typing import Any, List
 import pytest
 
 from investment_team.models import StrategySpec
+from investment_team.strategy_lab.agents._response_schemas import CRITIQUE_SCHEMA
 from investment_team.strategy_lab.agents.design_review import (
+    _CRITIQUE_SCHEMA_JSON,
     CritiqueIssue,
     DesignReviewAgent,
     SpecCritique,
@@ -243,6 +245,29 @@ def test_format_prior_critiques_renders_per_issue_detail() -> None:
     assert "- [warning] exit_rules: no stop" in rendered
     # The fix-less issue must not render an empty "(fix: )" suffix.
     assert "no stop (fix:" not in rendered
+
+
+def test_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The review prompt carries the JSON Schema so the wire model, the
+    hand-written skeleton, and the downstream coercer cannot drift apart."""
+    payload = json.dumps({"ready": True, "rationale": "fine", "issues": []})
+    capture = _patch_review(monkeypatch, payload)
+
+    DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert isinstance(capture, _CapturingAgent)
+    prompt = capture.calls[0]
+    assert "MUST conform to this JSON Schema" in prompt
+    assert _CRITIQUE_SCHEMA_JSON in prompt
+
+
+def test_embedded_schema_matches_format_constraint() -> None:
+    """The schema embedded in the prompt is the same object exported from
+    ``_response_schemas`` — the prompt-level contract cannot silently drift
+    from whatever is validated elsewhere."""
+    assert json.loads(_CRITIQUE_SCHEMA_JSON) == CRITIQUE_SCHEMA
+    assert CRITIQUE_SCHEMA["required"] == ["ready"]
+    assert {"ready", "rationale", "issues"} <= set(CRITIQUE_SCHEMA["properties"])
 
 
 # ---------------------------------------------------------------------------
