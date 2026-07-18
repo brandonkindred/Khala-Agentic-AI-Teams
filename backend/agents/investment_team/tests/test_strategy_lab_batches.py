@@ -532,6 +532,66 @@ def test_merge_from_failure_does_not_halt_run(
     assert state["errored_cycles"] == 1
     assert state["completed_batches"] == 1
     assert state["errored_details"][0].get("reason") == "tracker_merge_failed"
+    assert state["tracker_merge_error_count"] == 1
+
+
+def test_cancelled_run_publishes_structured_cancelled_flag(
+    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user-cancellation error event carries `cancelled: True` so SSE
+    consumers can tell a deliberate stop apart from a genuine failure without
+    inspecting `detail`'s free text."""
+
+    class _Orch:
+        _counter = 0
+
+        def __init__(self, convergence_tracker: Any = None) -> None:
+            self.convergence_tracker = _NoopTracker()
+
+        def run_cycle(
+            self,
+            prior_records: List[StrategyLabRecord],
+            config: BacktestConfig,
+            signal_brief: Any = None,
+            on_phase: Any = None,
+            exclude_asset_classes: Any = None,
+        ) -> StrategyLabRecord:
+            type(self)._counter += 1
+            return _make_record(type(self)._counter, config)
+
+    published: List[Dict[str, Any]] = []
+
+    def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
+        published.append({**event, "type": event_type})
+
+    from investment_team.api import job_event_bus as _job_event_bus
+
+    monkeypatch.setattr(_job_event_bus, "publish", _capture_publish)
+    monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _Orch)
+    monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
+    monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
+    monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
+    # Cancelled between waves, after the (only) wave in this single-cycle run.
+    monkeypatch.setattr(lab_main, "_is_strategy_lab_run_cancelled", lambda run_id: True)
+
+    request = RunStrategyLabRequest(
+        batch_size=1,
+        batch_count=1,
+        max_parallel=1,
+        paper_trading_enabled=False,
+    )
+    run_id = "run-test-cancelled"
+    _seed_run_state(run_id, request)
+
+    _strategy_lab_worker(run_id, request)
+
+    state = lab_main._active_runs[run_id]
+    assert state["status"] == "cancelled"
+
+    error_events = [e for e in published if e["type"] == "error"]
+    assert len(error_events) == 1
+    assert error_events[0]["detail"] == "Run cancelled by user"
+    assert error_events[0]["cancelled"] is True
 
 
 def test_restart_accepts_completed_with_errors(

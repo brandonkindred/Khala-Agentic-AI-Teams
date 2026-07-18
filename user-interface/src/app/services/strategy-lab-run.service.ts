@@ -154,6 +154,17 @@ export class StrategyLabRunService implements OnDestroy {
     }
   }
 
+  /**
+   * Preconditions: called only from `connectToStream()`'s `complete`
+   *   callback, `handleStreamEvent()`'s terminal-event branch, or
+   *   `fallbackToPolling()`'s terminal/error branches — never directly by a
+   *   component.
+   * Postconditions: `lastTerminalStatus()` captures `runStatus()`'s value at
+   *   the instant this runs (before it's cleared), so callers see the true
+   *   terminal outcome even when no explicit `complete`/`error` event
+   *   reaches them. `running()` is false, `activeRunId()`/`runStatus()` are
+   *   null, and any live SSE/poll subscription is unsubscribed.
+   */
   private finishRun(): void {
     this._lastTerminalStatus.set(this._runStatus());
     this._running.set(false);
@@ -165,6 +176,17 @@ export class StrategyLabRunService implements OnDestroy {
     this.pollSub = null;
   }
 
+  /**
+   * Preconditions: `runId` identifies the run whose SSE stream just errored
+   *   (called only from `connectToStream()`'s `error` callback).
+   * Postconditions: begins polling `getRunStatus(runId)` every 5s until a
+   *   non-`'running'` status arrives, at which point `finishRun()` runs.
+   *   `runStatus()` is updated on every successful poll. If polling itself
+   *   errors, `runStatus()` is cleared to null first so `finishRun()`
+   *   captures a null `lastTerminalStatus` (a genuinely unknown outcome)
+   *   rather than a stale `'running'` status a caller could mistake for a
+   *   real terminal outcome.
+   */
   private fallbackToPolling(runId: string): void {
     this.pollSub?.unsubscribe();
     this.pollSub = timer(0, 5000)

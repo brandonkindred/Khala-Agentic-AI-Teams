@@ -861,6 +861,16 @@ export interface StrategyLabRunStatus {
   /** Non-fatal per-cycle failures — run kept going but user should see the count. */
   errored_cycles?: number;
   errored_details?: StrategyLabErroredDetail[];
+  /**
+   * Uncapped count of `errored_details` entries tagged
+   * `reason: 'tracker_merge_failed'` (main.py's `tracker_merge_error_count`
+   * on `StrategyLabRunStatusResponse`). Unlike `errored_details` itself
+   * (capped at 50 entries server-side), this never evicts, so it stays the
+   * authoritative source for reconciling a cycle double-counted by a
+   * post-completion tracker-merge failure even once older matching entries
+   * have aged out of `errored_details`.
+   */
+  tracker_merge_error_count?: number;
   /** `| null`: see `StrategyLabCycleProgress`'s own field doc for why. */
   current_cycle?: StrategyLabCycleProgress | null;
   completed_record_ids: string[];
@@ -913,9 +923,9 @@ export interface InvestmentJobsListResponse {
  * (`_run_state_to_response(...).model_dump(mode="json")` backs both). Every
  * Optional[...] field on StrategyLabRunStatusResponse was audited against
  * its Python default: completed_cycles/skipped_cycles/errored_cycles/
- * batch_size/batch_count/completed_batches all default to a real 0/1,
- * never None, so they're correctly typed as-is. `current_cycle`/`status`/
- * `phase`/nested `strategy`/`metrics` needed widening to admit a real
+ * tracker_merge_error_count/batch_size/batch_count/completed_batches all
+ * default to a real 0/1, never None, so they're correctly typed as-is.
+ * `current_cycle`/`status`/`phase`/nested `strategy`/`metrics` needed widening to admit a real
  * `null` current_cycle, `'interrupted'` status, and an open-ended phase
  * vocabulary — applied on `StrategyLabRunStatus`/`StrategyLabCycleProgress`
  * themselves (not locally here) since the REST poll endpoint shares this
@@ -998,7 +1008,16 @@ export interface StrategyLabCompleteEvent {
   total_batches: number;
 }
 
-export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; }
+/**
+ * `cancelled` is `true` only on the one strategy-lab call site that
+ * publishes a genuine user cancellation (main.py: `_publish("error",
+ * {"detail": "Run cancelled by user", "cancelled": True})`); the other two
+ * `detail`-carrying error call sites never set it, so it's the sole
+ * authoritative cancellation signal — no need to infer intent from
+ * `detail`'s free text (which can't be constrained to exclude the word
+ * "cancel" for a genuine failure).
+ */
+export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; cancelled?: boolean; }
 export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; }
 /**
  * Two mutually-exclusive wire shapes: three strategy-lab call sites always

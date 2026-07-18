@@ -119,11 +119,25 @@ function categoryLabel(value: string): string {
  * Readable label for a raw backend phase id not in STRATEGY_LAB_PHASES
  * (e.g. 'design_review' → 'Design review'). Used only as a live-region
  * fallback for phases this component has no friendly label for.
+ *
+ * Preconditions: `phase` is any string (an open-ended backend phase id;
+ *   never validated against a known set — see STRATEGY_LAB_PHASES' own doc).
+ * Postconditions: returns `phase` with underscores replaced by spaces and
+ *   its first character capitalized (not per-word title-casing); '' in, ''
+ *   out.
  */
 function humanizePhase(phase: string): string {
   const spaced = phase.replace(/_/g, ' ');
   return spaced.length ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : spaced;
 }
+
+/**
+ * Shared text for both places the run's fate is genuinely unknown (not a
+ * known failure/cancellation/completion) — `describeRunStatus()`'s
+ * null-status branch and `handleStreamEvent()`'s SSE-reclaim branch — so the
+ * wording can't drift between the two.
+ */
+const CONNECTION_LOST_MESSAGE = 'Strategy Lab lost track of the run — status unavailable.';
 
 /** Build selector options from category values, deriving label + Material icon. */
 function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
@@ -367,16 +381,17 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   /**
    * Terminal-outcome text for the aria-live status region (`runAnnouncement`).
-   * Set from `handleStreamEvent()`'s `complete`/`error` branches — using the
-   * terminal event's own data, while `runService.runStatus()` is still
-   * populated — or, when neither branch fires (SSE degrades to polling, or a
-   * reconnect gets only a terminal snapshot then `done`), backstopped by
-   * `refreshResultsOnRunFinish`'s `??=` fallback once `runStatus()` has
-   * already cleared. Reset to null when a new run starts so a stale outcome
-   * from a previous run can't leak into the next run's brief "Starting…"
-   * window.
+   * A signal (not a plain field) so `runAnnouncement` can be a `computed()`
+   * that reactively tracks it. Set from `handleStreamEvent()`'s
+   * `complete`/`error` branches — using the terminal event's own data, while
+   * `runService.runStatus()` is still populated — or, when neither branch
+   * fires (SSE degrades to polling, or a reconnect gets only a terminal
+   * snapshot then `done`), backstopped by `refreshResultsOnRunFinish`'s
+   * fallback once `runStatus()` has already cleared. Reset to null when a
+   * new run starts so a stale outcome from a previous run can't leak into
+   * the next run's brief "Starting…" window.
    */
-  private runOutcomeAnnouncement: string | null = null;
+  private readonly runOutcomeAnnouncement = signal<string | null>(null);
 
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
@@ -398,13 +413,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * the event's own data, but a run that ends WITHOUT either of those events
    * reaching this component (SSE degrades to polling and polling itself
    * observes the terminal status; or a reconnect's terminal `snapshot` is
-   * followed straight by `done`) leaves it unset. `??=` only fills that gap —
-   * it never overwrites an outcome the explicit branches already derived.
+   * followed straight by `done`) leaves it unset. The fallback only fills
+   * that gap — it never overwrites an outcome the explicit branches already
+   * derived.
+   *
+   * Preconditions: none — constructed once as a field initializer, runs for
+   *   the component's lifetime.
+   * Postconditions: on every `running()` true→false transition, `loadResults()`
+   *   runs exactly once and `runOutcomeAnnouncement` holds a non-null value
+   *   (either one `handleStreamEvent()` already set, or this fallback's
+   *   `describeRunStatus()` derivation) by the time the effect returns.
    */
   private readonly refreshResultsOnRunFinish = effect(() => {
     const isRunning = this.runService.running();
     if (!isRunning && this.wasRunning) {
-      this.runOutcomeAnnouncement ??= this.describeRunStatus(this.runService.lastTerminalStatus());
+      this.runOutcomeAnnouncement.update(
+        (current) => current ?? this.describeRunStatus(this.runService.lastTerminalStatus()),
+      );
       this.loadResults();
     }
     this.wasRunning = isRunning;
@@ -428,7 +453,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   non-empty.
    */
   private describeRunStatus(status: StrategyLabRunStatus | null): string {
-    if (!status) return 'Strategy Lab lost track of the run — status unavailable.';
+    if (!status) return CONNECTION_LOST_MESSAGE;
     if (status.status === 'failed') return 'Strategy Lab run failed.';
     if (status.status === 'cancelled') return 'Strategy Lab run cancelled.';
     if (status.status === 'interrupted') return 'Strategy Lab run interrupted.';
@@ -596,17 +621,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // remaining signal that not every requested strategy was produced.
       const hasErrors = event.errored_count > 0 || event.status === 'completed_with_errors';
       const hasSkips = event.skipped_count > 0;
-      if (hasErrors || hasSkips) {
-        const parts: string[] = [];
-        if (event.errored_count > 0) parts.push(`${event.errored_count} cycle(s) errored`);
+      // completionWarning is the sighted dismissible banner — kept scoped to
+      // genuine errors only (its long-standing condition), unlike
+      // runOutcomeAnnouncement below: a skip-only completion already has a
+      // dedicated in-progress skipped-badge, so a banner re-announcing it
+      // again at the end would be new behavior this fix doesn't intend to add.
+      if (hasErrors) {
+        const parts: string[] = [`${event.errored_count} cycle(s) errored`];
         if (hasSkips) parts.push(`${event.skipped_count} cycle(s) skipped`);
         this.completionWarning.set(`Run finished with ${parts.join(' and ')}. See details below.`);
       }
-      this.runOutcomeAnnouncement = hasErrors
-        ? 'Strategy Lab run finished with errors.'
-        : hasSkips
-          ? 'Strategy Lab run finished with some strategies skipped.'
-          : 'Strategy Lab run complete.';
+      this.runOutcomeAnnouncement.set(
+        hasErrors
+          ? 'Strategy Lab run finished with errors.'
+          : hasSkips
+            ? 'Strategy Lab run finished with some strategies skipped.'
+            : 'Strategy Lab run complete.',
+      );
     }
 
     if (event.type === 'error') {
@@ -616,18 +647,19 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         // `.detail` — a connection-level event (e.g. eviction under load),
         // not necessarily a job failure, so it gets its own message rather
         // than confidently announcing a failure the run may not have had.
-        const message = 'Strategy Lab lost track of the run — status unavailable.';
-        this.error.set(message);
-        this.runOutcomeAnnouncement = message;
+        this.error.set(CONNECTION_LOST_MESSAGE);
+        this.runOutcomeAnnouncement.set(CONNECTION_LOST_MESSAGE);
       } else {
         const detail = event.detail || 'Run failed';
         this.error.set(detail);
-        // User cancellations are published as a terminal `error` event with a
-        // "cancelled" detail (there is no distinct cancel event type) — that
-        // is a deliberate stop, not a failure, and must not be announced as one.
-        this.runOutcomeAnnouncement = /cancel/i.test(detail)
-          ? 'Strategy Lab run cancelled.'
-          : 'Strategy Lab run failed.';
+        // `cancelled` is the sole authoritative cancellation signal (see
+        // StrategyLabErrorDetailEvent's own doc) — set only by main.py's
+        // genuine user-cancellation publish, never inferred from `detail`'s
+        // free text, so a real failure whose exception message happens to
+        // mention "cancel" can't be misannounced as a deliberate stop.
+        this.runOutcomeAnnouncement.set(
+          event.cancelled ? 'Strategy Lab run cancelled.' : 'Strategy Lab run failed.',
+        );
       }
     }
   }
@@ -707,7 +739,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.startingRun.set(true);
     this.error.set(null);
     this.completionWarning.set(null);
-    this.runOutcomeAnnouncement = null;
+    this.runOutcomeAnnouncement.set(null);
     this.api
       .runStrategyLab({
         batch_size: batchSize,
@@ -886,34 +918,30 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   /**
    * Cycles the run has finished attempting (successfully or not) as of
-   * `status`, and whether that count's tracker-merge double-count correction
-   * may be under-subtracting. Shared by `currentStrategyNumber` and
-   * `runAnnouncement`'s "Finishing up" decision so both derive the same
-   * number from one computation.
+   * `status`. Shared by `currentStrategyNumber` and `runAnnouncement`'s
+   * "Finishing up" decision so both derive the same number from one
+   * computation.
    *
    * Preconditions: `status` is the caller's own already-read
    *   `runService.runStatus()` snapshot (never re-read here, so this stays
    *   safe to call from inside a `computed()`).
-   * Postconditions: `attemptedCycles` counts `completed_cycles` +
-   *   `skipped_cycles` + `errored_cycles`, minus cycles double-counted by a
-   *   post-completion tracker-merge failure (main.py's wave loop, tagged
-   *   `reason: 'tracker_merge_failed'` in `errored_details` — published as
-   *   `cycle_complete`, then separately re-published as `cycle_errored` for
-   *   the same `cycle_index`). `correctionSaturated` is true only when
-   *   `errored_details` (capped at 50 entries server-side, unlike the
-   *   uncapped `errored_cycles` counter) has both reached that cap AND
-   *   contains at least one visible tracker-merge entry — the signal that
-   *   double-counted cycles exist AND some may have been evicted before
-   *   they could be subtracted, not merely that many cycles have errored.
+   * Postconditions: returns `completed_cycles` + `skipped_cycles` +
+   *   `errored_cycles`, minus cycles double-counted by a post-completion
+   *   tracker-merge failure (main.py's wave loop — published as
+   *   `cycle_complete`, then separately re-published as `cycle_errored` with
+   *   `reason: 'tracker_merge_failed'` for the same `cycle_index`). The
+   *   subtraction reads `tracker_merge_error_count`, the backend's own
+   *   uncapped counter for that reason, rather than filtering
+   *   `errored_details` (capped at 50 entries server-side), so the result
+   *   stays exact even once matching entries have evicted from that array.
    */
-  private cycleProgress(status: StrategyLabRunStatus): { attemptedCycles: number; correctionSaturated: boolean } {
-    const erroredDetails = status.errored_details ?? [];
-    const trackerMergeDoubleCounts = erroredDetails.filter((d) => d.reason === 'tracker_merge_failed').length;
-    return {
-      attemptedCycles:
-        status.completed_cycles + status.skipped_cycles + (status.errored_cycles ?? 0) - trackerMergeDoubleCounts,
-      correctionSaturated: erroredDetails.length >= 50 && trackerMergeDoubleCounts > 0,
-    };
+  private cycleProgress(status: StrategyLabRunStatus): number {
+    return (
+      status.completed_cycles +
+      status.skipped_cycles +
+      (status.errored_cycles ?? 0) -
+      (status.tracker_merge_error_count ?? 0)
+    );
   }
 
   /**
@@ -932,7 +960,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     const status = this.runService.runStatus();
     if (!status) return 1;
     if (status.current_cycle) return status.current_cycle.cycle_index;
-    const { attemptedCycles } = this.cycleProgress(status);
+    const attemptedCycles = this.cycleProgress(status);
     return Math.min(attemptedCycles + 1, status.total_cycles);
   });
 
@@ -962,29 +990,30 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * terminal outcome just after a run ends, or '' when idle. Deliberately
    * excludes per-log-line detail — `activityLog` stays out of the live
    * region so screen-reader users get a summary, not a blow-by-blow feed.
+   * A `computed()` (not a plain method) so it only recomputes when one of
+   * its signal dependencies (`running`, `runService.runStatus`,
+   * `runOutcomeAnnouncement`) actually changes, rather than on every
+   * OnPush change-detection pass that touches this view.
    *
    * Preconditions: none.
    * Postconditions: returns a non-empty sentence while `running` is true and
    *   `runStatus` is populated, or immediately after a run ends (until the
    *   next run starts clears it); returns '' otherwise.
    */
-  runAnnouncement(): string {
+  readonly runAnnouncement = computed(() => {
     const status = this.runService.runStatus();
     if (this.running() && status) {
       const segments: string[] = [];
       if (status.batch_count && status.batch_count > 1) {
         segments.push(`Batch ${this.currentBatchNumber()} of ${status.batch_count}`);
       }
-      const { attemptedCycles, correctionSaturated } = this.cycleProgress(status);
+      const attemptedCycles = this.cycleProgress(status);
       // Once the last cycle's cycle_complete/skipped/errored lands,
       // attemptedCycles already equals total_cycles — briefly, before the
       // terminal `complete` event arrives, there is no "next" strategy to
       // report. Reporting one here would announce an impossible position
-      // (e.g. "Strategy 6 of 5"). Skipped when correctionSaturated, since an
-      // under-subtracted attemptedCycles could cross this threshold on a run
-      // that isn't actually finishing — a live cycle_complete/cycle_errored/
-      // complete event, each unaffected by the cap, corrects it moments later.
-      if (!status.current_cycle && attemptedCycles >= status.total_cycles && !correctionSaturated) {
+      // (e.g. "Strategy 6 of 5").
+      if (!status.current_cycle && attemptedCycles >= status.total_cycles) {
         segments.push('Finishing up');
       } else if (status.current_cycle) {
         segments.push(`Strategy ${this.currentStrategyNumber()} of ${status.total_cycles}`);
@@ -1010,8 +1039,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       }
       return segments.join(' — ') + '.';
     }
-    return this.runOutcomeAnnouncement ?? '';
-  }
+    return this.runOutcomeAnnouncement() ?? '';
+  });
 
   /** Short multi-line tooltip summarizing recent errored cycles for hover. */
   erroredTooltip(): string {

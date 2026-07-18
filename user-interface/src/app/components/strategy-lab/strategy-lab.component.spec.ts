@@ -892,6 +892,15 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       });
       expect(component.completionWarning()).toBeNull();
     });
+
+    it('sets no completion warning for a skip-only, zero-error finish (the sighted banner stays scoped to genuine errors)', () => {
+      runService.events$.next({
+        type: 'complete', message: 'done', status: 'completed',
+        completed_count: 3, skipped_count: 2, errored_count: 0, errored_details: [],
+        completed_batches: 1, total_batches: 1,
+      });
+      expect(component.completionWarning()).toBeNull();
+    });
   });
 
   describe('error', () => {

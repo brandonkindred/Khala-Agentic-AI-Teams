@@ -39,6 +39,7 @@ export function reduce(
         skipped_cycles: event.skipped_cycles,
         errored_cycles: event.errored_cycles ?? state.errored_cycles,
         errored_details: event.errored_details ?? state.errored_details,
+        tracker_merge_error_count: event.tracker_merge_error_count ?? state.tracker_merge_error_count,
         // A real `null`/omitted current_cycle on the wire is treated the same
         // — both fall back to the prior value. Preserved from the original
         // Object.assign merge this replaces, not a new behavior.
@@ -122,6 +123,11 @@ export function reduce(
         ...state,
         errored_cycles: (state.errored_cycles ?? 0) + 1,
         errored_details: [...(state.errored_details ?? []), detail].slice(-50),
+        // Incremented directly from the live event's own `reason`, mirroring
+        // errored_cycles above — independent of errored_details' 50-entry
+        // cap, so this stays exact even once matching entries evict.
+        tracker_merge_error_count:
+          (state.tracker_merge_error_count ?? 0) + (event.reason === 'tracker_merge_failed' ? 1 : 0),
         current_cycle: undefined,
       };
     }

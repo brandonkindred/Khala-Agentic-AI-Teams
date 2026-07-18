@@ -168,6 +168,20 @@ describe('reduce (strategy-lab-run.reducer)', () => {
       expect(() => reduce(frozen, event)).not.toThrow();
       expect(frozen.completed_cycles).toBe(baseState.completed_cycles);
     });
+
+    it('folds tracker_merge_error_count from the event, falling back to the prior value when omitted', () => {
+      const withCount = reduce(baseState, {
+        type: 'snapshot',
+        ...baseState,
+        tracker_merge_error_count: 4,
+        error: null,
+      });
+      expect(withCount?.tracker_merge_error_count).toBe(4);
+
+      const state: StrategyLabRunStatus = { ...baseState, tracker_merge_error_count: 4 };
+      const withoutCount = reduce(state, { type: 'snapshot', ...baseState, error: null });
+      expect(withoutCount?.tracker_merge_error_count).toBe(4);
+    });
   });
 
   describe('progress', () => {
@@ -375,6 +389,46 @@ describe('reduce (strategy-lab-run.reducer)', () => {
       const result = reduce(baseState, event);
 
       expect(result?.errored_details?.[0].reason).toBe('tracker_merge_failed');
+    });
+
+    it('increments tracker_merge_error_count only for a tracker_merge_failed reason', () => {
+      const trackerMerge = reduce(baseState, {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        error: 'merge boom',
+      });
+      expect(trackerMerge?.tracker_merge_error_count).toBe(1);
+
+      const ordinary = reduce(baseState, {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'ValueError',
+        error: 'boom',
+      });
+      expect(ordinary?.tracker_merge_error_count).toBe(0);
+    });
+
+    it('keeps incrementing tracker_merge_error_count past errored_details eviction', () => {
+      const state: StrategyLabRunStatus = {
+        ...baseState,
+        errored_details: Array.from({ length: 50 }, (_, i) => ({ cycle_index: i, error: 'x' })),
+        tracker_merge_error_count: 9,
+      };
+      const result = reduce(state, {
+        type: 'cycle_errored',
+        cycle_index: 51,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        error: 'merge boom',
+      });
+
+      // errored_details is capped at 50 (an old entry evicts), but
+      // tracker_merge_error_count is never capped.
+      expect(result?.errored_details).toHaveLength(50);
+      expect(result?.tracker_merge_error_count).toBe(10);
     });
   });
 

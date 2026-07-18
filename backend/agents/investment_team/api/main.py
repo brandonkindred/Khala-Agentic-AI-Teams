@@ -342,6 +342,14 @@ class StrategyLabRunStatusResponse(BaseModel):
     # to the UI so users can see that something went wrong during generation.
     errored_cycles: int = 0
     errored_details: List[Dict[str, Any]] = Field(default_factory=list)
+    # Uncapped count of cycle_errored events tagged reason="tracker_merge_failed"
+    # (a cycle that already published cycle_complete, then separately
+    # cycle_errored for the same cycle_index when its post-completion
+    # convergence-tracker merge failed). Unlike errored_details (capped at
+    # _ERRORED_DETAILS_MAX), this counter never evicts, so a client
+    # reconciling a double-counted cycle_index can always recover the exact
+    # count instead of approximating it from a possibly-truncated array.
+    tracker_merge_error_count: int = 0
     current_cycle: Optional[StrategyLabCycleProgress] = None
     completed_record_ids: List[str] = Field(default_factory=list)
     error: Optional[str] = None
@@ -382,6 +390,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         skipped_cycles=state.get("skipped_cycles", 0),
         errored_cycles=state.get("errored_cycles", 0),
         errored_details=state.get("errored_details", []),
+        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
         current_cycle=StrategyLabCycleProgress(**cc) if cc else None,
         completed_record_ids=state.get("completed_record_ids", []),
         error=state.get("error"),
@@ -2145,6 +2154,8 @@ def _strategy_lab_worker(
             errored_details: List[Dict[str, Any]] = list(
                 _run_state_snapshot.get("errored_details") or []
             )
+            # Carry forward on resume (same reasoning as errored/errored_details).
+            tracker_merge_errors: int = int(_run_state_snapshot.get("tracker_merge_error_count") or 0)
         completed_indices: set[int] = set(range(start_cycle_offset))
         completed_batches = start_batch_idx
         primary_tracker = orchestrator.convergence_tracker
@@ -2372,6 +2383,7 @@ def _strategy_lab_worker(
                                 total_cycles,
                             )
                             errored += 1
+                            tracker_merge_errors += 1
                             if len(errored_details) < _ERRORED_DETAILS_MAX:
                                 errored_details.append(
                                     {
@@ -2386,6 +2398,7 @@ def _strategy_lab_worker(
                                 {
                                     "errored_cycles": errored,
                                     "errored_details": errored_details,
+                                    "tracker_merge_error_count": tracker_merge_errors,
                                 }
                             )
                             _publish(
@@ -2425,7 +2438,10 @@ def _strategy_lab_worker(
 
         if run_cancelled:
             _update_run({"status": "cancelled", "current_cycle": None, "current_batch": None})
-            _publish("error", {"detail": "Run cancelled by user"})
+            # `cancelled: True` is the sole authoritative cancellation signal for
+            # SSE consumers — the only publish() call site that sets it, so a
+            # client never has to infer intent from `detail`'s free text.
+            _publish("error", {"detail": "Run cancelled by user", "cancelled": True})
             return
 
         msg = (

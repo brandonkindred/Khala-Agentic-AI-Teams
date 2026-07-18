@@ -26,23 +26,42 @@ import { expectNoAxeViolations } from '../../testing/a11y';
 /**
  * A `StrategyLabRunService` test double: real signals so components read
  * them exactly as they would the live service; tests drive state directly
- * via `.set()`. See `strategy-lab.component.spec.ts` for the same pattern.
+ * via `.set()`. `startRun` mirrors the real service's field resets (matching
+ * `strategy-lab.component.spec.ts`'s copy of this stub) so a test that
+ * exercises the "start a new run" path sees the same stale-state cleanup the
+ * real service performs, rather than a no-op.
  */
 function createRunServiceStub() {
+  const runStatus = signal<StrategyLabRunStatus | null>(null);
+  const running = signal(false);
+  const activeRunId = signal<string | null>(null);
+  const paperTradingSessions = signal<Record<string, PaperTradingSession>>({});
+  const paperTradingLabRecordId = signal<string | null>(null);
+  const lastTerminalStatus = signal<StrategyLabRunStatus | null>(null);
   return {
-    runStatus: signal<StrategyLabRunStatus | null>(null),
-    running: signal(false),
-    activeRunId: signal<string | null>(null),
-    paperTradingSessions: signal<Record<string, PaperTradingSession>>({}),
-    paperTradingLabRecordId: signal<string | null>(null),
-    lastTerminalStatus: signal<StrategyLabRunStatus | null>(null),
+    runStatus,
+    running,
+    activeRunId,
+    paperTradingSessions,
+    paperTradingLabRecordId,
+    lastTerminalStatus,
     events$: new Subject<StrategyLabStreamEvent>(),
     errors$: new Subject<string>(),
     checkForActiveRun: vi.fn(),
-    startRun: vi.fn(),
-    clearPaperTradingSessions: vi.fn(),
-    hydratePaperTradingSessions: vi.fn(),
-    trackPaperTradingSession: vi.fn(),
+    startRun: vi.fn((runId: string, status: StrategyLabRunStatus) => {
+      lastTerminalStatus.set(null);
+      activeRunId.set(runId);
+      runStatus.set(status);
+      running.set(true);
+    }),
+    clearPaperTradingSessions: vi.fn(() => paperTradingSessions.set({})),
+    hydratePaperTradingSessions: vi.fn((sessions: Record<string, PaperTradingSession>) =>
+      paperTradingSessions.set(sessions),
+    ),
+    trackPaperTradingSession: vi.fn((labRecordId: string, session: PaperTradingSession) => {
+      paperTradingSessions.update((s) => ({ ...s, [labRecordId]: session }));
+      paperTradingLabRecordId.set(labRecordId);
+    }),
   };
 }
 
@@ -638,9 +657,10 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // Regression: main.py's wave loop can publish cycle_complete for a
     // cycle, then separately publish cycle_errored for that same
     // cycle_index if the post-completion convergence-tracker merge step
-    // throws (tagged reason: 'tracker_merge_failed' in errored_details).
-    // Naively summing completed_cycles + skipped_cycles + errored_cycles
-    // would count that one cycle twice.
+    // throws (tagged reason: 'tracker_merge_failed' in errored_details, and
+    // counted in the uncapped tracker_merge_error_count). Naively summing
+    // completed_cycles + skipped_cycles + errored_cycles would count that
+    // one cycle twice.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -654,6 +674,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       errored_details: [
         { cycle_index: 2, error: 'merge boom', reason: 'tracker_merge_failed' },
       ],
+      tracker_merge_error_count: 1,
       completed_record_ids: ['rec-1', 'rec-2'],
     });
     fixture.detectChanges();
@@ -666,17 +687,19 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
-  it('does not announce "Finishing up" early when a saturated tracker-merge correction under-subtracts', async () => {
-    // Regression: errored_details is capped at 50 entries server-side, but
-    // errored_cycles is not. For a 70-cycle run where 60 cycles each hit a
-    // post-completion tracker-merge failure, the visible correction (50
-    // entries) under-subtracts, so the naive attemptedCycles computes to
-    // 60 + 0 + 60 - 50 = 70 — equal to total_cycles, wrongly crossing the
-    // "Finishing up" threshold 10 cycles early even though the run has
-    // genuinely only gotten through 60 of 70. Saturation detection
-    // suppresses that false "Finishing up" and the position clamp then
-    // holds the announced number at total_cycles instead of the impossible
-    // "Strategy 71 of 70" the inflated count would otherwise produce.
+  it('corrects a tracker-merge double-count exactly via the uncapped counter, even once errored_details has evicted the matching entries', async () => {
+    // Regression: errored_details is capped at 50 entries server-side and
+    // the frontend reducer additionally re-caps it to the 50 MOST RECENT
+    // entries. For a 70-cycle run where 10 early cycles each hit a
+    // post-completion tracker-merge failure and 50 later, unrelated cycles
+    // also errored, errored_details holds only those 50 later (non-tracker)
+    // entries — every tracker-merge entry has evicted. A correction derived
+    // by filtering errored_details would read 0 double-counts and wrongly
+    // compute attemptedCycles as 10 + 0 + 60 - 0 = 70 (equal to
+    // total_cycles, prematurely announcing "Finishing up" 10 cycles early).
+    // tracker_merge_error_count is backend-sourced and uncapped, so the
+    // correction (10 + 0 + 60 - 10 = 60) stays exact regardless of what's
+    // still visible in errored_details.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -684,19 +707,20 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       status: 'running',
       started_at: '2024-06-01T00:00:00Z',
       total_cycles: 70,
-      completed_cycles: 60,
+      completed_cycles: 10,
       skipped_cycles: 0,
       errored_cycles: 60,
       errored_details: Array.from({ length: 50 }, (_, i) => ({
-        cycle_index: i + 1,
-        error: 'merge boom',
-        reason: 'tracker_merge_failed' as const,
+        cycle_index: i + 11,
+        error: 'boom',
+        reason: 'ValueError',
       })),
-      completed_record_ids: Array.from({ length: 60 }, (_, i) => `rec-${i + 1}`),
+      tracker_merge_error_count: 10,
+      completed_record_ids: Array.from({ length: 10 }, (_, i) => `rec-${i + 1}`),
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 70 of 70 — Run in progress.');
+    expect(liveRegionText(fixture)).toBe('Strategy 61 of 70 — Run in progress.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -987,10 +1011,13 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
-  it('announces a cancellation, not a failure, when the terminal error is a user cancellation', async () => {
+  it('announces a cancellation, not a failure, when the terminal error carries the structured cancelled flag', async () => {
     // Regression: the backend has no distinct cancel event type — user
-    // cancellations are published as a terminal `error` event whose detail
-    // says so. That's a deliberate stop, not a failure.
+    // cancellations are published as a terminal `error` event carrying
+    // `cancelled: true` (the sole authoritative signal — never inferred from
+    // `detail`'s free text, since a genuine failure's exception message
+    // isn't constrained to exclude the word "cancel"). That's a deliberate
+    // stop, not a failure.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -1004,12 +1031,43 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
     fixture.detectChanges();
 
-    stubOf(fixture).events$.next({ type: 'error', detail: 'Run cancelled by user' });
+    stubOf(fixture).events$.next({ type: 'error', detail: 'Run cancelled by user', cancelled: true });
     stubOf(fixture).running.set(false);
     stubOf(fixture).runStatus.set(null);
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run cancelled.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a failure, not a cancellation, when a genuine error message happens to mention "cancel"', async () => {
+    // Regression: before the structured `cancelled` flag, cancellation was
+    // detected via a /cancel/i regex on `detail`'s free text — a genuine
+    // failure whose exception message happened to mention "cancel" (e.g. an
+    // internal CancelledError surfacing during a real error) was
+    // misannounced as a deliberate stop.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'error',
+      detail: 'Cycle 3 failed: CancelledError()',
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
