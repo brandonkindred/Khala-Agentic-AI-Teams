@@ -825,25 +825,40 @@ def compensate_activity(
           absorbed by the orchestrator (best effort) — every step there,
           including the Docker teardown, is individually try/except-wrapped
           so one failing step doesn't block the others.
-        * When ``tear_down_environment`` is ``True``: raises ``RuntimeError``
-          when the docker provisioner still confirms (or can't rule out) a
-          live container for ``agent_id`` after ``compensate`` returns —
-          checked directly against the deterministic container name via
-          ``verify_and_remove_orphan``, not merely the provisioner's own
-          idempotency state, since a container can exist with no
-          corresponding state row (e.g. persisting that state failed right
-          after ``docker run`` succeeded, and the best-effort removal that
-          followed that specific failure also failed) — a state-only check
-          would then see nothing to clean up and report false success.
-          Raising here (rather than silently returning as if teardown
-          succeeded) lets Temporal's own retry policy give teardown another
-          attempt instead of leaking the container — the workflow's
-          setup-failure path in particular relies on this activity actually
-          retrying when its local rollback fails.
         * When ``job_id`` is set: clears ``completed_phases`` / ``phase_results``
-          so a later ``/resume`` cannot skip credential_generation (or setup)
-          after CredentialStore / Docker were torn down. Missing jobs are a
+          immediately after ``compensate`` returns — BEFORE the docker
+          verification below, which can raise — so a later ``/resume`` can
+          never skip credential_generation (or setup) on the strength of
+          checkpoints that survived only because this activity happened to
+          fail on its final check. ``compensate`` may already have torn down
+          CredentialStore / Docker / the env record by that point regardless
+          of whether verification below then raises. Missing jobs are a
           no-op; job-store write failures raise for Temporal retry.
+        * When ``tear_down_environment`` is ``True`` AND ``compensate``
+          reports it is safe to (see its own return contract — ``False``
+          specifically means the environment record removal itself failed,
+          so ``cleanup_setup`` deliberately left a live container in place
+          to stay consistent with that surviving record): raises
+          ``RuntimeError`` when the docker provisioner still confirms (or
+          can't rule out) a live container for ``agent_id`` after
+          ``compensate`` returns — checked directly against the
+          deterministic container name via ``verify_and_remove_orphan``, not
+          merely the provisioner's own idempotency state, since a container
+          can exist with no corresponding state row (e.g. persisting that
+          state failed right after ``docker run`` succeeded, and the
+          best-effort removal that followed that specific failure also
+          failed) — a state-only check would then see nothing to clean up
+          and report false success. Raising here (rather than silently
+          returning as if teardown succeeded) lets Temporal's own retry
+          policy give teardown another attempt instead of leaking the
+          container — the workflow's setup-failure path in particular relies
+          on this activity actually retrying when its local rollback fails.
+          When ``compensate`` reports ``False``, this independent by-name
+          verification is skipped entirely rather than raising or silently
+          declaring success — probing by name in that case cannot tell "an
+          orphan with no state row" apart from "the container a surviving
+          record still legitimately references", and removing the latter
+          would leave that record pointing at a dead container.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -860,9 +875,18 @@ def compensate_activity(
         )
         for t in succeeded_tools
     ]
-    orch.compensate(agent_id, shims, tear_down_environment=tear_down_environment)
+    safe_to_verify_by_name = orch.compensate(
+        agent_id, shims, tear_down_environment=tear_down_environment
+    )
 
-    if tear_down_environment:
+    if job_id:
+        # Compensate tears down Docker, env, and CredentialStore — no prior
+        # phase remains safe to skip on resume. Cleared before the
+        # (possibly-raising) verification below so a raise there can never
+        # leave stale, resumable checkpoints over already-torn-down state.
+        _js.clear_completed_phases(job_id)
+
+    if tear_down_environment and safe_to_verify_by_name:
         docker = orch.tool_agents.get("docker_provisioner")
         if docker is not None and not docker.verify_and_remove_orphan(agent_id):
             raise RuntimeError(
@@ -870,11 +894,6 @@ def compensate_activity(
                 "complete (container still confirmed alive, or its state is unknown, "
                 "after compensate)"
             )
-
-    if job_id:
-        # Compensate tears down Docker, env, and CredentialStore — no prior
-        # phase remains safe to skip on resume.
-        _js.clear_completed_phases(job_id)
 
 
 @activity.defn(name="agent_provisioning_mark_job_failed")

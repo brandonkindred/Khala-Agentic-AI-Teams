@@ -1036,6 +1036,7 @@ def test_compensate_activity_raises_when_docker_state_survives() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
+    fake_orch.compensate.return_value = True
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = False
     with (
         patch(
@@ -1047,9 +1048,39 @@ def test_compensate_activity_raises_when_docker_state_survives() -> None:
         with pytest.raises(RuntimeError, match="did not complete"):
             activities.compensate_activity("a1", [], job_id="j-comp")
 
-    # A raised activity must not still clear phase checkpoints as if resume
-    # were now safe — teardown didn't actually finish.
-    mock_clear.assert_not_called()
+    # Checkpoints are cleared BEFORE this verification step, specifically so
+    # a raise here (this step alone failing) cannot leave stale, resumable
+    # checkpoints over state compensate() may have already torn down.
+    mock_clear.assert_called_once_with("j-comp")
+
+
+def test_compensate_activity_skips_docker_verification_when_env_removal_unsafe() -> None:
+    """A False return from compensate() means the env record may have survived.
+
+    compensate() returns False only when tear_down_environment=True and
+    cleanup_setup raised — cleanup_setup removes the environment record
+    before deprovisioning the container specifically so a raise there (the
+    record removal itself failing) leaves both untouched and consistent. An
+    independent by-name probe afterward can't distinguish "an orphan with no
+    state row" from "the container a surviving record still legitimately
+    references" — so it must be skipped entirely rather than risk deleting
+    the latter.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.compensate.return_value = False
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=True)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
+    mock_clear.assert_called_once_with("j-comp")
 
 
 def test_compensate_activity_skips_verification_without_docker_provisioner() -> None:

@@ -356,7 +356,7 @@ class ProvisioningOrchestrator:
         agent_id: str,
         tool_results: List[Any],
         tear_down_environment: bool = True,
-    ) -> None:
+    ) -> bool:
         """Roll back partial provisioning after a phase failure.
 
         Public entry point for Temporal ``compensate_activity`` and in-process
@@ -402,6 +402,21 @@ class ProvisioningOrchestrator:
               newly-provisioned tool from THIS attempt still gets rolled
               back, but the environment this attempt never created is left
               untouched.
+            * Returns whether it is safe for an independent caller to reclaim
+              an orphaned container by ``agent_id``'s deterministic name
+              alone (e.g. ``compensate_activity``'s own
+              ``verify_and_remove_orphan`` follow-up check): ``True`` when
+              ``tear_down_environment`` is ``False`` (no environment teardown
+              was attempted, so there is nothing to reconcile against), or
+              when it is ``True`` and ``cleanup_setup`` returned without
+              raising. ``False`` only when ``tear_down_environment`` is
+              ``True`` and ``cleanup_setup`` raised — ``cleanup_setup``
+              removes the environment record before deprovisioning the
+              container specifically so a raise (record removal itself
+              failing) leaves both untouched and consistent; a caller
+              probing by name afterward without checking this return value
+              could still find that live, correctly-preserved container and
+              delete it out from under its surviving ``running`` record.
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293
@@ -491,7 +506,7 @@ class ProvisioningOrchestrator:
                     logger.exception("Compensation: credential cleanup failed for %s", tool_name)
 
         if not tear_down_environment:
-            return
+            return True
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker is not None:
@@ -509,6 +524,9 @@ class ProvisioningOrchestrator:
             cleanup_setup(agent_id, self.environment_store)
         except Exception:  # noqa: BLE001
             logger.exception("Compensation: environment cleanup failed")
+            return False
+
+        return True
 
     def deprovision(
         self,

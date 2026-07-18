@@ -716,6 +716,21 @@ class AgentProvisioningWorkflow:
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior
             )
+            if environment_dump is not None and environment_dump.get("reused") is False:
+                # Setup's own confirmed outcome is stronger evidence than the
+                # pre-check: a container run_setup just created cannot also
+                # predate this run, so nothing at agent_id could have either
+                # — this corrects a pre-check that was itself conservative or
+                # inconclusive (e.g. an unreadable registry, or a stale
+                # record whose backing container turned out to be gone, so
+                # run_setup created a fresh one in its place). Only trusted
+                # in this direction: reused=True is never used to flip
+                # pre_existing_environment to True, since it can also be
+                # this same run's own retry of setup_activity reading back
+                # its own earlier (response-lost) success as "existing" —
+                # the same ambiguity documented on _compensate_failed_tools
+                # for tool-level reuse, tracked in #1489.
+                pre_existing_environment = False
             await _renew_or_mark_lost()
 
             # Freeze manifest tools once for credential + provision phases so a

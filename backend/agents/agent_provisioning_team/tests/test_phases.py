@@ -563,6 +563,7 @@ def test_run_setup_calls_on_registered_with_fresh_environment(tmp_path: Path) ->
     assert result.success is True
     assert len(received) == 1
     assert received[0].container_id == "c-new"
+    assert result.environment.reused is False
 
 
 def test_run_setup_skips_on_registered_on_fast_path(tmp_path: Path) -> None:
@@ -590,6 +591,7 @@ def test_run_setup_skips_on_registered_on_fast_path(tmp_path: Path) -> None:
 
     assert result.success is True
     assert received == []
+    assert result.environment.reused is True
 
 
 def test_run_setup_rollback_swallows_deprovision_error() -> None:

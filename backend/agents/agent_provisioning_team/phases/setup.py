@@ -94,6 +94,7 @@ def run_setup(
                 ssh_port=existing.ssh_port,
                 workspace_path=existing.workspace_path,
                 status="running",
+                reused=True,
             ),
         )
 
@@ -138,6 +139,7 @@ def run_setup(
             ssh_port=result.details.get("ssh_port", 22),
             workspace_path=result.details.get("workspace_path", f"/workspace/{agent_id}"),
             status="running",
+            reused=bool(result.details.get("reused", False)),
         )
 
         env_store.register(

@@ -68,6 +68,10 @@ def test_environment_info():
     assert env.ssh_host == "localhost"
     assert env.ssh_port == 22
     assert env.status == "running"
+    # Defaults to True (conservative "don't know, assume reused") so data
+    # reconstructed from before this field existed can't silently read as an
+    # explicit False — both run_setup call sites always set this explicitly.
+    assert env.reused is True
 
 
 def test_tool_provision_result_success():

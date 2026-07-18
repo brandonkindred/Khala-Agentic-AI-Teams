@@ -918,6 +918,79 @@ async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_workflow_setup_reused_false_overrides_conservative_pre_check(tmp_path) -> None:
+    """Setup's own confirmed-fresh outcome corrects an inconclusive pre-check.
+
+    check_existing_environment_activity's pre-check can be conservative (an
+    unreadable registry, or now, a stale record whose container turned out
+    to be gone) and report pre_existing_environment=True even though
+    run_setup then goes on to create an entirely fresh container. Since a
+    container run_setup just created cannot also predate this run, its own
+    environment.reused=False must override that earlier guess — a later
+    failure must still tear the fresh environment down (tear_down_environment
+    stays True), not preserve it as if it were pre-existing.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "check_existing_environment_activity": True,
+            "setup_activity": {
+                "success": True,
+                "environment": {"workspace_path": "/w", "reused": False},
+            },
+            "credentials_activity": RuntimeError("cred boom"),
+            "compensate_activity": None,
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="cred boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
+
+
+@pytest.mark.asyncio
+async def test_workflow_setup_reused_true_does_not_override_pre_check(tmp_path) -> None:
+    """environment.reused=True must never flip pre_existing_environment to True.
+
+    Unlike reused=False (unambiguous), reused=True is not trustworthy
+    evidence of a genuinely pre-existing environment on its own — it can
+    also reflect this same run's own retried setup_activity reading back its
+    own earlier (response-lost) success as "already there". So it must never
+    override a pre-check that already concluded pre_existing_environment is
+    False (tear_down_environment stays True here, unaffected by
+    environment.reused).
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "check_existing_environment_activity": False,
+            "setup_activity": {
+                "success": True,
+                "environment": {"workspace_path": "/w", "reused": True},
+            },
+            "credentials_activity": RuntimeError("cred boom"),
+            "compensate_activity": None,
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="cred boom"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    compensate_call = _call(stub, "compensate_activity")
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
+
+
+@pytest.mark.asyncio
 async def test_workflow_compensates_succeeded_tools_on_checkpoint_failure(tmp_path) -> None:
     """Checkpoint failure after fan-out must roll back tools that already succeeded."""
     from agent_provisioning_team.temporal import workflows as wf
