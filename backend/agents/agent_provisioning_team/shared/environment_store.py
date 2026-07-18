@@ -6,6 +6,7 @@ Maintains mapping of agent IDs to their container information.
 
 import json
 import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -243,15 +244,21 @@ class EnvironmentStore:
         Postconditions:
             * Returns ``(data, path)`` when a candidate file parses as a dict with
               the required ``agent_id`` / ``container_id`` / ``container_name`` keys.
-            * Malformed JSON or incomplete records are skipped (treated as absent).
+            * Malformed JSON, invalid UTF-8 bytes, or incomplete records are
+              skipped (treated as absent).
         """
         required = ("agent_id", "container_id", "container_name")
         for path in self._env_file_candidates(agent_id):
-            if not path.exists():
-                continue
+            # Path.exists() itself can raise OSError (e.g. EACCES on a parent
+            # directory), so it lives inside the handler — otherwise `get`'s
+            # "never raises" postcondition would be false. read_text() can also
+            # raise UnicodeDecodeError on invalid UTF-8 bytes, which is neither
+            # OSError nor JSONDecodeError.
             try:
+                if not path.exists():
+                    continue
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 continue
             if not isinstance(data, dict) or any(k not in data for k in required):
                 continue
@@ -261,10 +268,36 @@ class EnvironmentStore:
     def _write_env_data(
         self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None
     ) -> None:
-        """Persist environment JSON to the primary store, dropping a legacy copy."""
+        """Persist environment JSON to the primary store, dropping a legacy copy.
+
+        Postconditions:
+            * The write is atomic (tempfile → fsync → ``os.replace``, matching
+              ``provisioner_state._save``): on any failure the primary file holds
+              its previous content — never a truncated or partial record — so a
+              raising write leaves the prior registration intact.
+            * The temp file's suffix is deliberately not ``.json``:
+              ``list_all``'s ``glob("*.json")`` (unlike shell globbing) matches
+              dotfiles too, so a fully-written temp file left behind by a crash
+              between ``fsync`` and ``os.replace`` would otherwise be scanned as
+              a phantom environment record indistinguishable from a real one.
+        """
         primary = self._env_file(agent_id)
         primary.parent.mkdir(parents=True, exist_ok=True)
-        primary.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{primary.stem}.", suffix=".tmp", dir=str(primary.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, primary)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         if source is not None and source != primary and source.exists():
             source.unlink()
 
@@ -277,6 +310,9 @@ class EnvironmentStore:
         Postconditions:
             * ``env_info`` is serialized to the primary store, replacing any
               prior record for the same ``agent_id``.
+            * The replacement is atomic: if the write raises, the prior record
+              (or the absence of one) is preserved unchanged — a failed register
+              never leaves a truncated or partial record behind.
             * Returns ``None``.
         """
         if env_info is None:
@@ -285,6 +321,68 @@ class EnvironmentStore:
             raise ValueError("agent_id must not be empty")
         with _lock:
             self._write_env_data(env_info.agent_id, env_info.to_dict())
+
+    def readable(self, agent_id: str) -> bool:
+        """Report whether ``agent_id``'s record location(s) can be examined now.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns ``True`` iff every existing candidate path for
+              ``agent_id`` (primary store, then legacy locations) is either
+              genuinely absent, or present and parses as a well-formed record
+              that also passes the same semantic validation ``get`` applies
+              (via ``EnvironmentInfo.from_dict``); never raises.
+            * A path that does not exist is not a readability failure. A path
+              that exists but cannot be stat'd/read (``OSError``), whose bytes
+              are not valid UTF-8 (``UnicodeDecodeError``), or whose content is
+              not a well-formed record (malformed JSON, valid JSON missing a
+              required key, or a required key present with an invalid value —
+              e.g. an out-of-range ``ssh_port`` — that fails construction), IS a
+              readability failure — such a file is evidence *something* was
+              written there, which must not be conflated with confirmed
+              absence.
+
+        A listable directory is not sufficient: the specific record file can be
+        individually unreadable (bad mode, transient I/O error) while sibling
+        files list fine, and a legacy-location record is invisible to a
+        primary-only directory listing. Nor is "the bytes could be read"
+        sufficient on its own: ``get`` maps a malformed/incomplete/invalid
+        record to ``None`` — correct for lookups, since callers don't care why
+        a record is unusable — but a destructive rollback caller needs to know
+        the difference between "confirmed nothing was ever registered here"
+        and "something is here but we can't trust it" before treating
+        ``get() is None`` as proof an orphan is safe to reclaim. Applying the
+        exact same validation as ``get`` (rather than a shallower "required
+        keys present" check) keeps the two methods from disagreeing on a
+        present-but-invalid record — disagreement that previously let such a
+        record be misread as confirmed absence.
+
+        Deliberately does not pre-check with ``Path.exists()``: it stats the
+        path and treats *any* ``OSError`` (not just "doesn't exist") as
+        `False`, so a transient stat failure (e.g. a parent directory
+        temporarily returning ``EACCES``) would be indistinguishable from
+        confirmed absence and this method would wrongly report readable.
+        Attempting the read directly and catching ``FileNotFoundError``
+        specifically (rather than ``OSError`` broadly) preserves that
+        distinction.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        with _lock:
+            for path in self._env_file_candidates(agent_id):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    continue
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    return False
+                if not isinstance(data, dict):
+                    return False
+                try:
+                    EnvironmentInfo.from_dict(data)
+                except (KeyError, TypeError, ValueError):
+                    return False
+        return True
 
     def get(self, agent_id: str) -> Optional[EnvironmentInfo]:
         """Get environment info for an agent.

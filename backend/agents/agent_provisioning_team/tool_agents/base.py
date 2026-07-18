@@ -146,6 +146,7 @@ class BaseToolProvisioner(ABC):
         create: Callable[[CompensationRegistrar], Tuple[List[str], Dict[str, Any]]],
         hydrate_extras: Tuple[str, ...] = (),
         reuse: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
+        on_persist_failure: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> ToolProvisionResult:
         """Run ``create`` once per (provisioner, agent_id); reuse stored state on subsequent calls.
 
@@ -178,11 +179,26 @@ class BaseToolProvisioner(ABC):
             current access tier.
           - When neither is enough to derive permissions, the default is
             ``stored_details.get("permissions", [])``.
+          - ``reuse`` may also raise to reject stale stored state instead of
+            trusting it (e.g. a provisioner that confirms the underlying
+            resource no longer exists): the exception is caught by the same
+            handling as ``create``'s, producing an error result instead of a
+            silently-wrong success.
         * Exceptions from infrastructure boundaries (missing binaries, subprocess
           timeouts, permission errors) are caught and converted to error results.
           Compensation records already registered before the exception remain
           persisted for the orchestrator to replay. Domain validation failures
           should ``return self._make_error_result(...)`` from inside ``create``.
+        * ``on_persist_failure(details)`` runs when ``create`` succeeds but the
+          follow-up ``state.put`` then raises (e.g. a full or read-only cache).
+          ``details`` is exactly what ``create`` just returned, so a provisioner
+          that created an out-of-band resource (a container, a role) can use it
+          to tear that resource down directly by name — the store never
+          recorded it, so the normal state-lookup-based ``deprovision(agent_id)``
+          path has nothing to find. Exceptions from ``on_persist_failure`` are
+          logged and swallowed so cleanup can never mask the original
+          persistence failure, which still propagates to the error-result
+          translation below.
         """
         state = self._state
 
@@ -206,7 +222,19 @@ class BaseToolProvisioner(ABC):
                 )
 
             permissions, details = create(_register)
-            state.put(agent_id, details)
+            try:
+                state.put(agent_id, details)
+            except Exception:
+                if on_persist_failure is not None:
+                    try:
+                        on_persist_failure(details)
+                    except Exception:
+                        logger.exception(
+                            "%s: on_persist_failure cleanup raised for agent_id=%s",
+                            self.tool_name,
+                            agent_id,
+                        )
+                raise
             return self._make_success_result(
                 credentials=credentials,
                 permissions=permissions,
