@@ -50,6 +50,7 @@ describe('reduce (strategy-lab-run.reducer)', () => {
           total_batches: 2,
         },
         { type: 'error', detail: 'Run failed' },
+        { type: 'cancelled', detail: 'Run cancelled by user' },
         { type: 'done' },
       ];
       for (const event of events) {
@@ -510,9 +511,11 @@ describe('reduce (strategy-lab-run.reducer)', () => {
       // A terminal 'error' event carries no structured outcome field (only
       // free-text detail/error), so 'failed' is a safe default that can
       // never misreport as success — same regression rationale as
-      // 'complete' above. The component's own detail-based classification
-      // (failed/cancelled/connection-lost) for the live announcement reads
-      // the event directly, outside this reducer.
+      // 'complete' above. A genuine user cancellation is never routed
+      // through 'error' (it's its own 'cancelled' event type — see below),
+      // so 'failed' is always correct here. The component's own detail-based
+      // classification (failed/connection-lost) for the live announcement
+      // reads the event directly, outside this reducer.
       const events: StrategyLabStreamEvent[] = [
         { type: 'error', detail: 'Run failed' },
         { type: 'error', error: 'subscription reclaimed' },
@@ -523,6 +526,17 @@ describe('reduce (strategy-lab-run.reducer)', () => {
         expect(result).not.toBe(baseState);
         expect(result).toEqual({ ...baseState, status: 'failed' });
       }
+    });
+  });
+
+  describe('cancelled', () => {
+    it('folds a "cancelled" status into state, leaving every other field unchanged', () => {
+      const event: StrategyLabStreamEvent = { type: 'cancelled', detail: 'Run cancelled by user' };
+
+      const result = reduce(baseState, event);
+
+      expect(result).not.toBe(baseState);
+      expect(result).toEqual({ ...baseState, status: 'cancelled' });
     });
   });
 });

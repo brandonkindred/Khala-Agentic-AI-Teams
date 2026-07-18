@@ -535,12 +535,13 @@ def test_merge_from_failure_does_not_halt_run(
     assert state["tracker_merge_error_count"] == 1
 
 
-def test_cancelled_run_publishes_structured_cancelled_flag(
+def test_cancelled_run_publishes_distinct_cancelled_event(
     empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The user-cancellation error event carries `cancelled: True` so SSE
-    consumers can tell a deliberate stop apart from a genuine failure without
-    inspecting `detail`'s free text."""
+    """A user cancellation publishes its own terminal `cancelled` SSE event
+    type (not folded into `error`), mirroring the blogging team's own
+    cancelled-job publish, so SSE consumers can tell a deliberate stop apart
+    from a genuine failure by `type` alone."""
 
     class _Orch:
         _counter = 0
@@ -588,10 +589,10 @@ def test_cancelled_run_publishes_structured_cancelled_flag(
     state = lab_main._active_runs[run_id]
     assert state["status"] == "cancelled"
 
-    error_events = [e for e in published if e["type"] == "error"]
-    assert len(error_events) == 1
-    assert error_events[0]["detail"] == "Run cancelled by user"
-    assert error_events[0]["cancelled"] is True
+    assert not [e for e in published if e["type"] == "error"]
+    cancelled_events = [e for e in published if e["type"] == "cancelled"]
+    assert len(cancelled_events) == 1
+    assert cancelled_events[0]["detail"] == "Run cancelled by user"
 
 
 def test_restart_accepts_completed_with_errors(

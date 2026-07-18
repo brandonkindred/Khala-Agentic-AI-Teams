@@ -1,6 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
-import { of, NEVER, Subject } from 'rxjs';
+import { of, NEVER } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
@@ -11,10 +10,9 @@ import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
+import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
 import type {
   StrategyLabRecord,
-  StrategyLabRunStatus,
-  StrategyLabStreamEvent,
   StrategySpec,
   TradeRecord,
   PaperTradingSession,
@@ -22,50 +20,6 @@ import type {
   QualityGateResult,
 } from '../../models';
 import { expectNoAxeViolations } from '../../testing/a11y';
-
-/**
- * A `StrategyLabRunService` test double: real signals so components read
- * them exactly as they would the live service; tests drive state directly
- * via `.set()`. `startRun` mirrors the real service's field resets (matching
- * `strategy-lab.component.spec.ts`'s copy of this stub) so a test that
- * exercises the "start a new run" path sees the same stale-state cleanup the
- * real service performs, rather than a no-op.
- */
-function createRunServiceStub() {
-  const runStatus = signal<StrategyLabRunStatus | null>(null);
-  const running = signal(false);
-  const activeRunId = signal<string | null>(null);
-  const paperTradingSessions = signal<Record<string, PaperTradingSession>>({});
-  const paperTradingLabRecordId = signal<string | null>(null);
-  const lastTerminalStatus = signal<StrategyLabRunStatus | null>(null);
-  return {
-    runStatus,
-    running,
-    activeRunId,
-    paperTradingSessions,
-    paperTradingLabRecordId,
-    lastTerminalStatus,
-    events$: new Subject<StrategyLabStreamEvent>(),
-    errors$: new Subject<string>(),
-    checkForActiveRun: vi.fn(),
-    startRun: vi.fn((runId: string, status: StrategyLabRunStatus) => {
-      lastTerminalStatus.set(null);
-      activeRunId.set(runId);
-      runStatus.set(status);
-      running.set(true);
-    }),
-    clearPaperTradingSessions: vi.fn(() => paperTradingSessions.set({})),
-    hydratePaperTradingSessions: vi.fn((sessions: Record<string, PaperTradingSession>) =>
-      paperTradingSessions.set(sessions),
-    ),
-    trackPaperTradingSession: vi.fn((labRecordId: string, session: PaperTradingSession) => {
-      paperTradingSessions.update((s) => ({ ...s, [labRecordId]: session }));
-      paperTradingLabRecordId.set(labRecordId);
-    }),
-  };
-}
-
-type RunServiceStub = ReturnType<typeof createRunServiceStub>;
 
 /** The `StrategyLabRunService` stub a fixture's component was constructed with — see `createRunServiceStub`. */
 function stubOf(fixture: ComponentFixture<StrategyLabComponent>): RunServiceStub {
@@ -1011,13 +965,11 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
-  it('announces a cancellation, not a failure, when the terminal error carries the structured cancelled flag', async () => {
-    // Regression: the backend has no distinct cancel event type — user
-    // cancellations are published as a terminal `error` event carrying
-    // `cancelled: true` (the sole authoritative signal — never inferred from
-    // `detail`'s free text, since a genuine failure's exception message
-    // isn't constrained to exclude the word "cancel"). That's a deliberate
-    // stop, not a failure.
+  it('announces a cancellation, not a failure, for a distinct "cancelled" terminal event', async () => {
+    // Regression: user cancellations are published as their own 'cancelled'
+    // terminal event type (not folded into 'error'), mirroring the blogging
+    // team's own cancelled-job SSE event — a deliberate stop, not a failure,
+    // and never inferred from `detail`'s free text.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -1031,7 +983,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
     fixture.detectChanges();
 
-    stubOf(fixture).events$.next({ type: 'error', detail: 'Run cancelled by user', cancelled: true });
+    stubOf(fixture).events$.next({ type: 'cancelled', detail: 'Run cancelled by user' });
     stubOf(fixture).running.set(false);
     stubOf(fixture).runStatus.set(null);
     fixture.detectChanges();
@@ -1041,11 +993,13 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
   }, 15000);
 
   it('announces a failure, not a cancellation, when a genuine error message happens to mention "cancel"', async () => {
-    // Regression: before the structured `cancelled` flag, cancellation was
-    // detected via a /cancel/i regex on `detail`'s free text — a genuine
+    // Regression: before cancellation had its own distinct event type, it
+    // was detected via a /cancel/i regex on `detail`'s free text — a genuine
     // failure whose exception message happened to mention "cancel" (e.g. an
     // internal CancelledError surfacing during a real error) was
-    // misannounced as a deliberate stop.
+    // misannounced as a deliberate stop. A type-based discriminator makes
+    // this structurally impossible: a real 'error' event can never be
+    // misread as 'cancelled' regardless of its text.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({

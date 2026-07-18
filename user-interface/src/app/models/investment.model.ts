@@ -1008,26 +1008,29 @@ export interface StrategyLabCompleteEvent {
   total_batches: number;
 }
 
-/**
- * `cancelled` is `true` only on the one strategy-lab call site that
- * publishes a genuine user cancellation (main.py: `_publish("error",
- * {"detail": "Run cancelled by user", "cancelled": True})`); the other two
- * `detail`-carrying error call sites never set it, so it's the sole
- * authoritative cancellation signal — no need to infer intent from
- * `detail`'s free text (which can't be constrained to exclude the word
- * "cancel" for a genuine failure).
- */
-export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; cancelled?: boolean; }
+export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; }
 export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; }
 /**
- * Two mutually-exclusive wire shapes: three strategy-lab call sites always
- * send `detail`; one shared-infra "subscription reclaimed" call site always
- * sends `error` instead. Each branch declares the other field as optional
- * `undefined` (rather than omitting it) so handleStreamEvent()'s existing
- * `event['detail'] as string` read still type-checks uniformly across the
- * union as `string | undefined`, without needing body changes here.
+ * Two mutually-exclusive wire shapes: two strategy-lab call sites always
+ * send `detail` (both genuine failure paths — user cancellation is its own
+ * `StrategyLabCancelledEvent`, not an `error`); one shared-infra
+ * "subscription reclaimed" call site always sends `error` instead. Each
+ * branch declares the other field as optional `undefined` (rather than
+ * omitting it) so handleStreamEvent()'s existing `event['detail'] as string`
+ * read still type-checks uniformly across the union as `string | undefined`,
+ * without needing body changes here.
  */
 export type StrategyLabErrorEvent = StrategyLabErrorDetailEvent | StrategyLabErrorReclaimEvent;
+
+/**
+ * Terminal event for a user-initiated cancellation — a distinct `type`
+ * rather than a flag bolted onto `error`, mirroring the blogging team's own
+ * cancelled-job SSE event (`backend/agents/blogging/api/background.py`'s
+ * `_publish_terminal_event(job_id, "cancelled", ...)`), the established
+ * pattern for this exact distinction elsewhere in the codebase. main.py's
+ * one cancellation call site is the sole publisher of this type.
+ */
+export interface StrategyLabCancelledEvent { type: 'cancelled'; detail: string; }
 
 /**
  * Sole terminal frame — always exactly `{ type: 'done' }`. The investment-api
@@ -1049,6 +1052,7 @@ export type StrategyLabStreamEvent =
   | StrategyLabBatchWarningEvent
   | StrategyLabCompleteEvent
   | StrategyLabErrorEvent
+  | StrategyLabCancelledEvent
   | StrategyLabDoneEvent;
 
 // ---------------------------------------------------------------------------

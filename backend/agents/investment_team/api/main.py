@@ -1781,6 +1781,7 @@ def _build_run_state(
     skipped_cycles: int = 0,
     errored_cycles: int = 0,
     errored_details: Optional[List[Any]] = None,
+    tracker_merge_error_count: int = 0,
     completed_record_ids: Optional[List[Any]] = None,
     completed_batches: int = 0,
 ) -> Dict[str, Any]:
@@ -1808,6 +1809,7 @@ def _build_run_state(
         "skipped_cycles": skipped_cycles,
         "errored_cycles": errored_cycles,
         "errored_details": errored_details if errored_details is not None else [],
+        "tracker_merge_error_count": tracker_merge_error_count,
         "current_cycle": None,
         "completed_record_ids": (completed_record_ids if completed_record_ids is not None else []),
         "error": None,
@@ -2074,6 +2076,30 @@ def _strategy_lab_worker(
     ``request.max_parallel`` cycles in parallel via a ThreadPoolExecutor.
     Between batches the signal-intelligence brief is regenerated so each new
     batch's strategies are informed by every prior batch's persisted records.
+
+    Preconditions:
+        - ``run_id`` already has an entry in ``_active_runs`` (seeded by the
+          run/resume/restart route before dispatch) whose ``errored_cycles``/
+          ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
+          reflect any prior progress to carry forward (``0``/empty for a
+          fresh run); ``start_cycle_offset`` is the 0-based global cycle
+          index to resume from (``0`` for a fresh run).
+    Postconditions:
+        - ``_active_runs[run_id]`` is continuously updated via ``_update_run``
+          and mirrored to persistent storage as each cycle/batch completes.
+          ``errored_cycles``/``errored_details`` grow by one entry per failed
+          cycle (the latter capped at ``_ERRORED_DETAILS_MAX``);
+          ``tracker_merge_error_count`` grows by one per post-completion
+          tracker-merge failure specifically, uncapped, so it can always be
+          subtracted from ``errored_cycles`` to recover an exact
+          double-count correction regardless of ``errored_details``'s cap.
+          On completion, ``status`` becomes ``"completed"`` or
+          ``"completed_with_errors"`` and a terminal ``complete`` SSE event
+          publishes; on external cancellation, ``status`` becomes
+          ``"cancelled"`` and a terminal ``cancelled`` SSE event publishes;
+          on an unhandled exception, ``status`` becomes ``"failed"`` and a
+          terminal ``error`` event publishes. Exactly one terminal SSE event
+          type (``complete``/``cancelled``/``error``) is published per call.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -2438,10 +2464,13 @@ def _strategy_lab_worker(
 
         if run_cancelled:
             _update_run({"status": "cancelled", "current_cycle": None, "current_batch": None})
-            # `cancelled: True` is the sole authoritative cancellation signal for
-            # SSE consumers — the only publish() call site that sets it, so a
-            # client never has to infer intent from `detail`'s free text.
-            _publish("error", {"detail": "Run cancelled by user", "cancelled": True})
+            # A distinct terminal event type — not folded into "error" — so SSE
+            # consumers never have to infer intent from `detail`'s free text.
+            # Mirrors the blogging team's own cancelled-job publish
+            # (agents/blogging/api/background.py: `_publish_terminal_event(job_id,
+            # "cancelled", ...)`), the established pattern for this exact
+            # distinction elsewhere in the codebase.
+            _publish("cancelled", {"detail": "Run cancelled by user"})
             return
 
         msg = (
@@ -2696,6 +2725,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         skipped_cycles=state.get("skipped_cycles", 0),
         errored_cycles=state.get("errored_cycles", 0),
         errored_details=state.get("errored_details", []),
+        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
         completed_record_ids=state.get("completed_record_ids", []),
         completed_batches=completed_batches,
     )
@@ -2898,7 +2928,7 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
     description=(
         "Server-Sent Events stream for real-time progress. Emits 'snapshot' on connect, "
         "'progress' at each phase, 'cycle_complete'/'cycle_skipped' per cycle, "
-        "and a terminal 'complete' or 'error' event."
+        "and a terminal 'complete', 'error', or 'cancelled' event."
     ),
 )
 async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
@@ -2938,7 +2968,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
             unsubscribe=unsubscribe,
             job_id=run_id,
             snapshot=_snapshot_event,
-            terminal_types=("complete", "error"),
+            terminal_types=("complete", "error", "cancelled"),
         ),
         media_type="text/event-stream",
     )

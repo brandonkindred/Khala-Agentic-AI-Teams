@@ -223,6 +223,31 @@ describe('StrategyLabRunService', () => {
       expect(service.lastTerminalStatus()?.status).toBe('failed');
     });
 
+    it('finishes the run on a "cancelled" event', () => {
+      // Regression: 'cancelled' is a distinct terminal event type (not
+      // folded into 'error'), so handleStreamEvent()'s finishRun() trigger
+      // must explicitly include it — otherwise a cancelled run would never
+      // clear running()/runStatus() or unsubscribe its SSE connection.
+      const sse = new Subject<StrategyLabStreamEvent>();
+      api.streamRunStatus.mockReturnValue(sse);
+      service.startRun('run-1', baseRunStatus);
+
+      sse.next({ type: 'cancelled', detail: 'Run cancelled by user' });
+
+      expect(service.running()).toBe(false);
+      expect(service.runStatus()).toBeNull();
+    });
+
+    it('captures "cancelled" into lastTerminalStatus on a "cancelled" event, not the stale initial "running"', () => {
+      const sse = new Subject<StrategyLabStreamEvent>();
+      api.streamRunStatus.mockReturnValue(sse);
+      service.startRun('run-1', baseRunStatus);
+
+      sse.next({ type: 'cancelled', detail: 'Run cancelled by user' });
+
+      expect(service.lastTerminalStatus()?.status).toBe('cancelled');
+    });
+
     it('finishes the run when the stream completes (the "done" sentinel)', () => {
       const sse = new Subject<StrategyLabStreamEvent>();
       api.streamRunStatus.mockReturnValue(sse);

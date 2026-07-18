@@ -575,8 +575,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   state.
    * Postconditions: `activityLog`, `completionWarning`, `error`, and
    *   `runOutcomeAnnouncement` are updated for event types that carry them
-   *   (`complete`/`error` set `runOutcomeAnnouncement` directly from the
-   *   terminal event's own data); `loadResults()` runs after a completed
+   *   (`complete`/`error`/`cancelled` set `runOutcomeAnnouncement` directly
+   *   from the terminal event's own data); `loadResults()` runs after a completed
    *   cycle (in addition to `refreshResultsOnRunFinish`'s once-per-run
    *   refresh — a multi-cycle run's earlier cycles need this mid-run call
    *   since `running()` stays true until the whole run ends).
@@ -650,17 +650,18 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         this.error.set(CONNECTION_LOST_MESSAGE);
         this.runOutcomeAnnouncement.set(CONNECTION_LOST_MESSAGE);
       } else {
+        // A genuine user cancellation is never routed through 'error' — it's
+        // its own 'cancelled' event type (branch below) — so every 'error'
+        // event reaching here is a real failure.
         const detail = event.detail || 'Run failed';
         this.error.set(detail);
-        // `cancelled` is the sole authoritative cancellation signal (see
-        // StrategyLabErrorDetailEvent's own doc) — set only by main.py's
-        // genuine user-cancellation publish, never inferred from `detail`'s
-        // free text, so a real failure whose exception message happens to
-        // mention "cancel" can't be misannounced as a deliberate stop.
-        this.runOutcomeAnnouncement.set(
-          event.cancelled ? 'Strategy Lab run cancelled.' : 'Strategy Lab run failed.',
-        );
+        this.runOutcomeAnnouncement.set('Strategy Lab run failed.');
       }
+    }
+
+    if (event.type === 'cancelled') {
+      this.error.set(event.detail);
+      this.runOutcomeAnnouncement.set('Strategy Lab run cancelled.');
     }
   }
 

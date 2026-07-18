@@ -17,11 +17,12 @@ import type {
  * Postconditions: for an event that carries no run-status field at all
  *   (`batch_warning`, `done`) or when `state` is `null` (no run is being
  *   tracked), returns the exact same `state` reference, unchanged.
- *   `complete`/`error` fold only `status` (`event.status`, or the safe
- *   default `'failed'` for `error`, which carries no structured outcome
- *   field) — every other field is unaffected, since the component derives
- *   the announcement/warning text for these two directly from the event
- *   outside this reducer. Every other event type returns a **new**
+ *   `complete`/`error`/`cancelled` fold only `status` (`event.status` for
+ *   `complete`; the safe default `'failed'` for `error`, which carries no
+ *   structured outcome field; the literal `'cancelled'` for `cancelled`) —
+ *   every other field is unaffected, since the component derives the
+ *   announcement/warning text for these directly from the event outside
+ *   this reducer. Every other event type returns a **new**
  *   `StrategyLabRunStatus` object reflecting the event; `state` and `event`
  *   are never mutated.
  */
@@ -167,16 +168,28 @@ export function reduce(
 
     case 'error': {
       if (!state) return state;
-      // Unlike 'complete', a terminal 'error' event carries no structured
-      // outcome field (just free-text detail/error) — 'failed' is a safe,
-      // never-wrongly-successful default for the same reason as above:
-      // a run whose connection stayed open its whole lifetime would
-      // otherwise leave `status` at its initial 'running' value straight
-      // through to finishRun()'s lastTerminalStatus capture. The
-      // component's own detail-based classification (failed/cancelled/
-      // connection-lost) for the live announcement happens outside this
-      // reducer, from the event directly.
+      // A genuine user cancellation is its own 'cancelled' event type (see
+      // that case below), never routed through 'error' — so a terminal
+      // 'error' event here always means a real failure or a connection-lost
+      // reclaim, neither of which carries a structured outcome field (just
+      // free-text detail/error). 'failed' is a safe, never-wrongly-successful
+      // default for the same reason as 'complete' above: a run whose
+      // connection stayed open its whole lifetime would otherwise leave
+      // `status` at its initial 'running' value straight through to
+      // finishRun()'s lastTerminalStatus capture. The component's own
+      // detail-based classification (failed vs. connection-lost) for the
+      // live announcement happens outside this reducer, from the event
+      // directly.
       return { ...state, status: 'failed' };
+    }
+
+    case 'cancelled': {
+      if (!state) return state;
+      // event.detail carries only free text — 'cancelled' is the one
+      // structured outcome this event type ever represents, so folding it
+      // unconditionally (unlike 'error') keeps lastTerminalStatus() accurate
+      // for a run whose SSE connection stayed open its whole lifetime.
+      return { ...state, status: 'cancelled' };
     }
 
     // These event types carry no StrategyLabRunStatus field — the component

@@ -149,7 +149,7 @@ export class StrategyLabRunService implements OnDestroy {
   private handleStreamEvent(event: StrategyLabStreamEvent): void {
     this._runStatus.set(reduceStrategyLabRun(this._runStatus(), event));
     this._events.next(event);
-    if (event.type === 'complete' || event.type === 'error') {
+    if (event.type === 'complete' || event.type === 'error' || event.type === 'cancelled') {
       this.finishRun();
     }
   }

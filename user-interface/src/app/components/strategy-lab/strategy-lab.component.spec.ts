@@ -1,5 +1,4 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
 import { NEVER, Subject, of, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
@@ -10,6 +9,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { NotificationService } from '../../core/notification.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
+import { createRunServiceStub } from '../../testing/strategy-lab-run-service.stub';
 import type {
   PaperTradingSession,
   QualityGateResult,
@@ -19,50 +19,6 @@ import type {
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
 } from '../../models';
-
-/**
- * A `StrategyLabRunService` test double: real signals (so components read
- * them exactly as they would the live service) with `vi.fn()` action
- * methods that apply the same minimal state changes the real service would,
- * so callers observing `running()`/`runStatus()` etc. after calling
- * `startRun()` and friends see realistic results without needing a fake SSE
- * stream or fake timers.
- */
-function createRunServiceStub() {
-  const runStatus = signal<StrategyLabRunStatus | null>(null);
-  const running = signal(false);
-  const activeRunId = signal<string | null>(null);
-  const paperTradingSessions = signal<Record<string, PaperTradingSession>>({});
-  const paperTradingLabRecordId = signal<string | null>(null);
-  const lastTerminalStatus = signal<StrategyLabRunStatus | null>(null);
-  const events$ = new Subject<StrategyLabStreamEvent>();
-  const errors$ = new Subject<string>();
-  return {
-    runStatus,
-    running,
-    activeRunId,
-    paperTradingSessions,
-    paperTradingLabRecordId,
-    lastTerminalStatus,
-    events$,
-    errors$,
-    checkForActiveRun: vi.fn(),
-    startRun: vi.fn((runId: string, status: StrategyLabRunStatus) => {
-      lastTerminalStatus.set(null);
-      activeRunId.set(runId);
-      runStatus.set(status);
-      running.set(true);
-    }),
-    clearPaperTradingSessions: vi.fn(() => paperTradingSessions.set({})),
-    hydratePaperTradingSessions: vi.fn((sessions: Record<string, PaperTradingSession>) =>
-      paperTradingSessions.set(sessions),
-    ),
-    trackPaperTradingSession: vi.fn((labRecordId: string, session: PaperTradingSession) => {
-      paperTradingSessions.update((s) => ({ ...s, [labRecordId]: session }));
-      paperTradingLabRecordId.set(labRecordId);
-    }),
-  };
-}
 
 type RunServiceStub = ReturnType<typeof createRunServiceStub>;
 
