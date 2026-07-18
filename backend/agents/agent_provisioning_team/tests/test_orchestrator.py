@@ -646,6 +646,51 @@ def test_compensate_environment_teardown_deletes_whole_file_when_nothing_preserv
     assert cred_store.get_credentials("a1") is None
 
 
+def test_compensate_environment_teardown_purges_legacy_only_tool_not_in_primary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The selective-preserve purge must reach a tool that ONLY exists in a legacy file.
+
+    Before this fix, the purge loop enumerated stored tools via
+    get_credentials(agent_id), which — like _read_agent_credentials — stops
+    at the first candidate path that exists (primary, here). A tool whose
+    credential was never migrated to primary and lives ONLY in a legacy
+    file was never even enumerated, so delete_tool_credentials was never
+    called for it and its stale secret survived compensation untouched.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    cred_store = CredentialStore(storage_dir=tmp_path / "creds", encryption_key=key)
+    cred_store.store_credentials("a1", "kept", {"password": "p1"})
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_store = CredentialStore(storage_dir=legacy_dir, encryption_key=key)
+    legacy_store.store_credentials("a1", "stale", {"password": "p2"})
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"docker_provisioner": MagicMock()},
+    )
+
+    # "kept" is preserved (reused=True); "stale" is never in tool_results at
+    # all — e.g. a leftover credential unrelated to this attempt — so it must
+    # still be purged by the environment-teardown pass since it isn't
+    # deliberately preserved.
+    results = [
+        ToolProvisionResult(
+            tool_name="kept", success=True, provisioner_key="x", details={"reused": True}
+        )
+    ]
+    orch.compensate("a1", results, tear_down_environment=True)
+
+    assert cred_store.get_credentials("a1", "kept") == {"password": "p1"}
+    assert cred_store.get_credentials("a1", "stale") is None
+
+
 def test_compensate_preserves_credentials_when_replay_step_fails(tmp_path: Path) -> None:
     """A failed (but swallowed) replay-compensation step must not purge the credential."""
     from agent_provisioning_team.shared.provisioner_state import CompensationRecord

@@ -387,6 +387,38 @@ class CredentialStore:
             return all_creds.get(tool_name)
         return all_creds
 
+    def list_tool_names(self, agent_id: str) -> set[str]:
+        """Return every tool name stored for ``agent_id`` across ALL candidates.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns the union of keys from every readable candidate path
+              (primary and legacy) — not just whichever single one
+              ``_read_agent_credentials``/``get_credentials`` would prefer.
+              A tool name that exists ONLY in a legacy file (never migrated
+              to primary) is still returned, so callers that need to
+              enumerate "every tool this agent currently has credentials
+              for" — e.g. selective compensation cleanup deciding which
+              stored tools to purge — don't silently skip it the way a
+              single-candidate read would.
+            * An unreadable or corrupt candidate contributes nothing to the
+              result (same tolerance as ``_read_agent_credentials``) rather
+              than raising.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        names: set[str] = set()
+        for path in self._agent_file_candidates(agent_id):
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(self.multifernet.decrypt(path.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                continue
+            if isinstance(data, dict):
+                names.update(data.keys())
+        return names
+
     def rotate_key(self, new_key: str) -> int:
         """Re-encrypt every stored agent file with a new Fernet key.
 

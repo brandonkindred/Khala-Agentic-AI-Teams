@@ -279,6 +279,41 @@ def test_credential_store_delete_tool_credentials_purges_legacy_when_primary_lac
     assert not legacy_file.exists()
 
 
+def test_credential_store_list_tool_names_merges_primary_and_legacy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """list_tool_names must return the union of every candidate's keys.
+
+    get_credentials/_read_agent_credentials stop at the first candidate that
+    exists, so a tool name that lives ONLY in a legacy file (never migrated
+    to primary) would otherwise never be discoverable by a caller that needs
+    to enumerate every tool this agent currently has credentials for.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    primary = tmp_path / "primary"
+    store = CredentialStore(storage_dir=primary, encryption_key=key)
+    store.store_credentials("a1", "pg", {"password": "p"})
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_store = CredentialStore(storage_dir=legacy_dir, encryption_key=key)
+    legacy_store.store_credentials("a1", "redis", {"password": "r"})
+
+    assert store.list_tool_names("a1") == {"pg", "redis"}
+
+
+def test_credential_store_list_tool_names_missing_agent_returns_empty_set(
+    tmp_path: Path,
+) -> None:
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    assert store.list_tool_names("nobody") == set()
+
+
 def test_credential_store_list_agents(tmp_path: Path) -> None:
     from agent_provisioning_team.shared.credential_store import CredentialStore
 

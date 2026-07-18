@@ -574,7 +574,15 @@ class ProvisioningOrchestrator:
                 # itself is also being torn down — purge only the entries
                 # NOT deliberately preserved (reused, or a rollback that
                 # didn't confirm success) instead of the whole file.
-                stored = self.credential_store.get_credentials(agent_id) or {}
+                #
+                # list_tool_names (not get_credentials) so a tool name that
+                # exists ONLY in a legacy candidate — never migrated to the
+                # primary file — still gets enumerated here and purged via
+                # delete_tool_credentials below; get_credentials stops at
+                # whichever single candidate it reads first and would
+                # silently skip a legacy-only tool, leaving its stale
+                # credential behind after this same compensation pass.
+                stored = self.credential_store.list_tool_names(agent_id)
                 for stored_tool_name in stored:
                     if stored_tool_name in preserved_credentials:
                         continue
