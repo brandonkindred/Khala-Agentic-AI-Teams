@@ -3,6 +3,7 @@ import {
   Component,
   DestroyRef,
   ElementRef,
+  Input,
   OnDestroy,
   OnInit,
   ViewChild,
@@ -176,6 +177,15 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   styleUrl: './strategy-lab.component.scss',
 })
 export class StrategyLabComponent implements OnInit, OnDestroy {
+  /**
+   * Whether to render the component's own "Strategy Lab" `<h2>` heading.
+   * Defaults to `true` (the dashboard-tab context, where this heading is the
+   * only heading anchor). The standalone route wrapper — which already
+   * renders its own `<h1>Strategy Lab</h1>` — sets this to `false` so the
+   * title isn't duplicated.
+   */
+  @Input() showTitle = true;
+
   private readonly api = inject(InvestmentApiService);
   private readonly integrations = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
