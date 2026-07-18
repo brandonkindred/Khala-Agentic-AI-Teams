@@ -27,7 +27,7 @@ from ...models import StrategySpec
 from ..quality_gates.models import QualityGateResult
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_budget import charge_active_budget
-from ._llm_envelope import invoke_agent
+from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
 from .model_factory import get_strands_model
 
@@ -491,14 +491,15 @@ class DesignReviewAgent:
         charge_active_budget()
 
         try:
-            raw = invoke_agent(
+            parsed = run_structured_agent(
                 agent,
                 user_prompt,
                 agent_key="strategy_design_review",
                 phase="design_review",
+                parse=extract_json_object,
+                charge=False,
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
             logger.warning("DesignReviewAgent failed to produce parseable JSON: %s", exc)
             return _fail_closed_critique(exc, readiness_findings)
