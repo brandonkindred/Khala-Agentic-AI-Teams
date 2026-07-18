@@ -3,7 +3,7 @@ import type {
   StrategyLabErroredDetail,
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
-} from '../../models';
+} from '../models';
 
 /**
  * Pure reducer folding one SSE stream event into the next Strategy Lab run

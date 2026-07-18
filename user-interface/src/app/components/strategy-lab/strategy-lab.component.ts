@@ -49,7 +49,7 @@ import type {
   StrategyLabProgressEvent,
   TradeRecord,
 } from '../../models';
-import { reduce as reduceStrategyLabRun } from './strategy-lab-run.reducer';
+import { reduce as reduceStrategyLabRun } from '../../services/strategy-lab-run.reducer';
 
 type FilterMode = 'all' | 'winning' | 'losing';
 

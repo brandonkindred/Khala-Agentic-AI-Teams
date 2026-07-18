@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { reduce } from './strategy-lab-run.reducer';
-import type { StrategyLabRunStatus, StrategyLabStreamEvent } from '../../models';
+import type { StrategyLabRunStatus, StrategyLabStreamEvent } from '../models';
 
 const baseState: StrategyLabRunStatus = {
   run_id: 'run-1',
