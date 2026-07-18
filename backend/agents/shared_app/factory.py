@@ -18,7 +18,7 @@ from __future__ import annotations
 import inspect
 import logging
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Sequence, Union
 
 from fastapi import FastAPI
 
@@ -54,6 +54,7 @@ def create_team_app(
     title: str,
     version: str = "1.0.0",
     postgres_schema: "Optional[TeamSchema]" = None,
+    extra_postgres_schemas: "Sequence[TeamSchema]" = (),
     on_startup: Optional[LifecycleHook] = None,
     on_shutdown: Optional[LifecycleHook] = None,
     excluded_urls: Optional[str] = None,
@@ -64,6 +65,10 @@ def create_team_app(
     Preconditions:
         - ``service_name``/``team_key``/``title``/``version`` are non-empty strings.
         - ``postgres_schema`` (when given) is a ``shared_postgres.TeamSchema``.
+        - ``extra_postgres_schemas`` (when given) is a sequence of additional
+          ``shared_postgres.TeamSchema`` — e.g. a schema owned by another team
+          that this one also depends on. Registered after ``postgres_schema``,
+          in the given order.
         - ``fastapi_kwargs`` must not contain ``lifespan`` (set explicitly here);
           passing it raises ``ValueError``. ``title``/``version`` are named
           parameters, so duplicating them raises ``TypeError`` from Python itself.
@@ -76,16 +81,22 @@ def create_team_app(
           instrumented; ``excluded_urls`` (when given) is forwarded to the
           instrumentor to override its default span-exclusion list — e.g. so a
           business route whose path contains ``metrics`` stays traced. Its
-          lifespan registers ``postgres_schema`` on startup and
-          closes the Postgres pool on shutdown (both no-ops/guarded when Postgres
-          is unconfigured), wrapping the optional hooks. ``fastapi_kwargs`` pass
-          through to the ``FastAPI`` constructor.
+          lifespan registers every schema in ``postgres_schema`` and
+          ``extra_postgres_schemas`` on startup — each independently best-effort,
+          so one schema's registration failure never blocks another's, nor
+          ``on_startup`` — and closes the Postgres pool on shutdown (both
+          no-ops/guarded when Postgres is unconfigured), wrapping the optional
+          hooks. ``fastapi_kwargs`` pass through to the ``FastAPI`` constructor.
         - The returned app exposes its ``postgres_schema`` (the given
-          ``TeamSchema`` or ``None``) via ``app.state.postgres_schema`` so early
-          bootstrap paths (e.g. the team-service wrapper) can register the schema's
-          DDL before starting background workers that write to it.
+          ``TeamSchema`` or ``None``, unchanged) via ``app.state.postgres_schema``,
+          and the full ordered set — ``postgres_schema`` first, then
+          ``extra_postgres_schemas``, with any ``None`` filtered — via
+          ``app.state.postgres_schemas`` (always a tuple, empty when neither is
+          given), so early bootstrap paths (e.g. the team-service wrapper) can
+          register every schema's DDL before starting background workers that
+          write to any of them.
     Invariants:
-        - Postgres wiring fires iff ``postgres_schema is not None``.
+        - Postgres wiring fires iff ``app.state.postgres_schemas`` is non-empty.
     """
     # Validate the required identifiers explicitly (not via assert, so the check
     # holds under ``python -O``): empty values otherwise surface as obscure
@@ -111,15 +122,29 @@ def create_team_app(
 
     init_otel(service_name=service_name, team_key=team_key)
 
+    # Primary schema first, then extras, in the given order; None filtered so
+    # callers never need to check "was a primary schema even given" separately.
+    # Computed once here (not inside _lifespan) since app.state needs it too.
+    all_postgres_schemas: tuple = tuple(
+        s for s in (postgres_schema, *extra_postgres_schemas) if s is not None
+    )
+
     @asynccontextmanager
     async def _lifespan(application: FastAPI):
-        if postgres_schema is not None:
+        for _schema in all_postgres_schemas:
             try:
                 from shared_postgres import register_team_schemas
 
-                register_team_schemas(postgres_schema)
+                register_team_schemas(_schema)
             except Exception:
-                logger.exception("%s postgres schema registration failed", team_key)
+                # getattr, not _schema.team directly: existing tests pass an
+                # opaque object() as postgres_schema (never dereferenced before
+                # this log line was added), and this path must not itself raise.
+                logger.exception(
+                    "%s postgres schema registration failed (schema=%s)",
+                    team_key,
+                    getattr(_schema, "team", _schema),
+                )
         # on_startup runs inside the try so that a raising hook still triggers
         # teardown — register_team_schemas may have opened the process-wide pool
         # above, and a startup failure must not leak it.
@@ -134,7 +159,7 @@ def create_team_app(
                 await _maybe_call(on_shutdown)
             except Exception:
                 logger.exception("%s on_shutdown hook failed", team_key)
-            if postgres_schema is not None:
+            if all_postgres_schemas:
                 try:
                     from shared_postgres import close_pool
 
@@ -146,7 +171,10 @@ def create_team_app(
     # Expose the team's schema (or None) so early bootstrap paths that run before
     # the lifespan fires — e.g. the team-service wrapper starting a Temporal worker
     # at import time — can register the DDL first and avoid racing a best-effort
-    # write against schema creation on a fresh database.
+    # write against schema creation on a fresh database. postgres_schemas is the
+    # full ordered set (primary + extras) those bootstrap paths should use;
+    # postgres_schema stays the primary alone for backward compatibility.
     app.state.postgres_schema = postgres_schema
+    app.state.postgres_schemas = all_postgres_schemas
     instrument_fastapi_app(app, team_key=team_key, excluded_urls=excluded_urls)
     return app
