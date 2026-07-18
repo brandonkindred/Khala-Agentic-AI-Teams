@@ -18,6 +18,7 @@ import type {
   QualityGateResult,
   StrategyLabRunStartResponse,
   StrategyLabStreamEvent,
+  StrategyLabPhase,
 } from '../../models';
 import { expectNoAxeViolations } from '../../testing/a11y';
 
@@ -366,6 +367,61 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
+  it('derives the strategy number from the active cycle_index, not completed_cycles, once they diverge', async () => {
+    // Regression: completed_cycles only counts successful completions.
+    // With multi-worker waves, or after a skipped/errored cycle,
+    // completed_cycles can lag behind the cycle actually emitting progress
+    // (cycle_index is 0-based and identifies it directly). Here cycle 1 was
+    // skipped, so completed_cycles is still 1 while cycle_index 2 (the 3rd
+    // strategy) is active.
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 1,
+      completed_record_ids: ['rec-1'],
+      current_cycle: { cycle_index: 2, phase: 'ideating' },
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Ideate phase.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces a humanized raw phase name for phases outside STRATEGY_LAB_PHASES instead of "Preparing next strategy"', async () => {
+    // Regression: real backend progress events include phases beyond the 4
+    // known ids (design_review, aligning, telemetry-related, ...). Work is
+    // actively progressing then, so falling back to the between-cycles
+    // "Preparing next strategy" text would misleadingly suggest the run is
+    // idle.
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 0, phase: 'design_review' as unknown as StrategyLabPhase },
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Design review phase.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
   it('announces "Preparing next strategy" between cycles (no current_cycle yet)', async () => {
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
@@ -570,6 +626,24 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('announces a cancellation, not a failure, when the terminal error is a user cancellation', async () => {
+    // Regression: the backend has no distinct cancel event type — user
+    // cancellations are published as a terminal `error` event whose detail
+    // says so. That's a deliberate stop, not a failure.
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+
+    stream$.next({ type: 'error', detail: 'Run cancelled by user' });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run cancelled.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
   it('derives the terminal outcome from the last known run status when the stream closes with no explicit terminal event', async () => {
     // Regression: a run that was already terminal before the SSE connection
     // was established (e.g. the page reconnects to a finished run) can reach
@@ -589,6 +663,25 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('treats an "interrupted" snapshot status as non-successful, not a plain "complete"', async () => {
+    // Regression: reconnecting to a run that is already terminal with
+    // status 'interrupted' (a real backend status not in the narrower
+    // StrategyLabRunStatus.status union) sends a terminal snapshot followed
+    // by `done`, landing on this same no-explicit-outcome fallback.
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+    (fixture.componentInstance.runStatus as unknown as { status: string }).status = 'interrupted';
+    stream$.complete();
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run interrupted.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

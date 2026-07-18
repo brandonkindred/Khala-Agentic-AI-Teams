@@ -95,6 +95,16 @@ function categoryLabel(value: string): string {
   return value.length ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
+/**
+ * Readable label for a raw backend phase id not in STRATEGY_LAB_PHASES
+ * (e.g. 'design_review' → 'Design review'). Used only as a live-region
+ * fallback for phases this component has no friendly label for.
+ */
+function humanizePhase(phase: string): string {
+  const spaced = phase.replace(/_/g, ' ');
+  return spaced.length ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : spaced;
+}
+
 /** Build selector options from category values, deriving label + Material icon. */
 function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
   return values.map((value) => ({
@@ -599,8 +609,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
 
     if (event.type === 'error') {
-      this.error = (event['detail'] as string) || 'Run failed';
-      this.onRunComplete('Strategy Lab run failed.');
+      // User cancellations are published as a terminal `error` event with a
+      // "cancelled" detail (there is no distinct cancel event type) — that
+      // is a deliberate stop, not a failure, and must not be announced as one.
+      const detail = (event['detail'] as string) || 'Run failed';
+      this.error = detail;
+      this.onRunComplete(/cancel/i.test(detail) ? 'Strategy Lab run cancelled.' : 'Strategy Lab run failed.');
     }
   }
 
@@ -650,6 +664,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     const status = this.runStatus;
     if (status?.status === 'failed') return 'Strategy Lab run failed.';
     if (status?.status === 'cancelled') return 'Strategy Lab run cancelled.';
+    // 'interrupted' is a real backend status (reconnecting to an
+    // already-stopped run sends a terminal snapshot carrying it) that
+    // doesn't fit the narrower StrategyLabRunStatus.status union — cast
+    // rather than widen the shared type just for this comparison.
+    if ((status?.status as string) === 'interrupted') return 'Strategy Lab run interrupted.';
     if (status?.status === 'completed_with_errors' || (status?.errored_cycles ?? 0) > 0) {
       return 'Strategy Lab run finished with errors.';
     }
@@ -955,10 +974,22 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // would announce an impossible position (e.g. "Strategy 6 of 5").
       if (!status.current_cycle && status.completed_cycles >= status.total_cycles) {
         segments.push('Finishing up');
+      } else if (status.current_cycle) {
+        // completed_cycles only counts successful completions — with
+        // multi-worker waves, or after a skipped/errored cycle,  it can lag
+        // behind the cycle actually emitting progress. cycle_index (0-based)
+        // identifies that cycle directly.
+        segments.push(`Strategy ${status.current_cycle.cycle_index + 1} of ${status.total_cycles}`);
+        const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
+        // Real backend phases (design_review, aligning, telemetry, ...) go
+        // beyond STRATEGY_LAB_PHASES' 4 known ids. Work is still actively
+        // progressing then, so fall back to the raw phase name rather than
+        // "Preparing next strategy" — that phrase means genuinely idle
+        // between cycles, which this is not.
+        segments.push(phaseLabel ? `${phaseLabel} phase` : `${humanizePhase(status.current_cycle.phase)} phase`);
       } else {
         segments.push(`Strategy ${status.completed_cycles + 1} of ${status.total_cycles}`);
-        const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
-        segments.push(phaseLabel ? `${phaseLabel} phase` : 'Preparing next strategy');
+        segments.push('Preparing next strategy');
       }
       return segments.join(' — ') + '.';
     }
