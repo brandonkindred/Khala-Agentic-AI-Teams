@@ -245,15 +245,17 @@
           </div>
         }
 
-        <!-- Activity log: hidden from assistive tech — the always-present
-             live region above announces concise run/phase progress instead,
-             so AT users aren't overwhelmed by (or double-announced) this
-             sighted-only, auto-scrolling detail feed. Not focusable: an
-             aria-hidden element must not remain in the tab order. -->
+        <!-- Activity log: stays keyboard-focusable/scrollable (WCAG 2.1.1/
+             2.4.7) so sighted keyboard users can still review it, but each
+             entry is aria-hidden so it isn't double-announced to assistive
+             tech — the always-present live region above already covers
+             concise run/phase progress. (The wrapper itself must NOT be
+             aria-hidden while it stays focusable — an aria-hidden element
+             must not remain in the tab order.) -->
         @if (activityLog.length > 0) {
-          <div class="activity-log" #logContainer aria-hidden="true">
+          <div class="activity-log" #logContainer tabindex="0" role="group" aria-label="Strategy run activity log, scrollable">
             @for (entry of activityLog; track $index) {
-              <div class="log-entry" [class]="'log-' + entry.status">
+              <div class="log-entry" [class]="'log-' + entry.status" aria-hidden="true">
                 <span class="log-time">{{ entry.time }}</span>
                 <span class="log-indicator">
                   @if (entry.status === 'active') {

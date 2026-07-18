@@ -441,6 +441,41 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('announces a clean completion even after an earlier non-fatal batch_warning, not "finished with errors"', async () => {
+    // Regression: a mid-run batch_warning (e.g. a signal-brief failure) sets
+    // the completionWarning banner, which stays populated for the rest of
+    // the run since nothing clears it. The terminal announcement must be
+    // driven by the 'complete' event's own status/errored_count — not by
+    // whether that unrelated warning banner happens to be non-null — or a
+    // fully clean run would misreport as "finished with errors".
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+
+    stream$.next({ type: 'batch_warning', batch_index: 0, reason: 'signal_brief_failed' });
+    fixture.detectChanges();
+    expect(fixture.componentInstance.completionWarning).toBeTruthy();
+
+    stream$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 5,
+      skipped_count: 0,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
   it('announces a qualified terminal outcome when the run finishes with errored cycles', async () => {
     const { fixture, apiSpy } = await createFixture();
     const stream$ = new Subject<StrategyLabStreamEvent>();
@@ -481,7 +516,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
-  it('activity-log is hidden from assistive tech and removed from the tab order while a run is active', async () => {
+  it('activity-log stays keyboard-focusable, but its entries are hidden from assistive tech, while a run is active', async () => {
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
     fixture.componentInstance.runStatus = {
@@ -499,11 +534,23 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     ];
     fixture.detectChanges();
 
+    // The scrollable wrapper keeps its WCAG 2.4.7 focusable-region treatment
+    // (sighted keyboard users can still Tab in and scroll it) — only its
+    // per-entry content is hidden from assistive tech, so a screen-reader
+    // user landing on it hears the label but not the verbose, already-
+    // duplicated-by-the-live-region log lines.
     const log: HTMLElement = fixture.nativeElement.querySelector('.activity-log');
     expect(log).toBeTruthy();
-    expect(log.getAttribute('aria-hidden')).toBe('true');
-    expect(log.hasAttribute('tabindex')).toBe(false);
-    expect(log.hasAttribute('role')).toBe(false);
+    expect(log.getAttribute('tabindex')).toBe('0');
+    expect(log.getAttribute('role')).toBe('group');
+    expect(log.getAttribute('aria-label')).toBe('Strategy run activity log, scrollable');
+    expect(log.hasAttribute('aria-hidden')).toBe(false);
+
+    const entries: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.log-entry'));
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(entry.getAttribute('aria-hidden')).toBe('true');
+    }
 
     // Same pre-existing gaps as before (run-btn spinner, phase progress-bar/
     // spinners lack accessible names; the running run-btn nests a focusable

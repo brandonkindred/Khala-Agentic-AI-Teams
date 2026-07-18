@@ -588,27 +588,41 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     if (event.type === 'complete') {
       const erroredCount = (event['errored_count'] as number) ?? this.runStatus?.errored_cycles ?? 0;
       const skippedCount = (event['skipped_count'] as number) ?? this.runStatus?.skipped_cycles ?? 0;
-      if (erroredCount > 0 || (event['status'] as string) === 'completed_with_errors') {
+      const erroredOrWarned = erroredCount > 0 || (event['status'] as string) === 'completed_with_errors';
+      if (erroredOrWarned) {
         const parts: string[] = [];
         if (erroredCount > 0) parts.push(`${erroredCount} cycle(s) errored`);
         if (skippedCount > 0) parts.push(`${skippedCount} cycle(s) skipped`);
         this.completionWarning = `Run finished with ${parts.join(' and ')}. See details below.`;
       }
-      this.onRunComplete();
+      this.onRunComplete(erroredOrWarned ? 'Strategy Lab run finished with errors.' : 'Strategy Lab run complete.');
     }
 
     if (event.type === 'error') {
       this.error = (event['detail'] as string) || 'Run failed';
-      this.onRunComplete();
+      this.onRunComplete('Strategy Lab run failed.');
     }
   }
 
-  private onRunComplete(): void {
-    this.runOutcomeAnnouncement = this.error
-      ? 'Strategy Lab run failed.'
-      : this.completionWarning
-      ? 'Strategy Lab run finished with errors.'
-      : 'Strategy Lab run complete.';
+  /**
+   * Tear down run-tracking state once a run stops (success, failure, or the
+   * stream simply closing).
+   *
+   * Preconditions: `outcome`, when given, is the terminal-outcome sentence
+   *   for the aria-live status region — derived by the caller from the
+   *   terminal event/status actually being handled (`event.status`,
+   *   `event.errored_count`, a polled `status.status`, ...). Never derive it
+   *   from `error`/`completionWarning` here: both are shared, ambient fields
+   *   that can already be populated by an unrelated prior warning (e.g. a
+   *   mid-run `batch_warning`) or a stale value from a different action, so
+   *   reading them at this point would misreport a clean run as failed/
+   *   warned.
+   * Postconditions: `runOutcomeAnnouncement` is set to `outcome`, or a
+   *   generic completion sentence when the caller has no specific terminal
+   *   data (e.g. the stream simply closed).
+   */
+  private onRunComplete(outcome?: string): void {
+    this.runOutcomeAnnouncement = outcome ?? 'Strategy Lab run complete.';
     this.running = false;
     this.activeRunId = null;
     this.runStatus = null;
