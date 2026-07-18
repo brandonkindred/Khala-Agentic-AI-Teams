@@ -390,6 +390,32 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
+  it('announces "Finishing up" instead of an impossible position once the last cycle completes', async () => {
+    // Regression: after the final cycle_complete, completed_cycles already
+    // equals total_cycles (with no current_cycle), so naively reporting
+    // "completed_cycles + 1 of total_cycles" would announce an impossible
+    // "Strategy 6 of 5" for the brief window before the terminal `complete`
+    // event lands.
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 5,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3', 'rec-4', 'rec-5'],
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
   it('includes batch position for multi-batch runs', async () => {
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
@@ -513,6 +539,58 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('derives the terminal outcome from the last known run status when the stream closes with no explicit terminal event', async () => {
+    // Regression: a run that was already terminal before the SSE connection
+    // was established (e.g. the page reconnects to a finished run) can reach
+    // a bare stream-complete with no 'complete'/'error' event — e.g. after a
+    // terminal `snapshot` followed by `done`, which handleStreamEvent has no
+    // branch for. onRunComplete() must not blindly default to "complete" in
+    // that case; it should read the last known runStatus.status instead.
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+    // Simulate a prior snapshot having updated the status to terminal.
+    fixture.componentInstance.runStatus!.status = 'failed';
+    stream$.complete();
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('derives a qualified terminal outcome from errored_cycles when the stream closes with no explicit terminal event', async () => {
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+    fixture.componentInstance.runStatus!.errored_cycles = 2;
+    stream$.complete();
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with errors.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('falls back to a plain "complete" when the stream closes with no terminal signal at all', async () => {
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+    // No status/errored_cycles update — runStatus.status is still 'running'.
+    stream$.complete();
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

@@ -617,12 +617,15 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   mid-run `batch_warning`) or a stale value from a different action, so
    *   reading them at this point would misreport a clean run as failed/
    *   warned.
-   * Postconditions: `runOutcomeAnnouncement` is set to `outcome`, or a
-   *   generic completion sentence when the caller has no specific terminal
-   *   data (e.g. the stream simply closed).
+   * Postconditions: `runOutcomeAnnouncement` is set to `outcome`, or — when
+   *   the caller has no specific terminal data (the SSE stream closed on its
+   *   own, or the polling fallback saw a terminal status without going
+   *   through the explicit call sites above) — derived from the last known
+   *   `runStatus` so a failed/errored run is never misreported as a plain
+   *   "complete".
    */
   private onRunComplete(outcome?: string): void {
-    this.runOutcomeAnnouncement = outcome ?? 'Strategy Lab run complete.';
+    this.runOutcomeAnnouncement = outcome ?? this.describeLastKnownRunStatus();
     this.running = false;
     this.activeRunId = null;
     this.runStatus = null;
@@ -631,6 +634,26 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.pollSub?.unsubscribe();
     this.pollSub = null;
     this.loadResults();
+  }
+
+  /**
+   * Best-effort terminal-outcome sentence derived from `runStatus` itself,
+   * used only when `onRunComplete()` receives no explicit outcome.
+   *
+   * Preconditions: none — safe to call while `runStatus` is still populated
+   *   (before `onRunComplete()` nulls it) or after (`runStatus` may be null).
+   * Postconditions: returns a sentence reflecting `runStatus.status`/
+   *   `errored_cycles` when available; falls back to a generic completion
+   *   sentence only when there is truly no status information to go on.
+   */
+  private describeLastKnownRunStatus(): string {
+    const status = this.runStatus;
+    if (status?.status === 'failed') return 'Strategy Lab run failed.';
+    if (status?.status === 'cancelled') return 'Strategy Lab run cancelled.';
+    if (status?.status === 'completed_with_errors' || (status?.errored_cycles ?? 0) > 0) {
+      return 'Strategy Lab run finished with errors.';
+    }
+    return 'Strategy Lab run complete.';
   }
 
   private fallbackToPolling(runId: string): void {
@@ -914,9 +937,17 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         const batchNum = status.current_batch ?? (status.completed_batches ?? 0) + 1;
         segments.push(`Batch ${batchNum} of ${status.batch_count}`);
       }
-      segments.push(`Strategy ${status.completed_cycles + 1} of ${status.total_cycles}`);
-      const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
-      segments.push(phaseLabel ? `${phaseLabel} phase` : 'Preparing next strategy');
+      // Once the last cycle's cycle_complete lands, completed_cycles already
+      // equals total_cycles — briefly, before the terminal `complete` event
+      // arrives, there is no "next" strategy to report. Reporting one here
+      // would announce an impossible position (e.g. "Strategy 6 of 5").
+      if (!status.current_cycle && status.completed_cycles >= status.total_cycles) {
+        segments.push('Finishing up');
+      } else {
+        segments.push(`Strategy ${status.completed_cycles + 1} of ${status.total_cycles}`);
+        const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
+        segments.push(phaseLabel ? `${phaseLabel} phase` : 'Preparing next strategy');
+      }
       return segments.join(' — ') + '.';
     }
     return this.runOutcomeAnnouncement ?? '';
