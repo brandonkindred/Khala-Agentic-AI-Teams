@@ -161,7 +161,7 @@ def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
 
 
 @activity.defn(name="agent_provisioning_check_existing_environment")
-def check_existing_environment_activity(agent_id: str) -> bool:
+def check_existing_environment_activity(agent_id: str, job_id: Optional[str] = None) -> bool:
     """Report whether ``agent_id`` already has an environment on record (read-only).
 
     Called by the workflow right after acquiring ``agent_id``'s lock, before
@@ -172,6 +172,12 @@ def check_existing_environment_activity(agent_id: str) -> bool:
 
     Preconditions:
         * ``agent_id`` is non-empty.
+        * ``job_id``, when given, is the calling workflow's own job id — used
+          only to recognize a container THIS run's own earlier attempt
+          labeled (see below); optional and defaulted so activity tasks
+          already scheduled (recorded in history with the old 1-arg payload)
+          before a rolling deploy still execute correctly against a newer
+          worker binary.
     Postconditions:
         * When ``EnvironmentStore`` holds a record for ``agent_id``: returns
           ``True`` unless the record's own ``container_name`` is CONFIRMED
@@ -196,11 +202,11 @@ def check_existing_environment_activity(agent_id: str) -> bool:
           confirmed absence without ``readable()``): the registry being
           unreadable is not proof nothing is there.
         * When ``EnvironmentStore`` holds NO record at all (confirmed
-          readable-and-empty): still returns ``True`` unless the
-          deterministic container name (``agent-<agent_id>``, the same name
-          every provisioner/rollback path in this codebase uses) is
-          CONFIRMED absent from Docker. The record and the container are
-          two independently-losable things — a record can go missing (disk
+          readable-and-empty) AND the deterministic container name
+          (``agent-<agent_id>``, the same name every provisioner/rollback
+          path in this codebase uses) is CONFIRMED absent from Docker:
+          returns ``False``. The record and the container are two
+          independently-losable things — a record can go missing (disk
           issue, manual cleanup, a prior compensation that removed the
           record but not the container) while the container itself, or
           ``DockerProvisionerTool``'s own separate idempotency state, is
@@ -210,12 +216,21 @@ def check_existing_environment_activity(agent_id: str) -> bool:
           authorize tearing down (or ``verify_and_remove_orphan``-ing) a
           container that predates this run, just because its record
           happened to be the thing that was lost.
-        * Returns ``False`` only when the registry is confirmed readable and
-          holds no record at all for ``agent_id`` AND the deterministic
-          container name is also confirmed absent — or holds a record whose
-          own container is confirmed gone.
+        * When that container is confirmed present (or the probe is
+          inconclusive): defers to ``DockerProvisionerTool.is_pre_existing``,
+          which consults the container's ``khala.job_id`` label (stamped at
+          creation, ``tool_agents/docker_provisioner.py``) when ``job_id`` was
+          given — a label matching THIS ``job_id`` means this run's own
+          earlier attempt created it (e.g. a resumed job reusing ``job_id``;
+          ``start_workflow.py`` derives the Temporal workflow id
+          deterministically from it), so it does not predate this run:
+          returns ``False``. Anything else (no ``job_id`` given, no label, or
+          a different job's label) is treated as possibly pre-existing:
+          returns ``True``. See ``is_pre_existing``'s own docstring for the
+          full reasoning, including why a different job's label usually
+          reflects normal sequential reuse rather than a problem.
         * Never raises (``EnvironmentStore.get``/``readable`` never raise;
-          the Docker probe is itself never-raising and advisory only).
+          the Docker probes are themselves never-raising and advisory only).
     """
     assert agent_id, "agent_id must be non-empty"
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
@@ -227,7 +242,7 @@ def check_existing_environment_activity(agent_id: str) -> bool:
         return DockerProvisionerTool._container_exists(existing.container_name) is not False
     if not env_store.readable(agent_id):
         return True
-    return DockerProvisionerTool._container_exists(f"agent-{agent_id}") is not False
+    return DockerProvisionerTool.is_pre_existing(agent_id, job_id)
 
 
 @activity.defn(name="agent_provisioning_acquire_lock")
@@ -316,6 +331,13 @@ def setup_activity(
           directly, so returning the weaker ``reused=True`` result here
           would silently drop the stronger evidence for the rest of this
           run even though it is right there on record.
+        * Passes this call's own ``job_id`` through to ``run_setup`` so a
+          freshly created container is labeled with it (see
+          ``docker_provisioner.JOB_ID_LABEL``), giving
+          ``compensate_activity``/``check_existing_environment_activity`` a
+          durable, container-native way to attribute the container to this
+          attempt even if the local idempotency state that would otherwise
+          prove it never gets written.
         * Raises ``RuntimeError`` when a fresh setup fails.
     """
     assert job_id, "job_id must be non-empty"
@@ -366,6 +388,7 @@ def setup_activity(
         environment_store=orch.environment_store,
         docker_provisioner=orch.tool_agents.get("docker_provisioner"),
         on_registered=_checkpoint_on_register,
+        job_id=job_id,
     )
     if not result.success:
         raise RuntimeError(f"setup failed: {result.error}")
@@ -551,9 +574,23 @@ def provision_tool_activity(
         * Updates ``job_store`` with the current tool / phase progress.
           Does not write ``tools_completed`` — parallel fan-out indexes are not
           completion counts and would race/regress under ``asyncio.gather``.
+        * When ``job_id`` is truthy AND ``provisioner`` is
+          ``"docker_provisioner"``, injects ``job_id`` into ``config`` under
+          ``docker_provisioner.JOB_ID_CONFIG_KEY`` before calling
+          ``agent.provision(...)``, so ``DockerProvisionerTool`` can stamp
+          the ``khala.job_id`` container label used to disambiguate
+          self-leaked containers from pre-existing ones during compensation.
+          Scoped to that one provisioner specifically — not injected
+          generically into every provisioner's ``config`` — because at least
+          one other provisioner (``generic_provisioner``) echoes its whole
+          ``config`` dict verbatim into persisted/returned state
+          (``credentials.extra``/``details``), which is not redacted for an
+          unrecognized key like this one; injecting unconditionally would
+          leak this internal id into checkpoints and API responses.
     """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
 
     assert tool_name, "tool_name must be non-empty"
     assert provisioner, "provisioner must be non-empty"
@@ -574,10 +611,14 @@ def provision_tool_activity(
 
     creds = GeneratedCredentials.model_validate(credentials_dump)
 
+    tool_config_dict = dict(tool_config or {})
+    if job_id and provisioner == "docker_provisioner":
+        tool_config_dict[JOB_ID_CONFIG_KEY] = job_id
+
     activity.heartbeat(f"provisioning {tool_name}")
     result = agent.provision(
         agent_id=agent_id,
-        config=dict(tool_config or {}),
+        config=tool_config_dict,
         credentials=creds,
     )
     # Mirror run_account_provisioning: stamp the registry key so compensate()
@@ -930,20 +971,18 @@ def compensate_activity(
           whose removal itself failed inside ``compensate`` also still has
           one; only the "nothing ever got registered, or it did and was
           since removed" case has none, and that is exactly when a container
-          matching the name is unambiguously orphaned. When no record exists
-          at all AND ``tear_down_environment`` is ``False`` (ownership was
-          never settled), this also probes the deterministic container name
-          directly (mirroring ``check_existing_environment_activity``)
-          before concluding that: a record and its container are
-          independently losable, so an absent record alone is not proof the
-          container is an orphan — e.g. the setup name-conflict path, where
-          Docker/idempotency state was lost but ``agent-<agent_id>`` is a
-          real container that predates this run and was never registered
-          here at all. When ``tear_down_environment`` is ``True``, ownership
-          is already settled — this run is known to own the environment — so
-          that probe is skipped: a surviving container in that case is this
-          run's own leaked orphan to reclaim via ``verify_and_remove_orphan``,
-          not something a name match should protect from removal.
+          matching the name might be orphaned. When no record exists at all
+          AND ``tear_down_environment`` is ``False`` (ownership was never
+          settled), defers to ``DockerProvisionerTool.is_pre_existing`` —
+          the same shared, label-aware ownership check
+          ``check_existing_environment_activity`` uses — since a name match
+          alone cannot tell "predates this run" apart from "this run's own
+          leak"; see that method's own docstring for the full reasoning.
+          When ``tear_down_environment`` is ``True``, ownership is already
+          settled — this run is known to have created/own the environment —
+          so that check is skipped entirely: a surviving container in that
+          case is unconditionally this run's own leaked orphan to reclaim
+          via ``verify_and_remove_orphan``.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -984,15 +1023,16 @@ def compensate_activity(
             # pre-existing container can still be sitting there under the
             # deterministic name with no record at all, e.g. the setup
             # name-conflict path where Docker/idempotency state was lost
-            # but the container itself predates this run. Probe it directly
-            # before concluding there is nothing left to protect.
+            # but the container itself predates this run. Defer to the same
+            # shared, label-aware ownership check before concluding there is
+            # nothing left to protect.
             #
             # When tear_down_environment=True, ownership is already settled
             # — this run is known to have created/own the environment — so
-            # this probe must NOT run: a container that still exists there
+            # this check must NOT run: a container that still exists there
             # is our own leaked orphan to reclaim, not something to protect
             # from verify_and_remove_orphan.
-            record_may_exist = docker._container_exists(f"agent-{agent_id}") is not False
+            record_may_exist = docker.is_pre_existing(agent_id, job_id)
         if not record_may_exist and not docker.verify_and_remove_orphan(agent_id):
             raise RuntimeError(
                 f"compensate_activity: docker teardown for agent_id={agent_id!r} did not "
