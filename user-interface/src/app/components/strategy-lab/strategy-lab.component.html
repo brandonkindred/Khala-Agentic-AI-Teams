@@ -246,16 +246,20 @@
         }
 
         <!-- Activity log: stays keyboard-focusable/scrollable (WCAG 2.1.1/
-             2.4.7) so sighted keyboard users can still review it, but each
-             entry is aria-hidden so it isn't double-announced to assistive
-             tech — the always-present live region above already covers
-             concise run/phase progress. (The wrapper itself must NOT be
-             aria-hidden while it stays focusable — an aria-hidden element
-             must not remain in the tab order.) -->
+             2.4.7) and its entries stay in the accessibility tree, so a
+             screen-reader user who navigates in gets the same per-line
+             detail (validation failures, refinement messages, ...) sighted
+             users see — the live region above only ever carries a concise
+             summary and was never meant to replace this. That's on-demand
+             detail (the user chooses to navigate in), not a duplicate
+             announcement (the live region's updates are the only thing
+             spoken automatically), so exposing it doesn't reintroduce the
+             double-announcement this component's live region exists to
+             avoid. -->
         @if (activityLog.length > 0) {
           <div class="activity-log" #logContainer tabindex="0" role="group" aria-label="Strategy run activity log, scrollable">
             @for (entry of activityLog; track $index) {
-              <div class="log-entry" [class]="'log-' + entry.status" aria-hidden="true">
+              <div class="log-entry" [class]="'log-' + entry.status">
                 <span class="log-time">{{ entry.time }}</span>
                 <span class="log-indicator">
                   @if (entry.status === 'active') {

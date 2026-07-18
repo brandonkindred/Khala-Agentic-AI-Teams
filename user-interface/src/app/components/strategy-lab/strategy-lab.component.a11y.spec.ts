@@ -649,7 +649,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
-  it('activity-log stays keyboard-focusable, but its entries are hidden from assistive tech, while a run is active', async () => {
+  it('activity-log stays keyboard-focusable and its entries stay exposed to assistive tech, while a run is active', async () => {
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
     fixture.componentInstance.runStatus = {
@@ -668,10 +668,10 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     // The scrollable wrapper keeps its WCAG 2.4.7 focusable-region treatment
-    // (sighted keyboard users can still Tab in and scroll it) — only its
-    // per-entry content is hidden from assistive tech, so a screen-reader
-    // user landing on it hears the label but not the verbose, already-
-    // duplicated-by-the-live-region log lines.
+    // (sighted keyboard users can still Tab in and scroll it), and a
+    // screen-reader user who navigates in hears the same per-line detail
+    // sighted users see — the live region above only ever carries a concise
+    // summary and never duplicates this on-demand detail.
     const log: HTMLElement = fixture.nativeElement.querySelector('.activity-log');
     expect(log).toBeTruthy();
     expect(log.getAttribute('tabindex')).toBe('0');
@@ -682,7 +682,8 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     const entries: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.log-entry'));
     expect(entries.length).toBeGreaterThan(0);
     for (const entry of entries) {
-      expect(entry.getAttribute('aria-hidden')).toBe('true');
+      expect(entry.hasAttribute('aria-hidden')).toBe(false);
+      expect(entry.textContent).toContain('Executing strategy backtest...');
     }
 
     // Same pre-existing gaps as before (run-btn spinner, phase progress-bar/
