@@ -6,6 +6,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
@@ -51,6 +52,7 @@ import { LatestOnly } from '../../shared/latest-only';
     MatFormFieldModule,
     MatInputModule,
     MatProgressSpinnerModule,
+    MatSlideToggleModule,
     MatTooltipModule,
     MatPaginatorModule,
     RouterLink,
@@ -108,6 +110,11 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   pullsLoaded = false;
   // Top-level banner: errors loading the PR list only.
   pullError: string | null = null;
+  /** Case-insensitive text narrowing `pulls` to `filteredPulls` (matches `#<number>` or title). */
+  pullFilter = '';
+  /** When true, `filteredPulls` excludes draft PRs. Persists across repo switches (a
+   *  cross-repo preference, like `pageSize` already does) — only `pullFilter` is repo-scoped. */
+  hideDrafts = false;
 
   // Client-side pagination over the fully-fetched PR array
   readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
@@ -228,6 +235,7 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
     this.pullsLoaded = false;
     this.expandedPrNumber = null;
     this.pullError = null;
+    this.pullFilter = '';
     this.reviewRuns.reset(this.selectedRepo);
   }
 
@@ -284,16 +292,40 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
     return n === 1 ? '1 repository shown' : `${n} repositories shown`;
   }
 
+  /** `pulls` narrowed by `pullFilter` (substring match against `"#<number> <title>"`,
+   *  case-insensitively) and, when `hideDrafts` is set, with draft PRs excluded. */
+  get filteredPulls(): GitHubPullRequestItem[] {
+    const q = this.pullFilter.trim().toLowerCase();
+    return this.pulls.filter((p) => {
+      if (this.hideDrafts && p.draft) return false;
+      if (!q) return true;
+      return `#${p.number} ${p.title}`.toLowerCase().includes(q);
+    });
+  }
+
   /** The slice of PRs visible on the current page. */
   get pagedPulls(): GitHubPullRequestItem[] {
     const start = this.pageIndex * this.pageSize;
-    return this.pulls.slice(start, start + this.pageSize);
+    return this.filteredPulls.slice(start, start + this.pageSize);
   }
 
   /** Adopt a new page index/size from the paginator (the `pagedPulls` getter re-slices). */
   onPageChange(event: PageEvent): void {
     this.pageIndex = event.pageIndex;
     this.pageSize = event.pageSize;
+  }
+
+  /** Update the PR text filter and reset to page 1 — the current page may no longer
+   *  exist against the narrowed result set. */
+  onPullFilterChange(value: string): void {
+    this.pullFilter = value;
+    this.pageIndex = 0;
+  }
+
+  /** Toggle whether `filteredPulls` excludes draft PRs, resetting to page 1. */
+  onHideDraftsChange(value: boolean): void {
+    this.hideDrafts = value;
+    this.pageIndex = 0;
   }
 
   /** Toggle the accordion expansion for a PR (only one open at a time). */

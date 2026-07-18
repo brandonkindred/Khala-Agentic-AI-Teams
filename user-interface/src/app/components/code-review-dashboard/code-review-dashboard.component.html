@@ -124,6 +124,31 @@
       @if (pulls.length === 0) {
         <app-empty-state icon="check_circle_outline" title="No open pull requests" [headingLevel]="3" />
       } @else {
+        <div class="cr-pulls-toolbar">
+          <mat-form-field appearance="outline" class="cr-search-field">
+            <mat-label>Search pull requests</mat-label>
+            <mat-icon matPrefix>search</mat-icon>
+            <input
+              matInput
+              type="search"
+              [ngModel]="pullFilter"
+              (ngModelChange)="onPullFilterChange($event)"
+              placeholder="Number or title…"
+            />
+          </mat-form-field>
+          <mat-slide-toggle [ngModel]="hideDrafts" (ngModelChange)="onHideDraftsChange($event)" color="primary">
+            Hide drafts
+          </mat-slide-toggle>
+        </div>
+
+        @if (filteredPulls.length === 0) {
+          <app-empty-state
+            icon="search_off"
+            title="No pull requests match"
+            description="Try a different search or turn off Hide drafts."
+            [headingLevel]="3"
+          />
+        } @else {
         <div class="cr-pulls-list">
           @for (pull of pagedPulls; track pull.number) {
             <div class="cr-pull" [class.cr-pull--expanded]="expandedPrNumber === pull.number">
@@ -179,15 +204,16 @@
             </div>
           }
         </div>
-        @if (pulls.length > PAGE_SIZE_OPTIONS[0]) {
+        @if (filteredPulls.length > PAGE_SIZE_OPTIONS[0]) {
           <mat-paginator
             class="cr-pulls-paginator"
-            [length]="pulls.length"
+            [length]="filteredPulls.length"
             [pageSize]="pageSize"
             [pageIndex]="pageIndex"
             [pageSizeOptions]="PAGE_SIZE_OPTIONS"
             (page)="onPageChange($event)"
           ></mat-paginator>
+        }
         }
       }
     }

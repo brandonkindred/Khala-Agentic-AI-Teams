@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
+import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -225,6 +226,101 @@ describe('CodeReviewDashboardComponent', () => {
     component.pulls = [];
     component.onPageChange({ pageIndex: 0, pageSize: 10, length: 0 });
     expect(component.pagedPulls).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR search/filter + hide drafts (Group E3)
+  // -------------------------------------------------------------------------
+  // makePulls alternates `draft: i % 2 === 0`, so odd-numbered PRs are drafts and
+  // even-numbered PRs are not.
+
+  it('filteredPulls returns every pull by default (empty filter, hideDrafts off)', async () => {
+    await setup();
+    expect(component.filteredPulls).toEqual(component.pulls);
+  });
+
+  it('filteredPulls matches case-insensitively on title', async () => {
+    await setup();
+    component.pullFilter = 'pr 2';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+  });
+
+  it('filteredPulls matches on #<number> and the bare number', async () => {
+    await setup();
+    component.pullFilter = '#2';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+    component.pullFilter = '2';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+  });
+
+  it('hideDrafts excludes draft PRs', async () => {
+    await setup();
+    component.hideDrafts = true;
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+  });
+
+  it('combines the text filter and hideDrafts', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(5)));
+    await setup();
+    component.hideDrafts = true;
+    component.pullFilter = 'PR';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2, 4]);
+  });
+
+  it('onPullFilterChange resets pageIndex to 0', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
+    expect(component.pageIndex).toBe(1);
+    component.onPullFilterChange('PR');
+    expect(component.pageIndex).toBe(0);
+  });
+
+  it('onHideDraftsChange resets pageIndex to 0', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
+    expect(component.pageIndex).toBe(1);
+    component.onHideDraftsChange(true);
+    expect(component.pageIndex).toBe(0);
+  });
+
+  it('pagedPulls slices filteredPulls, not the raw pulls array', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.hideDrafts = true; // 12 non-draft PRs remain: 2, 4, ..., 24
+    component.pageSize = 10;
+    component.pageIndex = 0;
+    expect(component.pagedPulls.map((p) => p.number)).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
+    component.pageIndex = 1;
+    expect(component.pagedPulls.map((p) => p.number)).toEqual([22, 24]);
+  });
+
+  it('renders "No pull requests match" when the filter excludes everything', async () => {
+    await setup();
+    component.pullFilter = 'nonexistent-xyz';
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-empty-state h3')?.textContent).toContain('No pull requests match');
+  });
+
+  it("the rendered paginator's length reflects filteredPulls.length once filtered", async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.hideDrafts = true; // 12 non-draft PRs remain, still above the pagination threshold
+    fixture.detectChanges();
+    const paginatorDebug = fixture.debugElement.query(By.css('mat-paginator'));
+    expect(paginatorDebug).not.toBeNull();
+    expect(paginatorDebug.componentInstance.length).toBe(12);
+  });
+
+  it('collapsing/switching repos clears pullFilter but leaves hideDrafts untouched', async () => {
+    await setup();
+    component.pullFilter = 'something';
+    component.hideDrafts = true;
+    component.toggleRepo(component.repos[0]); // collapse
+    expect(component.pullFilter).toBe('');
+    expect(component.hideDrafts).toBe(true);
   });
 
   it('renders the PR-list error banner inside the expanded repo panel', async () => {
