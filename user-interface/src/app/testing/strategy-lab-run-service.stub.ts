@@ -14,6 +14,19 @@ import type { PaperTradingSession, StrategyLabRunStatus, StrategyLabStreamEvent 
  * Shared by `strategy-lab.component.spec.ts` and
  * `strategy-lab.component.a11y.spec.ts` — previously two independently
  * hand-maintained copies that had to be kept in sync by hand.
+ *
+ * Preconditions: none — call once per test (or per fixture) needing an
+ *   isolated `StrategyLabRunService` stand-in; each call returns fresh
+ *   signals/Subjects/`vi.fn()`s, never shared state across calls.
+ * Postconditions: returns an object whose signal-typed properties
+ *   (`runStatus`, `running`, `activeRunId`, `paperTradingSessions`,
+ *   `paperTradingLabRecordId`, `lastTerminalStatus`) start at the same
+ *   values `StrategyLabRunService`'s constructor does, and whose action
+ *   methods (`startRun`, `clearPaperTradingSessions`,
+ *   `hydratePaperTradingSessions`, `trackPaperTradingSession`) mutate those
+ *   same signals the way the real service's methods do, so a test driving
+ *   the stub observes realistic state transitions without a live SSE
+ *   connection.
  */
 export function createRunServiceStub() {
   const runStatus = signal<StrategyLabRunStatus | null>(null);

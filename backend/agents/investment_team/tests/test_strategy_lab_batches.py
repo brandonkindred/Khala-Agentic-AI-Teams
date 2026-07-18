@@ -12,6 +12,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 # NOTE: import via the same module path used inside ``main.py`` so Pydantic
@@ -477,6 +478,61 @@ def test_unexpected_cycle_exception_does_not_halt_run(
     assert "boom" in detail["error"]
 
 
+def test_concurrent_deep_failures_in_one_wave_publish_only_one_terminal_error(
+    empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: as_completed() yields a wave's futures one at a time, so a
+    non-502 HTTPException (a "deep failure") from a second concurrent cycle in
+    the same wave used to be processed and published before the first
+    failure's run_failed=True could stop the loop — publishing two terminal
+    'error' events for one run instead of one."""
+
+    class _AllCyclesFailOrchestrator:
+        def __init__(self, convergence_tracker: Any = None) -> None:
+            self.convergence_tracker = _NoopTracker()
+
+        def run_cycle(
+            self,
+            prior_records: List[StrategyLabRecord],
+            config: BacktestConfig,
+            signal_brief: Any = None,
+            on_phase: Any = None,
+            exclude_asset_classes: Any = None,
+        ) -> StrategyLabRecord:
+            raise HTTPException(status_code=500, detail="downstream provider unavailable")
+
+    published: List[Dict[str, Any]] = []
+
+    def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
+        published.append({**event, "type": event_type})
+
+    from investment_team.api import job_event_bus as _job_event_bus
+
+    monkeypatch.setattr(_job_event_bus, "publish", _capture_publish)
+    monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _AllCyclesFailOrchestrator)
+    monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
+    monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
+    monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
+
+    # A single wave of 2 concurrent cycles, both hitting the deep-failure path.
+    request = RunStrategyLabRequest(
+        batch_size=2,
+        batch_count=1,
+        max_parallel=2,
+        paper_trading_enabled=False,
+    )
+    run_id = "run-test-concurrent-deep-failure"
+    _seed_run_state(run_id, request)
+
+    _strategy_lab_worker(run_id, request)
+
+    state = lab_main._active_runs[run_id]
+    assert state["status"] == "failed"
+
+    error_events = [e for e in published if e["type"] == "error"]
+    assert len(error_events) == 1, f"expected exactly one terminal 'error' event, got {error_events}"
+
+
 def test_merge_from_failure_does_not_halt_run(
     empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -573,7 +629,7 @@ def test_cancelled_run_publishes_distinct_cancelled_event(
     monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
     monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
     # Cancelled between waves, after the (only) wave in this single-cycle run.
-    monkeypatch.setattr(lab_main, "_is_strategy_lab_run_cancelled", lambda run_id: True)
+    monkeypatch.setattr(lab_main, "_strategy_lab_external_terminal_status", lambda run_id: "cancelled")
 
     request = RunStrategyLabRequest(
         batch_size=1,
@@ -593,6 +649,72 @@ def test_cancelled_run_publishes_distinct_cancelled_event(
     cancelled_events = [e for e in published if e["type"] == "cancelled"]
     assert len(cancelled_events) == 1
     assert cancelled_events[0]["detail"] == "Run cancelled by user"
+
+
+@pytest.mark.parametrize("external_status", ["interrupted", "failed"])
+def test_externally_interrupted_or_failed_run_is_not_mislabeled_cancelled(
+    external_status: str, empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: _STRATEGY_LAB_CANCEL_STATUSES also includes "failed" and
+    "interrupted" (e.g. a service-wide "mark all interrupted" reconciliation
+    hitting a still-running job), but the between-wave check used to
+    unconditionally overwrite the run's status with "cancelled" and publish
+    a "Run cancelled by user" detail regardless of the true external cause —
+    mislabeling both the live SSE event and the persisted record."""
+
+    class _Orch:
+        _counter = 0
+
+        def __init__(self, convergence_tracker: Any = None) -> None:
+            self.convergence_tracker = _NoopTracker()
+
+        def run_cycle(
+            self,
+            prior_records: List[StrategyLabRecord],
+            config: BacktestConfig,
+            signal_brief: Any = None,
+            on_phase: Any = None,
+            exclude_asset_classes: Any = None,
+        ) -> StrategyLabRecord:
+            type(self)._counter += 1
+            return _make_record(type(self)._counter, config)
+
+    published: List[Dict[str, Any]] = []
+
+    def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
+        published.append({**event, "type": event_type})
+
+    from investment_team.api import job_event_bus as _job_event_bus
+
+    monkeypatch.setattr(_job_event_bus, "publish", _capture_publish)
+    monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _Orch)
+    monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
+    monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
+    monkeypatch.setattr(lab_main, "_persist_run_state", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        lab_main, "_strategy_lab_external_terminal_status", lambda run_id: external_status
+    )
+
+    request = RunStrategyLabRequest(
+        batch_size=1,
+        batch_count=1,
+        max_parallel=1,
+        paper_trading_enabled=False,
+    )
+    run_id = f"run-test-{external_status}"
+    _seed_run_state(run_id, request)
+
+    _strategy_lab_worker(run_id, request)
+
+    state = lab_main._active_runs[run_id]
+    # The true external status survives — not silently overwritten to "cancelled".
+    assert state["status"] == external_status
+
+    assert not [e for e in published if e["type"] == "cancelled"]
+    error_events = [e for e in published if e["type"] == "error"]
+    assert len(error_events) == 1
+    assert "cancelled by user" not in error_events[0]["detail"].lower()
+    assert external_status in error_events[0]["detail"]
 
 
 def test_restart_accepts_completed_with_errors(

@@ -9,7 +9,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { NotificationService } from '../../core/notification.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
-import { createRunServiceStub } from '../../testing/strategy-lab-run-service.stub';
+import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
 import type {
   PaperTradingSession,
   QualityGateResult,
@@ -19,8 +19,6 @@ import type {
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
 } from '../../models';
-
-type RunServiceStub = ReturnType<typeof createRunServiceStub>;
 
 /**
  * Focused coverage for the asset-category selection feature. The component is
