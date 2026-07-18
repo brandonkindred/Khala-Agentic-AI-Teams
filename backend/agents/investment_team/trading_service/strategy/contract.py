@@ -421,18 +421,12 @@ class StrategyContext:
         # This dict only covers indicator() calls. Generated strategy code
         # may instead call the 16 standalone wrapper functions directly
         # (`from indicators import sma`, a documented, supported call shape
-        # — see strategy_indicators' module docstring), which always fall
-        # through to _shared_registry's thread-local fallback cache (no
-        # registries argument passed). That cache is keyed only by (symbol,
-        # source), so without a reset here it can survive across unrelated
-        # executions that construct a StrategyContext in-process on the same
-        # thread (e.g. tests) and hand this execution a stale value cached
-        # by a different execution for the same symbol.
-        try:
-            from indicators import _reset_shared_registries  # type: ignore[import-not-found]
-        except ImportError:
-            from ...strategy_lab.executor.strategy_indicators import _reset_shared_registries
-        _reset_shared_registries()
+        # — see strategy_indicators' module docstring), which never see this
+        # dict directly either. The harness instead sets strategy_indicators'
+        # _active_registries contextvar to this dict right after
+        # constructing ctx (see streaming_harness.py's _HARNESS_SCRIPT), so a
+        # standalone wrapper call resolves to it too — see
+        # _shared_registry's docstring for the mechanism.
 
     # ------------------------------------------------------------------
     # Read-only accessors

@@ -122,38 +122,31 @@ def _temporal_dispatch_inline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_indicator_registries():
-    """Clear strategy_indicators' shared-registry fallback caches per test.
+    """Force-clear strategy_indicators' ``_active_registries`` contextvar per test.
 
-    ``strategy_indicators._shared_registry`` reuses one ``IndicatorRegistry``
-    per (thread, symbol) across calls instead of constructing fresh each time.
-    pytest runs a worker's tests sequentially on one thread and this suite
-    reuses a small, overlapping symbol vocabulary (``"QQQ"``, ``"TEST"``, the
-    no-symbol default bucket) across many test files, so without a reset a
-    registry warmed by one test would still be cached when an unrelated later
-    test queries the same symbol — silently mutating state left over from a
-    different bar sequence rather than starting cold.
-
-    Also force-clears the ``_active_registries`` contextvar both before and
-    after the test. Tests that exercise it directly (e.g. to prove the
-    contextvar takes precedence over the thread-local fallback) are expected
-    to reset their own ``Token`` via ``try``/``finally``; this is a defensive
-    backstop, not the primary mechanism, so a test with a bug in that
-    cleanup — or a future test that forgets it — can't leave a stale
-    registries dict active for whatever test runs next on this thread.
+    ``strategy_indicators._shared_registry`` only ever caches an
+    ``IndicatorRegistry`` in a dict it's explicitly handed — the caller's own
+    ``registries`` argument, or (for the 16 standalone wrapper functions and
+    any direct ``indicator_value`` call) whatever dict the ``_active_
+    registries`` contextvar currently points to; with neither set, it always
+    returns a fresh, uncached instance. Tests that exercise the contextvar
+    directly (e.g. to prove it takes precedence, or to simulate a dispatch
+    bracket) are expected to reset their own ``Token`` via ``try``/``finally``;
+    this is a defensive backstop, not the primary mechanism, so a test with a
+    bug in that cleanup — or a future test that forgets it — can't leave a
+    stale registries dict active for whatever test runs next on this thread.
 
     Preconditions:
         None (import is lazy so tests that never touch strategy_indicators
         are unaffected).
     Postconditions:
-        Every test starts with, and leaves behind, an empty shared-registry
-        cache on this thread and no ``_active_registries`` context set.
+        Every test starts with, and leaves behind, no ``_active_registries``
+        context set.
     """
     from investment_team.strategy_lab.executor import strategy_indicators as si
 
-    si._reset_shared_registries()
     si._active_registries.set(None)
     yield
-    si._reset_shared_registries()
     si._active_registries.set(None)
 
 

@@ -137,15 +137,12 @@ class _ShadowContext:
         # straight from strategy_indicators onto the shadow indicators
         # module with no registries argument, so generated code that does
         # `from indicators import sma` (a documented, supported call shape —
-        # see strategy_indicators' module docstring) always falls through to
-        # _shared_registry's thread-local fallback cache, never this dict.
-        # That cache is keyed only by (symbol, source), so without a reset
-        # here it survives across unrelated shadow executions on the same
-        # worker thread and can hand this execution a stale value cached by
-        # a different execution for the same symbol.
-        from ..executor.strategy_indicators import _reset_shared_registries
-
-        _reset_shared_registries()
+        # see strategy_indicators' module docstring) never sees this dict
+        # directly either. _check_fixture instead brackets every call into
+        # strategy code with strategy_indicators._active_registries.set(self.
+        # _indicator_registries) / .reset(token), so a standalone wrapper
+        # called from inside on_start/on_bar resolves to this dict too — see
+        # _check_fixture and _shared_registry's docstring for the mechanism.
 
     @property
     def capital(self) -> float:

@@ -27,7 +27,6 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
 )
 from investment_team.strategy_lab.executor.strategy_indicators import (
     bollinger_bands,
-    ema,
     indicator_value,
 )
 from investment_team.strategy_lab.quality_gates.code_conformance import CodeConformanceGate
@@ -203,7 +202,13 @@ def test_indicator_value_accepts_plain_number_sequence() -> None:
 def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
     """Acceptance criterion: the registry is instantiated once per backtest
     (per symbol), not once per indicator call — checked across many calls and
-    two different indicators (one always-recompute, one deque-stateful)."""
+    two different indicators (one always-recompute, one deque-stateful).
+    Passes an explicit ``registries`` dict, matching how ``ctx.indicator()``
+    actually calls this in production (see ``contract.py``/
+    ``predicate_conformance.py``) — ``indicator_value`` has no caching of its
+    own for a caller that omits ``registries`` entirely; see
+    ``test_ad_hoc_sequential_calls_with_overlapping_timestamps_no_longer_corrupt``
+    in ``test_strategy_indicators.py`` for why that's deliberate."""
     from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 
     constructed: list[object] = []
@@ -215,10 +220,11 @@ def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
 
+    registries: dict = {}
     bars = _make_bars(n=40, symbol="QQQ")
     for i in range(20, len(bars) + 1):
-        indicator_value("sma", bars[:i], period=10)
-        indicator_value("macd", bars[:i])
+        indicator_value("sma", bars[:i], period=10, registries=registries)
+        indicator_value("macd", bars[:i], registries=registries)
 
     assert len(constructed) == 1
 
@@ -229,7 +235,8 @@ def test_indicator_value_registry_count_scales_with_distinct_symbols(
     """'Once per backtest' means once per symbol-stream within a backtest, not
     a single flat instance: a multi-symbol backtest constructs one registry
     per symbol it actually reads — still far below one-per-call, but not a
-    literal singleton either."""
+    literal singleton either. Passes an explicit ``registries`` dict — see
+    ``test_indicator_value_shares_one_registry_per_symbol`` above."""
     from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 
     constructed: list[object] = []
@@ -241,11 +248,12 @@ def test_indicator_value_registry_count_scales_with_distinct_symbols(
 
     monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
 
+    registries: dict = {}
     aaa = _make_bars(n=30, symbol="AAA")
     bbb = _make_bars(n=30, symbol="BBB")
     for i in range(20, 31):
-        indicator_value("sma", aaa[:i], period=10)
-        indicator_value("sma", bbb[:i], period=10)
+        indicator_value("sma", aaa[:i], period=10, registries=registries)
+        indicator_value("sma", bbb[:i], period=10, registries=registries)
 
     assert len(constructed) == 2
 
@@ -369,32 +377,6 @@ def test_shadow_context_owns_isolated_indicator_registries() -> None:
     assert first._indicator_registries  # constructing `second` didn't touch `first`
 
 
-def test_shadow_context_construction_resets_the_standalone_wrapper_fallback_cache() -> None:
-    """Regression test for a fifth bug caught in code review: the instance-
-    owned ``_indicator_registries`` dict (see
-    ``test_shadow_context_owns_isolated_indicator_registries``) only covers
-    ``ctx.indicator(...)`` calls. ``_build_indicators_stub`` binds the 16
-    standalone wrapper functions (``sma``/``ema``/...) straight from
-    ``strategy_indicators`` onto the shadow ``indicators`` module with no
-    ``registries`` argument, so generated code that does ``from indicators
-    import sma`` (a documented, supported call shape — see
-    ``strategy_indicators``'s module docstring) always falls through to
-    ``_shared_registry``'s thread-local fallback cache instead, bypassing
-    ``_ShadowContext`` entirely. That cache is keyed only by ``(symbol,
-    source)`` and survives across unrelated executions on the same worker
-    thread unless reset, so ``_ShadowContext.__init__`` must still call
-    ``_reset_shared_registries()`` even though it also owns its own dict.
-    """
-    from investment_team.strategy_lab.executor import strategy_indicators as si
-
-    _ShadowContext()  # first shadow execution
-    ema(_shadow_bars(30), 5)  # warms the thread-local fallback cache for QQQ
-    assert si._thread_local.registries  # sanity: something got cached
-
-    _ShadowContext()  # a second, unrelated shadow execution on the same thread
-    assert si._thread_local.registries == {}
-
-
 def test_strategy_context_owns_isolated_indicator_registries() -> None:
     """``StrategyContext`` can be constructed in-process (not just inside the
     sandboxed subprocess — e.g. by tests); it gets the same per-instance
@@ -409,26 +391,6 @@ def test_strategy_context_owns_isolated_indicator_registries() -> None:
     second = StrategyContext(emit=lambda _d: None)
     assert second._indicator_registries == {}
     assert first._indicator_registries
-
-
-def test_strategy_context_construction_resets_the_standalone_wrapper_fallback_cache() -> None:
-    """``StrategyContext`` gets the same fallback-cache reset as
-    ``_ShadowContext`` (see
-    ``test_shadow_context_construction_resets_the_standalone_wrapper_fallback_cache``)
-    and for the same reason: it can be constructed in-process on a shared
-    thread (e.g. this test suite, or any other in-process caller), and the 16
-    standalone wrapper functions bypass its instance-owned
-    ``_indicator_registries`` dict entirely — see
-    ``strategy_indicators._reset_shared_registries``'s docstring.
-    """
-    from investment_team.strategy_lab.executor import strategy_indicators as si
-
-    StrategyContext(emit=lambda _d: None)
-    ema(_make_bars(30, symbol="QQQ"), 5)  # warms the thread-local fallback cache for QQQ
-    assert si._thread_local.registries  # sanity: something got cached
-
-    StrategyContext(emit=lambda _d: None)  # a new, unrelated execution on the same thread
-    assert si._thread_local.registries == {}
 
 
 def test_interleaved_contexts_do_not_corrupt_each_others_indicator_state() -> None:

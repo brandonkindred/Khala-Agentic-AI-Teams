@@ -235,7 +235,7 @@ def test_shared_registry_tolerates_raising_timestamp_descriptor() -> None:
     assert si.ema(bars, 5) == pytest.approx(si.ema(plain, 5))
 
 
-def test_shared_registry_prefers_active_registries_contextvar_over_thread_local() -> None:
+def test_shared_registry_uses_active_registries_contextvar_when_set() -> None:
     """Regression test for a sixth bug caught in code review: the 16
     standalone wrapper functions have no ``registries`` parameter, so
     ``StrategyContext``/``_ShadowContext`` cannot pass their own dict when a
@@ -243,10 +243,8 @@ def test_shared_registry_prefers_active_registries_contextvar_over_thread_local(
     ``_shared_registry`` now checks the ``_active_registries`` contextvar —
     set by those two classes around every call into strategy code (see
     ``streaming_harness.py``'s ``_HARNESS_SCRIPT`` and
-    ``predicate_conformance.py``'s ``_check_fixture``) — before falling back
-    to the thread-local cache. This proves the precedence directly: with the
-    contextvar set, a wrapper call must land in *that* dict, not the
-    thread-local one, even though both are available."""
+    ``predicate_conformance.py``'s ``_check_fixture``) — so a wrapper call
+    made while it's set is cached in *that* dict rather than uncached."""
     bars = _bars(20)
     own_dict: dict = {}
     token = si._active_registries.set(own_dict)
@@ -255,8 +253,86 @@ def test_shared_registry_prefers_active_registries_contextvar_over_thread_local(
     finally:
         si._active_registries.reset(token)
 
-    assert own_dict  # the call landed in the contextvar's dict...
-    assert si._thread_local.registries == {}  # ...not the thread-local fallback
+    assert own_dict  # the call landed in the contextvar's dict
+
+
+def test_shared_registry_never_caches_with_no_registries_source_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for a seventh bug caught in code review: an earlier
+    version of this module fell back to a module-level thread-local cache
+    when a wrapper call had neither an explicit ``registries`` argument nor
+    ``_active_registries`` set — reasoning it was safe because such a caller
+    has no context to *interleave* with. That reasoning missed a *sequential*
+    failure mode with no context object involved at all: two ad-hoc calls for
+    the same symbol with overlapping timestamps —
+    ``bollinger_bands(history_a)`` then ``bollinger_bands(history_b)`` — could
+    still have ``history_b``'s second-to-last bar coincide with
+    ``history_a``'s last bar, and ``streaming.py``'s ``_advance_kind`` reads
+    that as "this stream just advanced by one," silently blending both
+    histories into a wrong value (verified empirically: 100% reproducible via
+    the timestamp-match path, not dependent on CPython's ``id()`` reuse).
+    Removing that third cache entirely closes it: with no registries source
+    of any kind, every call now constructs its own instance — proven here the
+    same way the no-timestamp/no-symbol escape hatches already are, by
+    counting constructor calls."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    assert si._active_registries.get() is None  # sanity: no context in scope
+    bars = _bars(20)
+    si.ema(bars, 5)
+    si.ema(bars, 5)
+    assert len(constructed) == 2
+
+
+def test_ad_hoc_sequential_calls_with_overlapping_timestamps_no_longer_corrupt() -> None:
+    """Black-box counterpart to the constructor-count proof above: two
+    genuinely different histories for the same symbol, called back-to-back
+    with no owning context, where the second history's *second-to-last* bar
+    shares a timestamp with the first history's *last* bar (the exact
+    ``streaming.py`` ``_advance_kind`` "slide" trigger) — this reproduced
+    reliably (914/1000 trials) against the previous thread-local fallback.
+    With no registries source at all, ``bollinger_bands`` on the second call
+    must match a fully independent computation over its own data, not a value
+    blended with the first call's."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    def hist(closes, dates):
+        return [
+            contract.Bar(
+                symbol="QQQ",
+                timestamp=d,
+                timeframe="1d",
+                open=c,
+                high=c,
+                low=c,
+                close=c,
+                volume=0.0,
+            )
+            for d, c in zip(dates, closes)
+        ]
+
+    dates_a = [f"2024-01-{i:02d}T00:00:00Z" for i in range(1, 21)]
+    closes_a = [100.0 + i for i in range(20)]
+    dates_b = [f"2024-01-{i:02d}T00:00:00Z" for i in range(2, 22)]  # overlaps a's dates 2..20
+    closes_b = [500.0 + i for i in range(20)]  # genuinely different prices
+
+    si.bollinger_bands(hist(closes_a, dates_a), period=20)
+    got_b = si.bollinger_bands(hist(closes_b, dates_b), period=20)[0]
+
+    expected_b = IndicatorRegistry().bollinger_bands(
+        hist(closes_b, dates_b), period=20, num_std=2.0, source="close", select="upper"
+    )
+    assert got_b == pytest.approx(expected_b)
 
 
 # ---------------------------------------------------------------------------

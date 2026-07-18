@@ -31,7 +31,6 @@ from __future__ import annotations
 import contextvars
 import math
 import numbers
-import threading
 from typing import Optional, Sequence
 
 try:  # in-package use (predicate-conformance gate, in-process tests)
@@ -66,27 +65,27 @@ except ImportError:  # flat sandbox layout
 # thread. Unlike a plain thread-local, a contextvar Token records exactly
 # what to restore on exit, so nested/alternating set-call-reset regions never
 # leak into each other regardless of how the call stack interleaves.
+#
+# A wrapper call made with neither an explicit `registries` argument nor
+# `_active_registries` set — i.e. outside any dispatch bracket entirely, such
+# as a direct script/test call with no owning StrategyContext/_ShadowContext
+# at all — gets a fresh, uncached IndicatorRegistry every time (see
+# _shared_registry below) rather than falling back to a third, module-level
+# cache. An earlier version of this module used a thread-local dict for that
+# case, reasoning it was safe because such a caller has no context to
+# interleave with — true for interleaving, but not for two *sequential*
+# ad-hoc calls: `bollinger_bands(history_a)` followed by
+# `bollinger_bands(history_b)` for the same symbol with overlapping
+# timestamps could still reuse history_a's cached deque and return a value
+# blended from both histories, silently, with no context object involved at
+# all. Since every real caller now has a registries source — StrategyContext/
+# _ShadowContext always bracket dispatch — there is no remaining case where
+# that third cache would be both safe and beneficial, so it was removed
+# rather than patched further.
 # Set to a dict for the duration of a bracketed call; None outside one.
 _active_registries: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "_active_registries", default=None
 )
-
-# Fallback cache for _shared_registry calls with no owning execution context
-# AND no `_active_registries` set — i.e. a wrapper call made outside any
-# dispatch bracket (a direct test call, or any future caller that doesn't go
-# through StrategyContext/_ShadowContext). A thread-local dict can't
-# distinguish two different execution contexts that happen to run on the same
-# thread (sequentially or interleaved), so it isn't safe as the *only*
-# mechanism — that's what `_active_registries` is for — but it's fine as a
-# last-resort fallback for callers with no context object and no bracketed
-# dispatch to inherit, since those callers have no notion of "a different
-# execution" to interleave with in the first place. Bucketed by inferred
-# symbol and requested source because 8 of IndicatorRegistry's 16 methods (3
-# of them with incremental deque state) don't include symbol in their own
-# cache key, and none of them see the caller's true requested source
-# (indicator_value always dispatches with the literal source="close" after
-# pre-projecting) — see _shared_registry's docstring for the full reasoning.
-_thread_local = threading.local()
 
 
 def _trailing_element(reference):
@@ -166,27 +165,39 @@ def _shared_registry(
 
     Callers that can't pass ``registries`` directly — the 16 wrapper
     functions below, and any direct ``indicator_value`` call with no context
-    in scope — fall back through two further layers, in order:
+    in scope — fall back to ``_active_registries`` (a
+    ``contextvars.ContextVar``): set by ``StrategyContext``/``_ShadowContext``
+    for the duration of a call into strategy code (``on_start``/``on_bar``/
+    ``on_fill``/``on_end`` — see ``streaming_harness.py``'s
+    ``_HARNESS_SCRIPT`` and ``predicate_conformance.py``'s
+    ``_check_fixture``), so a standalone wrapper called *from inside* that
+    dispatch resolves to the same dict ``ctx.indicator()`` already uses. This
+    is what makes the wrapper functions execution-safe despite taking no
+    ``registries`` parameter of their own: a plain thread-local dict can't
+    distinguish two different execution contexts that happen to run on the
+    same thread (nothing about "same thread" implies "same execution" once
+    more than one context can be live at a time — and, less obviously, not
+    even "one call, then a later, unrelated call" is safe without something
+    marking the boundary between them), but a contextvar ``Token`` records
+    exactly what to restore when a bracketed call exits, so alternating
+    dispatch between two contexts — even genuinely interleaved — never leaks
+    one's cache into the other's.
 
-    1. ``_active_registries`` (a ``contextvars.ContextVar``): set by
-       ``StrategyContext``/``_ShadowContext`` for the duration of a call into
-       strategy code (``on_start``/``on_bar``/``on_fill``/``on_end`` — see
-       ``streaming_harness.py``'s ``_HARNESS_SCRIPT`` and
-       ``predicate_conformance.py``'s ``_check_fixture``), so a standalone
-       wrapper called *from inside* that dispatch resolves to the same dict
-       ``ctx.indicator()`` already uses. This is what makes the wrapper
-       functions execution-safe: a plain thread-local can't distinguish two
-       different execution contexts that happen to run on the same thread
-       (nothing about "same thread" implies "same execution" once more than
-       one context can be live at a time), but a contextvar ``Token`` records
-       exactly what to restore when a bracketed call exits, so alternating
-       dispatch between two contexts — even genuinely interleaved — never
-       leaks one's cache into the other's.
-    2. A thread-local dict, used only when ``_active_registries`` is unset
-       (a wrapper call made with no bracketing dispatch above it on the call
-       stack at all — e.g. a direct test call). Safe there because such a
-       caller has no context object, and thus no other execution, to
-       interleave with in the first place.
+    A call with *neither* ``registries`` nor ``_active_registries`` set —
+    entirely outside any dispatch bracket, e.g. a direct script or test call
+    with no owning ``StrategyContext``/``_ShadowContext`` at all — gets a
+    fresh, uncached ``IndicatorRegistry`` (see below), never a shared one.
+    There is deliberately no further fallback cache for this case: two
+    *sequential* ad-hoc calls sharing a symbol (not just interleaved ones)
+    can have genuinely different histories with an overlapping timestamp —
+    e.g. ``bollinger_bands(history_a)`` then ``bollinger_bands(history_b)``
+    for the same symbol where ``history_b``'s second-to-last bar happens to
+    carry the same timestamp as ``history_a``'s last bar — which
+    ``streaming.py``'s ``_advance_kind`` reads as "this stream just advanced
+    by one bar," blending both histories into a wrong value. That failure
+    mode has no context object involved at any point, so no amount of
+    resetting-at-construction can catch it; only never caching this call
+    shape at all does.
 
     Preconditions:
         ``reference`` is whatever pre-projection argument the caller already
@@ -199,12 +210,13 @@ def _shared_registry(
     Postconditions:
         Returns an ``IndicatorRegistry``. When the trailing element exposes
         both a non-``None`` ``timestamp`` and a non-``None`` ``symbol``,
-        constructs and caches one per ``(symbol, source)`` in ``registries``
-        (or, if ``registries`` is ``None``: the current ``_active_registries``
-        dict if set, else this thread's fallback dict) the first time it's
-        seen and returns that same instance on every subsequent call for that
-        key against that same dict; otherwise returns a fresh, never-cached
-        instance. Never mutates ``reference``.
+        AND ``registries`` (or, if ``None``, the current
+        ``_active_registries``) resolves to a dict, constructs and caches one
+        per ``(symbol, source)`` in that dict the first time it's seen and
+        returns that same instance on every subsequent call for that key
+        against that same dict; otherwise (missing timestamp/symbol, or no
+        dict available at all) returns a fresh, never-cached instance. Never
+        mutates ``reference``.
     """
     last = _trailing_element(reference)
     if last is None:
@@ -225,47 +237,13 @@ def _shared_registry(
     if registries is None:
         registries = _active_registries.get()
     if registries is None:
-        registries = getattr(_thread_local, "registries", None)
-        if registries is None:
-            registries = {}
-            _thread_local.registries = registries
+        return IndicatorRegistry()
     key = (symbol, source)
     reg = registries.get(key)
     if reg is None:
         reg = IndicatorRegistry()
         registries[key] = reg
     return reg
-
-
-def _reset_shared_registries() -> None:
-    """Clear this thread's last-resort fallback registry cache (see :func:`_shared_registry`).
-
-    Only affects calls that fall all the way through to the thread-local
-    layer — i.e. no ``registries`` argument AND no ``_active_registries``
-    contextvar set. In production, standalone wrapper calls made *during*
-    strategy dispatch are covered by ``_active_registries`` instead (set by
-    ``StrategyContext``/``_ShadowContext`` around ``on_start``/``on_bar``/
-    ``on_fill``/``on_end`` — see ``streaming_harness.py``'s
-    ``_HARNESS_SCRIPT`` and ``predicate_conformance.py``'s
-    ``_check_fixture``), so this thread-local layer is only actually reached
-    by a wrapper call made with no bracketed dispatch above it on the call
-    stack at all (a direct test call, or any future caller that bypasses
-    both context classes). ``StrategyContext``/``_ShadowContext`` still call
-    this from their own ``__init__`` regardless — cheap, and it keeps this
-    layer's guarantee ("cold for every symbol/source at the start of a new
-    execution") true unconditionally rather than contingent on every call
-    site remembering to bracket its dispatch correctly. Called directly by
-    tests that need a clean slate for the thread-local fallback between
-    cases.
-
-    Preconditions: none.
-    Postconditions: the next :func:`_shared_registry` call on this thread
-    that reaches the thread-local layer starts cold for every symbol/source,
-    as if no indicator had been read yet. Does not affect
-    ``_active_registries`` — that's scoped by ``.set()``/``.reset(token)``
-    around dispatch, not by this function.
-    """
-    _thread_local.registries = {}
 
 
 def _extract_timestamps(source) -> list:
