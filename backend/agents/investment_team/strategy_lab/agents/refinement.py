@@ -11,7 +11,7 @@ from strands import Agent
 
 from ...models import BacktestResult, StrategySpec
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_envelope import invoke_agent
+from ._llm_envelope import run_structured_agent
 from ._parse_helpers import (
     build_json_correction_prompt,
     extract_json_object,
@@ -224,15 +224,20 @@ class RefinementAgent:
         prompt = user_prompt
         for attempt in range(retries + 1):
             agent = Agent(
-                model=get_strands_model("strategy_ideation"),
+                model=get_strands_model("strategy_refinement"),
                 system_prompt=system_prompt,
                 tools=[],
             )
-            raw = invoke_agent(
-                agent, prompt, agent_key="strategy_ideation", phase="refinement", logger=logger
-            )
             try:
-                return extract_json_object(raw)
+                return run_structured_agent(
+                    agent,
+                    prompt,
+                    agent_key="strategy_refinement",
+                    phase="refinement",
+                    parse=extract_json_object,
+                    charge=False,
+                    logger=logger,
+                )
             except ValueError as exc:
                 logger.warning(
                     "RefinementAgent emitted unparseable JSON (attempt %d/%d) "

@@ -1,14 +1,21 @@
-<div class="strategy-lab">
+<div
+  class="strategy-lab"
+  role="region"
+  [attr.aria-labelledby]="showTitle ? 'strategy-lab-heading' : null"
+  [attr.aria-label]="showTitle ? null : 'Strategy Lab'"
+>
 
   <!-- Header row -->
   <div class="lab-header">
-    <div class="lab-title">
-      <mat-icon aria-hidden="true">science</mat-icon>
-      <div>
-        <h2>Strategy Lab</h2>
-        <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
+    @if (showTitle) {
+      <div class="lab-title">
+        <mat-icon aria-hidden="true">science</mat-icon>
+        <div>
+          <h2 id="strategy-lab-heading">Strategy Lab</h2>
+          <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
+        </div>
       </div>
-    </div>
+    }
     <div class="lab-header-actions">
       @if (totalCount() > 0) {
         <button
