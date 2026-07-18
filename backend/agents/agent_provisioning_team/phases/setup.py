@@ -59,6 +59,11 @@ def run_setup(
         * On success: returns ``SetupResult(success=True, environment=...)``; the
           environment record is registered (registration is atomic — see
           ``EnvironmentStore.register``).
+        * The already-``running``-record fast path is only taken when Docker
+          also confirms (or can't rule out) that the container is still
+          there — a record whose container is CONFIRMED gone falls through
+          to ``docker.provision()`` instead of returning a broken
+          ``success=True`` result pointing at a dead ``container_id``.
         * On Docker provisioning failure: returns
           ``SetupResult(success=False, error=...)``; no environment record is
           written, and the docker provisioner best-effort-removes a container its
@@ -84,7 +89,20 @@ def run_setup(
         progress_callback("Checking for existing environment...")
 
     existing = env_store.get(agent_id)
-    if existing and existing.status == "running":
+    # The fast path trusts a "running" record without otherwise verifying
+    # anything — so a record surviving after its container was destroyed
+    # out-of-band (or docker's own idempotency state was separately lost)
+    # would deliver success=True pointing at a dead container_id. Only a
+    # CONFIRMED-absent container disqualifies the fast path; alive or
+    # unknown (daemon unreachable) both still trust it, same conservative
+    # default used elsewhere. Falling through to docker.provision() below
+    # lets DockerProvisionerTool's own reuse check (_on_reuse) detect and
+    # clear this same staleness and create a fresh container on retry.
+    if (
+        existing
+        and existing.status == "running"
+        and docker._container_exists(existing.container_name) is not False
+    ):
         return SetupResult(
             success=True,
             environment=EnvironmentInfo(

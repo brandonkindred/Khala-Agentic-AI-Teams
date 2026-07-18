@@ -985,6 +985,8 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
     with (
         patch(
@@ -1012,6 +1014,9 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     assert shims[0].success is True
     assert kwargs["tear_down_environment"] is True
     mock_clear.assert_called_once_with("job-1")
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with(
+        "agent-1"
+    )
 
 
 def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> None:
@@ -1023,6 +1028,8 @@ def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> Non
         patch.object(activities._js, "clear_completed_phases") as mock_clear,
     ):
         Orch.return_value.compensate = MagicMock()
+        Orch.return_value.environment_store.get.return_value = None
+        Orch.return_value.environment_store.readable.return_value = True
         Orch.return_value.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
         activities.compensate_activity("a1", [], job_id="j-comp")
 
@@ -1036,7 +1043,8 @@ def test_compensate_activity_raises_when_docker_state_survives() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
-    fake_orch.compensate.return_value = True
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = False
     with (
         patch(
@@ -1054,22 +1062,22 @@ def test_compensate_activity_raises_when_docker_state_survives() -> None:
     mock_clear.assert_called_once_with("j-comp")
 
 
-def test_compensate_activity_skips_docker_verification_when_env_removal_unsafe() -> None:
-    """A False return from compensate() means the env record may have survived.
+def test_compensate_activity_skips_docker_verification_when_env_record_survives() -> None:
+    """A live EnvironmentStore record means the container may still be legitimately owned.
 
-    compensate() returns False only when tear_down_environment=True and
-    cleanup_setup raised — cleanup_setup removes the environment record
-    before deprovisioning the container specifically so a raise there (the
-    record removal itself failing) leaves both untouched and consistent. An
-    independent by-name probe afterward can't distinguish "an orphan with no
-    state row" from "the container a surviving record still legitimately
-    references" — so it must be skipped entirely rather than risk deleting
-    the latter.
+    Checked fresh (not inferred from tear_down_environment or from whether
+    compensate() happened to raise internally): a genuinely pre-existing
+    environment leaves its record untouched by compensate() either way, and
+    a record whose removal itself failed inside compensate() also still has
+    one. Either way, an independent by-name probe can't distinguish "an
+    orphan with no state row" from "the container this surviving record
+    still legitimately references" — so it must be skipped entirely rather
+    than risk deleting the latter.
     """
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
-    fake_orch.compensate.return_value = False
+    fake_orch.environment_store.get.return_value = MagicMock()  # a record exists
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
@@ -1081,6 +1089,53 @@ def test_compensate_activity_skips_docker_verification_when_env_removal_unsafe()
 
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
     mock_clear.assert_called_once_with("j-comp")
+
+
+def test_compensate_activity_skips_docker_verification_when_registry_unreadable() -> None:
+    """An unreadable registry location is not proof no record exists — stays conservative."""
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = False
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=True)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
+
+
+def test_compensate_activity_verifies_orphan_even_when_tear_down_environment_false() -> None:
+    """A conservative tear_down_environment=False must not itself suppress the orphan check.
+
+    This is the compound-failure gap: the pre-run ownership check can fail
+    (leaving pre_existing_environment's conservative True default, hence
+    tear_down_environment=False) and setup can still create-then-fail with
+    its own local rollback also failing. Nothing ever gets registered in
+    EnvironmentStore in that case, so the live record check must still let
+    the by-name orphan probe run and catch the leak.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
 
 
 def test_compensate_activity_skips_verification_without_docker_provisioner() -> None:

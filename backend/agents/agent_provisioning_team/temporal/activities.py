@@ -834,31 +834,39 @@ def compensate_activity(
           CredentialStore / Docker / the env record by that point regardless
           of whether verification below then raises. Missing jobs are a
           no-op; job-store write failures raise for Temporal retry.
-        * When ``tear_down_environment`` is ``True`` AND ``compensate``
-          reports it is safe to (see its own return contract — ``False``
-          specifically means the environment record removal itself failed,
-          so ``cleanup_setup`` deliberately left a live container in place
-          to stay consistent with that surviving record): raises
-          ``RuntimeError`` when the docker provisioner still confirms (or
-          can't rule out) a live container for ``agent_id`` after
-          ``compensate`` returns — checked directly against the
-          deterministic container name via ``verify_and_remove_orphan``, not
-          merely the provisioner's own idempotency state, since a container
-          can exist with no corresponding state row (e.g. persisting that
-          state failed right after ``docker run`` succeeded, and the
-          best-effort removal that followed that specific failure also
-          failed) — a state-only check would then see nothing to clean up
-          and report false success. Raising here (rather than silently
-          returning as if teardown succeeded) lets Temporal's own retry
-          policy give teardown another attempt instead of leaking the
-          container — the workflow's setup-failure path in particular relies
-          on this activity actually retrying when its local rollback fails.
-          When ``compensate`` reports ``False``, this independent by-name
-          verification is skipped entirely rather than raising or silently
-          declaring success — probing by name in that case cannot tell "an
-          orphan with no state row" apart from "the container a surviving
-          record still legitimately references", and removing the latter
-          would leave that record pointing at a dead container.
+        * Independent of ``tear_down_environment``: when a docker provisioner
+          is registered and ``EnvironmentStore`` confirms NO record currently
+          exists for ``agent_id`` (checked live, right here — not inferred
+          from ``tear_down_environment`` or from how ``compensate`` happened
+          to fare), raises ``RuntimeError`` if the docker provisioner still
+          confirms (or can't rule out) a live container for ``agent_id`` —
+          checked directly against the deterministic container name via
+          ``verify_and_remove_orphan``, not merely the provisioner's own
+          idempotency state, since a container can exist with no
+          corresponding state row (e.g. persisting that state failed right
+          after ``docker run`` succeeded, and the best-effort removal that
+          followed that specific failure also failed) — a state-only check
+          would then see nothing to clean up and report false success.
+          Raising here (rather than silently returning as if teardown
+          succeeded) lets Temporal's own retry policy give teardown another
+          attempt instead of leaking the container — the workflow's
+          setup-failure path in particular relies on this activity actually
+          retrying when its local rollback fails, INCLUDING when
+          ``tear_down_environment`` was conservatively ``False`` because the
+          pre-run ownership check itself failed rather than because an
+          environment genuinely predates this run.
+        * A live record for ``agent_id`` skips this verification entirely: a
+          container that record still legitimately references must not be
+          probed-and-removed by name out from under it. Checking
+          ``EnvironmentStore`` fresh here (rather than trusting
+          ``tear_down_environment`` or inferring safety from whether
+          ``compensate`` happened to raise internally) is deliberate: a
+          genuinely pre-existing environment leaves its record untouched by
+          ``compensate`` either way, so it always still has one; a record
+          whose removal itself failed inside ``compensate`` also still has
+          one; only the "nothing ever got registered, or it did and was
+          since removed" case has none, and that is exactly when a container
+          matching the name is unambiguously orphaned.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -875,9 +883,7 @@ def compensate_activity(
         )
         for t in succeeded_tools
     ]
-    safe_to_verify_by_name = orch.compensate(
-        agent_id, shims, tear_down_environment=tear_down_environment
-    )
+    orch.compensate(agent_id, shims, tear_down_environment=tear_down_environment)
 
     if job_id:
         # Compensate tears down Docker, env, and CredentialStore — no prior
@@ -886,9 +892,14 @@ def compensate_activity(
         # leave stale, resumable checkpoints over already-torn-down state.
         _js.clear_completed_phases(job_id)
 
-    if tear_down_environment and safe_to_verify_by_name:
-        docker = orch.tool_agents.get("docker_provisioner")
-        if docker is not None and not docker.verify_and_remove_orphan(agent_id):
+    docker = orch.tool_agents.get("docker_provisioner")
+    if docker is not None:
+        env_store = orch.environment_store
+        # Live, not the (possibly stale/conservative) tear_down_environment
+        # flag: unreadable counts as "might have a record" — conservative,
+        # same as everywhere else this ambiguity shows up.
+        record_may_exist = env_store.get(agent_id) is not None or not env_store.readable(agent_id)
+        if not record_may_exist and not docker.verify_and_remove_orphan(agent_id):
             raise RuntimeError(
                 f"compensate_activity: docker teardown for agent_id={agent_id!r} did not "
                 "complete (container still confirmed alive, or its state is unknown, "

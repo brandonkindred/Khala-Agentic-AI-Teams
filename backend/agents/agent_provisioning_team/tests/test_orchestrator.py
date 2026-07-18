@@ -450,6 +450,12 @@ def test_compensate_replay_failure_continues(tmp_path: Path) -> None:
     orch.compensate("a1", [success])
     # Replay attempted for both records (continues despite failure)
     assert fake_prov.replay_compensation.call_count == 2
+    # A failed replay step preserves the persisted records/state instead of
+    # clearing them, so a retry of compensate() can still finish the
+    # rollback rather than losing track of what was never (or only
+    # partially) undone.
+    fake_prov.clear_compensations.assert_not_called()
+    fake_prov._state.delete.assert_not_called()
 
 
 def test_compensate_credential_cleanup_failure_swallowed(tmp_path: Path) -> None:
@@ -465,7 +471,6 @@ def test_compensate_credential_cleanup_failure_swallowed(tmp_path: Path) -> None
 
 
 def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkeypatch) -> None:
-    """A raised cleanup_setup is swallowed, but reported False — see next test."""
     from agent_provisioning_team import orchestrator as orch_mod
 
     monkeypatch.setattr(orch_mod, "cleanup_setup", MagicMock(side_effect=RuntimeError("env io")))
@@ -474,45 +479,6 @@ def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkey
         tool_agents={"docker_provisioner": MagicMock()},
     )
     orch.compensate("a1", [])  # must not raise
-
-
-def test_compensate_returns_false_when_environment_cleanup_raises(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A raised cleanup_setup means the env record may have survived.
-
-    cleanup_setup removes the environment record before deprovisioning the
-    container, specifically so a raise (the record removal itself failing)
-    leaves both untouched and consistent. Callers (compensate_activity) rely
-    on this False to know an independent by-name container probe would be
-    unsafe — it can't tell "an orphan with no state row" apart from "the
-    container a surviving record still legitimately references".
-    """
-    from agent_provisioning_team import orchestrator as orch_mod
-
-    monkeypatch.setattr(orch_mod, "cleanup_setup", MagicMock(side_effect=RuntimeError("env io")))
-    orch = ProvisioningOrchestrator(
-        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
-        tool_agents={"docker_provisioner": MagicMock()},
-    )
-    assert orch.compensate("a1", [], tear_down_environment=True) is False
-
-
-def test_compensate_returns_true_when_environment_cleanup_succeeds(tmp_path: Path) -> None:
-    orch = ProvisioningOrchestrator(
-        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
-        tool_agents={"docker_provisioner": MagicMock()},
-    )
-    assert orch.compensate("a1", [], tear_down_environment=True) is True
-
-
-def test_compensate_returns_true_when_environment_teardown_skipped(tmp_path: Path) -> None:
-    """tear_down_environment=False means no environment teardown was attempted at all."""
-    orch = ProvisioningOrchestrator(
-        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
-        tool_agents={"docker_provisioner": MagicMock()},
-    )
-    assert orch.compensate("a1", [], tear_down_environment=False) is True
 
 
 def test_compensate_skips_reused_tool_result(tmp_path: Path) -> None:

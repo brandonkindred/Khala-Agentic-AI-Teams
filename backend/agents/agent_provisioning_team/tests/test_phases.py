@@ -594,6 +594,66 @@ def test_run_setup_skips_on_registered_on_fast_path(tmp_path: Path) -> None:
     assert result.environment.reused is True
 
 
+def test_run_setup_falls_through_fast_path_when_container_confirmed_gone(tmp_path: Path) -> None:
+    """A "running" record whose container is CONFIRMED gone must not short-circuit.
+
+    Trusting it would deliver success=True pointing at a dead container_id.
+    Falling through to docker.provision() lets DockerProvisionerTool's own
+    reuse check (_on_reuse) detect and clear the same staleness in its own
+    idempotency state and create a fresh container instead.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(_stored_env("a18", status="running", container_id="c-dead"))
+
+    docker = _docker_stub(container_id="c-new", container_name="agent-a18")
+    docker._container_exists = MagicMock(return_value=False)
+
+    result = run_setup(
+        agent_id="a18",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+    )
+
+    assert result.success is True
+    docker.provision.assert_called_once()
+    assert result.environment.container_id == "c-new"
+    assert result.environment.reused is False
+
+
+def test_run_setup_takes_fast_path_when_container_liveness_unknown(tmp_path: Path) -> None:
+    """An inconclusive liveness probe (daemon unreachable) still trusts the record.
+
+    Conservative default: unknown is not proof the container is gone, so
+    falling through and potentially creating a duplicate container would be
+    the wrong tradeoff.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(_stored_env("a19", status="running", container_id="c-existing"))
+
+    docker = _docker_stub()
+    docker._container_exists = MagicMock(return_value=None)
+
+    result = run_setup(
+        agent_id="a19",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+    )
+
+    assert result.success is True
+    docker.provision.assert_not_called()
+    assert result.environment.container_id == "c-existing"
+
+
 def test_run_setup_rollback_swallows_deprovision_error() -> None:
     """The best-effort rollback must not mask the original register failure."""
     env_store = _rollback_env_store(get=None)

@@ -356,7 +356,7 @@ class ProvisioningOrchestrator:
         agent_id: str,
         tool_results: List[Any],
         tear_down_environment: bool = True,
-    ) -> bool:
+    ) -> None:
         """Roll back partial provisioning after a phase failure.
 
         Public entry point for Temporal ``compensate_activity`` and in-process
@@ -393,6 +393,14 @@ class ProvisioningOrchestrator:
               tool upfront, so once (and only once) a tool's account is
               confirmed torn back down, that secret no longer corresponds to
               anything live and is safe to discard.
+            * When a replay step fails, the provisioner's persisted
+              compensation records and idempotency state row are left
+              intact rather than cleared — clearing them would make an
+              un-replayed (or partially-applied) step's side effect
+              permanently unreachable by a future retry of this same
+              method; ``list_compensations`` must still return every
+              record next time so the retry can pick up where this
+              attempt left off.
             * ``tear_down_environment=False`` skips the Docker / whole-agent
               credential-file / environment-record teardown entirely, while
               tool rollback above still runs unconditionally (modulo the
@@ -401,22 +409,15 @@ class ProvisioningOrchestrator:
               against an already-delivered agent) and must be preserved — a
               newly-provisioned tool from THIS attempt still gets rolled
               back, but the environment this attempt never created is left
-              untouched.
-            * Returns whether it is safe for an independent caller to reclaim
-              an orphaned container by ``agent_id``'s deterministic name
-              alone (e.g. ``compensate_activity``'s own
-              ``verify_and_remove_orphan`` follow-up check): ``True`` when
-              ``tear_down_environment`` is ``False`` (no environment teardown
-              was attempted, so there is nothing to reconcile against), or
-              when it is ``True`` and ``cleanup_setup`` returned without
-              raising. ``False`` only when ``tear_down_environment`` is
-              ``True`` and ``cleanup_setup`` raised — ``cleanup_setup``
-              removes the environment record before deprovisioning the
-              container specifically so a raise (record removal itself
-              failing) leaves both untouched and consistent; a caller
-              probing by name afterward without checking this return value
-              could still find that live, correctly-preserved container and
-              delete it out from under its surviving ``running`` record.
+              untouched. Whether it is safe to independently reclaim an
+              orphaned container by name afterward (e.g.
+              ``compensate_activity``'s own ``verify_and_remove_orphan``
+              follow-up) is not reported here — callers needing that answer
+              should check ``EnvironmentStore`` directly rather than infer it
+              from how this method's internal steps happened to fare, since
+              ``cleanup_setup`` raising does not always mean the record
+              survived (e.g. the record removal itself can succeed and a
+              later step in the same call still raise).
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293
@@ -477,12 +478,33 @@ class ProvisioningOrchestrator:
                             "Compensation: replay failed kind=%s for %s", rec.kind, key
                         )
                         replay_failed = True
-                try:
-                    provisioner.clear_compensations(agent_id)
-                    provisioner._state.delete(agent_id)
-                    rollback_succeeded = not replay_failed
-                except Exception:  # noqa: BLE001
-                    logger.exception("Compensation: post-replay state cleanup failed for %s", key)
+                if replay_failed:
+                    # Preserve the persisted records and state row rather
+                    # than clearing them: a step that failed to replay left
+                    # its side effect (partially) intact, and a Temporal
+                    # retry of this whole activity needs list_compensations
+                    # to still return every record — including the ones that
+                    # DID replay successfully, since replaying an idempotent
+                    # step twice is safe but losing track of one that never
+                    # ran is not — to finish the rollback. Clearing here
+                    # would make that side effect permanently unreachable by
+                    # any future compensation attempt.
+                    logger.error(
+                        "Compensation: preserving compensation records for %s "
+                        "(agent_id=%s) after a replay step failed, so a retry can "
+                        "still attempt them",
+                        key,
+                        agent_id,
+                    )
+                else:
+                    try:
+                        provisioner.clear_compensations(agent_id)
+                        provisioner._state.delete(agent_id)
+                        rollback_succeeded = True
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Compensation: post-replay state cleanup failed for %s", key
+                        )
             else:
                 try:
                     deprovision_result = provisioner.deprovision(agent_id)
@@ -506,7 +528,7 @@ class ProvisioningOrchestrator:
                     logger.exception("Compensation: credential cleanup failed for %s", tool_name)
 
         if not tear_down_environment:
-            return True
+            return
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker is not None:
@@ -524,9 +546,6 @@ class ProvisioningOrchestrator:
             cleanup_setup(agent_id, self.environment_store)
         except Exception:  # noqa: BLE001
             logger.exception("Compensation: environment cleanup failed")
-            return False
-
-        return True
 
     def deprovision(
         self,
