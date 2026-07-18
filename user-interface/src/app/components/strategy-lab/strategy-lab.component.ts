@@ -328,6 +328,15 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   activityLog: ActivityLogEntry[] = [];
   private lastCycleIndex = -1;
 
+  /**
+   * Terminal-outcome text for the aria-live status region (`runAnnouncement`),
+   * set once in `onRunComplete()` — at that point `runStatus` is already
+   * cleared, so the in-progress branch can no longer describe what just
+   * happened. Reset to null when a new run starts so a stale outcome from a
+   * previous run can't leak into the next run's brief "Starting…" window.
+   */
+  private runOutcomeAnnouncement: string | null = null;
+
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
   /** Pending auto-scroll timer id, cleared on destroy. */
@@ -595,6 +604,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   private onRunComplete(): void {
+    this.runOutcomeAnnouncement = this.error
+      ? 'Strategy Lab run failed.'
+      : this.completionWarning
+      ? 'Strategy Lab run finished with errors.'
+      : 'Strategy Lab run complete.';
     this.running = false;
     this.activeRunId = null;
     this.runStatus = null;
@@ -697,6 +711,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.running = true;
     this.error = null;
     this.completionWarning = null;
+    this.runOutcomeAnnouncement = null;
     this.api
       .runStrategyLab({
         batch_size: batchSize,
@@ -863,6 +878,34 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   progressPercent(): number {
     if (!this.runStatus || this.runStatus.total_cycles === 0) return 0;
     return Math.round((this.runStatus.completed_cycles / this.runStatus.total_cycles) * 100);
+  }
+
+  /**
+   * Concise text for the always-present aria-live status region: batch and
+   * strategy position plus the current phase label while a run proceeds, the
+   * terminal outcome just after a run ends, or '' when idle. Deliberately
+   * excludes per-log-line detail — `activityLog` stays out of the live
+   * region so screen-reader users get a summary, not a blow-by-blow feed.
+   *
+   * Preconditions: none.
+   * Postconditions: returns a non-empty sentence while `running` is true and
+   *   `runStatus` is populated, or immediately after a run ends (until the
+   *   next run starts clears it); returns '' otherwise.
+   */
+  runAnnouncement(): string {
+    if (this.running && this.runStatus) {
+      const status = this.runStatus;
+      const segments: string[] = [];
+      if (status.batch_count && status.batch_count > 1) {
+        const batchNum = status.current_batch ?? (status.completed_batches ?? 0) + 1;
+        segments.push(`Batch ${batchNum} of ${status.batch_count}`);
+      }
+      segments.push(`Strategy ${status.completed_cycles + 1} of ${status.total_cycles}`);
+      const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
+      segments.push(phaseLabel ? `${phaseLabel} phase` : 'Preparing next strategy');
+      return segments.join(' — ') + '.';
+    }
+    return this.runOutcomeAnnouncement ?? '';
   }
 
   /** Short multi-line tooltip summarizing recent errored cycles for hover. */

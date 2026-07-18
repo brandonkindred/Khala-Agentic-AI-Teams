@@ -1,5 +1,5 @@
-import { TestBed } from '@angular/core/testing';
-import { of, NEVER } from 'rxjs';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { of, NEVER, Subject } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
@@ -16,6 +16,8 @@ import type {
   PaperTradingSession,
   PaperTradingComparison,
   QualityGateResult,
+  StrategyLabRunStartResponse,
+  StrategyLabStreamEvent,
 } from '../../models';
 import { expectNoAxeViolations } from '../../testing/a11y';
 
@@ -271,8 +273,216 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
-  it('activity-log: focusable, named, no axe violations while a run is active', async () => {
+  it('comparison-table-wrap: focusable, named, no axe violations (independent of card expansion)', async () => {
     const fixture = await createFixture(RECORD);
+    fixture.componentInstance.paperTradingSessions = { 'rec-1': PAPER_SESSION };
+    fixture.detectChanges();
+
+    const wrap: HTMLElement = fixture.nativeElement.querySelector('.comparison-table-wrap');
+    expect(wrap).toBeTruthy(); // renders without toggleCard() — paper trading is independent of card expansion
+    expect(wrap.getAttribute('tabindex')).toBe('0');
+    expect(wrap.getAttribute('role')).toBe('group');
+    expect(wrap.getAttribute('aria-label')).toBe('stocks strategy backtest vs. paper-trading comparison, scrollable');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+});
+
+describe('StrategyLabComponent a11y — run announcement live region', () => {
+  const START_RESPONSE: StrategyLabRunStartResponse = {
+    run_id: 'run-1',
+    status: 'running',
+    total_cycles: 5,
+    message: 'started',
+  };
+
+  async function createFixture() {
+    const apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(of(START_RESPONSE)),
+      streamRunStatus: vi.fn(),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    const integrationsSpy = {
+      getTradingViewConfig: vi.fn().mockReturnValue(
+        of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+      ),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        { provide: IntegrationsApiService, useValue: integrationsSpy },
+      ],
+    }).compileComponents();
+
+    const fixture = TestBed.createComponent(StrategyLabComponent);
+    fixture.detectChanges(); // triggers ngOnInit
+    return { fixture, apiSpy };
+  }
+
+  /** Reads the always-present SR-only status region, asserting its fixed attributes. */
+  function liveRegionText(fixture: ComponentFixture<StrategyLabComponent>): string {
+    const region: HTMLElement | null = fixture.nativeElement.querySelector('p.visually-hidden[role="status"]');
+    expect(region).toBeTruthy();
+    expect(region!.getAttribute('aria-live')).toBe('polite');
+    return region!.textContent?.trim() ?? '';
+  }
+
+  it('is present and empty while idle', async () => {
+    const { fixture } = await createFixture();
+    expect(liveRegionText(fixture)).toBe('');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces strategy position and the current phase as a run proceeds', async () => {
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 0, phase: 'backtesting' },
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Backtest phase.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces "Preparing next strategy" between cycles (no current_cycle yet)', async () => {
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1'],
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5 — Preparing next strategy.');
+    // Same pre-existing gaps as the other in-progress-section tests above
+    // (run-btn spinner, phase progress-bar/spinner lack accessible names;
+    // the running run-btn nests a focusable spinner) — unrelated to the
+    // live-region text under test here.
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('includes batch position for multi-batch runs', async () => {
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      batch_count: 3,
+      current_batch: 2,
+      current_cycle: { cycle_index: 0, phase: 'ideating' },
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Batch 2 of 3 — Strategy 1 of 5 — Ideate phase.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces the terminal outcome once a run completes, replacing the progress text', async () => {
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Preparing next strategy.');
+
+    stream$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 5,
+      skipped_count: 0,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.running).toBe(false);
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a qualified terminal outcome when the run finishes with errored cycles', async () => {
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+
+    stream$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed_with_errors',
+      completed_count: 3,
+      skipped_count: 0,
+      errored_count: 2,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with errors.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces run failure as the terminal outcome', async () => {
+    const { fixture, apiSpy } = await createFixture();
+    const stream$ = new Subject<StrategyLabStreamEvent>();
+    apiSpy.streamRunStatus.mockReturnValue(stream$.asObservable());
+
+    fixture.componentInstance.runNewStrategy();
+    fixture.detectChanges();
+
+    stream$.next({ type: 'error', detail: 'Sandbox crashed' });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('activity-log is hidden from assistive tech and removed from the tab order while a run is active', async () => {
+    const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
     fixture.componentInstance.runStatus = {
       run_id: 'run-1',
@@ -291,33 +501,17 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
 
     const log: HTMLElement = fixture.nativeElement.querySelector('.activity-log');
     expect(log).toBeTruthy();
-    expect(log.getAttribute('tabindex')).toBe('0');
-    expect(log.getAttribute('role')).toBe('group');
-    expect(log.getAttribute('aria-label')).toBe('Strategy run activity log, scrollable');
+    expect(log.getAttribute('aria-hidden')).toBe('true');
+    expect(log.hasAttribute('tabindex')).toBe(false);
+    expect(log.hasAttribute('role')).toBe(false);
 
-    // Pre-existing gaps in the "run in progress" header — the run-btn's spinner
-    // and the phase progress-bar/spinners lack accessible names, and the
-    // running run-btn nests a focusable spinner. Both predate this fix, are
-    // unrelated to the activity-log focus-indicator under test here, and are
-    // only surfaced now because this is the first a11y spec to set `running`.
+    // Same pre-existing gaps as before (run-btn spinner, phase progress-bar/
+    // spinners lack accessible names; the running run-btn nests a focusable
+    // spinner) — unrelated to the activity-log visibility under test here.
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
-  }, 15000);
-
-  it('comparison-table-wrap: focusable, named, no axe violations (independent of card expansion)', async () => {
-    const fixture = await createFixture(RECORD);
-    fixture.componentInstance.paperTradingSessions = { 'rec-1': PAPER_SESSION };
-    fixture.detectChanges();
-
-    const wrap: HTMLElement = fixture.nativeElement.querySelector('.comparison-table-wrap');
-    expect(wrap).toBeTruthy(); // renders without toggleCard() — paper trading is independent of card expansion
-    expect(wrap.getAttribute('tabindex')).toBe('0');
-    expect(wrap.getAttribute('role')).toBe('group');
-    expect(wrap.getAttribute('aria-label')).toBe('stocks strategy backtest vs. paper-trading comparison, scrollable');
-
-    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });
 

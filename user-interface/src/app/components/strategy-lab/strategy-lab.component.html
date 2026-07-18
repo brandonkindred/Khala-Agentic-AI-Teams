@@ -1,5 +1,16 @@
 <div class="strategy-lab">
 
+  <!-- SR-only live region: announces run progress (batch/strategy position +
+       current phase) as a run proceeds, and the terminal outcome once it
+       ends, so a screen-reader user gets the same progress signal sighted
+       users get from the activity log and phase stepper below. Rendered
+       unconditionally (always in the DOM) and empty until a run exists — a
+       live region inserted already-populated is commonly NOT announced,
+       which would drop the first update. aria-live only speaks on text
+       change, so a steady state isn't re-announced. The visible activity
+       log below is aria-hidden so AT isn't double-announced. -->
+  <p class="visually-hidden" role="status" aria-live="polite">{{ runAnnouncement() }}</p>
+
   <!-- Header row -->
   <div class="lab-header">
     <div class="lab-title">
@@ -234,9 +245,13 @@
           </div>
         }
 
-        <!-- Activity log -->
+        <!-- Activity log: hidden from assistive tech — the always-present
+             live region above announces concise run/phase progress instead,
+             so AT users aren't overwhelmed by (or double-announced) this
+             sighted-only, auto-scrolling detail feed. Not focusable: an
+             aria-hidden element must not remain in the tab order. -->
         @if (activityLog.length > 0) {
-          <div class="activity-log" #logContainer tabindex="0" role="group" aria-label="Strategy run activity log, scrollable">
+          <div class="activity-log" #logContainer aria-hidden="true">
             @for (entry of activityLog; track $index) {
               <div class="log-entry" [class]="'log-' + entry.status">
                 <span class="log-time">{{ entry.time }}</span>
