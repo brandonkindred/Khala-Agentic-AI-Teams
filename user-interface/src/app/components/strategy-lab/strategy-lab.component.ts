@@ -968,18 +968,24 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         );
         segments.push(`Batch ${batchNum} of ${status.batch_count}`);
       }
-      // Once the last cycle's cycle_complete lands, completed_cycles already
-      // equals total_cycles — briefly, before the terminal `complete` event
-      // arrives, there is no "next" strategy to report. Reporting one here
-      // would announce an impossible position (e.g. "Strategy 6 of 5").
-      if (!status.current_cycle && status.completed_cycles >= status.total_cycles) {
+      // Cycles the run has finished attempting, successfully or not.
+      // completed_cycles alone excludes skipped/errored cycles, which would
+      // otherwise repeat an already-attempted strategy's number as the
+      // "next" one, and would miss the "Finishing up" terminal gap below
+      // when the last attempted cycle was skipped/errored rather than
+      // completed.
+      const attemptedCycles = status.completed_cycles + status.skipped_cycles + (status.errored_cycles ?? 0);
+      // Once the last cycle's cycle_complete/skipped/errored lands,
+      // attemptedCycles already equals total_cycles — briefly, before the
+      // terminal `complete` event arrives, there is no "next" strategy to
+      // report. Reporting one here would announce an impossible position
+      // (e.g. "Strategy 6 of 5").
+      if (!status.current_cycle && attemptedCycles >= status.total_cycles) {
         segments.push('Finishing up');
       } else if (status.current_cycle) {
-        // completed_cycles only counts successful completions — with
-        // multi-worker waves, or after a skipped/errored cycle,  it can lag
-        // behind the cycle actually emitting progress. cycle_index (0-based)
-        // identifies that cycle directly.
-        segments.push(`Strategy ${status.current_cycle.cycle_index + 1} of ${status.total_cycles}`);
+        // The backend's cycle_index is already 1-based (`cn = i + 1` in
+        // main.py's wave loop) — used directly, not offset again.
+        segments.push(`Strategy ${status.current_cycle.cycle_index} of ${status.total_cycles}`);
         const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
         // Real backend phases (design_review, aligning, telemetry, ...) go
         // beyond STRATEGY_LAB_PHASES' 4 known ids. Work is still actively
@@ -988,7 +994,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         // between cycles, which this is not.
         segments.push(phaseLabel ? `${phaseLabel} phase` : `${humanizePhase(status.current_cycle.phase)} phase`);
       } else {
-        segments.push(`Strategy ${status.completed_cycles + 1} of ${status.total_cycles}`);
+        segments.push(`Strategy ${attemptedCycles + 1} of ${status.total_cycles}`);
         segments.push('Preparing next strategy');
       }
       return segments.join(' — ') + '.';

@@ -356,7 +356,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 0,
       skipped_cycles: 0,
       completed_record_ids: [],
-      current_cycle: { cycle_index: 0, phase: 'backtesting' },
+      // The backend's cycle_index is 1-based (cn = i + 1 in main.py's wave
+      // loop) — 1 is the first strategy, not 0.
+      current_cycle: { cycle_index: 1, phase: 'backtesting' },
     };
     fixture.detectChanges();
 
@@ -368,12 +370,12 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
   }, 15000);
 
   it('derives the strategy number from the active cycle_index, not completed_cycles, once they diverge', async () => {
-    // Regression: completed_cycles only counts successful completions.
-    // With multi-worker waves, or after a skipped/errored cycle,
-    // completed_cycles can lag behind the cycle actually emitting progress
-    // (cycle_index is 0-based and identifies it directly). Here cycle 1 was
-    // skipped, so completed_cycles is still 1 while cycle_index 2 (the 3rd
-    // strategy) is active.
+    // Regression: completed_cycles only counts successful completions —
+    // after a skipped/errored cycle (or with multi-worker waves), it can
+    // lag behind the cycle actually emitting progress. cycle_index (the
+    // backend's 1-based cn) identifies that cycle directly. Here cycle 1
+    // was skipped and cycle 2 completed, so completed_cycles is 1 while
+    // cycle 3 (cycle_index 3) is the one now active.
     const { fixture } = await createFixture();
     fixture.componentInstance.running = true;
     fixture.componentInstance.runStatus = {
@@ -384,7 +386,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 1,
       skipped_cycles: 1,
       completed_record_ids: ['rec-1'],
-      current_cycle: { cycle_index: 2, phase: 'ideating' },
+      current_cycle: { cycle_index: 3, phase: 'ideating' },
     };
     fixture.detectChanges();
 
@@ -411,7 +413,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 0,
       skipped_cycles: 0,
       completed_record_ids: [],
-      current_cycle: { cycle_index: 0, phase: 'design_review' as unknown as StrategyLabPhase },
+      current_cycle: { cycle_index: 1, phase: 'design_review' as unknown as StrategyLabPhase },
     };
     fixture.detectChanges();
 
@@ -473,6 +475,58 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
   }, 15000);
 
+  it('does not repeat a skipped strategy\'s number as "next" between cycles', async () => {
+    // Regression: completed_cycles alone excludes skipped/errored cycles.
+    // Cycle 1 completed and cycle 2 was skipped — completed_cycles is only
+    // 1, so "completed_cycles + 1" would announce "Strategy 2", repeating
+    // the cycle that was just skipped instead of the genuinely next one.
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 1,
+      completed_record_ids: ['rec-1'],
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Preparing next strategy.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces "Finishing up" when the last attempted cycle was errored rather than completed', async () => {
+    // Regression: for a 3-cycle run where the last cycle errored (not
+    // completed), completed_cycles stays at 2 and never reaches
+    // total_cycles on its own, so the "Finishing up" terminal gap would
+    // never trigger — the live region would announce a "Strategy 3 of 3 —
+    // Preparing next strategy" that never resolves until the terminal event.
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 3,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      errored_cycles: 1,
+      completed_record_ids: ['rec-1', 'rec-2'],
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
   it('clamps the announced batch number instead of announcing an impossible batch position', async () => {
     // Regression: after the last batch's batch_complete, current_batch is
     // null and completed_batches already equals batch_count — the same
@@ -513,7 +567,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_record_ids: [],
       batch_count: 3,
       current_batch: 2,
-      current_cycle: { cycle_index: 0, phase: 'ideating' },
+      current_cycle: { cycle_index: 1, phase: 'ideating' },
     };
     fixture.detectChanges();
 
@@ -753,7 +807,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 0,
       skipped_cycles: 0,
       completed_record_ids: [],
-      current_cycle: { cycle_index: 0, phase: 'backtesting' },
+      current_cycle: { cycle_index: 1, phase: 'backtesting' },
     };
     fixture.componentInstance.activityLog = [
       { time: '10:00:00', status: 'active', message: 'Executing strategy backtest...' },
@@ -988,7 +1042,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
       completed_cycles: 0,
       skipped_cycles: 0,
       completed_record_ids: [],
-      current_cycle: { cycle_index: 0, phase: 'backtesting' },
+      current_cycle: { cycle_index: 1, phase: 'backtesting' },
     };
     fixture.componentInstance.activityLog = [
       { time: '10:00:00', status: 'done', message: 'Market data loaded.' },
