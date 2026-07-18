@@ -23,7 +23,7 @@ from pathlib import Path
 from strands import Agent
 
 from ...models import StrategySpec
-from ._llm_envelope import invoke_agent
+from ._llm_envelope import run_structured_agent
 from ._prompt_context import spec_prompt_fields
 from .model_factory import get_strands_model
 
@@ -105,11 +105,13 @@ class CodeSynthesisAgent:
         )
 
         try:
-            raw = invoke_agent(
+            raw = run_structured_agent(
                 agent,
                 user_prompt,
                 agent_key="strategy_code_synthesis",
                 phase="code_synthesis",
+                parse=lambda text: text,
+                charge=False,
                 logger=logger,
             )
         except Exception as exc:  # noqa: BLE001 — wrap any transport fault

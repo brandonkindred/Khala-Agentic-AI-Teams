@@ -16,7 +16,7 @@ from ..models import (
 from ..shared.environment_store import EnvironmentInfo as StoreEnvironmentInfo
 from ..shared.environment_store import EnvironmentStore
 from ..shared.tool_manifest import ToolManifest
-from ..tool_agents.docker_provisioner import DockerProvisionerTool
+from ..tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY, DockerProvisionerTool
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ def run_setup(
     docker_provisioner: Optional[DockerProvisionerTool] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     on_registered: Optional[Callable[[EnvironmentInfo], None]] = None,
+    job_id: Optional[str] = None,
 ) -> SetupResult:
     """
     Execute the setup phase: create (or reuse) the agent's Docker container.
@@ -48,6 +49,12 @@ def run_setup(
             leaking it. Not called on the fast path (an already-``running``
             record reused with nothing freshly created) — there is no new
             infrastructure there for a checkpoint failure to leak.
+        job_id: The calling workflow's own job id. When given, is stamped as
+            a ``khala.job_id`` Docker label on the container this call
+            creates, so a later ``compensate_activity``/
+            ``check_existing_environment_activity`` can positively attribute
+            it to this attempt even if the local idempotency state that
+            would otherwise prove it never gets written.
 
     Returns:
         SetupResult with environment info
@@ -125,6 +132,8 @@ def run_setup(
         "environment": manifest.environment,
         "expose_ssh": True,
     }
+    if job_id:
+        docker_config[JOB_ID_CONFIG_KEY] = job_id
 
     credentials = GeneratedCredentials(
         tool_name="docker",

@@ -49,6 +49,16 @@
 // Repository accordion — one row per repo the PAT can access
 // ---------------------------------------------------------------------------
 
+// Shared by the repo (E1) and PR (E3) quick-filter search inputs.
+.cr-search-field {
+  max-width: 22rem;
+  width: 100%;
+}
+
+.cr-repo-search {
+  margin-bottom: 0.75rem;
+}
+
 .cr-repos-list {
   display: flex;
   flex-direction: column;
@@ -77,9 +87,29 @@
     border-color: var(--mat-sys-primary, #1a73e8);
   }
 
-  &__name {
+  &__main {
+    display: flex;
+    flex-direction: column;
     flex: 1 1 auto;
+    // A flex item's automatic min-width is its content's natural (unwrapped) width
+    // unless the item itself sets overflow — since __name/__description (not __main)
+    // are the ones with `overflow: hidden`, __main needs this explicitly or neither
+    // child's ellipsis ever triggers.
+    min-width: 0;
+    gap: 0.1rem;
+  }
+
+  &__name {
     font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__description {
+    font-size: 0.8rem;
+    font-weight: 400;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -103,6 +133,14 @@
 // ---------------------------------------------------------------------------
 // PR list
 // ---------------------------------------------------------------------------
+
+.cr-pulls-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
 
 .cr-pulls-list {
   display: flex;
@@ -276,6 +314,15 @@
 
   mat-spinner {
     flex: 0 0 auto;
+  }
+
+  // Sized to match the spinner's 14px diameter — mat-icon defaults to 24x24, which
+  // would blow out this small pill.
+  &__icon {
+    flex: 0 0 auto;
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
   }
 }
 

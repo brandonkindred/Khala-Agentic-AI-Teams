@@ -12,7 +12,8 @@ prior behavior in ``api.main``).
 from __future__ import annotations
 
 import logging
-import os
+
+from shared_env_config import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,7 @@ def env_positive_int(name: str, default: int) -> int:
         integer ``>= 1``; otherwise returns ``default`` (logging a warning
         when the env var was set but invalid). Never raises.
     """
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; falling back to default %d", name, raw, default)
-        return default
+    value = env_int(name, default)
     if value < 1:
         logger.warning("%s=%d is < 1; falling back to default %d", name, value, default)
         return default
