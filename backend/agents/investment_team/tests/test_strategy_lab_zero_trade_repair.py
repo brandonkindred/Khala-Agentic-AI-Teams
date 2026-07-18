@@ -14,6 +14,7 @@ directly with stubs for the agent and ``run_strategy_code``.
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -29,7 +30,12 @@ from investment_team.models import (
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab import zero_trade_repair as zero_trade_repair_module
-from investment_team.strategy_lab.agents.zero_trade_repair import ZeroTradeRepairReport
+from investment_team.strategy_lab.agents._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
+from investment_team.strategy_lab.agents.zero_trade_repair import (
+    _ZERO_TRADE_REPAIR_SCHEMA_JSON,
+    ZeroTradeRepairAgent,
+    ZeroTradeRepairReport,
+)
 from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
@@ -1455,3 +1461,58 @@ def test_other_zero_trade_category_still_uses_code_repair() -> None:
 
     assert spy.calls == 1, "code-only repair must run for NO_ORDERS_EMITTED"
     assert recovery.exhausted is False
+
+
+# ---------------------------------------------------------------------------
+# ZeroTradeRepairAgent.run() — prompt content (direct, not through the
+# orchestrator's whole-agent stub used by the tests above)
+# ---------------------------------------------------------------------------
+
+
+class _CapturingAgent:
+    def __init__(self, payload: str) -> None:
+        self._payload = payload
+        self.calls: List[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.calls.append(prompt)
+        return self._payload
+
+
+def _patch_zero_trade_repair(monkeypatch: pytest.MonkeyPatch, payload: str) -> _CapturingAgent:
+    capture = _CapturingAgent(payload)
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.zero_trade_repair.Agent",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.zero_trade_repair.get_strands_model",
+        lambda *_a, **_k: object(),
+    )
+    return capture
+
+
+def test_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repair prompt carries the JSON Schema so the wire model and the
+    downstream coercer cannot drift apart."""
+    payload = '{"root_cause_category": "NO_ORDERS_EMITTED", "evidence": "e"}'
+    capture = _patch_zero_trade_repair(monkeypatch, payload)
+
+    ZeroTradeRepairAgent().run(
+        spec=_spec(),
+        code="# original",
+        diagnostics=BacktestExecutionDiagnostics(zero_trade_category="NO_ORDERS_EMITTED"),
+    )
+
+    assert len(capture.calls) == 1
+    prompt = capture.calls[0]
+    assert "MUST conform to this JSON Schema" in prompt
+    assert _ZERO_TRADE_REPAIR_SCHEMA_JSON in prompt
+
+
+def test_embedded_schema_matches_format_constraint() -> None:
+    """The schema embedded in the prompt is the same object exported from
+    ``_response_schemas`` — the prompt-level contract cannot silently drift
+    from whatever is validated elsewhere."""
+    assert json.loads(_ZERO_TRADE_REPAIR_SCHEMA_JSON) == ZERO_TRADE_REPAIR_SCHEMA
+    assert ZERO_TRADE_REPAIR_SCHEMA["required"] == ["root_cause_category"]

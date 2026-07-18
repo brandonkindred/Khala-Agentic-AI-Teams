@@ -26,6 +26,7 @@ from ..coverage_probe import format_coverage_report
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import StrategySpecParseError, extract_json_object, validate_structured_rules
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
+from ._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,10 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # Loaded once at import — the system prompt is static, so re-reading it from disk
 # on every zero-trade repair is wasted I/O.
 _SYSTEM_PROMPT = (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
+
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
+_ZERO_TRADE_REPAIR_SCHEMA_JSON = json.dumps(ZERO_TRADE_REPAIR_SCHEMA, indent=2)
 
 # Spec keys the orchestrator will honour from a ZeroTradeRepairReport's
 # ``proposed_spec_updates``. Anything else is silently dropped — the
@@ -123,6 +128,12 @@ Summary: {summary}
 4. Predict the change in order and trade count your fix should produce.
 
 Return ONLY a JSON object with no markdown.
+
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
 """
 
 
@@ -185,6 +196,7 @@ class ZeroTradeRepairAgent:
             coverage_block=coverage_section,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
+            response_schema_json=_ZERO_TRADE_REPAIR_SCHEMA_JSON,
         )
 
         agent = Agent(
