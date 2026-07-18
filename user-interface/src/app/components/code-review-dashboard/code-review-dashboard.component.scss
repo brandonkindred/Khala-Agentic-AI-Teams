@@ -49,6 +49,16 @@
 // Repository accordion — one row per repo the PAT can access
 // ---------------------------------------------------------------------------
 
+// Shared by the repo (E1) and PR (E3) quick-filter search inputs.
+.cr-search-field {
+  max-width: 22rem;
+  width: 100%;
+}
+
+.cr-repo-search {
+  margin-bottom: 0.75rem;
+}
+
 .cr-repos-list {
   display: flex;
   flex-direction: column;

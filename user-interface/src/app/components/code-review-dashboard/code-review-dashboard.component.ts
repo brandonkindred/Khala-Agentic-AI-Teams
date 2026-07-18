@@ -1,7 +1,10 @@
 import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
@@ -42,8 +45,11 @@ import { LatestOnly } from '../../shared/latest-only';
   standalone: true,
   imports: [
     CommonModule,
+    FormsModule,
     MatIconModule,
     MatButtonModule,
+    MatFormFieldModule,
+    MatInputModule,
     MatProgressSpinnerModule,
     MatTooltipModule,
     MatPaginatorModule,
@@ -93,6 +99,8 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   repoError: string | null = null;
   /** The expanded repo whose pull requests are shown; null when all repo rows are collapsed. */
   selectedRepo: GitHubRepoItem | null = null;
+  /** Case-insensitive text narrowing `repos` to `filteredRepos`; empty shows every repo. */
+  repoFilter = '';
 
   // Pull-request list (scoped to the expanded repo)
   pulls: GitHubPullRequestItem[] = [];
@@ -257,6 +265,23 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
           this.pullError = extractErrorDetail(err, 'Failed to load pull requests.');
         },
       });
+  }
+
+  /** `repos` narrowed by `repoFilter`, matching case-insensitively on `full_name` or `description`. */
+  get filteredRepos(): GitHubRepoItem[] {
+    const q = this.repoFilter.trim().toLowerCase();
+    if (!q) return this.repos;
+    return this.repos.filter(
+      (r) => r.full_name.toLowerCase().includes(q) || (r.description ?? '').toLowerCase().includes(q),
+    );
+  }
+
+  /** Polite live-region text for how many repos `filteredRepos` currently shows; empty
+   *  before repos have loaded or when the token has no repo access at all. */
+  get repoCountAnnouncement(): string {
+    if (!this.reposLoaded || this.repos.length === 0) return '';
+    const n = this.filteredRepos.length;
+    return n === 1 ? '1 repository shown' : `${n} repositories shown`;
   }
 
   /** The slice of PRs visible on the current page. */

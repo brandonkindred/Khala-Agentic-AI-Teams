@@ -61,8 +61,23 @@
           [headingLevel]="3"
         />
       } @else {
+        <mat-form-field appearance="outline" class="cr-search-field cr-repo-search">
+          <mat-label>Search repositories</mat-label>
+          <mat-icon matPrefix>search</mat-icon>
+          <input matInput type="search" [(ngModel)]="repoFilter" placeholder="Name or description…" />
+        </mat-form-field>
+        <p class="visually-hidden" role="status" aria-live="polite">{{ repoCountAnnouncement }}</p>
+
+        @if (filteredRepos.length === 0) {
+          <app-empty-state
+            icon="search_off"
+            title="No repositories match"
+            description="Try a different search."
+            [headingLevel]="3"
+          />
+        } @else {
         <div class="cr-repos-list">
-          @for (repo of repos; track repo.full_name; let i = $index) {
+          @for (repo of filteredRepos; track repo.full_name; let i = $index) {
             <button
               class="cr-repo-row"
               type="button"
@@ -99,6 +114,7 @@
             }
           }
         </div>
+        }
       }
     }
 

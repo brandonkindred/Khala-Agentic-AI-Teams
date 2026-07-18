@@ -247,6 +247,82 @@ describe('CodeReviewDashboardComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Repo search/filter (Group E1)
+  // -------------------------------------------------------------------------
+
+  const GIZMOS: GitHubRepoItem = { ...REPO, full_name: 'acme/gizmos', name: 'gizmos', description: 'Gizmo tooling' };
+
+  it('filteredRepos returns every repo when repoFilter is empty', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    expect(component.filteredRepos).toEqual([REPO, GIZMOS]);
+  });
+
+  it('filteredRepos matches case-insensitively on full_name', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'GIZMOS';
+    expect(component.filteredRepos).toEqual([GIZMOS]);
+  });
+
+  it('filteredRepos matches case-insensitively on description', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'WIDGET';
+    expect(component.filteredRepos).toEqual([REPO]);
+  });
+
+  it('filteredRepos is empty when nothing matches', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'nonexistent';
+    expect(component.filteredRepos).toEqual([]);
+  });
+
+  it('typing in the repo filter narrows the rendered repo rows', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelectorAll('.cr-repo-row').length).toBe(2);
+    component.repoFilter = 'gizmos';
+    fixture.detectChanges();
+    expect(el.querySelectorAll('.cr-repo-row').length).toBe(1);
+  });
+
+  it('renders "No repositories match" (not "No repository access") when the filter empties the list', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'nonexistent';
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-empty-state h3')?.textContent).toContain('No repositories match');
+    expect(el.textContent).not.toContain('No repository access');
+  });
+
+  it('repoCountAnnouncement is empty when the token has no repository access', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+    await setup();
+    expect(component.repoCountAnnouncement).toBe('');
+  });
+
+  it('repoCountAnnouncement is singular for one result and plural otherwise, and updates as the filter changes', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    expect(component.repoCountAnnouncement).toBe('2 repositories shown');
+    component.repoFilter = 'gizmos';
+    expect(component.repoCountAnnouncement).toBe('1 repository shown');
+  });
+
+  it('renders the repo count announcement in a role="status" live region', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    const texts = Array.from(el.querySelectorAll('[role="status"]')).map((r) => r.textContent?.trim());
+    expect(texts).toContain('2 repositories shown');
+  });
+
+  // -------------------------------------------------------------------------
   // Visible repo description (Group E2)
   // -------------------------------------------------------------------------
 
