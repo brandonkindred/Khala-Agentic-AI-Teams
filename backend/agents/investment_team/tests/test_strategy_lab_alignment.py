@@ -12,6 +12,7 @@ flow directly.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -832,6 +833,67 @@ def test_propose_code_fix_fails_open_preserving_patch_on_coercion_error(monkeypa
     assert report.aligned is False
     assert report.proposed_code == "def fixed(): pass"  # patch survives the error
     assert report.alignment_findings == findings
+
+
+def test_propose_code_fix_prompt_embeds_response_schema(monkeypatch) -> None:
+    """The propose-fix user prompt carries the JSON Schema so the wire model
+    and the downstream coercer cannot drift apart."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+
+    class _CapturingStrandsAgent:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self.calls: List[str] = []
+
+        def __call__(self, prompt: str) -> str:
+            self.calls.append(prompt)
+            return '{"aligned": false, "rationale": "r", "issues": [], "changes_made": "c"}'
+
+    capture = _CapturingStrandsAgent()
+    monkeypatch.setattr(alignment_module, "Agent", lambda *_a, **_k: capture)
+    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+
+    agent = alignment_module.TradeAlignmentAgent()
+    agent.propose_code_fix(
+        spec=_spec(),
+        code="code-v0",
+        findings=[
+            AlignmentFinding(
+                trade_num=1, check_name="entry_signal", passed=False, severity="critical"
+            )
+        ],
+        prior_attempts=None,
+    )
+
+    assert len(capture.calls) == 1
+    prompt = capture.calls[0]
+    assert "MUST conform to this JSON Schema" in prompt
+    assert alignment_module._ALIGNMENT_FIX_SCHEMA_JSON in prompt
+    assert "predicted_aligned_after_fix" in prompt
+
+
+def test_embedded_schema_matches_format_constraint() -> None:
+    """The schema embedded in the prompt is the same object exported from
+    ``_response_schemas`` — the prompt-level contract cannot silently drift
+    from whatever is validated elsewhere."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+    from investment_team.strategy_lab.agents._response_schemas import ALIGNMENT_FIX_SCHEMA
+
+    assert json.loads(alignment_module._ALIGNMENT_FIX_SCHEMA_JSON) == ALIGNMENT_FIX_SCHEMA
+    assert ALIGNMENT_FIX_SCHEMA["required"] == ["aligned"]
+    assert "predicted_aligned_after_fix" in ALIGNMENT_FIX_SCHEMA["properties"]
+
+
+def test_propose_fix_system_prompt_never_carries_schema_json() -> None:
+    """Safety regression: ``_PROPOSE_FIX_SYSTEM_PROMPT`` is held raw and must
+    never be ``.format()``-ed (it contains literal ``{...}`` code examples),
+    so the injected schema must only ever reach the user template."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+
+    assert (
+        alignment_module._ALIGNMENT_FIX_SCHEMA_JSON
+        not in alignment_module._PROPOSE_FIX_SYSTEM_PROMPT
+    )
+    assert "response_schema_json" not in alignment_module._PROPOSE_FIX_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

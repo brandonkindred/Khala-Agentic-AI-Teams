@@ -26,6 +26,7 @@ entry-point has been removed; its job is now split across the gate
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -39,6 +40,7 @@ from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import extract_json_object
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
+from ._response_schemas import ALIGNMENT_FIX_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,13 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # code examples and must never pass through ``str.format``.)
 _NEAR_MISS_SYSTEM_PROMPT = (_PROMPT_DIR / "alignment_near_miss.md").read_text(encoding="utf-8")
 _PROPOSE_FIX_SYSTEM_PROMPT = (_PROMPT_DIR / "alignment_propose_fix.md").read_text(encoding="utf-8")
+
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the *user* prompt only (mirrors
+# ``refinement._REFINEMENT_SCHEMA_JSON``). Never splice this into
+# ``_PROPOSE_FIX_SYSTEM_PROMPT`` — that prompt is held raw on purpose (see
+# above) and is never passed through ``str.format``.
+_ALIGNMENT_FIX_SCHEMA_JSON = json.dumps(ALIGNMENT_FIX_SCHEMA, indent=2)
 
 
 def _alignment_max_attempts() -> int:
@@ -237,6 +246,12 @@ Risk limits: {risk_limits}
 {prior_attempts_text}
 
 Return ONLY a JSON object with no markdown.
+
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
 """
 
 
@@ -369,6 +384,7 @@ class TradeAlignmentAgent:
             strategy_code=code,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
+            response_schema_json=_ALIGNMENT_FIX_SCHEMA_JSON,
         )
 
         agent = Agent(
