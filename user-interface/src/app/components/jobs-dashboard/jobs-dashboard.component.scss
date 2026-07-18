@@ -449,7 +449,7 @@ tbody .col-actions {
   }
 
   &.status-completed-with-failures {
-    background: var(--kh-warning-subtle, rgba(251, 191, 36, 0.12));
+    background: var(--kh-warning-subtle, rgba(217, 119, 6, 0.12));
     color: var(--kh-warning, #d97706);
   }
 
@@ -464,7 +464,7 @@ tbody .col-actions {
   }
 
   &.status-interrupted {
-    background: var(--kh-warning-subtle, rgba(251, 191, 36, 0.12));
+    background: var(--kh-warning-subtle, rgba(217, 119, 6, 0.12));
     color: var(--kh-warning, #d97706);
   }
 }
