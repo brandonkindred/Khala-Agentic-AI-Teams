@@ -447,25 +447,44 @@ class CredentialStore:
               generated-but-now-stale secret (its account was just rolled
               back) without discarding the agent's other, still-valid tools'
               credentials the way ``delete_credentials`` would.
-            * When the read source was a LEGACY path (not the primary), that
-              legacy file is unlinked after the primary write succeeds —
-              mirroring ``remove``'s write-forward migration below. Otherwise
-              the purged secret would still sit in the legacy copy and could
-              resurface if the primary file is later removed or becomes
-              unreadable, since reads fall back to legacy candidates.
+            * ``tool_name``'s entry is ALSO purged from every OTHER
+              candidate path (legacy locations) that independently contains
+              it, not just the one location ``_read_agent_credentials``
+              happened to read from — a legacy file can hold a stale copy
+              of this tool's secret alongside (or even when a newer) primary
+              file exists, e.g. left over from before the primary store
+              cut over, and reads fall back to legacy candidates whenever
+              the primary is missing or unreadable. Leaving such a copy
+              behind would let the purged secret resurface later. A
+              candidate whose OTHER entries survive is rewritten in place;
+              one left fully empty is removed instead.
         """
         assert agent_id, "agent_id must be non-empty"
         assert tool_name, "tool_name must be non-empty"
-        existing, src = self._read_agent_credentials(agent_id)
+        existing, _src = self._read_agent_credentials(agent_id)
         if not existing or tool_name not in existing:
             return False
         del existing[tool_name]
-        path = self._agent_file(agent_id)
+        primary = self._agent_file(agent_id)
         encrypted = self.multifernet.encrypt(json.dumps(existing).encode())
-        path.write_bytes(encrypted)
-        path.chmod(0o600)
-        if src is not None and src != path and src.exists():
-            src.unlink()
+        primary.write_bytes(encrypted)
+        primary.chmod(0o600)
+
+        for path in self._agent_file_candidates(agent_id):
+            if path == primary or not path.exists():
+                continue
+            try:
+                other = json.loads(self.multifernet.decrypt(path.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                continue
+            if not isinstance(other, dict) or tool_name not in other:
+                continue
+            del other[tool_name]
+            if other:
+                path.write_bytes(self.multifernet.encrypt(json.dumps(other).encode()))
+                path.chmod(0o600)
+            else:
+                path.unlink()
         return True
 
     def list_agents(self) -> List[str]:

@@ -294,8 +294,17 @@ def setup_activity(
         * When ``prior_setup`` is set, it is a serialized setup phase snapshot
           acceptable to ``restore_setup``.
     Postconditions:
-        * Returns ``{"success": True, "environment": <dump|None>}``.
-        * Writes setup progress (or restore status) into ``job_store``.
+        * Returns ``{"success": True, "environment": <dump|None>}`` reflecting
+          THIS call's own outcome (including its own ``reused`` value).
+        * Writes setup progress (or restore status) into ``job_store``. The
+          durable ``phase_results["setup"]`` checkpoint itself, though, is
+          never overwritten once present — only the first call to actually
+          checkpoint (whether via ``on_registered`` on a fresh
+          registration, or this fallback on the always-reused fast path)
+          wins, so a Temporal retry whose fast path reuses what an earlier,
+          response-lost attempt of this same activity already created
+          (and durably recorded as ``reused=False``) can't replace that
+          stronger ownership evidence with its own weaker ``reused=True``.
         * Raises ``RuntimeError`` when a fresh setup fails.
     """
     assert job_id, "job_id must be non-empty"
@@ -358,7 +367,20 @@ def setup_activity(
         # Fast path: an already-running environment was reused, so nothing new
         # was created here — a checkpoint failure has nothing to leak, and a
         # bare durable write (Temporal retries the whole activity) suffices.
-        _js.add_completed_phase(job_id, "setup", payload)
+        # But don't blindly overwrite: if an EARLIER attempt of this same
+        # activity already durably checkpointed "setup" via on_registered
+        # (its own completion response then got lost, so Temporal retried
+        # the whole activity), that checkpoint's environment carries
+        # reused=False — proof this job's own earlier try created the
+        # container fresh. This retry's fast path reuses that same
+        # container (reused=True here) and must not overwrite the stronger
+        # ownership evidence already on record with this weaker one, or a
+        # later resume reading phase_results would lose track of the fact
+        # that this job created the environment, not something pre-existing.
+        existing_job = _js.get_job(job_id)
+        already_checkpointed = "setup" in (existing_job.get("completed_phases") or [])
+        if not already_checkpointed:
+            _js.add_completed_phase(job_id, "setup", payload)
     _best_effort_job_store(_js.update_job, job_id, progress=15, status_text="Setup complete")
     return payload
 
@@ -884,7 +906,15 @@ def compensate_activity(
           whose removal itself failed inside ``compensate`` also still has
           one; only the "nothing ever got registered, or it did and was
           since removed" case has none, and that is exactly when a container
-          matching the name is unambiguously orphaned.
+          matching the name is unambiguously orphaned. When NO record
+          exists at all, this also probes the deterministic container name
+          directly (mirroring ``check_existing_environment_activity``)
+          before concluding that: a record and its container are
+          independently losable, so an absent record alone is not proof the
+          container is an orphan — e.g. the setup name-conflict path, where
+          Docker/idempotency state was lost but ``agent-<agent_id>`` is a
+          real container that predates this run and was never registered
+          here at all.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -917,6 +947,16 @@ def compensate_activity(
         # flag: unreadable counts as "might have a record" — conservative,
         # same as everywhere else this ambiguity shows up.
         record_may_exist = env_store.get(agent_id) is not None or not env_store.readable(agent_id)
+        if not record_may_exist:
+            # No EnvironmentStore record — but the record and the container
+            # are independently losable (mirrors
+            # check_existing_environment_activity's own reasoning): a
+            # pre-existing container can still be sitting there under the
+            # deterministic name with no record at all, e.g. the setup
+            # name-conflict path where Docker/idempotency state was lost
+            # but the container itself predates this run. Probe it directly
+            # before concluding there is nothing left to protect.
+            record_may_exist = docker._container_exists(f"agent-{agent_id}") is not False
         if not record_may_exist and not docker.verify_and_remove_orphan(agent_id):
             raise RuntimeError(
                 f"compensate_activity: docker teardown for agent_id={agent_id!r} did not "
