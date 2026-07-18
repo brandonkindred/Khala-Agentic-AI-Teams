@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._agent_runner import invoke_json_agent
+from ._agent_runner import AgentConstructionError, invoke_json_agent
 from ._parse_helpers import StrategySpecParseError, validate_structured_rules
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,8 @@ class ZeroTradeRepairAgent:
                 system_prompt=system_prompt,
                 logger=logger,
             )
+        except AgentConstructionError:
+            raise
         except Exception as exc:
             logger.exception("Zero-trade repair agent failed to produce parseable JSON")
             return ZeroTradeRepairReport(

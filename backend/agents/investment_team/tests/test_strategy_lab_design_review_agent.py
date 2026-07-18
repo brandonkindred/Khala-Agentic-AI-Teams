@@ -17,6 +17,7 @@ from typing import Any, List
 import pytest
 
 from investment_team.models import StrategySpec
+from investment_team.strategy_lab.agents._agent_runner import AgentConstructionError
 from investment_team.strategy_lab.agents.design_review import (
     CritiqueIssue,
     DesignReviewAgent,
@@ -272,6 +273,26 @@ def test_transport_failure_falls_closed_to_unready(
 
     assert critique.ready is False
     assert any("review_parse_error" in i.description for i in critique.issues)
+
+
+def _raise_bad_config(*_a: Any, **_k: Any) -> Any:
+    raise ValueError("bad config")
+
+
+def test_construction_failure_propagates_uncaught_not_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-flight construction failure (bad LLM_PROVIDER, missing API key)
+    is a deployment bug, not a reviewer hiccup — it must crash the design
+    round loudly, not be silently converted into an ordinary fail-closed
+    ``ready=False`` critique indistinguishable from a real LLM/parse fault."""
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
+        _raise_bad_config,
+    )
+
+    with pytest.raises(AgentConstructionError):
+        DesignReviewAgent().run(_spec(), readiness_results=[])
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from typing import Any, List
 import pytest
 
 from investment_team.models import StrategySpec
+from investment_team.strategy_lab.agents._agent_runner import AgentConstructionError
 from investment_team.strategy_lab.agents.code_synthesis import (
     CodeSynthesisAgent,
     CodeSynthesisError,
@@ -141,6 +142,26 @@ def test_transport_failure_raises_code_synthesis_error(
         CodeSynthesisAgent().run(_spec())
 
     assert "RuntimeError" in str(exc.value)
+
+
+def _raise_bad_config(*_a: Any, **_k: Any) -> Any:
+    raise ValueError("bad config")
+
+
+def test_construction_failure_propagates_uncaught_not_wrapped_as_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-flight construction failure (bad LLM_PROVIDER, missing API key)
+    must not be normalized into the same CodeSynthesisError('transport
+    failure') the orchestrator treats as an ordinary short-circuit — it's a
+    deployment bug, not a transient LLM outage."""
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
+        _raise_bad_config,
+    )
+
+    with pytest.raises(AgentConstructionError):
+        CodeSynthesisAgent().run(_spec())
 
 
 def test_empty_response_raises_code_synthesis_error(

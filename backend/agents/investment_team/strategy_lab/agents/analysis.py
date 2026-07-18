@@ -8,7 +8,7 @@ from typing import Any, List, Optional
 
 from ...models import WINNING_THRESHOLD, BacktestResult, StrategySpec, TradeRecord
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._agent_runner import invoke_json_agent
+from ._agent_runner import AgentConstructionError, invoke_json_agent
 from .alignment import TradeAlignmentReport
 
 logger = logging.getLogger(__name__)
@@ -204,6 +204,8 @@ class AnalysisAgent:
                 logger=logger,
             )
             draft_narrative = draft_parsed.get("draft_narrative", "")
+        except AgentConstructionError:
+            raise
         except Exception:
             logger.exception("Draft analysis failed")
             return _fallback_narrative(spec, metrics, is_winning, alignment_report)
@@ -257,6 +259,8 @@ class AnalysisAgent:
             revised = review_parsed.get("revised_narrative", "")
             if revised:
                 return _ensure_misalignment_disclaimer(revised, alignment_report)
+        except AgentConstructionError:
+            raise
         except Exception:
             logger.exception("Self-review failed, using draft")
 

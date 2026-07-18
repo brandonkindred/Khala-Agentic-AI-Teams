@@ -30,6 +30,7 @@ import pytest
 from investment_team.models import BacktestResult, StrategySpec
 from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
 from investment_team.strategy_lab.agents import analysis as analysis_module
+from investment_team.strategy_lab.agents._agent_runner import AgentConstructionError
 from investment_team.strategy_lab.agents.alignment import (
     AlignmentIssue,
     TradeAlignmentReport,
@@ -541,6 +542,63 @@ def test_no_report_fallback_unchanged_on_draft_failure(monkeypatch):
     assert "did not faithfully implement the specification" not in narrative
     assert "Alignment issues:" not in narrative
     assert "Detailed narrative generation failed" in narrative
+
+
+# ---------------------------------------------------------------------------
+# Construction failures (bad LLM_PROVIDER, missing API key) are a deployment
+# bug, not a draft/self-review hiccup — they must propagate uncaught rather
+# than being silently absorbed into a fallback narrative that looks
+# identical to an ordinary LLM/parse failure.
+# ---------------------------------------------------------------------------
+
+
+def _raise_bad_config(*_a: Any, **_k: Any) -> Any:
+    raise ValueError("bad config")
+
+
+def test_draft_construction_failure_propagates_uncaught(monkeypatch) -> None:
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", _raise_bad_config)
+
+    with pytest.raises(AgentConstructionError):
+        AnalysisAgent().run(
+            _spec(),
+            _high_return_metrics(),
+            trades=[],
+            rationale="rationale",
+        )
+
+
+def test_self_review_construction_failure_propagates_uncaught(monkeypatch) -> None:
+    """A successful draft followed by a construction failure on the
+    self-review call must not silently fall back to the draft narrative —
+    that fallback path exists for LLM/parse hiccups, not deployment bugs."""
+
+    class _DraftOnlyAgent:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return json.dumps({"draft_narrative": "draft body"})
+
+    monkeypatch.setattr(agent_runner_module, "Agent", _DraftOnlyAgent)
+
+    calls = {"n": 0}
+
+    def _fail_on_second_call(*_a: Any, **_k: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise ValueError("bad config")
+        return None
+
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", _fail_on_second_call)
+
+    with pytest.raises(AgentConstructionError):
+        AnalysisAgent().run(
+            _spec(),
+            _high_return_metrics(),
+            trades=[],
+            rationale="rationale",
+        )
 
 
 # ---------------------------------------------------------------------------

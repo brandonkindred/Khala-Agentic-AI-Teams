@@ -35,6 +35,7 @@ from ...strategy_lab_context import (
     format_prior_results,
 )
 from ..market_regime import RegimeSummary, regime_to_prompt_block
+from ._agent_runner import invoke_json_agent
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import (
@@ -555,11 +556,6 @@ class DesignAgent:
         transport or JSON parse failure raises and the caller falls back
         to the original spec.
         """
-        agent = Agent(
-            model=get_strands_model("strategy_design"),
-            system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
-            tools=[],
-        )
         spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
         user_prompt = (
             "Audit the following candidate StrategySpec for the two "
@@ -568,14 +564,13 @@ class DesignAgent:
             f"```json\n{spec_json}\n```\n"
         )
         charge_active_budget()
-        raw = invoke_agent(
-            agent,
+        parsed = invoke_json_agent(
             user_prompt,
             agent_key="strategy_design",
             phase="design_self_review",
+            system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
             logger=logger,
         )
-        parsed = extract_json_object(raw)
         # Self-review tolerates advisory warnings on an otherwise-ready
         # verdict: the self-review LLM routinely flags minor notes as
         # warnings while still satisfied with the spec. Only a *critical*

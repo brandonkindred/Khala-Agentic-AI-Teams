@@ -22,7 +22,7 @@ from pathlib import Path
 
 from ...models import StrategySpec
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._agent_runner import invoke_text_agent
+from ._agent_runner import AgentConstructionError, invoke_text_agent
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,8 @@ class CodeSynthesisAgent:
                 response_format="text",
                 logger=logger,
             )
+        except AgentConstructionError:
+            raise
         except Exception as exc:  # noqa: BLE001 — wrap any transport fault
             logger.warning("CodeSynthesisAgent transport failure: %s", exc)
             raise CodeSynthesisError(f"{type(exc).__name__}: {exc}") from exc

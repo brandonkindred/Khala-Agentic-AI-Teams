@@ -126,7 +126,14 @@ def _patch_design(
     *,
     enable_self_review: bool = False,
 ) -> _CapturingAgent:
-    """Replace the in-module ``Agent``/``get_strands_model`` with stubs.
+    """Replace the ``Agent``/``get_strands_model`` symbols with stubs.
+
+    Both ``design._invoke_and_parse`` (the main generation/revision call,
+    still constructs its own ``Agent`` inline) and ``design._self_review``
+    (routed through ``_agent_runner.invoke_json_agent``) are patched onto
+    the SAME capturing agent, so self-review tests can script one ordered
+    payload sequence across both call sites regardless of which one a
+    given call actually reaches.
 
     Returns the capturing agent so the test can inspect the prompt
     sent to the model. Self-review is disabled by default so legacy
@@ -140,6 +147,14 @@ def _patch_design(
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.design.get_strands_model",
+        lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda *_a, **_k: object(),
     )
     monkeypatch.setenv(

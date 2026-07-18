@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._agent_runner import invoke_json_agent
+from ._agent_runner import AgentConstructionError, invoke_json_agent
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +312,8 @@ class TradeAlignmentAgent:
                 system_prompt=system_prompt,
                 logger=logger,
             )
+        except AgentConstructionError:
+            raise
         except Exception as exc:
             logger.debug(
                 "Near-miss adjudicator failed to produce parseable JSON: %s",
@@ -385,6 +387,8 @@ class TradeAlignmentAgent:
                 max_attempts=_alignment_max_attempts(),
                 logger=logger,
             )
+        except AgentConstructionError:
+            raise
         except Exception as exc:
             logger.debug(
                 "Alignment fix proposer failed to produce parseable JSON: %s",

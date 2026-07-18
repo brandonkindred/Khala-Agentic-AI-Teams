@@ -17,7 +17,11 @@ import pytest
 
 from investment_team.strategy_lab.agents import _agent_runner as agent_runner
 from investment_team.strategy_lab.agents import _llm_envelope as env
-from investment_team.strategy_lab.agents._agent_runner import invoke_json_agent, invoke_text_agent
+from investment_team.strategy_lab.agents._agent_runner import (
+    AgentConstructionError,
+    invoke_json_agent,
+    invoke_text_agent,
+)
 from investment_team.strategy_lab.exceptions import StrategyLabLLMError
 
 
@@ -304,3 +308,96 @@ def test_invoke_json_agent_defaults_to_envelope_module_logger_when_none_passed(
     assert all(
         r.name == "investment_team.strategy_lab.agents._llm_envelope" for r in failure_records
     )
+
+
+# ---------------------------------------------------------------------------
+# Precondition validation — agent_key / phase must be non-empty
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("agent_key", ["", "   "])
+def test_invoke_text_agent_rejects_blank_agent_key(agent_key: str) -> None:
+    with pytest.raises(ValueError, match="agent_key"):
+        invoke_text_agent("prompt", agent_key=agent_key, phase="ph", system_prompt="sys")
+
+
+@pytest.mark.parametrize("phase", ["", "   "])
+def test_invoke_text_agent_rejects_blank_phase(phase: str) -> None:
+    with pytest.raises(ValueError, match="phase"):
+        invoke_text_agent("prompt", agent_key="k", phase=phase, system_prompt="sys")
+
+
+def test_invoke_json_agent_inherits_blank_agent_key_validation() -> None:
+    """invoke_json_agent delegates to invoke_text_agent for construction, so
+    the same validation applies without needing to duplicate it."""
+    with pytest.raises(ValueError, match="agent_key"):
+        invoke_json_agent("prompt", agent_key="", phase="ph", system_prompt="sys")
+
+
+# ---------------------------------------------------------------------------
+# Construction failures — distinct type, never swallowed, never retried
+# ---------------------------------------------------------------------------
+
+
+def _patch_get_strands_model_raising(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
+    """Patch ``_agent_runner.get_strands_model`` to raise ``exc`` — simulates
+    a pre-flight construction/config failure (bad LLM_PROVIDER, missing API
+    key) before any LLM call is attempted.
+    """
+
+    def _fake(agent_key: str, **kwargs: Any) -> object:
+        raise exc
+
+    monkeypatch.setattr(agent_runner, "get_strands_model", _fake)
+
+
+def test_invoke_text_agent_raises_agent_construction_error_on_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_get_strands_model_raising(monkeypatch, ValueError("Ollama Cloud requires an API key"))
+
+    with pytest.raises(AgentConstructionError) as exc_info:
+        invoke_text_agent("prompt", agent_key="k", phase="ph", system_prompt="sys")
+
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_invoke_json_agent_raises_agent_construction_error_on_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_get_strands_model_raising(
+        monkeypatch, ValueError("LLM_PROVIDER=dummy is not supported for Strands agents")
+    )
+
+    with pytest.raises(AgentConstructionError):
+        invoke_json_agent("prompt", agent_key="k", phase="ph", system_prompt="sys")
+
+
+def test_agent_construction_error_is_not_a_strategy_lab_llm_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Call sites rely on AgentConstructionError being a distinct type from
+    StrategyLabLLMError (and from the plain ValueError a parse failure
+    raises) so their except clauses can let it propagate instead of
+    misdiagnosing a pre-flight config bug as an LLM/parse failure."""
+    _patch_get_strands_model_raising(monkeypatch, ValueError("bad config"))
+
+    with pytest.raises(AgentConstructionError) as exc_info:
+        invoke_json_agent("prompt", agent_key="k", phase="ph", system_prompt="sys")
+
+    assert not isinstance(exc_info.value, StrategyLabLLMError)
+
+
+def test_construction_failure_short_circuits_before_agent_is_built_or_invoked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A construction failure must never reach Agent construction or the
+    envelope's retry/backoff machinery — it's a pre-flight config error,
+    not a transient transport fault worth retrying."""
+    constructions = _patch_agent(monkeypatch, lambda _p: "should never be called")
+    _patch_get_strands_model_raising(monkeypatch, ValueError("bad config"))
+
+    with pytest.raises(AgentConstructionError):
+        invoke_text_agent("prompt", agent_key="k", phase="ph", system_prompt="sys")
+
+    assert constructions == []

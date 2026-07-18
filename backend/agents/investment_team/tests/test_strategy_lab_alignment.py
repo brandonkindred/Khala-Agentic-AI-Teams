@@ -798,6 +798,63 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
     assert exc_info.value.__cause__ is not None
 
 
+def test_propose_code_fix_construction_failure_propagates_uncaught(monkeypatch) -> None:
+    """A pre-flight construction failure (bad LLM_PROVIDER, missing API key)
+    is a deployment bug, not an LLM/parse hiccup — it must not be wrapped
+    as an ordinary AlignmentAuditError, which the orchestrator's retry
+    wrapper treats identically to a transient transport fault."""
+    from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+    from investment_team.strategy_lab.agents._agent_runner import AgentConstructionError
+
+    def _raise_bad_config(*_a: Any, **_k: Any) -> Any:
+        raise ValueError("bad config")
+
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", _raise_bad_config)
+
+    agent = alignment_module.TradeAlignmentAgent()
+
+    with pytest.raises(AgentConstructionError):
+        agent.propose_code_fix(
+            spec=_spec(),
+            code="code-v0",
+            findings=[
+                AlignmentFinding(
+                    trade_num=1,
+                    check_name="entry_signal",
+                    passed=False,
+                    severity="critical",
+                )
+            ],
+            prior_attempts=None,
+        )
+
+
+def test_adjudicate_near_miss_construction_failure_propagates_uncaught(monkeypatch) -> None:
+    """Same guard for the other alignment.py call site: a construction
+    failure must not be wrapped as AlignmentAuditError."""
+    from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+    from investment_team.strategy_lab.agents._agent_runner import AgentConstructionError
+
+    def _raise_bad_config(*_a: Any, **_k: Any) -> Any:
+        raise ValueError("bad config")
+
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", _raise_bad_config)
+
+    agent = alignment_module.TradeAlignmentAgent()
+
+    with pytest.raises(AgentConstructionError):
+        agent.adjudicate_near_miss(
+            rule_id="rule-1",
+            predicate_repr="rsi < 30",
+            computed_value=29.5,
+            threshold=30.0,
+            symbol="AAPL",
+            entry_date="2024-06-01",
+        )
+
+
 def test_propose_code_fix_fails_open_preserving_patch_on_coercion_error(monkeypatch) -> None:
     """A residual report-coercion error must NOT discard a usable patch. The LLM
     returned parseable JSON with ``proposed_code``; if ``_coerce_report`` then

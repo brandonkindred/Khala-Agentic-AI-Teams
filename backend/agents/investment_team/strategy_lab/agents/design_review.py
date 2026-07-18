@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, model_validator
 from ...models import StrategySpec
 from ..quality_gates.models import QualityGateResult
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._agent_runner import invoke_json_agent
+from ._agent_runner import AgentConstructionError, invoke_json_agent
 from ._llm_budget import charge_active_budget
 
 logger = logging.getLogger(__name__)
@@ -489,6 +489,8 @@ class DesignReviewAgent:
                 system_prompt=_SYSTEM_PROMPT,
                 logger=logger,
             )
+        except AgentConstructionError:
+            raise
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
             logger.warning("DesignReviewAgent failed to produce parseable JSON: %s", exc)
             return _fail_closed_critique(exc, readiness_findings)

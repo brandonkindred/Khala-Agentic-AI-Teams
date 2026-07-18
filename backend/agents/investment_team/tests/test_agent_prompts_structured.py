@@ -336,6 +336,25 @@ def test_design_rejects_prose_sizing_object(monkeypatch: pytest.MonkeyPatch) -> 
     assert exc_info.value.field == "sizing"
 
 
+def test_design_self_review_construction_failure_propagates_uncaught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DesignAgent._self_review has no local except at all — any failure,
+    including a pre-flight construction/config failure, must propagate
+    uncaught to the caller (_with_self_review), which decides whether to
+    fall back to the current spec."""
+    from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
+    from investment_team.strategy_lab.agents._agent_runner import AgentConstructionError
+
+    def _raise_bad_config(*_a, **_k):
+        raise ValueError("bad config")
+
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", _raise_bad_config)
+
+    with pytest.raises(AgentConstructionError):
+        DesignAgent()._self_review({"sizing": {"kind": "fixed_fraction"}})
+
+
 # ---------------------------------------------------------------------------
 # RefinementAgent — stray rule keys must be discarded with a warning
 # ---------------------------------------------------------------------------
@@ -397,6 +416,29 @@ def _zero_trade_payload(*, proposed_spec_updates=None) -> str:
         "proposed_spec_updates": proposed_spec_updates,
     }
     return json.dumps(payload)
+
+
+def test_zero_trade_repair_construction_failure_propagates_uncaught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-flight construction failure (bad LLM_PROVIDER, missing API key)
+    must not be silently converted into a fallback ZeroTradeRepairReport
+    whose evidence text falsely claims the LLM response could not be
+    parsed — it must propagate uncaught."""
+    from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
+    from investment_team.strategy_lab.agents._agent_runner import AgentConstructionError
+
+    def _raise_bad_config(*_a, **_k):
+        raise ValueError("bad config")
+
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", _raise_bad_config)
+
+    with pytest.raises(AgentConstructionError):
+        ZeroTradeRepairAgent().run(
+            spec=_spec(),
+            code="# original",
+            diagnostics=_zero_trade_diagnostics(),
+        )
 
 
 def test_zero_trade_repair_accepts_risk_limits_spec_update(
