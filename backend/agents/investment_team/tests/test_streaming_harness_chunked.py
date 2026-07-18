@@ -252,6 +252,63 @@ def test_send_bar_per_bar_path_unchanged() -> None:
         harness.send_end()
 
 
+def test_standalone_wrapper_shares_ctxs_own_registry_via_active_registries() -> None:
+    """Regression test for a sixth bug caught in code review: the standalone
+    indicator wrapper functions (``from indicators import sma``) have no
+    ``registries`` parameter, so calling them directly instead of
+    ``ctx.indicator()`` always fell through to ``strategy_indicators``'s
+    thread-local fallback cache — a *different* cache than ``ctx.indicator()``
+    uses (its value would still be numerically correct either way, since
+    ``sma`` always recomputes from the given bars regardless of which
+    registry backs it — a value-agreement check alone can't tell "sharing
+    one registry" apart from "two independently-correct ones"). The harness
+    now sets ``strategy_indicators._active_registries`` to ``ctx.
+    _indicator_registries`` right after constructing ``ctx`` (see
+    ``_HARNESS_SCRIPT``), so both call styles resolve to the exact same dict
+    object. Proven directly here — not by inference from output values, but
+    by having the strategy assert the identity itself (``indicators`` is
+    genuinely importable inside the sandbox, so this runs as real strategy
+    code in the subprocess): an ``AssertionError`` there surfaces to the
+    parent as a ``StrategyRuntimeError``, so the harness call raising nothing
+    *is* the proof.
+    """
+    code = textwrap.dedent("""\
+        from contract import Strategy, OrderSide, OrderType
+        import indicators
+
+        class IdentityCheckStrategy(Strategy):
+            def on_bar(self, ctx, bar):
+                history = ctx.history(bar.symbol, 30)
+                if len(history) < 10:
+                    return
+                active = indicators._active_registries.get()
+                assert active is not None, "no _active_registries set during on_bar"
+                assert active is ctx._indicator_registries, (
+                    "standalone wrapper fallback is not scoped to this ctx"
+                )
+                indicators.sma(history, 10)  # exercise the call shape itself too
+                ctx.submit_order(
+                    symbol=bar.symbol,
+                    side=OrderSide.LONG,
+                    qty=1.0,
+                    order_type=OrderType.MARKET,
+                    reason="identity-check-passed",
+                )
+    """)
+    with StreamingHarness(code) as harness:
+        harness.send_start(config={"initial_capital": 100_000.0})
+        checked = 0
+        for i in range(15):
+            resp = harness.send_bar(
+                bar=_bar(f"2024-01-{i + 1:02d}"),
+                state=_state(),
+                is_warmup=False,
+            )
+            checked += len(resp.orders)
+        harness.send_end()
+        assert checked > 0  # the loop body actually ran past warmup at least once
+
+
 # ---------------------------------------------------------------------------
 # Service-level integration: chunked path preserves per-order timestamps
 # (i.e. BarSafetyAssertion semantics under issue #377).

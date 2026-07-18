@@ -200,7 +200,9 @@ def test_small_code_routes_through_coordinator_chunk_path() -> None:
     agent = CodeReviewAgent(llm_client=client)
     result = agent.run(_input())
     assert result.approved is True
-    assert len(client.prompts) == 1
+    # 1 chunk-review call + 1 side-effect/blast-radius pass call (additive,
+    # runs once per submission regardless of chunk count).
+    assert len(client.prompts) == 2
     # CHUNK_REVIEW_NOTE marker proves the coordinator's map path was used.
     assert "one chunk of the full codebase" in client.prompts[0]
 

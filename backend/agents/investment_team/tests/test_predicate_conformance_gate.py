@@ -538,6 +538,79 @@ class TestSandboxImports:
         assert len(strategy_fail) == 0
 
 
+class TestActiveRegistriesWiring:
+    def test_check_fixture_scopes_standalone_wrapper_calls_to_this_shadow_context(self):
+        """Regression test for a sixth bug caught in code review: standalone
+        indicator wrapper calls (``from indicators import bollinger_bands``,
+        see ``TestSandboxImports.test_strategy_importing_indicators`` above)
+        bypass ``_ShadowContext``'s instance-owned ``_indicator_registries``
+        dict entirely — the wrapper functions have no ``registries``
+        parameter, so they always fall through to ``strategy_indicators``'s
+        module-level fallback layers regardless of which context is
+        dispatching. ``_check_fixture`` now brackets every call into
+        strategy code with ``_active_registries.set(ctx._indicator_
+        registries)`` / ``.reset(token)`` so a standalone wrapper called
+        *during* that dispatch resolves to this fixture's own dict instead
+        of whatever a different execution left behind on this worker thread.
+
+        This proves the wiring itself — not just the underlying contextvar
+        mechanism, which ``test_indicator_accessor.py``'s
+        ``test_interleaved_standalone_wrapper_calls_do_not_corrupt_each_
+        others_indicator_state`` already covers — by capturing what
+        ``_active_registries.get()`` actually returns from inside a real
+        ``on_start``/``on_bar`` dispatch driven through the gate's own
+        ``_check_fixture``, using a hand-written (non-sandboxed) strategy so
+        the test can read module internals directly instead of smuggling
+        values out through ``submit_order``.
+        """
+        from investment_team.market_data_service import OHLCVBar
+        from investment_team.strategy_lab.executor import strategy_indicators as si
+        from investment_team.strategy_lab.quality_gates.predicate_conformance_fixtures import (
+            ConformanceFixture,
+        )
+
+        seen: list = []
+
+        class _RecordingStrategy:
+            def on_start(self, ctx):
+                seen.append(("on_start", si._active_registries.get(), ctx._indicator_registries))
+
+            def on_bar(self, ctx, bar):
+                seen.append(("on_bar", si._active_registries.get(), ctx._indicator_registries))
+
+        bars = [
+            OHLCVBar(
+                date=f"2024-01-{(i % 28) + 1:02d}",
+                open=100.0 + i,
+                high=101.0 + i,
+                low=99.0 + i,
+                close=100.0 + i,
+                volume=1_000.0,
+            )
+            for i in range(25)
+        ]
+        fixture = ConformanceFixture(
+            rule_id="entry[0]",
+            rule_kind="entry",
+            side="long",
+            symbol="PROBE",
+            bars=bars,
+            expected_verdicts=[None] * 20 + [True, False, True, False, True],
+        )
+
+        gate = PredicateConformanceGate()
+        assert si._active_registries.get() is None  # sanity: nothing set beforehand
+        with gate._using_phase("synthesis"):
+            gate._check_fixture(_RecordingStrategy, fixture, spec=None, demote=False)
+
+        # Bracketed set/reset leaves no trace once dispatch has finished.
+        assert si._active_registries.get() is None
+        assert len(seen) == 1 + len(bars)  # one on_start + one on_bar per bar
+        for _kind, active_dict, ctx_dict in seen:
+            assert active_dict is not None
+            assert active_dict is ctx_dict  # the SAME dict ctx.indicator() uses
+
+
 class TestShortEntryStrategy:
     def test_faithful_short_entry_passes(self):
         """A short-entry strategy that correctly fires on predicate-true bars."""

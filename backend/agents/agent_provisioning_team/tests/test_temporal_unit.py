@@ -118,9 +118,9 @@ def test_activities_includes_every_activity_a_workflow_schedules() -> None:
 
     activity_names = {getattr(a, "__name__", str(a)) for a in temporal_pkg.ACTIVITIES}
     missing = scheduled - activity_names
-    assert (
-        not missing
-    ), f"activities scheduled by workflows.py but missing from ACTIVITIES: {missing}"
+    assert not missing, (
+        f"activities scheduled by workflows.py but missing from ACTIVITIES: {missing}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -667,9 +667,7 @@ def test_credentials_activity_restores_from_prior() -> None:
         patch("temporalio.activity.heartbeat"),
     ):
         prior = {"success": True, "tool_names": ["pg"], "credentials": {}}
-        payload = activities.credentials_activity(
-            "j", "a", "default.yaml", prior_credentials=prior
-        )
+        payload = activities.credentials_activity("j", "a", "default.yaml", prior_credentials=prior)
 
     assert payload["success"] is True
     assert payload["credentials"]["pg"]["password"] == "secret"
@@ -987,6 +985,10 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
+    fake_orch.tool_agents.get.return_value._container_exists.return_value = False
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
@@ -1004,14 +1006,18 @@ def test_compensate_activity_invokes_orchestrator() -> None:
         )
 
     fake_orch.compensate.assert_called_once()
-    args, _ = fake_orch.compensate.call_args
+    args, kwargs = fake_orch.compensate.call_args
     assert args[0] == "agent-1"
     shims = args[1]
     assert len(shims) == 2
     assert shims[0].tool_name == "pg"
     assert shims[0].provisioner_key == "postgres_provisioner"
     assert shims[0].success is True
+    assert kwargs["tear_down_environment"] is True
     mock_clear.assert_called_once_with("job-1")
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with(
+        "agent-1"
+    )
 
 
 def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> None:
@@ -1023,6 +1029,198 @@ def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> Non
         patch.object(activities._js, "clear_completed_phases") as mock_clear,
     ):
         Orch.return_value.compensate = MagicMock()
+        Orch.return_value.environment_store.get.return_value = None
+        Orch.return_value.environment_store.readable.return_value = True
+        Orch.return_value.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
+        Orch.return_value.tool_agents.get.return_value._container_exists.return_value = False
+        activities.compensate_activity("a1", [], job_id="j-comp")
+
+    mock_clear.assert_called_once_with("j-comp")
+
+
+def test_compensate_activity_raises_when_docker_state_survives() -> None:
+    """compensate() never raises even when its own docker teardown fails — this
+    activity must verify teardown independently and raise itself, or Temporal
+    considers compensation successful and never retries a leaked container."""
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = False
+    fake_orch.tool_agents.get.return_value._container_exists.return_value = False
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
+    ):
+        with pytest.raises(RuntimeError, match="did not complete"):
+            activities.compensate_activity("a1", [], job_id="j-comp")
+
+    # Checkpoints are cleared BEFORE this verification step, specifically so
+    # a raise here (this step alone failing) cannot leave stale, resumable
+    # checkpoints over state compensate() may have already torn down.
+    mock_clear.assert_called_once_with("j-comp")
+
+
+def test_compensate_activity_skips_docker_verification_when_env_record_survives() -> None:
+    """A live EnvironmentStore record means the container may still be legitimately owned.
+
+    Checked fresh (not inferred from tear_down_environment or from whether
+    compensate() happened to raise internally): a genuinely pre-existing
+    environment leaves its record untouched by compensate() either way, and
+    a record whose removal itself failed inside compensate() also still has
+    one. Either way, an independent by-name probe can't distinguish "an
+    orphan with no state row" from "the container this surviving record
+    still legitimately references" — so it must be skipped entirely rather
+    than risk deleting the latter.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = MagicMock()  # a record exists
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=True)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
+    mock_clear.assert_called_once_with("j-comp")
+
+
+def test_compensate_activity_skips_docker_verification_when_registry_unreadable() -> None:
+    """An unreadable registry location is not proof no record exists — stays conservative."""
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = False
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=True)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
+
+
+def test_compensate_activity_verifies_orphan_even_when_tear_down_environment_false() -> None:
+    """A conservative tear_down_environment=False must not itself suppress the orphan check.
+
+    This is the compound-failure gap: the pre-run ownership check can fail
+    (leaving pre_existing_environment's conservative True default, hence
+    tear_down_environment=False) and setup can still create-then-fail with
+    its own local rollback also failing. Nothing ever gets registered in
+    EnvironmentStore in that case, so the live record check must still let
+    the by-name orphan probe run and catch the leak.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
+    fake_orch.tool_agents.get.return_value._container_exists.return_value = False
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
+
+
+def test_compensate_activity_skips_orphan_probe_when_deterministic_container_still_exists() -> None:
+    """No EnvironmentStore record, but the deterministic container itself still exists.
+
+    Mirrors check_existing_environment_activity's own reasoning: the record
+    and the container are independently losable, e.g. the setup
+    name-conflict path where Docker/idempotency state was lost but
+    agent-<agent_id> is a real pre-existing container. An absent record
+    alone must not be treated as proof the container is an orphan.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
+
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
+
+
+def test_compensate_activity_raises_when_tear_down_environment_true_and_container_survives() -> (
+    None
+):
+    """When ownership is already settled (tear_down_environment=True), a
+    surviving container with no EnvironmentStore record must be treated as
+    this run's own leaked orphan — not protected by the by-name probe that
+    exists only to cover the genuinely-ambiguous tear_down_environment=False
+    case.
+
+    Regression guard: the probe fallback used to run unconditionally, so a
+    container that was still alive after both local rollback and
+    orchestrator-level compensate() failed to remove it would flip
+    record_may_exist to True here, suppressing verify_and_remove_orphan and
+    letting compensate_activity return successfully — masking a real leak
+    instead of raising for Temporal to retry.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = False
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        with pytest.raises(RuntimeError, match="did not complete"):
+            activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=True)
+
+    # The container-name probe must never run when ownership is already
+    # settled — only verify_and_remove_orphan decides the outcome.
+    fake_orch.tool_agents.get.return_value._container_exists.assert_not_called()
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
+
+
+def test_compensate_activity_skips_verification_without_docker_provisioner() -> None:
+    """No docker_provisioner registered (e.g. a non-docker tool manifest) must
+    not spuriously raise — there is nothing to verify."""
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.tool_agents = {}
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases") as mock_clear,
+    ):
         activities.compensate_activity("a1", [], job_id="j-comp")
 
     mock_clear.assert_called_once_with("j-comp")
@@ -1054,9 +1252,7 @@ def test_credentials_activity_migrates_legacy_plaintext_and_redacts_checkpoint()
             "tool_names": ["pg"],
             "credentials": {k: v.model_dump() for k, v in legacy.items()},
         }
-        payload = activities.credentials_activity(
-            "j", "a", "default.yaml", prior_credentials=prior
-        )
+        payload = activities.credentials_activity("j", "a", "default.yaml", prior_credentials=prior)
 
     assert payload["credentials"]["pg"]["password"] == "legacy-secret"
     store.store_credentials.assert_called_once()
@@ -1213,9 +1409,7 @@ def test_record_account_provisioning_persists_enriched_credentials(tmp_path: Pat
     with (
         patch.object(activities._js, "add_completed_phase") as mock_phase,
         patch.object(activities._js, "update_job"),
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore"
-        ) as mock_env_cls,
+        patch("agent_provisioning_team.shared.environment_store.EnvironmentStore") as mock_env_cls,
         patch(
             "agent_provisioning_team.phases.credential_generation.CredentialStore",
             return_value=store,
@@ -1274,6 +1468,247 @@ def test_list_manifest_tools_activity_rejects_empty_path() -> None:
     with pytest.raises(AssertionError):
         activities.list_manifest_tools_activity("")
 
+
+# ---------------------------------------------------------------------------
+# check_existing_environment_activity
+# ---------------------------------------------------------------------------
+
+
+def test_check_existing_environment_activity_true_when_running(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a1", container_id="c1", container_name="agent-a1", status="running"
+        )
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
+    ):
+        assert t_acts.check_existing_environment_activity("a1") is True
+
+
+def test_check_existing_environment_activity_false_when_absent(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=EnvironmentStore(storage_dir=tmp_path),
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
+    ):
+        assert t_acts.check_existing_environment_activity("missing-agent") is False
+
+
+def test_check_existing_environment_activity_true_when_record_missing_but_container_exists(
+    tmp_path: Path,
+) -> None:
+    """A record can go missing while its container (or docker's own state) survives.
+
+    The record and the container are two independently-losable things — a
+    prior compensation could have removed the record but not the container,
+    or the record file could simply be lost to a disk issue. Since
+    docker.provision() would still reuse that container via its own
+    _on_reuse check regardless of what EnvironmentStore says, this must
+    probe the deterministic container name directly rather than assuming
+    absence just because EnvironmentStore has nothing.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=EnvironmentStore(storage_dir=tmp_path),
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True) as mock_probe,
+    ):
+        assert t_acts.check_existing_environment_activity("orphan-agent") is True
+
+    mock_probe.assert_called_once_with("agent-orphan-agent")
+
+
+def test_check_existing_environment_activity_true_when_not_running(tmp_path: Path) -> None:
+    """A non-running record (e.g. stopped) still counts as "existing" for this check.
+
+    run_setup only fast-paths on status=="running", but docker.provision()'s
+    own idempotency state (independent of EnvironmentStore) can still resolve
+    to reusing that same container regardless of this record's status — so a
+    "stopped" record must still be treated as pre-existing, or a later
+    phase's failure could tear down a container that predates this run.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a2", container_id="c2", container_name="agent-a2", status="stopped"
+        )
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
+    ):
+        assert t_acts.check_existing_environment_activity("a2") is True
+
+
+def test_check_existing_environment_activity_false_when_record_stale_and_container_gone(
+    tmp_path: Path,
+) -> None:
+    """A record whose backing container is CONFIRMED gone is stale, not pre-existing.
+
+    A record can survive after its container is destroyed out-of-band (or
+    the docker-level idempotency state is separately lost). run_setup would
+    then create an entirely fresh container and overwrite the record — so
+    trusting the stale record alone would misreport a brand-new container
+    THIS run creates as "pre-existing", leaking it if a later phase fails
+    (tear_down_environment=False would skip tearing it down).
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a2b", container_id="c-stale", container_name="agent-a2b", status="stopped"
+        )
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
+    ):
+        assert t_acts.check_existing_environment_activity("a2b") is False
+
+
+def test_check_existing_environment_activity_true_when_container_probe_inconclusive(
+    tmp_path: Path,
+) -> None:
+    """A record whose container liveness can't be determined is treated as pre-existing.
+
+    _container_exists returns None (daemon unreachable, probe timeout) when
+    it can't tell — that is not proof the container is gone, so this must
+    stay conservative rather than risk destroying a live one.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="a2c", container_id="c-unknown", container_name="agent-a2c", status="stopped"
+        )
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=None),
+    ):
+        assert t_acts.check_existing_environment_activity("a2c") is True
+
+
+def test_check_existing_environment_activity_true_when_ready(tmp_path: Path) -> None:
+    """A delivered ("ready") environment must count as pre-existing too.
+
+    phases/deliver.py moves a completed environment from "running" to
+    "ready" — a check that only recognized "running" would report a fully
+    delivered agent as nonexistent, letting a later provisioning attempt's
+    failure destroy it via workflow-level compensation.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo, EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        EnvironmentInfo(agent_id="a3", container_id="c3", container_name="agent-a3", status="ready")
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
+    ):
+        assert t_acts.check_existing_environment_activity("a3") is True
+
+
+def test_check_existing_environment_activity_true_when_registry_unreadable(
+    tmp_path: Path,
+) -> None:
+    """An unreadable registry location must NOT be treated as confirmed absence.
+
+    get() maps both "genuinely nothing here" and "something's here but we
+    can't read it" to None — conflating those would let compensation destroy
+    a healthy environment whose record simply can't be read right now.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(env_store, "readable", return_value=False),
+    ):
+        assert t_acts.check_existing_environment_activity("a4") is True
+
+
+def test_check_existing_environment_activity_false_when_confirmed_absent(
+    tmp_path: Path,
+) -> None:
+    """A confirmed-readable, confirmed-empty registry AND confirmed-absent container is False."""
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=env_store,
+        ),
+        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
+    ):
+        assert t_acts.check_existing_environment_activity("a5") is False
+
+
+def test_check_existing_environment_activity_rejects_empty_agent_id() -> None:
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    with pytest.raises(AssertionError):
+        t_acts.check_existing_environment_activity("")
+
+
 # ---------------------------------------------------------------------------
 # setup_activity — moved from test_workflows_unit
 # ---------------------------------------------------------------------------
@@ -1317,6 +1752,198 @@ def test_setup_activity_progress_path() -> None:
     assert "mark_job_running" in fn_names
     assert "update_job" in fn_names
     mock_phase.assert_called_once()
+
+
+def test_setup_activity_checkpoints_inside_run_setup_rollback_boundary() -> None:
+    """The durable checkpoint write is passed to run_setup as on_registered.
+
+    A fresh setup must run the job-store checkpoint write inside run_setup's
+    own atomic rollback boundary (so a checkpoint failure tears the container
+    back down) rather than after run_setup has already returned — this
+    exercises that setup_activity actually wires the hook through and that a
+    single checkpoint write happens (not a duplicate fallback write).
+    """
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_env = EnvironmentInfo(container_id="c1", container_name="c1")
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    captured_hook = {}
+
+    def fake_run_setup(**kwargs):
+        captured_hook["on_registered"] = kwargs["on_registered"]
+        kwargs["on_registered"](fake_env)
+        return SetupResult(success=True, environment=fake_env)
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase") as mock_phase,
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            side_effect=fake_run_setup,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        payload = t_acts.setup_activity("j", "a", "default.yaml")
+
+    assert payload["success"] is True
+    assert payload["environment"]["container_id"] == "c1"
+    assert "on_registered" in captured_hook
+    # Checkpointed inside the hook — the post-return fallback must not also fire.
+    mock_phase.assert_called_once()
+    assert mock_phase.call_args.args[0] == "j"
+    assert mock_phase.call_args.args[1] == "setup"
+
+
+def test_setup_activity_retry_fast_path_returns_prior_stronger_checkpoint() -> None:
+    """A retry's reused=True fast path must not overwrite — or return — a
+    weaker result when an earlier reused=False checkpoint already exists.
+
+    If the first attempt of this activity creates a container and durably
+    checkpoints via on_registered (reused=False), but Temporal loses that
+    attempt's completion response and retries, the retry's fast path reuses
+    the same container (reused=True) and does NOT call on_registered. The
+    fallback write below must not blindly overwrite the earlier, stronger
+    "this job created it" evidence already on record with this weaker one —
+    a later resume reading phase_results would otherwise lose track of the
+    fact that this job created the environment. The activity's own RETURN
+    VALUE must also surface that earlier, stronger checkpoint rather than
+    this retry's own weaker reused=True result: the workflow corrects a
+    conservative pre_existing_environment from THIS activity's return value
+    alone, never from job_store directly, so returning the weaker result
+    here would silently drop the stronger evidence for the rest of the run.
+    """
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    # Fast-path result: reused=True, no on_registered call — this retry's
+    # own (weaker) outcome.
+    reused_result = SetupResult(
+        success=True,
+        environment=EnvironmentInfo(container_id="c1", container_name="c1", reused=True),
+    )
+    # The earlier attempt's durable checkpoint: reused=False, proof this
+    # job's own earlier try created the container fresh.
+    prior_checkpoint = {
+        "success": True,
+        "environment": EnvironmentInfo(
+            container_id="c1", container_name="c1", reused=False
+        ).model_dump(),
+    }
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase") as mock_phase,
+        patch.object(
+            t_acts._js,
+            "get_job",
+            return_value={
+                "completed_phases": ["setup"],
+                "phase_results": {"setup": prior_checkpoint},
+            },
+        ),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=reused_result,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        payload = t_acts.setup_activity("j", "a", "default.yaml")
+
+    # The return value surfaces the earlier, STRONGER checkpoint — not this
+    # retry's own weaker reused=True outcome — so the workflow's
+    # pre_existing_environment correction still fires downstream.
+    assert payload["environment"]["reused"] is False
+    # The durable checkpoint (already recorded by an earlier attempt) is
+    # still left untouched — not overwritten with this weaker evidence.
+    mock_phase.assert_not_called()
+
+
+def test_setup_activity_retry_fast_path_falls_back_without_checkpoint_payload() -> None:
+    """A checkpointed phase with no recoverable payload falls back to this call's
+    own result rather than returning nothing.
+
+    completed_phases and phase_results are always written atomically together
+    by add_completed_phase, so this is a defensive-only edge case — but the
+    fast path must never surface a missing/malformed payload as if it were
+    the stronger evidence.
+    """
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    reused_result = SetupResult(
+        success=True,
+        environment=EnvironmentInfo(container_id="c1", container_name="c1", reused=True),
+    )
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase") as mock_phase,
+        patch.object(
+            t_acts._js,
+            "get_job",
+            # completed_phases says "setup" is checkpointed, but phase_results
+            # has no recoverable entry for it.
+            return_value={"completed_phases": ["setup"], "phase_results": {}},
+        ),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=reused_result,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        payload = t_acts.setup_activity("j", "a", "default.yaml")
+
+    assert payload["environment"]["reused"] is True
+    mock_phase.assert_not_called()
+
+
+def test_setup_activity_fast_path_checkpoints_when_none_exists_yet() -> None:
+    """A fast path with NO prior checkpoint still durably records its own result."""
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    reused_result = SetupResult(
+        success=True,
+        environment=EnvironmentInfo(container_id="c1", container_name="c1", reused=True),
+    )
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase") as mock_phase,
+        patch.object(t_acts._js, "get_job", return_value={"completed_phases": []}),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=reused_result,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t_acts.setup_activity("j", "a", "default.yaml")
+
+    mock_phase.assert_called_once_with("j", "setup", {"success": True, "environment": ANY})
 
 
 def test_setup_activity_raises_when_setup_fails() -> None:

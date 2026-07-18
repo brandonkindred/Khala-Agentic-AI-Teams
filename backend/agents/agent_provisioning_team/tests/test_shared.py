@@ -108,6 +108,188 @@ def test_environment_store_register_get_remove(tmp_path: Path) -> None:
     assert store.get("a1") is None
 
 
+def test_environment_store_register_is_atomic_on_write_failure(tmp_path: Path) -> None:
+    """A register whose write fails leaves the prior record fully intact.
+
+    Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: after a raising register, ``get`` returns the previous
+    record unchanged (never a truncated/partial one) and no temp files remain.
+    """
+    from agent_provisioning_team.shared import environment_store as es_mod
+
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+
+    with patch.object(es_mod.os, "replace", side_effect=OSError("disk full")):
+        with pytest.raises(OSError, match="disk full"):
+            store.register(
+                StoreEnvInfo(
+                    agent_id="a1", container_id="c2", container_name="n2", workspace_path="/w2"
+                )
+            )
+
+    fetched = store.get("a1")
+    assert fetched is not None and fetched.container_id == "c1"
+    assert [p for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+
+
+def test_environment_store_readable_probe(tmp_path: Path) -> None:
+    """readable() is True when agent_id's record is absent or readable.
+
+    Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: no record and a readable record both probe True.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    assert store.readable("missing") is True
+
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+    assert store.readable("a1") is True
+
+
+def test_environment_store_readable_false_on_unreadable_record_content(tmp_path: Path) -> None:
+    """A record whose CONTENT can't be read (not just directory listing) probes False.
+
+    A listable directory is not sufficient evidence: the specific file can be
+    individually unreadable while the directory listing (and other files in it)
+    are fine.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+
+    with patch.object(Path, "read_text", side_effect=OSError("permission denied")):
+        assert store.readable("a1") is False
+
+
+def test_environment_store_readable_false_when_exists_probe_swallows_permission_error(
+    tmp_path: Path,
+) -> None:
+    """readable() must not rely on Path.exists() to prove absence.
+
+    Path.exists() catches ANY OSError from the underlying stat() call —
+    including a transient EACCES on a parent directory — and returns False,
+    indistinguishable from "genuinely doesn't exist". A caller that
+    pre-checks with .exists() before reading would then skip straight past a
+    record it couldn't actually rule out, misreporting a real access failure
+    as confirmed absence. readable() must attempt the read directly instead
+    so a real access failure surfaces as an OSError from that read, rather
+    than being silently swallowed by .exists() first.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    store.register(
+        StoreEnvInfo(agent_id="a1", container_id="c1", container_name="n1", workspace_path="/w")
+    )
+
+    with (
+        patch.object(Path, "exists", return_value=False),
+        patch.object(Path, "read_text", side_effect=PermissionError("EACCES")),
+    ):
+        assert store.readable("a1") is False
+
+
+def test_environment_store_readable_false_on_unreadable_legacy_copy(tmp_path: Path) -> None:
+    """An unreadable LEGACY-location record also probes False.
+
+    A primary-directory-only listing check would miss this; readable() must
+    probe every candidate path readable() -> `get` would consult, including
+    legacy locations.
+    """
+    from agent_provisioning_team.shared import environment_store as es_mod
+
+    store = EnvironmentStore(storage_dir=tmp_path)
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    legacy_path = legacy_dir / "a1.json"
+    legacy_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch.object(es_mod, "legacy_environments_dirs", return_value=[legacy_dir]),
+        patch.object(Path, "read_text", side_effect=OSError("permission denied")),
+    ):
+        assert store.readable("a1") is False
+
+
+def test_environment_store_readable_false_on_malformed_record(tmp_path: Path) -> None:
+    """A record that IS readable but malformed/incomplete also probes False.
+
+    ``get`` maps malformed JSON or a JSON object missing a required key to
+    ``None`` — correct for lookups, but a destructive caller must not conflate
+    that with confirmed absence: the file's mere existence is evidence
+    *something* was written there by an unknown prior process.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+
+    (tmp_path / "a1.json").write_text("not valid json{{{", encoding="utf-8")
+    assert store.readable("a1") is False
+
+    (tmp_path / "a2.json").write_text('{"agent_id": "a2"}', encoding="utf-8")
+    assert store.readable("a2") is False
+
+
+def test_environment_store_readable_false_on_invalid_utf8(tmp_path: Path) -> None:
+    """Invalid UTF-8 bytes are a readability failure, not a silent pass-through.
+
+    ``Path.read_text`` raises ``UnicodeDecodeError`` on invalid UTF-8, which is
+    neither ``OSError`` nor ``json.JSONDecodeError`` — an except clause naming
+    only those two would let this exception escape and violate the
+    "never raises" contract.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "a1.json").write_bytes(b"\xff\xfe not valid utf-8")
+    assert store.readable("a1") is False
+
+
+def test_environment_store_get_none_on_invalid_utf8(tmp_path: Path) -> None:
+    """``get`` also treats invalid UTF-8 bytes as absent rather than raising."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "a1.json").write_bytes(b"\xff\xfe not valid utf-8")
+    assert store.get("a1") is None
+
+
+def test_environment_store_readable_false_on_invalid_field_value(tmp_path: Path) -> None:
+    """A record with all required keys but an invalid value also probes False.
+
+    ``get`` maps this to ``None`` via ``EnvironmentInfo.from_dict`` raising
+    ``ValueError`` on the out-of-range ``ssh_port``. Before applying the same
+    validation, ``readable`` only checked required-key presence, so it
+    disagreed with ``get`` here and reported ``True`` — a destructive rollback
+    caller combining ``get() is None`` with ``readable() is True`` would then
+    misread this as a confirmed-absent orphan safe to reclaim, when a
+    corrupt-but-present record for someone else's container sits right there.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    (tmp_path / "a1.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "a1",
+                "container_id": "c1",
+                "container_name": "n1",
+                "ssh_port": 99999,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert store.get("a1") is None
+    assert store.readable("a1") is False
+
+
+def test_environment_store_get_never_raises_on_unreadable_path(tmp_path: Path) -> None:
+    """``get`` honors its never-raises contract even when Path.exists raises.
+
+    Preconditions: ``tmp_path`` is an empty, writable directory.
+    Postconditions: an OSError from the filesystem probe (e.g. EACCES) is
+    treated as record-absent, not propagated.
+    """
+    store = EnvironmentStore(storage_dir=tmp_path)
+    with patch.object(Path, "exists", side_effect=OSError("permission denied")):
+        assert store.get("a1") is None
+
+
 def test_environment_store_preserves_updated_at_on_get(tmp_path: Path) -> None:
     """Preconditions: ``tmp_path`` is an empty, writable directory.
     Postconditions: an explicit ``updated_at`` passed to ``register`` is
@@ -338,7 +520,9 @@ def test_environment_store_list_all_dedupes_by_agent_id_not_stem(tmp_path: Path)
     """A legacy file whose stem differs from its agent_id must not produce a duplicate."""
     store = EnvironmentStore(storage_dir=tmp_path)
     store.register(
-        StoreEnvInfo(agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w")
+        StoreEnvInfo(
+            agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w"
+        )
     )
     # Legacy file named differently from the agent_id it contains.
     (tmp_path / "backup.json").write_text(

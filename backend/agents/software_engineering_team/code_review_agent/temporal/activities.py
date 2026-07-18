@@ -13,6 +13,9 @@ phase, with independent retries and resumability:
 - :func:`find_architecture_and_redundancy_activity` — once-per-submission
   architecture-consistency / cross-codebase-redundancy pass (wraps
   ``architecture_consistency_pass.find_architecture_and_redundancy_issues``).
+- :func:`find_side_effect_impact_activity` — once-per-submission side-effect /
+  blast-radius pass (wraps
+  ``side_effect_impact_pass.find_side_effect_impact_issues``).
 - :func:`finalize_review_activity` — deterministic reduce gate: dedupe +
   approval reconciliation (wraps ``coordinator._dedupe_issues`` /
   ``_reconcile_approval``).
@@ -296,17 +299,93 @@ def find_architecture_and_redundancy_activity(
           ``existing_codebase`` excerpt.
         - Never raises: the wrapped function is itself fail-safe (disabled via
           env, no architecture document, or any setup/LLM failure all degrade
-          to an empty list), so an activity failure here would only ever be an
-          unexpected defect, not an expected outcome.
+          to an empty list) -- and so is this activity as a whole, including
+          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
+          the wrapped function's own env/profile early-return checks run, so
+          without this activity's own try/except a client-resolution failure
+          (e.g. no LLM provider configured) would raise even when this
+          optional, additive pass would have no-op'd anyway -- turning an
+          inapplicable pass into a failure of the whole durable review. An
+          activity failure here would only ever be an unexpected defect, not
+          an expected outcome.
     """
     from ..architecture_consistency_pass import find_architecture_and_redundancy_issues
     from ..models import CodeReviewInput
 
     input_data = CodeReviewInput.model_validate(review_input)
-    llm = _resolve_llm()
-    findings = find_architecture_and_redundancy_issues(
-        llm, input_data, repo_reader=_repo_reader_from_input(input_data)
-    )
+    try:
+        llm = _resolve_llm()
+        findings = find_architecture_and_redundancy_issues(
+            llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
+        logger.warning(
+            "ArchitectureConsistencyPass: activity failed (%s: %s); returning no additional findings",
+            type(exc).__name__,
+            exc,
+        )
+        return []
+    return [i.model_dump(mode="json") for i in findings]
+
+
+@activity.defn(name="code_review_side_effect_impact")
+def find_side_effect_impact_activity(
+    review_input: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Once-per-submission side-effect / blast-radius pass.
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict
+          (the same one every other activity in this module reconstructs from).
+
+    Postconditions:
+        - Returns zero or more NEW ``CodeReviewIssue`` dicts (category
+          ``"side-effects"``); never mutates or removes any finding from the
+          caller's perspective — this activity is purely additive, mirroring
+          ``find_side_effect_impact_issues``'s own contract. When
+          ``review_input.repo_root`` names a disk checkout reachable by this
+          worker, a ``DiskRepoReader`` is rebuilt from it (via
+          ``_repo_reader_from_input``, the same helper the false-positive and
+          architecture activities use) so ``search_repository`` can find
+          out-of-diff callers exactly as it does in thread mode; otherwise the
+          reader is ``None`` and this pass can only see callers within the
+          submission's own files plus the ``existing_codebase`` excerpt.
+        - A live ``GitHubRepoReader`` (the PR-review flow) cannot cross this
+          boundary at all — it holds a per-request auth token, not a
+          reconstructible field — so that caller forces the in-process
+          coordinator instead of Temporal dispatch whenever it supplies a
+          reader (``coding_engine_provider.py``); this activity is then simply
+          never invoked for that review, and ``find_side_effect_impact_issues``
+          receives the live reader directly.
+        - Never raises: the wrapped function is itself fail-safe (disabled via
+          env, wrong profile, or any setup/LLM failure all degrade to an empty
+          list) -- and so is this activity as a whole, including
+          ``_resolve_llm()`` itself: resolving the LLM client happens BEFORE
+          the wrapped function's own env/profile/``pre_numbered`` early-return
+          checks run, so without this activity's own try/except a
+          client-resolution failure (e.g. no LLM provider configured) would
+          raise even when this optional, additive pass would have no-op'd
+          anyway (``CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS=false``, a non-default
+          profile, or hunk-mode input) -- turning an inapplicable pass into a
+          failure of the whole durable review. An activity failure here would
+          only ever be an unexpected defect, not an expected outcome.
+    """
+    from ..models import CodeReviewInput
+    from ..side_effect_impact_pass import find_side_effect_impact_issues
+
+    input_data = CodeReviewInput.model_validate(review_input)
+    try:
+        llm = _resolve_llm()
+        findings = find_side_effect_impact_issues(
+            llm, input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
+        logger.warning(
+            "SideEffectImpactPass: activity failed (%s: %s); returning no additional findings",
+            type(exc).__name__,
+            exc,
+        )
+        return []
     return [i.model_dump(mode="json") for i in findings]
 
 

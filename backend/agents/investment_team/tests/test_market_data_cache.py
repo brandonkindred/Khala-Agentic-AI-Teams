@@ -266,6 +266,60 @@ def test_multi_fetch_workers_env_caps_at_one(
     assert len(set(seen_threads)) == 1
 
 
+def test_multi_fetch_worker_sees_calling_threads_contextvar(
+    cache: MarketDataCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the raw-``pool.map`` contextvar drop: a value bound on
+    the calling thread before ``get_or_fetch_multi`` must be visible inside
+    every concurrently-dispatched fetch worker."""
+    monkeypatch.setenv("MARKET_DATA_FETCH_WORKERS", "4")
+    import contextvars
+
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("test_fetch_probe", default="unset")
+    seen: List[str] = []
+
+    def fetch(symbol, ac, start, end):
+        seen.append(probe.get())
+        return _bars(3), "yahoo"
+
+    token = probe.set("parent-value")
+    try:
+        cache.get_or_fetch_multi(
+            symbols=["AAA", "BBB", "CCC", "DDD"],
+            asset_class="stocks",
+            frequency="1d",
+            start="2024-01-01",
+            end="2024-01-03",
+            fetch_fn=fetch,
+        )
+    finally:
+        probe.reset(token)
+
+    assert seen == ["parent-value"] * 4
+
+
+def test_multi_fetch_tolerates_one_symbol_raising(
+    cache: MarketDataCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One symbol's ``fetch_fn`` raising must not drop the other symbols."""
+    monkeypatch.setenv("MARKET_DATA_FETCH_WORKERS", "4")
+
+    def fetch(symbol, ac, start, end):
+        if symbol == "BBB":
+            raise RuntimeError("simulated provider outage")
+        return _bars(3), "yahoo"
+
+    res = cache.get_or_fetch_multi(
+        symbols=["AAA", "BBB", "CCC"],
+        asset_class="stocks",
+        frequency="1d",
+        start="2024-01-01",
+        end="2024-01-03",
+        fetch_fn=fetch,
+    )
+    assert sorted(res.keys()) == ["AAA", "CCC"]
+
+
 # ---------------------------------------------------------------------------
 # MarketDataService integration
 # ---------------------------------------------------------------------------

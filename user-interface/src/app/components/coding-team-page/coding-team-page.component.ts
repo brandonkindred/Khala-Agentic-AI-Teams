@@ -8,6 +8,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatExpansionModule } from '@angular/material/expansion';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
 import { Subject, Subscription, timer, of } from 'rxjs';
@@ -34,6 +36,9 @@ import { NotificationService } from '../../core/notification.service';
 
 /** How often the Runs list is re-fetched while the page is open. */
 const RUNS_POLL_MS = 15000;
+
+/** localStorage key for the last repo the user expanded, so it can be pre-expanded on return. */
+const LAST_REPO_STORAGE_KEY = 'coding-team-last-repo-v1';
 
 /**
  * Precomputed view-model for one run row, so the Jobs accordion template binds plain properties
@@ -102,6 +107,8 @@ interface IssueRowVm {
     MatChipsModule,
     MatTooltipModule,
     MatExpansionModule,
+    MatFormFieldModule,
+    MatInputModule,
     MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,
@@ -157,12 +164,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   repoError: string | null = null;
   /** The expanded repo whose issues are shown; null when every repo row is collapsed. */
   selectedRepo: GitHubRepoItem | null = null;
+  /** Free-text filter over `repos`, matched against `full_name`. */
+  repoSearch = '';
+  /** Restoring the remembered repo happens at most once per component instance, on the first
+   * successful `loadRepos()` — never on a later manual "Refresh", so a user who collapsed it
+   * isn't forced back to it. Only cleared on success (see `loadRepos`), so a failed first load
+   * still gets a restore attempt on the next successful one. */
+  private initialReposLoad = true;
 
   // Issue list (scoped to the expanded repo)
   issues: GitHubIssueItem[] = [];
   loadingIssues = false;
   issuesLoaded = false;
   issueError: string | null = null;
+  /** Free-text filter over `issues`, matched against `title`. Reset per-repo in `resetIssueState`. */
+  issueSearch = '';
   // "Latest wins" guard so a slow issue load superseded by a newer one (rapid
   // collapse/re-expand of the same repo, or a repo switch) is discarded, and the
   // loading flag is always cleared by the current handler rather than getting stuck.
@@ -316,7 +332,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Preconditions: none.
    * Postconditions: a no-op while a load is already in flight (`loadingRepos`). On success `repos`
    * holds the accessible repositories (most recently pushed first, as the API returns them) and any
-   * expanded repo/issue state is reset; on error `repoError` is surfaced.
+   * expanded repo/issue state is reset; on the very first successful load for this component
+   * instance, a remembered repo (see `loadLastRepo`) present in the result is re-expanded via
+   * `toggleRepo` — a later manual refresh never repeats this, so collapsing it sticks. On error
+   * `repoError` is surfaced and `initialReposLoad` is left untouched, so the next successful load
+   * still attempts the restore.
    */
   loadRepos(): void {
     if (this.loadingRepos) return;
@@ -337,6 +357,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         // A runs poll that already applied an unfiltered snapshot before this list arrived
         // re-filters on its next tick (repos auto-loads on init, so the window is brief); we
         // deliberately do NOT re-apply here to avoid racing the first poll's auto-select.
+        if (this.initialReposLoad) {
+          this.initialReposLoad = false;
+          this.restoreLastRepo();
+        }
       },
       error: (err: unknown) => {
         this.repoError = extractErrorDetail(err, 'Failed to load repositories.');
@@ -346,8 +370,47 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * Re-expand the remembered last-used repo, if it is still accessible.
+   *
+   * Preconditions: called once, right after `repos` is populated by the first successful
+   * `loadRepos()`.
+   * Postconditions: a no-op when nothing is remembered or the remembered repo is no longer in
+   * `repos` (PAT lost access, repo renamed/deleted) — no error is surfaced either way. Otherwise
+   * expands it via `toggleRepo`, which also loads its issues.
+   */
+  private restoreLastRepo(): void {
+    const fullName = this.loadLastRepo();
+    if (!fullName) return;
+    const repo = this.repos.find((r) => r.full_name === fullName);
+    if (repo) {
+      this.toggleRepo(repo);
+    }
+  }
+
+  /** Read the remembered last-used repo's `full_name`, or null if none/unreadable. */
+  private loadLastRepo(): string | null {
+    try {
+      return localStorage.getItem(LAST_REPO_STORAGE_KEY);
+    } catch {
+      // Storage unavailable (e.g. private browsing) — behave as if nothing were remembered.
+      return null;
+    }
+  }
+
+  /** Remember a repo as the last one used, so it can be pre-expanded on a future visit. */
+  private persistLastRepo(fullName: string): void {
+    try {
+      localStorage.setItem(LAST_REPO_STORAGE_KEY, fullName);
+    } catch {
+      // Storage full or unavailable — silently ignore; the page still works without memory.
+    }
+  }
+
+  /**
    * Toggle a repository row: expand it (and load its issues) when collapsed, collapse it when it is
    * the open one. Only one repo is expanded at a time, and the issue list is always scoped to it.
+   * Expanding also remembers the repo (see `persistLastRepo`) for next visit; collapsing does not
+   * forget it — the memory tracks "last repo worked on," not "currently expanded repo."
    */
   toggleRepo(repo: GitHubRepoItem): void {
     const collapse = this.selectedRepo?.full_name === repo.full_name;
@@ -355,19 +418,39 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.resetIssueState();
     if (!collapse) {
       this.loadIssues();
+      this.persistLastRepo(repo.full_name);
     }
   }
 
-  /** Clear all issue-scoped state (list, selection, error) when the expanded repo changes. */
+  /** Clear all issue-scoped state (list, selection, search, pagination, error) when the expanded repo changes. */
   private resetIssueState(): void {
     this.issues = [];
     this.issuesLoaded = false;
     this.selectedIssue = null;
     this.issueError = null;
+    this.issueSearch = '';
+    this.pageIndex = 0;
     // The label filter is per-repo: each newly-expanded repo starts with the operator's
     // configured default applied, and the toggle is a transient override for that repo only
     // (so turning it off for one repo doesn't silently unfilter every other repo).
     this.labelFilterActive = true;
+  }
+
+  /** Repos matching `repoSearch` (case-insensitive substring of `full_name`); all repos when empty. */
+  get filteredRepos(): GitHubRepoItem[] {
+    const query = this.repoSearch.trim().toLowerCase();
+    if (!query) return this.repos;
+    return this.repos.filter((repo) => repo.full_name.toLowerCase().includes(query));
+  }
+
+  /** True when there are repos to show but the search excludes every one. */
+  get hasFilteredOutRepos(): boolean {
+    return this.repos.length > 0 && this.filteredRepos.length === 0;
+  }
+
+  /** Clear the repo search, restoring the full repo list. */
+  clearRepoSearch(): void {
+    this.repoSearch = '';
   }
 
   /**
@@ -449,10 +532,22 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** The slice of issues visible on the current page. */
+  /** Issues matching `issueSearch` (case-insensitive substring of `title`); all issues when empty. */
+  get filteredIssues(): GitHubIssueItem[] {
+    const query = this.issueSearch.trim().toLowerCase();
+    if (!query) return this.issues;
+    return this.issues.filter((issue) => issue.title.toLowerCase().includes(query));
+  }
+
+  /** True when there are issues to show but the search excludes every one. */
+  get hasFilteredOutIssues(): boolean {
+    return this.issues.length > 0 && this.filteredIssues.length === 0;
+  }
+
+  /** The slice of (filtered) issues visible on the current page. */
   get pagedIssues(): GitHubIssueItem[] {
     const start = this.pageIndex * this.pageSize;
-    return this.issues.slice(start, start + this.pageSize);
+    return this.filteredIssues.slice(start, start + this.pageSize);
   }
 
   /**
@@ -465,6 +560,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.pageIndex = event.pageIndex;
     this.pageSize = event.pageSize;
     this.recomputeIssueVms();
+  }
+
+  /**
+   * Handle an issue-search keystroke: re-page to the first page (a narrower result set may no
+   * longer have a current page) and rebuild the visible issue view-models.
+   */
+  onIssueSearchChange(): void {
+    this.pageIndex = 0;
+    this.recomputeIssueVms();
+  }
+
+  /** Clear the issue search, restoring the full (repo-scoped) issue list. */
+  clearIssueSearch(): void {
+    this.issueSearch = '';
+    this.onIssueSearchChange();
   }
 
   /** Select an issue, surfacing the run-confirmation affordance inline under its row. */

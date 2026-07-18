@@ -450,6 +450,12 @@ def test_compensate_replay_failure_continues(tmp_path: Path) -> None:
     orch.compensate("a1", [success])
     # Replay attempted for both records (continues despite failure)
     assert fake_prov.replay_compensation.call_count == 2
+    # A failed replay step preserves the persisted records/state instead of
+    # clearing them, so a retry of compensate() can still finish the
+    # rollback rather than losing track of what was never (or only
+    # partially) undone.
+    fake_prov.clear_compensations.assert_not_called()
+    fake_prov._state.delete.assert_not_called()
 
 
 def test_compensate_credential_cleanup_failure_swallowed(tmp_path: Path) -> None:
@@ -472,7 +478,237 @@ def test_compensate_environment_cleanup_failure_swallowed(tmp_path: Path, monkey
         environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
         tool_agents={"docker_provisioner": MagicMock()},
     )
-    orch.compensate("a1", [])
+    orch.compensate("a1", [])  # must not raise
+
+
+def test_compensate_skips_reused_tool_result(tmp_path: Path) -> None:
+    """A reused (not this attempt's own) account must not be rolled back."""
+    fake_prov = MagicMock()
+
+    orch = ProvisioningOrchestrator(
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    reused = ToolProvisionResult(
+        tool_name="t",
+        success=True,
+        provisioner_key="x",
+        details={"reused": True},
+    )
+    orch.compensate("a1", [reused])
+    fake_prov.list_compensations.assert_not_called()
+    fake_prov.deprovision.assert_not_called()
+
+
+def test_compensate_skips_credential_purge_for_reused_tool(tmp_path: Path) -> None:
+    """A reused tool's credential entry must survive compensation untouched."""
+    cred_store = MagicMock()
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": MagicMock(), "docker_provisioner": MagicMock()},
+    )
+
+    reused = ToolProvisionResult(
+        tool_name="t",
+        success=True,
+        provisioner_key="x",
+        details={"reused": True},
+    )
+    orch.compensate("a1", [reused], tear_down_environment=False)
+    cred_store.delete_tool_credentials.assert_not_called()
+
+
+def test_compensate_purges_credentials_for_rolled_back_tool(tmp_path: Path) -> None:
+    """A genuinely rolled-back tool's now-stale credential entry is purged."""
+    cred_store = MagicMock()
+    fake_prov = MagicMock()
+    fake_prov.list_compensations.return_value = []
+    fake_prov.deprovision.return_value = DeprovisionResult(tool_name="t", success=True)
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    fresh = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    # tear_down_environment=False: the whole-agent credential file is NOT
+    # wiped, so the per-tool purge below must run independently of that flag.
+    orch.compensate("a1", [fresh], tear_down_environment=False)
+    fake_prov.deprovision.assert_called_once_with("a1")
+    cred_store.delete_tool_credentials.assert_called_once_with("a1", "t")
+
+
+def test_compensate_preserves_credentials_when_deprovision_reports_failure(
+    tmp_path: Path,
+) -> None:
+    """A reported (not raised) deprovision failure must not purge the credential.
+
+    Provisioner deprovision() methods commonly report failure via
+    DeprovisionResult(success=False) rather than raising — "didn't raise" is
+    not the same as "actually tore the account down". Purging the credential
+    entry anyway would strip the only remaining way to reach an account that
+    may still be live.
+    """
+    cred_store = MagicMock()
+    fake_prov = MagicMock()
+    fake_prov.list_compensations.return_value = []
+    fake_prov.deprovision.return_value = DeprovisionResult(
+        tool_name="t", success=False, error="daemon down"
+    )
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    fresh = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    orch.compensate("a1", [fresh], tear_down_environment=False)
+    fake_prov.deprovision.assert_called_once_with("a1")
+    cred_store.delete_tool_credentials.assert_not_called()
+
+
+def test_compensate_environment_teardown_preserves_failed_rollback_credentials(
+    tmp_path: Path,
+) -> None:
+    """tear_down_environment=True must not defeat the per-tool preservation above.
+
+    Before this fix, the environment-teardown path unconditionally called
+    delete_credentials(agent_id) — wiping the WHOLE credential file,
+    including entries the per-tool loop had just deliberately preserved
+    because their rollback never confirmed success. A tool's account is
+    frequently an external resource (e.g. a database) that destroying the
+    container alone would not also destroy, so that credential may be the
+    only remaining way to reach a still-live account.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    cred_store = CredentialStore(storage_dir=tmp_path / "creds")
+    cred_store.store_credentials("a1", "ok", {"password": "p1"})
+    cred_store.store_credentials("a1", "broken", {"password": "p2"})
+
+    ok_prov = MagicMock()
+    ok_prov.list_compensations.return_value = []
+    ok_prov.deprovision.return_value = DeprovisionResult(tool_name="ok", success=True)
+
+    broken_prov = MagicMock()
+    broken_prov.list_compensations.return_value = []
+    broken_prov.deprovision.return_value = DeprovisionResult(
+        tool_name="broken", success=False, error="daemon down"
+    )
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={
+            "ok_provisioner": ok_prov,
+            "broken_provisioner": broken_prov,
+            "docker_provisioner": MagicMock(),
+        },
+    )
+
+    results = [
+        ToolProvisionResult(tool_name="ok", success=True, provisioner_key="ok_provisioner"),
+        ToolProvisionResult(tool_name="broken", success=True, provisioner_key="broken_provisioner"),
+    ]
+    orch.compensate("a1", results, tear_down_environment=True)
+
+    assert cred_store.get_credentials("a1", "ok") is None
+    assert cred_store.get_credentials("a1", "broken") == {"password": "p2"}
+
+
+def test_compensate_environment_teardown_deletes_whole_file_when_nothing_preserved(
+    tmp_path: Path,
+) -> None:
+    """The simple whole-file delete is still used when every tool rolled back cleanly."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    cred_store = CredentialStore(storage_dir=tmp_path / "creds")
+    cred_store.store_credentials("a1", "ok", {"password": "p1"})
+
+    ok_prov = MagicMock()
+    ok_prov.list_compensations.return_value = []
+    ok_prov.deprovision.return_value = DeprovisionResult(tool_name="ok", success=True)
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"ok_provisioner": ok_prov, "docker_provisioner": MagicMock()},
+    )
+
+    results = [ToolProvisionResult(tool_name="ok", success=True, provisioner_key="ok_provisioner")]
+    orch.compensate("a1", results, tear_down_environment=True)
+
+    assert cred_store.get_credentials("a1") is None
+
+
+def test_compensate_environment_teardown_purges_legacy_only_tool_not_in_primary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The selective-preserve purge must reach a tool that ONLY exists in a legacy file.
+
+    Before this fix, the purge loop enumerated stored tools via
+    get_credentials(agent_id), which — like _read_agent_credentials — stops
+    at the first candidate path that exists (primary, here). A tool whose
+    credential was never migrated to primary and lives ONLY in a legacy
+    file was never even enumerated, so delete_tool_credentials was never
+    called for it and its stale secret survived compensation untouched.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    cred_store = CredentialStore(storage_dir=tmp_path / "creds", encryption_key=key)
+    cred_store.store_credentials("a1", "kept", {"password": "p1"})
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_store = CredentialStore(storage_dir=legacy_dir, encryption_key=key)
+    legacy_store.store_credentials("a1", "stale", {"password": "p2"})
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"docker_provisioner": MagicMock()},
+    )
+
+    # "kept" is preserved (reused=True); "stale" is never in tool_results at
+    # all — e.g. a leftover credential unrelated to this attempt — so it must
+    # still be purged by the environment-teardown pass since it isn't
+    # deliberately preserved.
+    results = [
+        ToolProvisionResult(
+            tool_name="kept", success=True, provisioner_key="x", details={"reused": True}
+        )
+    ]
+    orch.compensate("a1", results, tear_down_environment=True)
+
+    assert cred_store.get_credentials("a1", "kept") == {"password": "p1"}
+    assert cred_store.get_credentials("a1", "stale") is None
+
+
+def test_compensate_preserves_credentials_when_replay_step_fails(tmp_path: Path) -> None:
+    """A failed (but swallowed) replay-compensation step must not purge the credential."""
+    from agent_provisioning_team.shared.provisioner_state import CompensationRecord
+
+    cred_store = MagicMock()
+    fake_prov = MagicMock()
+    fake_prov.list_compensations.return_value = [CompensationRecord(kind="k1", payload={})]
+    fake_prov.replay_compensation.side_effect = RuntimeError("replay boom")
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+
+    fresh = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    orch.compensate("a1", [fresh], tear_down_environment=False)
+    cred_store.delete_tool_credentials.assert_not_called()
 
 
 def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:

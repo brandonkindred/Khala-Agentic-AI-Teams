@@ -33,8 +33,8 @@ body {
 :root {
   // ── HIGH CONTRAST DESIGN ────────────────────────────────────────────────
   // Designed for color acuity issues. All text/background pairs exceed
-  // WCAG AAA (7:1) except --kh-text-muted, which clears AA (≥ 4.5:1) on
-  // every --kh-surface-* layer. Decorative usages of the original muted
+  // WCAG AAA (7:1) except --kh-text-muted and --kh-warning, which clear AA
+  // (≥ 4.5:1) on every --kh-surface-* layer. Decorative usages of the original muted
   // shade live on --kh-border-muted.
   // Semantic colors are maximally separated in luminance, not just hue.
   // Borders and surfaces have strong visible separation.
@@ -97,8 +97,8 @@ body {
   // distinguishable even with reduced color acuity.
   --kh-success:           #4ade80;   // bright green (high luminance)
   --kh-success-subtle:    rgba(74, 222, 128, 0.18);
-  --kh-warning:           #fbbf24;   // bright yellow-amber (highest luminance)
-  --kh-warning-subtle:    rgba(251, 191, 36, 0.18);
+  --kh-warning:           #d97706;   // deep amber-orange (distinct from --kh-accent)
+  --kh-warning-subtle:    rgba(217, 119, 6, 0.18);
   --kh-error:             #f87171;   // bright red-pink (medium luminance)
   --kh-error-subtle:      rgba(248, 113, 113, 0.18);
   --kh-info:              #93c5fd;   // bright sky blue (high luminance)

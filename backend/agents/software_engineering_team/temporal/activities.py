@@ -437,6 +437,7 @@ def plan_project_activity(
         from llm_service import get_client
         from planning_team.orchestrator import run_workflow as run_planning_workflow
         from software_engineering_team.planning_adapter import adapt_planning_result
+        from software_engineering_team.shared import planning_audit
         from software_engineering_team.spec_parser import parse_spec_with_llm
 
         # Re-parse requirements for the adapter (lightweight)
@@ -471,6 +472,8 @@ def plan_project_activity(
             err = planning_result.get("failure_reason") or "Planning failed"
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return PlanResult().model_dump()
+
+        planning_audit.record_se_planning_run(job_id, planning_result)
 
         adapter_result = adapt_planning_result(
             planning_result, spec_title=requirements.title, repo_path=str(path)

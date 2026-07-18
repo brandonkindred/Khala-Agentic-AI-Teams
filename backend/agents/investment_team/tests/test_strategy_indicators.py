@@ -102,6 +102,306 @@ def test_helpers_accept_list_float_and_deque() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared registry (issue: backtest hot loop caching) — input-shape handling
+# ---------------------------------------------------------------------------
+
+
+def test_shared_registry_accepts_raw_pandas_series() -> None:
+    """The shared-registry symbol-peek must use ``.iloc[-1]`` (positional) for
+    a pandas ``Series``, not ``[-1]`` (label lookup, which can raise/misbehave
+    on a non-default index). A raw ``Series`` is a shape ``_coerce_series``
+    documents accepting but no other test passes directly into this module."""
+    s = pd.Series([100.0 + i for i in range(20)])
+    assert si.ema(s, 5) == pytest.approx(si.ema(list(s), 5))
+
+
+def test_shared_registry_does_not_consume_a_generator() -> None:
+    """Regression test: a naive symbol-peek (``bars[-1]``/``len(bars)`` on an
+    arbitrary object) would crash on, or silently exhaust, a one-shot
+    generator before the wrapper's own ``_coerce_series`` call gets to consume
+    it. The shared registry must leave non-indexable input un-peeked."""
+
+    def _gen():
+        yield from (100.0 + i for i in range(20))
+
+    assert si.ema(_gen(), 5) == pytest.approx(si.ema([100.0 + i for i in range(20)], 5))
+
+
+def test_regbar_helpers_propagate_timestamp_from_bar_like_input() -> None:
+    """Deterministic proof of the mechanism behind ``_shared_registry``'s
+    safety: once a registry is shared across calls, IndicatorRegistry's own
+    fingerprinting needs a real per-bar timestamp to tell a genuinely new bar
+    window apart from a coincidentally-similar one (same length, same
+    trailing close, possibly-reused ``id()``) — this asserts each ``_RegBar``
+    built from real ``Bar`` objects carries that bar's actual timestamp
+    rather than the ``None`` it used to hard-code."""
+    bars = _bars(10)
+    value_bars = si._value_bars(bars)
+    assert [b.timestamp for b in value_bars] == [b.timestamp for b in bars]
+    ohlc_bars = si._ohlc_bars(bars, bars, bars)
+    assert [b.timestamp for b in ohlc_bars] == [b.timestamp for b in bars]
+    from_history = si._ohlc_bars_from_history(bars)
+    assert [b.timestamp for b in from_history] == [b.timestamp for b in bars]
+
+
+def test_shared_registry_skips_cache_when_no_timestamp_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape hatch: with no timestamp derivable (plain floats), sharing
+    would let IndicatorRegistry's coincidental close-value fallback (see
+    ``_shared_registry``'s docstring) merge two unrelated calls. Rather than
+    risk that, ``_shared_registry`` falls back to a fresh, uncached instance
+    every call — proven here by asserting the constructor runs once per call,
+    not once total, for plain-number input with no stable per-bar signal."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    closes = [100.0 + i for i in range(20)]
+    si.ema(closes, 5)
+    si.ema(closes, 5)
+    assert len(constructed) == 2
+
+
+def test_shared_registry_skips_cache_when_symbol_not_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bar-like object can expose ``timestamp`` without ``symbol`` — the
+    wrapper functions only require whichever field ``_coerce_series`` needs,
+    so two unrelated symbol-less-but-timestamped histories sharing the
+    anonymous bucket could hit/advance each other's registry state.
+    ``_shared_registry`` must fall back to a fresh, uncached instance for
+    these too, matching the no-timestamp escape hatch."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    class _TimestampedNoSymbol:
+        __slots__ = ("close", "timestamp")
+
+        def __init__(self, close: float, timestamp: str) -> None:
+            self.close = close
+            self.timestamp = timestamp
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    bars = [
+        _TimestampedNoSymbol(close=100.0 + i, timestamp=f"2024-01-{i + 1:02d}") for i in range(20)
+    ]
+    si.ema(bars, 5)
+    si.ema(bars, 5)
+    assert len(constructed) == 2
+
+
+def test_shared_registry_tolerates_raising_timestamp_descriptor() -> None:
+    """A bar-like object's ``timestamp``/``symbol`` can be a lazily-loaded
+    descriptor that raises when accessed (e.g. a lazy DB session, per
+    ``streaming.py``'s ``_safe_getattr`` docstring) — these were previously
+    valid inputs to the standalone scalar helpers because ``_coerce_series``
+    only requires the requested numeric field, and this metadata was never
+    read at all before the shared registry existed. ``_shared_registry`` must
+    treat a raising descriptor as "unavailable" (matching
+    ``IndicatorRegistry``'s own bar reads) and fall back to a fresh registry,
+    not crash a call that worked before."""
+
+    class _RaisingMetadata:
+        __slots__ = ("close",)
+
+        def __init__(self, close: float) -> None:
+            self.close = close
+
+        @property
+        def timestamp(self):
+            raise RuntimeError("lazy timestamp descriptor misbehaved")
+
+        @property
+        def symbol(self):
+            raise RuntimeError("lazy symbol descriptor misbehaved")
+
+    bars = [_RaisingMetadata(close=100.0 + i) for i in range(20)]
+    plain = [100.0 + i for i in range(20)]
+    assert si.ema(bars, 5) == pytest.approx(si.ema(plain, 5))
+
+
+def test_shared_registry_uses_active_registries_contextvar_when_set() -> None:
+    """Regression test for a sixth bug caught in code review: the 16
+    standalone wrapper functions have no ``registries`` parameter, so
+    ``StrategyContext``/``_ShadowContext`` cannot pass their own dict when a
+    strategy calls e.g. ``sma(...)`` directly instead of ``ctx.indicator()``.
+    ``_shared_registry`` now checks the ``_active_registries`` contextvar —
+    set by those two classes around every call into strategy code (see
+    ``streaming_harness.py``'s ``_HARNESS_SCRIPT`` and
+    ``predicate_conformance.py``'s ``_check_fixture``) — so a wrapper call
+    made while it's set is cached in *that* dict rather than uncached."""
+    bars = _bars(20)
+    own_dict: dict = {}
+    token = si._active_registries.set(own_dict)
+    try:
+        si.ema(bars, 5)
+    finally:
+        si._active_registries.reset(token)
+
+    assert own_dict  # the call landed in the contextvar's dict
+
+
+def test_shared_registry_never_caches_with_no_registries_source_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for a seventh bug caught in code review: an earlier
+    version of this module fell back to a module-level thread-local cache
+    when a wrapper call had neither an explicit ``registries`` argument nor
+    ``_active_registries`` set — reasoning it was safe because such a caller
+    has no context to *interleave* with. That reasoning missed a *sequential*
+    failure mode with no context object involved at all: two ad-hoc calls for
+    the same symbol with overlapping timestamps —
+    ``bollinger_bands(history_a)`` then ``bollinger_bands(history_b)`` — could
+    still have ``history_b``'s second-to-last bar coincide with
+    ``history_a``'s last bar, and ``streaming.py``'s ``_advance_kind`` reads
+    that as "this stream just advanced by one," silently blending both
+    histories into a wrong value (verified empirically: 100% reproducible via
+    the timestamp-match path, not dependent on CPython's ``id()`` reuse).
+    Removing that third cache entirely closes it: with no registries source
+    of any kind, every call now constructs its own instance — proven here the
+    same way the no-timestamp/no-symbol escape hatches already are, by
+    counting constructor calls."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    assert si._active_registries.get() is None  # sanity: no context in scope
+    bars = _bars(20)
+    si.ema(bars, 5)
+    si.ema(bars, 5)
+    assert len(constructed) == 2
+
+
+def test_ad_hoc_sequential_calls_with_overlapping_timestamps_no_longer_corrupt() -> None:
+    """Black-box counterpart to the constructor-count proof above: two
+    genuinely different histories for the same symbol, called back-to-back
+    with no owning context, where the second history's *second-to-last* bar
+    shares a timestamp with the first history's *last* bar (the exact
+    ``streaming.py`` ``_advance_kind`` "slide" trigger) — this reproduced
+    reliably (914/1000 trials) against the previous thread-local fallback.
+    With no registries source at all, ``bollinger_bands`` on the second call
+    must match a fully independent computation over its own data, not a value
+    blended with the first call's."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    def hist(closes, dates):
+        return [
+            contract.Bar(
+                symbol="QQQ",
+                timestamp=d,
+                timeframe="1d",
+                open=c,
+                high=c,
+                low=c,
+                close=c,
+                volume=0.0,
+            )
+            for d, c in zip(dates, closes)
+        ]
+
+    dates_a = [f"2024-01-{i:02d}T00:00:00Z" for i in range(1, 21)]
+    closes_a = [100.0 + i for i in range(20)]
+    dates_b = [f"2024-01-{i:02d}T00:00:00Z" for i in range(2, 22)]  # overlaps a's dates 2..20
+    closes_b = [500.0 + i for i in range(20)]  # genuinely different prices
+
+    si.bollinger_bands(hist(closes_a, dates_a), period=20)
+    got_b = si.bollinger_bands(hist(closes_b, dates_b), period=20)[0]
+
+    expected_b = IndicatorRegistry().bollinger_bands(
+        hist(closes_b, dates_b), period=20, num_std=2.0, source="close", select="upper"
+    )
+    assert got_b == pytest.approx(expected_b)
+
+
+def test_shared_registry_does_not_blend_different_window_depths_for_one_symbol() -> None:
+    """Regression test for an eighth bug caught in code review: even *within*
+    one correctly-scoped ``registries`` dict (the ``_active_registries``
+    contextvar, simulating a strategy mid-``on_bar``), reading the same
+    symbol at two different window depths — e.g.
+    ``bollinger_bands(ctx.history(sym, 20))`` then
+    ``bollinger_bands(ctx.history(sym, 21))`` — used to blend both windows'
+    deque state into a wrong value. Root cause lives in ``streaming.py``'s
+    ``_advance_kind`` (out of scope to change): it checks ``id(bars[-2])``
+    against the cached fingerprint *before* checking timestamps, so an
+    ``id()`` match short-circuits the (correctly-disagreeing) timestamp
+    check entirely — and empirically, for two same-shaped ``_RegBar`` lists
+    built back-to-back, CPython's allocator reuses that address reliably,
+    not rarely (reproduced 100% across 2000 trials for this exact
+    depth-20-then-21 pair before the fix). ``_shared_registry`` now buckets
+    by ``len(reference)`` too, so the two depths never share a registry in
+    the first place — the second call must match a fully independent
+    computation over its own (longer) window, not a value blended with the
+    first call's shorter one."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    full_bars = _bars(30)  # one stable, growing stream — real per-bar timestamps
+
+    token = si._active_registries.set({})
+    try:
+        si.bollinger_bands(full_bars[-20:], period=15)  # warms a length-20 bucket
+        got = si.bollinger_bands(full_bars[-21:], period=15)[0]  # different depth, same bar
+    finally:
+        si._active_registries.reset(token)
+
+    expected = IndicatorRegistry().bollinger_bands(
+        full_bars[-21:], period=15, num_std=2.0, source="close", select="upper"
+    )
+    assert got == pytest.approx(expected)
+
+
+def test_shared_registry_still_caches_across_a_stable_window_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The length-bucketing fix above must not defeat the steady-state
+    caching this whole module exists for: a caller requesting the *same*
+    depth every call (the normal case once ``ctx.history(sym, n)`` warmup
+    completes) still shares one registry, constructed exactly once, across
+    many calls."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
+    constructed: list[object] = []
+    real_init = IndicatorRegistry.__init__
+
+    def _counting_init(self) -> None:
+        constructed.append(self)
+        real_init(self)
+
+    monkeypatch.setattr(IndicatorRegistry, "__init__", _counting_init)
+
+    full_bars = _bars(40)
+    token = si._active_registries.set({})
+    try:
+        for i in range(20, len(full_bars) + 1):
+            si.bollinger_bands(full_bars[i - 20 : i], period=15)  # constant depth: 20
+    finally:
+        si._active_registries.reset(token)
+
+    assert len(constructed) == 1
+
+
+# ---------------------------------------------------------------------------
 # Flat sandbox layout: the module imports the impl as ``_indicators_impl``
 # ---------------------------------------------------------------------------
 

@@ -119,6 +119,30 @@ class _ShadowContext:
         self._is_warmup: bool = False
         self._current_bar_index: int = -1
         self.orders: List[_OrderRecord] = []
+        # indicator() shares one IndicatorRegistry per (symbol, source) across
+        # this instance's calls for performance (see
+        # strategy_indicators._shared_registry). Owned here — not a
+        # module/thread-level cache — so this execution's indicator state is
+        # never visible to any other _ShadowContext. This matters because this
+        # class runs in-process on worker threads (api.main's
+        # _strategy_lab_worker ThreadPoolExecutor and similar) that can process
+        # many shadow executions over their lifetime, including — if two
+        # contexts for the same symbol are ever constructed before either
+        # runs — executions whose bar ingestion interleaves rather than one
+        # running to completion before the next starts; a thread-local cache
+        # can't tell those apart, a fresh dict per instance doesn't need to.
+        self._indicator_registries: dict = {}
+        # This dict only covers indicator() calls. _build_indicators_stub
+        # below binds the 16 standalone wrapper functions (sma/ema/...)
+        # straight from strategy_indicators onto the shadow indicators
+        # module with no registries argument, so generated code that does
+        # `from indicators import sma` (a documented, supported call shape —
+        # see strategy_indicators' module docstring) never sees this dict
+        # directly either. _check_fixture instead brackets every call into
+        # strategy code with strategy_indicators._active_registries.set(self.
+        # _indicator_registries) / .reset(token), so a standalone wrapper
+        # called from inside on_start/on_bar resolves to this dict too — see
+        # _check_fixture and _shared_registry's docstring for the mechanism.
 
     @property
     def capital(self) -> float:
@@ -177,7 +201,9 @@ class _ShadowContext:
             return None
         from ..executor.strategy_indicators import indicator_value
 
-        return indicator_value(name, bars, source=source, **params)
+        return indicator_value(
+            name, bars, source=source, registries=self._indicator_registries, **params
+        )
 
     def submit_order(
         self,
@@ -388,27 +414,42 @@ class PredicateConformanceGate(GateResultsMixin):
                 rule_id=fixture.rule_id,
             )
 
-        if callable(getattr(strategy, "on_start", None)):
-            try:
-                strategy.on_start(ctx)
-            except Exception:
-                pass
+        # Bracket every call into strategy code with this fixture's own
+        # registries dict as the ambient _active_registries context (see
+        # strategy_indicators._shared_registry): a strategy that reads
+        # indicators via the standalone wrappers (`from indicators import
+        # bollinger_bands`) instead of ctx.indicator() would otherwise share
+        # a registry with whatever other execution last ran on this worker
+        # thread. Resetting via the token (not a blind clear) means this is
+        # correct even if a future caller nests or interleaves _check_fixture
+        # calls, not just for today's strictly-sequential fixture loop.
+        from ..executor.strategy_indicators import _active_registries
 
-        if fixture.rule_kind == "signal_exit":
-            pos_side = _SideStr("short") if _infer_short_from_spec(spec) else _SideStr("long")
-            ctx._positions[fixture.symbol] = _SimplePosition(
-                symbol=fixture.symbol,
-                side=pos_side,
-                entry_price=100.0,
-            )
+        token = _active_registries.set(ctx._indicator_registries)
+        try:
+            if callable(getattr(strategy, "on_start", None)):
+                try:
+                    strategy.on_start(ctx)
+                except Exception:
+                    pass
 
-        for i, bar in enumerate(fixture.bars):
-            shadow_bar = _to_shadow_bar(bar, fixture.symbol)
-            ctx._ingest_bar(shadow_bar, i)
-            try:
-                strategy.on_bar(ctx, shadow_bar)
-            except Exception:
-                pass
+            if fixture.rule_kind == "signal_exit":
+                pos_side = _SideStr("short") if _infer_short_from_spec(spec) else _SideStr("long")
+                ctx._positions[fixture.symbol] = _SimplePosition(
+                    symbol=fixture.symbol,
+                    side=pos_side,
+                    entry_price=100.0,
+                )
+
+            for i, bar in enumerate(fixture.bars):
+                shadow_bar = _to_shadow_bar(bar, fixture.symbol)
+                ctx._ingest_bar(shadow_bar, i)
+                try:
+                    strategy.on_bar(ctx, shadow_bar)
+                except Exception:
+                    pass
+        finally:
+            _active_registries.reset(token)
 
         orders_at: Dict[int, List[_OrderRecord]] = {}
         for o in ctx.orders:

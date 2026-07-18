@@ -47,9 +47,9 @@ import type {
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
   StrategyLabProgressEvent,
-  StrategyLabPhase,
   TradeRecord,
 } from '../../models';
+import { reduce } from './strategy-lab-run.reducer';
 
 type FilterMode = 'all' | 'winning' | 'losing';
 
@@ -495,126 +495,74 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   private handleStreamEvent(event: StrategyLabStreamEvent): void {
-    if (event.type === 'snapshot' && this.runStatus) {
-      // Merge snapshot fields into runStatus
-      Object.assign(this.runStatus, {
-        status: event['status'] ?? this.runStatus.status,
-        completed_cycles: event['completed_cycles'] ?? this.runStatus.completed_cycles,
-        skipped_cycles: event['skipped_cycles'] ?? this.runStatus.skipped_cycles,
-        errored_cycles: event['errored_cycles'] ?? this.runStatus.errored_cycles,
-        errored_details: event['errored_details'] ?? this.runStatus.errored_details,
-        current_cycle: event['current_cycle'] ?? this.runStatus.current_cycle,
-        completed_record_ids: event['completed_record_ids'] ?? this.runStatus.completed_record_ids,
-        error: event['error'] ?? this.runStatus.error,
-        batch_size: event['batch_size'] ?? this.runStatus.batch_size,
-        batch_count: event['batch_count'] ?? this.runStatus.batch_count,
-        completed_batches: event['completed_batches'] ?? this.runStatus.completed_batches,
-        current_batch: event['current_batch'] ?? this.runStatus.current_batch,
-      });
-    }
+    this.runStatus = reduce(this.runStatus, event);
 
-    if (event.type === 'batch_start' && this.runStatus) {
-      this.runStatus.current_batch = (event['batch_index'] as number) ?? this.runStatus.current_batch;
-      this.runStatus.batch_count = (event['total_batches'] as number) ?? this.runStatus.batch_count;
-      this.runStatus.completed_batches = (event['completed_batches'] as number) ?? this.runStatus.completed_batches;
-    }
+    switch (event.type) {
+      case 'progress':
+        if (this.runStatus) {
+          // Reset activity log when a new cycle starts
+          if (event.cycle_index !== this.lastCycleIndex) {
+            this.activityLog = [];
+            this.lastCycleIndex = event.cycle_index;
+          }
+          this.addLogEntry(event.phase, event.sub_phase, event);
+        }
+        break;
 
-    if (event.type === 'batch_complete' && this.runStatus) {
-      this.runStatus.completed_batches = (event['completed_batches'] as number) ?? this.runStatus.completed_batches;
-      this.runStatus.current_batch = null;
-    }
+      case 'cycle_complete':
+        if (this.runStatus) {
+          this.activityLog = [];
+          this.lastCycleIndex = -1;
+          this.loadResults();
+        }
+        break;
 
-    if (event.type === 'progress' && this.runStatus) {
-      const cycleIndex = (event['cycle_index'] as number) ?? 0;
-      const phase = (event['phase'] as StrategyLabPhase) ?? 'ideating';
-      const subPhase = event['sub_phase'] as string | undefined;
+      case 'batch_warning':
+        // Non-fatal pre-batch issue (e.g. signal-brief failure). Surface as a
+        // gentle warning; the run is still progressing.
+        this.completionWarning =
+          event.reason === 'signal_brief_failed'
+            ? 'Signal brief unavailable for a batch; strategies continued without it.'
+            : event.reason || 'A non-fatal warning occurred during a batch.';
+        break;
 
-      // Reset activity log when a new cycle starts
-      if (cycleIndex !== this.lastCycleIndex) {
-        this.activityLog = [];
-        this.lastCycleIndex = cycleIndex;
+      case 'complete': {
+        const erroredOrWarned = event.errored_count > 0 || event.status === 'completed_with_errors';
+        if (erroredOrWarned) {
+          const parts: string[] = [];
+          if (event.errored_count > 0) parts.push(`${event.errored_count} cycle(s) errored`);
+          if (event.skipped_count > 0) parts.push(`${event.skipped_count} cycle(s) skipped`);
+          this.completionWarning = `Run finished with ${parts.join(' and ')}. See details below.`;
+        }
+        this.onRunComplete(erroredOrWarned ? 'Strategy Lab run finished with errors.' : 'Strategy Lab run complete.');
+        break;
       }
 
-      // Merge strategy from completed ideation into current_cycle
-      const prevStrategy = this.runStatus.current_cycle?.strategy;
-      const newStrategy = event['strategy'] as { asset_class: string; hypothesis: string } | undefined;
-
-      this.runStatus.current_cycle = {
-        cycle_index: cycleIndex,
-        phase,
-        sub_phase: subPhase,
-        refinement_round: event['refinement_round'] as number | undefined,
-        strategy: newStrategy ?? prevStrategy,
-        metrics: (event['metrics'] as Record<string, number> | undefined) ?? this.runStatus.current_cycle?.metrics,
-        checks_passed: event['checks_passed'] as number | undefined,
-        checks_total: event['checks_total'] as number | undefined,
-        symbols_count: event['symbols_count'] as number | undefined,
-        bars_count: event['bars_count'] as number | undefined,
-        trades_count: event['trades_count'] as number | undefined,
-        execution_time: event['execution_time'] as number | undefined,
-        failure_phase: event['failure_phase'] as string | undefined,
-        changes_made: event['changes_made'] as string | undefined,
-        is_winning: event['is_winning'] as boolean | undefined,
-      };
-
-      this.addLogEntry(phase, subPhase, event);
-    }
-
-    if (event.type === 'cycle_complete' && this.runStatus) {
-      this.runStatus.completed_cycles = (event['completed_cycles'] as number) ?? this.runStatus.completed_cycles + 1;
-      this.runStatus.current_cycle = undefined;
-      this.activityLog = [];
-      this.lastCycleIndex = -1;
-      this.loadResults();
-    }
-
-    if (event.type === 'cycle_skipped' && this.runStatus) {
-      this.runStatus.skipped_cycles = (this.runStatus.skipped_cycles ?? 0) + 1;
-      this.runStatus.current_cycle = undefined;
-    }
-
-    if (event.type === 'cycle_errored' && this.runStatus) {
-      this.runStatus.errored_cycles = (this.runStatus.errored_cycles ?? 0) + 1;
-      const detail = {
-        cycle_index: (event['cycle_index'] as number) ?? 0,
-        batch_index: event['batch_index'] as number | undefined,
-        error: (event['error'] as string) || '',
-        exception_type: event['reason'] as string | undefined,
-      };
-      const existing = this.runStatus.errored_details ?? [];
-      this.runStatus.errored_details = [...existing, detail].slice(-50);
-      this.runStatus.current_cycle = undefined;
-    }
-
-    if (event.type === 'batch_warning') {
-      // Non-fatal pre-batch issue (e.g. signal-brief failure). Surface as a
-      // gentle warning; the run is still progressing.
-      this.completionWarning =
-        (event['reason'] as string) === 'signal_brief_failed'
-          ? 'Signal brief unavailable for a batch; strategies continued without it.'
-          : (event['reason'] as string) || 'A non-fatal warning occurred during a batch.';
-    }
-
-    if (event.type === 'complete') {
-      const erroredCount = (event['errored_count'] as number) ?? this.runStatus?.errored_cycles ?? 0;
-      const skippedCount = (event['skipped_count'] as number) ?? this.runStatus?.skipped_cycles ?? 0;
-      const erroredOrWarned = erroredCount > 0 || (event['status'] as string) === 'completed_with_errors';
-      if (erroredOrWarned) {
-        const parts: string[] = [];
-        if (erroredCount > 0) parts.push(`${erroredCount} cycle(s) errored`);
-        if (skippedCount > 0) parts.push(`${skippedCount} cycle(s) skipped`);
-        this.completionWarning = `Run finished with ${parts.join(' and ')}. See details below.`;
+      case 'error': {
+        // User cancellations are published as a terminal `error` event with a
+        // "cancelled" detail (there is no distinct cancel event type) — that
+        // is a deliberate stop, not a failure, and must not be announced as one.
+        const detail = event.detail || 'Run failed';
+        this.error = detail;
+        this.onRunComplete(/cancel/i.test(detail) ? 'Strategy Lab run cancelled.' : 'Strategy Lab run failed.');
+        break;
       }
-      this.onRunComplete(erroredOrWarned ? 'Strategy Lab run finished with errors.' : 'Strategy Lab run complete.');
-    }
 
-    if (event.type === 'error') {
-      // User cancellations are published as a terminal `error` event with a
-      // "cancelled" detail (there is no distinct cancel event type) — that
-      // is a deliberate stop, not a failure, and must not be announced as one.
-      const detail = (event['detail'] as string) || 'Run failed';
-      this.error = detail;
-      this.onRunComplete(/cancel/i.test(detail) ? 'Strategy Lab run cancelled.' : 'Strategy Lab run failed.');
+      case 'snapshot':
+      case 'batch_start':
+      case 'batch_complete':
+      case 'cycle_skipped':
+      case 'cycle_errored':
+      case 'done':
+        break;
+
+      default: {
+        // Compile-time exhaustiveness: a new StrategyLabStreamEvent member
+        // fails to build until it gets an explicit case above.
+        const unhandled: never = event;
+        void unhandled;
+        break;
+      }
     }
   }
 

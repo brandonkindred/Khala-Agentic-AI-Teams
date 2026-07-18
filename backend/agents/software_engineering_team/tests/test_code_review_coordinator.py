@@ -15,6 +15,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import pytest
+from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
 from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
     _issues_from_chunk_output,
@@ -968,8 +969,10 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
         ),
     )
     # combined fail + two single-file successes + 1 reduce-phase synthesis pass
-    # (two recovered sub-reviews → one findings-only synthesis call).
-    assert client.calls == 4
+    # (two recovered sub-reviews → one findings-only synthesis call) + 1
+    # side-effect/blast-radius pass call (its single prompt also inlines both
+    # files together, so it hits the same synthetic failure and fails safe).
+    assert client.calls == 5
     assert result.approved is True
     assert all(i.severity != "info" for i in result.issues)
 
@@ -987,7 +990,9 @@ def test_transient_failure_recovers_via_same_input_retry() -> None:
         ),
     )
     assert result.approved is True
-    assert len(client.prompts) == 2  # initial failure + successful retry
+    # initial failure + successful retry + 1 side-effect/blast-radius pass call
+    # (additive, runs once per submission after the map phase completes).
+    assert len(client.prompts) == 3
 
 
 def test_transient_failure_in_bisected_child_recovers() -> None:
@@ -1021,8 +1026,11 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
     )
     assert result.approved is True
     # combined fail + a fail + a retry success + b success
-    # + 1 reduce-phase synthesis pass (two recovered sub-reviews).
-    assert client.calls == 5
+    # + 1 reduce-phase synthesis pass (two recovered sub-reviews)
+    # + 1 side-effect/blast-radius pass call (its single prompt also inlines
+    # both files together, so it hits the same combined-fail branch and fails
+    # safe).
+    assert client.calls == 6
 
 
 def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> None:
@@ -1141,7 +1149,9 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
         ),
     )
     assert result.approved is True
-    assert client.calls == 2  # initial no-ladder exhaustion + successful same-input retry
+    # initial no-ladder exhaustion + successful same-input retry + 1
+    # side-effect/blast-radius pass call (additive, runs once per submission).
+    assert client.calls == 3
 
 
 def test_context_chained_child_failure_is_not_misclassified_as_semantic() -> None:
@@ -1957,6 +1967,22 @@ def test_unrecognized_category_is_clamped_to_general() -> None:
     assert issues[0].category == "general"
 
 
+def test_side_effects_category_survives_chunk_output_validation() -> None:
+    """Regression test: the "side-effects" category (advertised to the chunk
+    reviewer by profiles.py's checklist item 12 / output contract) must be
+    accepted by the same validator as every other documented category -- it
+    was previously missing from _VALID_CATEGORIES, silently clamping every
+    chunk-level side-effects finding to "general" and losing its
+    classification for rendering/grouping/dedup."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "d", "category": "side-effects", "severity": "high"}],
+    )
+    assert issues[0].category == "side-effects"
+
+
 def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     """The optional ``pre_existing`` tag (used by the PR-review path to route a
     finding to an issue proposal instead of a PR comment) survives conversion,
@@ -2352,8 +2378,9 @@ def test_language_is_threaded_into_every_chunk_prompt() -> None:
             language="python",
         ),
     )
-    assert client.prompts
-    assert all("**Language:** python" in p for p in client.prompts)
+    chunk_prompts = [p for p in client.prompts if CHUNK_REVIEW_NOTE in p]
+    assert chunk_prompts
+    assert all("**Language:** python" in p for p in chunk_prompts)
 
 
 def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
@@ -2378,8 +2405,9 @@ def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
             user_decisions=["Which timeout? → 30s"],
         ),
     )
-    assert client.prompts
-    assert all("Which timeout? → 30s" in p for p in client.prompts)
+    chunk_prompts = [p for p in client.prompts if CHUNK_REVIEW_NOTE in p]
+    assert chunk_prompts
+    assert all("Which timeout? → 30s" in p for p in chunk_prompts)
 
 
 # ---------------------------------------------------------------------------
@@ -2618,3 +2646,42 @@ def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> Non
 
     assert synth_calls, "synthesis must run so the narrative reflects the architecture finding"
     assert any(i.description == arch_issue.description for i in result.issues)
+
+
+def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None:
+    """Regression test: the same gap as
+    ``test_single_chunk_summary_reflects_architecture_findings``, but for the
+    side-effect/blast-radius pass -- ``_merge_narrative`` was only ever told
+    about ``architecture_findings``, so a single-chunk review whose only new
+    findings come from the side-effect pass silently dropped them from the
+    narrative (returning the map phase's chunk summary verbatim, which never
+    mentions a finding it never saw)."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.models import CodeReviewIssue
+
+    side_effect_issue = CodeReviewIssue(
+        severity="high",
+        category="side-effects",
+        file_path="a.py",
+        description="bar() no longer raises ValueError; app/caller.py still catches it.",
+    )
+    monkeypatch.setattr(
+        coord, "find_side_effect_impact_issues", lambda *a, **kw: [side_effect_issue]
+    )
+
+    synth_calls: list = []
+    original_synthesize = coord.synthesize_review_findings
+
+    def _spy(*args, **kwargs):
+        synth_calls.append(True)
+        return original_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert synth_calls, "synthesis must run so the narrative reflects the side-effect finding"
+    assert any(i.description == side_effect_issue.description for i in result.issues)

@@ -7,6 +7,12 @@ One table, ``planning_runs``: an audit record of each planning run, keyed by
 ``job_id``, holding the client name, run summary, handoff summary, and the
 open/resolved discovery questions as JSONB. See ``postgres.writer`` for the
 best-effort writer that populates it at run finalize.
+
+``job_id`` is not necessarily one this team's own job store created: a caller
+that invokes ``planning_team.orchestrator.run_workflow`` directly instead of
+going through this team's own entry points (currently
+``software_engineering_team``'s SE-embedded planning phase) owns its own
+finalize-time write using its own job_id — see ``postgres.writer`` for detail.
 """
 
 from __future__ import annotations

@@ -91,8 +91,16 @@ def run_account_provisioning(
 
             # Stamp the registry key so compensate() can look the provisioner
             # back up by key rather than by the fragile class attribute
-            # `tool_name` (see #293).
+            # `tool_name` (see #293). Also force tool_name to the manifest's
+            # alias (mirrors provision_tool_activity, the Temporal path's
+            # equivalent stamp): provisioners return their own class-level
+            # tool_name (e.g. "postgresql"), which can differ from the
+            # manifest name credentials were generated/stored under (e.g.
+            # "pg") — compensate()'s credential purge looks the entry up by
+            # this field, so leaving the provisioner's own name here would
+            # silently miss the credential actually stored for this tool.
             result.provisioner_key = provisioner_name
+            result.tool_name = tool_name
             tool_results.append(result)
 
             if result.success:

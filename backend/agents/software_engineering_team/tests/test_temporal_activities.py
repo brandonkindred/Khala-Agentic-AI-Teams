@@ -269,10 +269,10 @@ def test_plan_project_activity_wires_lazy_architecture_callback(
             resolved["n"] += 1
             return arch_agent
 
+    monkeypatch.setattr("software_engineering_team.orchestrator._get_agents", lambda: _Registry())
     monkeypatch.setattr(
-        "software_engineering_team.orchestrator._get_agents", lambda: _Registry()
+        "software_engineering_team.spec_parser.parse_spec_with_llm", lambda *a, **kw: MagicMock()
     )
-    monkeypatch.setattr("software_engineering_team.spec_parser.parse_spec_with_llm", lambda *a, **kw: MagicMock())
 
     captured: Dict[str, Any] = {}
 
@@ -283,6 +283,12 @@ def test_plan_project_activity_wires_lazy_architecture_callback(
         return {"success": False, "failure_reason": "stop here"}
 
     monkeypatch.setattr("planning_team.orchestrator.run_workflow", _fake_run_workflow)
+
+    mock_record_planning_run = MagicMock()
+    monkeypatch.setattr(
+        "software_engineering_team.shared.planning_audit.record_se_planning_run",
+        mock_record_planning_run,
+    )
 
     activities.plan_project_activity(
         "pp-wire",
@@ -300,6 +306,78 @@ def test_plan_project_activity_wires_lazy_architecture_callback(
 
     assert overview == "Wired overview"
     assert resolved["n"] == 1
+    # run_workflow short-circuited with success=False above, so the audit write
+    # must not fire for this run.
+    mock_record_planning_run.assert_not_called()
+
+
+def test_plan_project_activity_records_planning_run_on_success(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """On a successful planning run, the activity records a planning_runs audit row.
+
+    Mirrors ``test_plan_project_activity_wires_lazy_architecture_callback``'s setup but
+    drives ``run_workflow`` to success instead of short-circuiting on failure — no other
+    test in this file reaches ``plan_project_activity``'s success path. ``adapt_planning_result``
+    is patched so the test stays focused on the audit-write wiring rather than the adapter.
+    """
+    from unittest.mock import MagicMock
+
+    from software_engineering_team.planning_adapter import PlanningAdapterResult
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.shared.models import ProductRequirements
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-success", repo_path=str(tmp_path))
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": MagicMock()},
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.spec_parser.parse_spec_with_llm",
+        lambda *a, **kw: MagicMock(),
+    )
+
+    planning_result = {
+        "success": True,
+        "summary": "Planning completed; handoff package ready.",
+        "handoff_package": {"summary": "Build a widget API."},
+        "open_questions": [],
+        "resolved_questions": [],
+    }
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", lambda *a, **kw: planning_result)
+
+    adapter_result = PlanningAdapterResult(
+        requirements=ProductRequirements(
+            title="Test",
+            description="Desc",
+            acceptance_criteria=["Ship it"],
+            constraints=[],
+        ),
+        project_overview={"goals": "Ship", "features_and_functionality_doc": "API"},
+        open_questions=[],
+        assumptions=[],
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.planning_adapter.adapt_planning_result",
+        lambda *a, **kw: adapter_result,
+    )
+
+    mock_record_planning_run = MagicMock()
+    monkeypatch.setattr(
+        "software_engineering_team.shared.planning_audit.record_se_planning_run",
+        mock_record_planning_run,
+    )
+
+    activities.plan_project_activity(
+        "pp-success",
+        str(tmp_path),
+        {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+    )
+
+    mock_record_planning_run.assert_called_once_with("pp-success", planning_result)
 
 
 def test_coding_update_callback_forwards_without_heartbeat(monkeypatch) -> None:
