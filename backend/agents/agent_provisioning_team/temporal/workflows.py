@@ -24,6 +24,7 @@ from temporalio.common import RetryPolicy
 # side effects (Pattern A worker boot), so TASK_QUEUE — despite being a plain
 # string — must stay inside the pass-through block with the other package imports.
 with workflow.unsafe.imports_passed_through():
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
     from agent_provisioning_team.temporal import activities as _activities
     from agent_provisioning_team.temporal.constants import (
         DEFAULT_WORKSPACE_PATH,
@@ -40,6 +41,13 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=30),
     maximum_interval=timedelta(minutes=2),
     backoff_coefficient=2.0,
+    # StaleFencingTokenError (shared/fencing.py) means the caller's lease was
+    # reclaimed while it was paused — retrying would just be rejected again.
+    # Governs setup/credentials/record_account_provisioning/compensate/
+    # deliver/deprovision/release_agent_lock; inert for the activities on
+    # this shared policy that can never raise it (list_manifest_tools,
+    # audit, documentation, mark_job_failed).
+    non_retryable_error_types=["StaleFencingTokenError"],
 )
 
 # Bounds how long a workflow keeps retrying a busy per-agent_id lock
@@ -59,7 +67,10 @@ TOOL_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=15),
     maximum_interval=timedelta(minutes=2),
     backoff_coefficient=2.0,
-    non_retryable_error_types=["ValueError"],
+    # ValueError: bad tool config, won't succeed on retry. StaleFencingTokenError
+    # (shared/fencing.py): the caller's lease was reclaimed while it was
+    # paused — retrying would just be rejected again by the same check.
+    non_retryable_error_types=["ValueError", "StaleFencingTokenError"],
 )
 
 # Replay-compatibility gates for the per-agent_id ownership lock
@@ -77,8 +88,64 @@ TOOL_RETRY_POLICY = RetryPolicy(
 # pre-lock AgentProvisioningWorkflow/AgentDeprovisioningWorkflow histories
 # remain open (confirm via the Temporal UI), then deprecate each marker with
 # ``workflow.deprecate_patch(...)`` for one release before deleting it.
+#
+# No corresponding gate is needed for the fencing-token argument added to
+# every already-locked activity call below: Temporal's replay-determinism
+# check matches command type/order/count against recorded history, not
+# activity input payloads —
+# for an activity already completed in history, replay reads the recorded
+# result directly and never re-sends or re-validates its input. The two gates
+# above exist specifically because pre-lock histories have *no*
+# acquire/renew/release commands at all (a missing command — a count
+# mismatch), not because an existing command's arguments changed. A workflow
+# instance straddling this deploy runs with fencing_token=None (unenforced)
+# from wherever it resumes until its next lock renewal — strictly better than
+# today (zero enforcement anywhere), not a regression.
 _PROVISIONING_LOCK_PATCH = "agent-provisioning-lock"
 _DEPROVISIONING_LOCK_PATCH = "agent-deprovisioning-lock"
+
+# Bounded so a cyclic/adversarial cause chain can never loop forever — mirrors
+# shared_temporal.failure_translation.translate_workflow_failure's own bound.
+_MAX_FENCING_CAUSE_DEPTH = 12
+
+
+def _is_stale_fencing_token_failure(exc: BaseException) -> bool:
+    """True iff ``exc``'s cause chain carries a StaleFencingTokenError marker.
+
+    Temporal reconstructs an activity's raised exception as a generic
+    ``ActivityError`` wrapping an ``ApplicationError`` tagged
+    ``type=<original class name>`` — not an instance of the original class —
+    so a plain ``isinstance`` check cannot detect this. A local, minimal
+    walk rather than reusing
+    ``shared_temporal.failure_translation.translate_workflow_failure``: that
+    helper reconstructs and raises the *native* exception on a match (via
+    ``native(message)``, a single positional arg), which is incompatible
+    with ``StaleFencingTokenError``'s richer ``(agent_id, resource,
+    provided_token, current_token)`` constructor — and unnecessary here,
+    since this call site only needs a boolean, never the reconstructed
+    instance.
+
+    Preconditions:
+        * ``exc`` is the exception caught from an ``await
+          workflow.execute_activity(...)`` call (typically an
+          ``ActivityError``).
+    Postconditions:
+        * Returns ``True`` iff some node in the chain (``exc`` itself, or
+          reached via ``__cause__``/``__context__``, bounded and cycle-safe
+          via an id-based visited set) has a ``.type`` attribute equal to
+          ``StaleFencingTokenError.__name__``; ``False`` otherwise. Never
+          raises.
+    """
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    depth = 0
+    while node is not None and id(node) not in seen and depth < _MAX_FENCING_CAUSE_DEPTH:
+        seen.add(id(node))
+        depth += 1
+        if getattr(node, "type", None) == StaleFencingTokenError.__name__:
+            return True
+        node = node.__cause__ or node.__context__
+    return False
 
 
 @workflow.defn(name="AgentProvisioningWorkflow")
@@ -178,6 +245,7 @@ class AgentProvisioningWorkflow:
         credentials_by_tool: dict[str, dict[str, Any]],
         skip: set[str],
         prior: dict[str, Any],
+        fencing_token: int | None,
     ) -> tuple[list[dict], list[dict], list[str]]:
         """Fan out per-tool provision activities, or restore a prior phase dump.
 
@@ -187,6 +255,11 @@ class AgentProvisioningWorkflow:
         Postconditions:
             * Returns ``(tool_results_dump, succeeded, failures)``.
             * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key``.
+            * Every fanned-out activity call presents the SAME ``fencing_token``
+              (captured once before the fan-out starts) — the stores this token
+              is checked against accept any caller presenting a token ``>=``
+              their current high-water mark, so N concurrent writers sharing
+              one still-valid token are all accepted.
         """
         tool_names = [s["name"] for s in tool_specs]
         if "account_provisioning" in skip and prior.get("account_provisioning"):
@@ -210,6 +283,7 @@ class AgentProvisioningWorkflow:
                     tools_total,
                     spec["provisioner"],
                     spec.get("config") or {},
+                    fencing_token,
                 ],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=TOOL_ACTIVITY_TIMEOUT,
@@ -243,11 +317,13 @@ class AgentProvisioningWorkflow:
                 err = (res.get("error") if isinstance(res, dict) else None) or "unknown"
                 failures.append(f"{name}: {err}")
                 tool_results_dump.append(
-                    res if isinstance(res, dict) else {"tool_name": name, "success": False, "error": err}
+                    res
+                    if isinstance(res, dict)
+                    else {"tool_name": name, "success": False, "error": err}
                 )
         return tool_results_dump, succeeded, failures
 
-    async def _acquire_agent_lock(self, job_id: str, agent_id: str) -> None:
+    async def _acquire_agent_lock(self, job_id: str, agent_id: str) -> int | None:
         """Claim exclusive ownership of ``agent_id`` for this workflow run.
 
         Preconditions:
@@ -256,14 +332,19 @@ class AgentProvisioningWorkflow:
             * A replay of a history recorded before the lock existed
               (``workflow.patched(_PROVISIONING_LOCK_PATCH)`` is ``False``)
               schedules nothing, reproducing that history's original
-              (lock-free) command sequence exactly. Otherwise blocks (with
-              backoff, via ``LOCK_ACQUIRE_RETRY_POLICY``) until ``agent_id``
-              is free or ``LOCK_ACQUIRE_TIMEOUT`` is exhausted, in which case
-              the activity's exception propagates.
+              (lock-free) command sequence exactly, and returns ``None``.
+              Otherwise blocks (with backoff, via ``LOCK_ACQUIRE_RETRY_POLICY``)
+              until ``agent_id`` is free or ``LOCK_ACQUIRE_TIMEOUT`` is
+              exhausted, in which case the activity's exception propagates.
+            * On success, returns the fencing token now associated with
+              ``agent_id`` (see ``AgentLockStore.acquire``). The caller must
+              use this (or the value of a later renewal, whichever is more
+              recent) on every subsequent mutating activity call and on
+              ``_release_agent_lock``.
         """
         if not workflow.patched(_PROVISIONING_LOCK_PATCH):
-            return
-        await workflow.execute_activity(
+            return None
+        return await workflow.execute_activity(
             _activities.acquire_agent_lock_activity,
             args=[job_id, agent_id],
             task_queue=TASK_QUEUE,
@@ -271,7 +352,7 @@ class AgentProvisioningWorkflow:
             retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
         )
 
-    async def _renew_agent_lock(self, job_id: str, agent_id: str) -> None:
+    async def _renew_agent_lock(self, job_id: str, agent_id: str) -> int | None:
         """Refresh this workflow's lease on ``agent_id`` at an activity boundary.
 
         Preconditions:
@@ -290,10 +371,20 @@ class AgentProvisioningWorkflow:
               legitimately slow (but still active) multi-hour run therefore
               never loses its own lock to ``AGENT_PROVISIONING_LOCK_TTL_S``
               expiry.
+            * Returns the (possibly unchanged) fencing token — same semantics
+              as ``_acquire_agent_lock``. A live, still-valid renewal returns
+              the SAME token as before (the store does not mint a new one for
+              a renewal in good standing); a renewal that happens to land
+              just after expiry is, by ``AgentLockStore.acquire``'s own
+              contract, indistinguishable from a genuine reclaim and DOES
+              mint a new one — callers must always use this method's return
+              value, not a value captured earlier in the run.
         """
-        await self._acquire_agent_lock(job_id, agent_id)
+        return await self._acquire_agent_lock(job_id, agent_id)
 
-    async def _release_agent_lock(self, job_id: str, agent_id: str) -> None:
+    async def _release_agent_lock(
+        self, job_id: str, agent_id: str, fencing_token: int | None
+    ) -> None:
         """Release this workflow's ownership of ``agent_id`` (best-effort).
 
         Preconditions:
@@ -312,7 +403,7 @@ class AgentProvisioningWorkflow:
         try:
             await workflow.execute_activity(
                 _activities.release_agent_lock_activity,
-                args=[job_id, agent_id],
+                args=[job_id, agent_id, fencing_token],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=PHASE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
@@ -326,7 +417,7 @@ class AgentProvisioningWorkflow:
             )
 
     async def _compensate_failed_tools(
-        self, agent_id: str, succeeded: list[dict], job_id: str
+        self, agent_id: str, succeeded: list[dict], job_id: str, fencing_token: int | None
     ) -> None:
         """Roll back tools that succeeded when the account-provisioning phase fails.
 
@@ -338,7 +429,7 @@ class AgentProvisioningWorkflow:
         """
         await workflow.execute_activity(
             _activities.compensate_activity,
-            args=[agent_id, succeeded, job_id],
+            args=[agent_id, succeeded, job_id, fencing_token],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -355,12 +446,16 @@ class AgentProvisioningWorkflow:
         )
 
     async def _record_account_provisioning(
-        self, job_id: str, agent_id: str, tool_results_dump: list[dict]
+        self,
+        job_id: str,
+        agent_id: str,
+        tool_results_dump: list[dict],
+        fencing_token: int | None,
     ) -> None:
         """Checkpoint successful tool results so later-phase failures can resume."""
         await workflow.execute_activity(
             _activities.record_account_provisioning_activity,
-            args=[job_id, tool_results_dump, agent_id],
+            args=[job_id, tool_results_dump, agent_id, fencing_token],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -373,12 +468,13 @@ class AgentProvisioningWorkflow:
         manifest_path: str,
         skip: set[str],
         prior: dict[str, Any],
+        fencing_token: int | None,
     ) -> dict[str, Any] | None:
         """Run or restore setup; return the environment dump (or ``None``)."""
         setup_prior = prior.get("setup") if "setup" in skip else None
         setup_result = await workflow.execute_activity(
             _activities.setup_activity,
-            args=[job_id, agent_id, manifest_path, setup_prior],
+            args=[job_id, agent_id, manifest_path, setup_prior, fencing_token],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -393,12 +489,15 @@ class AgentProvisioningWorkflow:
         skip: set[str],
         prior: dict[str, Any],
         tool_specs: list[dict[str, Any]] | None,
+        fencing_token: int | None,
     ) -> dict[str, dict[str, Any]]:
         """Run or restore credential generation; return credentials keyed by tool."""
-        creds_prior = prior.get("credential_generation") if "credential_generation" in skip else None
+        creds_prior = (
+            prior.get("credential_generation") if "credential_generation" in skip else None
+        )
         creds_result = await workflow.execute_activity(
             _activities.credentials_activity,
-            args=[job_id, agent_id, manifest_path, creds_prior, tool_specs],
+            args=[job_id, agent_id, manifest_path, creds_prior, tool_specs, fencing_token],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -414,7 +513,12 @@ class AgentProvisioningWorkflow:
         skip: set[str],
         prior: dict[str, Any],
     ) -> Any:
-        """Run or restore access audit."""
+        """Run or restore access audit.
+
+        Read-only of the three fencing-relevant stores (no ``fencing_token``
+        parameter) — ``run_access_audit``/``audit_single_tool`` only read
+        already-provisioned state.
+        """
         audit_prior = prior.get("access_audit") if "access_audit" in skip else None
         return await workflow.execute_activity(
             _activities.audit_activity,
@@ -435,7 +539,13 @@ class AgentProvisioningWorkflow:
         skip: set[str],
         prior: dict[str, Any],
     ) -> Any:
-        """Run or restore documentation generation."""
+        """Run or restore documentation generation.
+
+        Read-only of the three fencing-relevant stores (no ``fencing_token``
+        parameter) — ``run_documentation`` only reads already-provisioned
+        state and writes onboarding docs to the workspace filesystem, not to
+        ``EnvironmentStore``/``CredentialStore``/``ProvisionerStateStore``.
+        """
         doc_prior = prior.get("documentation") if "documentation" in skip else None
         return await workflow.execute_activity(
             _activities.documentation_activity,
@@ -462,6 +572,7 @@ class AgentProvisioningWorkflow:
         tool_results_dump: list[dict],
         audit_dump: Any,
         onboarding_dump: Any,
+        fencing_token: int | None,
     ) -> None:
         """Run deliver and final job-store terminal update."""
         await workflow.execute_activity(
@@ -474,6 +585,7 @@ class AgentProvisioningWorkflow:
                 tool_results_dump,
                 audit_dump,
                 onboarding_dump,
+                fencing_token,
             ],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
@@ -526,6 +638,12 @@ class AgentProvisioningWorkflow:
               ``workflow.patched(_PROVISIONING_LOCK_PATCH)`` so a history
               recorded before the lock existed replays its original
               (lock-free) sequence.
+            * The fencing token returned by the initial acquire (and updated
+              by every subsequent renewal) is threaded into every mutating
+              activity call, so a resumed-but-stale run's writes are rejected
+              at the point of mutation even if this run's own renewal loop
+              never observes the theft directly (see ``_is_stale_fencing_token_failure``
+              and the ``lock_lost`` gating below).
         """
         assert job_id, "job_id must be non-empty"
         assert agent_id, "agent_id must be non-empty"
@@ -539,6 +657,7 @@ class AgentProvisioningWorkflow:
         account_provisioning_done = False
         succeeded_tools: list[dict] = []
         lock_lost = False
+        fencing_token: int | None = None
 
         async def _renew_or_mark_lost() -> None:
             # A renewal failure (AgentLockBusyError from a genuine steal, or
@@ -547,18 +666,20 @@ class AgentProvisioningWorkflow:
             # agent_id's resources. Record that before re-raising so the
             # except block below never runs unfenced compensation against
             # resources a replacement job may now own.
-            nonlocal lock_lost
+            nonlocal lock_lost, fencing_token
             try:
-                await self._renew_agent_lock(job_id, agent_id)
+                token = await self._renew_agent_lock(job_id, agent_id)
+                if token is not None:
+                    fencing_token = token
             except Exception:
                 lock_lost = True
                 raise
 
         try:
-            await self._acquire_agent_lock(job_id, agent_id)
+            fencing_token = await self._acquire_agent_lock(job_id, agent_id)
 
             environment_dump = await self._execute_setup_phase(
-                job_id, agent_id, manifest_path, skip, prior
+                job_id, agent_id, manifest_path, skip, prior, fencing_token
             )
             setup_completed = True
             await _renew_or_mark_lost()
@@ -575,7 +696,7 @@ class AgentProvisioningWorkflow:
             await _renew_or_mark_lost()
 
             credentials_by_tool = await self._execute_credentials_phase(
-                job_id, agent_id, manifest_path, skip, prior, tool_specs
+                job_id, agent_id, manifest_path, skip, prior, tool_specs, fencing_token
             )
             # Renew immediately before the fan-out phase (and again right
             # after it, below) so that phase's own worst-case duration — a
@@ -591,9 +712,12 @@ class AgentProvisioningWorkflow:
                 credentials_by_tool,
                 skip,
                 prior,
+                fencing_token,
             )
             succeeded_tools = list(succeeded)
-            credentials_by_tool = self._merge_enriched_credentials(credentials_by_tool, tool_results_dump)
+            credentials_by_tool = self._merge_enriched_credentials(
+                credentials_by_tool, tool_results_dump
+            )
             # Renew immediately after the fan-out — its own worst-case
             # duration (TOOL_RETRY_POLICY's ceiling) is this workflow's
             # single largest un-renewed gap; keep the checkpoint below out
@@ -601,7 +725,7 @@ class AgentProvisioningWorkflow:
             await _renew_or_mark_lost()
 
             if failures:
-                await self._compensate_failed_tools(agent_id, succeeded, job_id)
+                await self._compensate_failed_tools(agent_id, succeeded, job_id, fencing_token)
                 tools_phase_compensated = True
                 err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
                 await self._mark_job_failed(job_id, err)
@@ -609,7 +733,9 @@ class AgentProvisioningWorkflow:
                 raise RuntimeError(err)
 
             if "account_provisioning" not in skip:
-                await self._record_account_provisioning(job_id, agent_id, tool_results_dump)
+                await self._record_account_provisioning(
+                    job_id, agent_id, tool_results_dump, fencing_token
+                )
             account_provisioning_done = True
             await _renew_or_mark_lost()
 
@@ -642,6 +768,7 @@ class AgentProvisioningWorkflow:
                 tool_results_dump,
                 audit_dump,
                 onboarding_dump,
+                fencing_token,
             )
         except Exception as exc:
             # Pre-tool failures leave Docker/credentials behind → compensate([]).
@@ -649,19 +776,26 @@ class AgentProvisioningWorkflow:
             # compensate the tools that already succeeded.
             # Nested try/except: compensation / terminal writes must not mask
             # the original failure if Temporal activity retries are exhausted.
-            # lock_lost gates this: a renewal failure means we can no longer
-            # prove we still own agent_id's resources (a replacement job may
-            # already own them), so compensating here — keyed on agent_id
-            # alone, like every teardown path — would recreate the exact
-            # cross-job teardown race this lock exists to prevent.
+            # lock_lost / stale_token_failure both gate this: either means we
+            # can no longer prove we still own agent_id's resources (a
+            # replacement job may already own them — via a renewal that
+            # itself failed, or via a mutating activity's own preflight
+            # fencing check rejecting a token that went stale between
+            # renewals), so compensating here — keyed on agent_id alone, like
+            # every teardown path — would recreate the exact cross-job
+            # teardown race this lock exists to prevent.
+            stale_token_failure = _is_stale_fencing_token_failure(exc)
             if (
                 setup_completed
                 and not account_provisioning_done
                 and not tools_phase_compensated
                 and not lock_lost
+                and not stale_token_failure
             ):
                 try:
-                    await self._compensate_failed_tools(agent_id, succeeded_tools, job_id)
+                    await self._compensate_failed_tools(
+                        agent_id, succeeded_tools, job_id, fencing_token
+                    )
                 except Exception as comp_exc:
                     workflow.logger.error(
                         "Compensation failed after provisioning error for job=%s: %s (original=%s)",
@@ -672,7 +806,7 @@ class AgentProvisioningWorkflow:
             elif setup_completed and not account_provisioning_done and not tools_phase_compensated:
                 workflow.logger.error(
                     "Skipped unfenced compensation for job=%s agent=%s after losing the "
-                    "agent_id lock (a replacement job may now own its resources): %s",
+                    "agent_id lock (renewal loss or a stale-fencing-token rejection): %s",
                     job_id,
                     agent_id,
                     exc,
@@ -689,7 +823,7 @@ class AgentProvisioningWorkflow:
                     )
             raise
         finally:
-            await self._release_agent_lock(job_id, agent_id)
+            await self._release_agent_lock(job_id, agent_id, fencing_token)
 
 
 @workflow.defn(name="AgentDeprovisioningWorkflow")
@@ -711,6 +845,11 @@ class AgentDeprovisioningWorkflow:
           run (or another deprovision) for the same ``agent_id``. Gated by
           ``workflow.patched(_DEPROVISIONING_LOCK_PATCH)`` so a history
           recorded before the lock existed replays its original sequence.
+        * No renewal loop (a single bounded activity between acquire and
+          release), so — unlike ``AgentProvisioningWorkflow`` — there is no
+          gap where the fencing token captured at acquire time could go
+          stale mid-run; the one token captured up front is used for both
+          the deprovision call and the release.
     """
 
     @workflow.run
@@ -736,6 +875,7 @@ class AgentDeprovisioningWorkflow:
         # fixed from workflow start).
         owner = workflow.info().workflow_id
         locked = workflow.patched(_DEPROVISIONING_LOCK_PATCH)
+        fencing_token: int | None = None
         try:
             if locked:
                 # Inside the try (not before it): Temporal activities are
@@ -744,7 +884,7 @@ class AgentDeprovisioningWorkflow:
                 # (e.g. exhausted LOCK_ACQUIRE_TIMEOUT after a lost ack). The
                 # finally below must always get a chance to release, or that
                 # successful acquire orphans the lock until LOCK_TTL_S.
-                await workflow.execute_activity(
+                fencing_token = await workflow.execute_activity(
                     _activities.acquire_agent_lock_activity,
                     args=[owner, agent_id],
                     task_queue=TASK_QUEUE,
@@ -753,7 +893,7 @@ class AgentDeprovisioningWorkflow:
                 )
             return await workflow.execute_activity(
                 _activities.deprovision_activity,
-                args=[agent_id, force],
+                args=[agent_id, force, fencing_token],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=PHASE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
@@ -763,7 +903,7 @@ class AgentDeprovisioningWorkflow:
                 try:
                     await workflow.execute_activity(
                         _activities.release_agent_lock_activity,
-                        args=[owner, agent_id],
+                        args=[owner, agent_id, fencing_token],
                         task_queue=TASK_QUEUE,
                         schedule_to_close_timeout=PHASE_TIMEOUT,
                         retry_policy=DEFAULT_RETRY_POLICY,

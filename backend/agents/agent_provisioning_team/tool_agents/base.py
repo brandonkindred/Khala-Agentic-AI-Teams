@@ -15,6 +15,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.fencing import StaleFencingTokenError
 from ..shared.provisioner_state import CompensationRecord
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class ToolProvisionerInterface(Protocol):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Provision resources for the agent in this tool.
 
@@ -43,6 +45,8 @@ class ToolProvisionerInterface(Protocol):
             agent_id: Unique identifier for the agent
             config: Tool-specific configuration from manifest
             credentials: Pre-generated credentials to use
+            fencing_token: Caller's fencing token (see
+                ``shared.fencing``); ``None`` skips enforcement.
 
         Returns:
             ToolProvisionResult with success status and details
@@ -63,11 +67,13 @@ class ToolProvisionerInterface(Protocol):
         """
         ...
 
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
         """Remove agent's access and clean up resources.
 
         Args:
             agent_id: Agent to deprovision
+            fencing_token: Caller's fencing token (see
+                ``shared.fencing``); ``None`` skips enforcement.
 
         Returns:
             DeprovisionResult with success status
@@ -98,6 +104,7 @@ class BaseToolProvisioner(ABC):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Provision resources for the agent."""
         pass
@@ -111,7 +118,7 @@ class BaseToolProvisioner(ABC):
         pass
 
     @abstractmethod
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
         """Remove agent access and resources."""
         pass
 
@@ -146,6 +153,7 @@ class BaseToolProvisioner(ABC):
         create: Callable[[CompensationRegistrar], Tuple[List[str], Dict[str, Any]]],
         hydrate_extras: Tuple[str, ...] = (),
         reuse: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Run ``create`` once per (provisioner, agent_id); reuse stored state on subsequent calls.
 
@@ -183,13 +191,28 @@ class BaseToolProvisioner(ABC):
           Compensation records already registered before the exception remain
           persisted for the orchestrator to replay. Domain validation failures
           should ``return self._make_error_result(...)`` from inside ``create``.
+        * ``fencing_token``, when given, is checked against ``self._state``
+          *before* ``create`` runs — i.e. before any real infrastructure
+          mutation, not just before the final state persist — so a stale
+          caller's write is rejected before it can touch live infrastructure.
+          A rejection raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (propagated, not converted to an error result: this is a
+          programming/ownership error, not an infrastructure failure).
         """
         state = self._state
 
         def _register(kind: str, payload: Dict[str, Any]) -> None:
-            state.add_compensation(agent_id, CompensationRecord(kind=kind, payload=payload))
+            state.add_compensation(
+                agent_id,
+                CompensationRecord(kind=kind, payload=payload),
+                fencing_token=fencing_token,
+            )
 
         try:
+            if fencing_token is not None:
+                state.check_fencing_token(agent_id, fencing_token)
+
             existing = state.get(agent_id)
             if existing is not None:
                 for key in hydrate_extras:
@@ -206,12 +229,14 @@ class BaseToolProvisioner(ABC):
                 )
 
             permissions, details = create(_register)
-            state.put(agent_id, details)
+            state.put(agent_id, details, fencing_token=fencing_token)
             return self._make_success_result(
                 credentials=credentials,
                 permissions=permissions,
                 details=details,
             )
+        except StaleFencingTokenError:
+            raise
         except FileNotFoundError as e:
             return self._make_error_result(f"{self.tool_name}: required binary not found: {e}")
         except subprocess.TimeoutExpired:
@@ -226,9 +251,9 @@ class BaseToolProvisioner(ABC):
         """Return compensation records registered for ``agent_id``."""
         return self._state.list_compensations(agent_id)
 
-    def clear_compensations(self, agent_id: str) -> None:
+    def clear_compensations(self, agent_id: str, fencing_token: Optional[int] = None) -> None:
         """Clear compensation records for ``agent_id`` (leaves details intact)."""
-        self._state.clear_compensations(agent_id)
+        self._state.clear_compensations(agent_id, fencing_token=fencing_token)
 
     def replay_compensation(
         self,

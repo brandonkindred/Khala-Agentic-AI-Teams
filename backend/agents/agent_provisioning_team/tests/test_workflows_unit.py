@@ -86,6 +86,50 @@ def _call(stub: _ExecActivityStub, name: str) -> dict:
     return next(c for c in stub.calls if c["name"] == name)
 
 
+class _FakeActivityError(Exception):
+    """Mimics the shape Temporal actually surfaces for a workflow-side
+    activity failure: an ActivityError-like object whose cause chain node
+    carries a `.type` marker matching the raising exception's class name
+    (see temporalio's DefaultFailureConverter.to_failure/from_failure).
+    `_ExecActivityStub` raises whatever object is configured directly (no
+    real wire round-trip), so tests exercising `_is_stale_fencing_token_failure`
+    need this stand-in to get a realistic `.type`-bearing node."""
+
+    def __init__(self, marker_type: str, message: str = "boom") -> None:
+        super().__init__(message)
+        self.type = marker_type
+
+
+# ---------------------------------------------------------------------------
+# _is_stale_fencing_token_failure — standalone (no workflow execution needed)
+# ---------------------------------------------------------------------------
+
+
+def test_is_stale_fencing_token_failure_detects_marker() -> None:
+    from agent_provisioning_team.temporal import workflows as wf
+
+    exc = _FakeActivityError("StaleFencingTokenError", "stale token for agent-1")
+    assert wf._is_stale_fencing_token_failure(exc) is True
+
+
+def test_is_stale_fencing_token_failure_detects_marker_nested_under_cause() -> None:
+    """Temporal nests the activity's own failure under an outer ActivityError
+    whose own `.type` is unset — the walk must descend via __cause__."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    inner = _FakeActivityError("StaleFencingTokenError", "stale token for agent-1")
+    outer = RuntimeError("activity failed")
+    outer.__cause__ = inner
+    assert wf._is_stale_fencing_token_failure(outer) is True
+
+
+def test_is_stale_fencing_token_failure_false_for_unrelated_error() -> None:
+    from agent_provisioning_team.temporal import workflows as wf
+
+    assert wf._is_stale_fencing_token_failure(RuntimeError("docker daemon down")) is False
+    assert wf._is_stale_fencing_token_failure(_FakeActivityError("ValueError")) is False
+
+
 @pytest.mark.asyncio
 async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     """Happy path runs setup → credentials → per-tool provision → audit → docs → deliver."""
@@ -146,7 +190,7 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     assert fn_names[0] == "acquire_agent_lock_activity"
     assert fn_names[-1] == "release_agent_lock_activity"
     assert _call(stub, "acquire_agent_lock_activity")["args"] == ["job-1", "agent-1"]
-    assert _call(stub, "release_agent_lock_activity")["args"] == ["job-1", "agent-1"]
+    assert _call(stub, "release_agent_lock_activity")["args"] == ["job-1", "agent-1", None]
     # The lease is renewed between every scheduled activity (P1 regression:
     # a long-running job must never lose its own lock to LOCK_TTL_S expiry,
     # and no un-renewed gap may exceed the tool fan-out's own worst case) —
@@ -174,9 +218,9 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
             continue
         collapsed.append(name)
     for prev, nxt in zip(collapsed, collapsed[1:]):
-        assert (
-            prev in lock_names or nxt in lock_names
-        ), f"no lock renewal between consecutive activities {prev!r} -> {nxt!r}: {fn_names}"
+        assert prev in lock_names or nxt in lock_names, (
+            f"no lock renewal between consecutive activities {prev!r} -> {nxt!r}: {fn_names}"
+        )
 
 
 @pytest.mark.asyncio
@@ -260,7 +304,7 @@ async def test_workflow_releases_lock_when_deliver_fails(tmp_path) -> None:
     fn_names = [c["name"] for c in stub.calls]
     assert fn_names[0] == "acquire_agent_lock_activity"
     assert fn_names[-1] == "release_agent_lock_activity"
-    assert _call(stub, "release_agent_lock_activity")["args"] == ["job-1", "agent-1"]
+    assert _call(stub, "release_agent_lock_activity")["args"] == ["job-1", "agent-1", None]
 
 
 @pytest.mark.asyncio
@@ -332,6 +376,148 @@ async def test_workflow_skips_compensation_when_renewal_loses_the_lock(tmp_path)
     assert "compensate_activity" not in fn_names
     assert "mark_job_failed_activity" in fn_names
     assert fn_names[-1] == "release_agent_lock_activity"
+
+
+@pytest.mark.asyncio
+async def test_workflow_threads_fencing_token_to_every_mutating_activity(tmp_path) -> None:
+    """The token returned by acquire (and echoed by every renewal, since none
+    of them land on a genuine reclaim here) must reach every single mutating
+    activity call, plus the final release."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": 5,
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"},
+                    "redis": {"tool_name": "redis", "username": "u", "password": "p"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": {"success": True, "error": None},
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    assert _call(stub, "setup_activity")["args"][-1] == 5
+    assert _call(stub, "credentials_activity")["args"][-1] == 5
+    provision_calls = [c for c in stub.calls if c["name"] == "provision_tool_activity"]
+    assert all(c["args"][-1] == 5 for c in provision_calls)
+    assert _call(stub, "record_account_provisioning_activity")["args"][-1] == 5
+    assert _call(stub, "deliver_activity")["args"][-1] == 5
+    assert _call(stub, "release_agent_lock_activity")["args"][-1] == 5
+
+
+@pytest.mark.asyncio
+async def test_workflow_propagates_bumped_token_after_late_renewal(tmp_path) -> None:
+    """A renewal that happens to land after expiry mints a NEW token (per
+    AgentLockStore.acquire's contract -- indistinguishable from a genuine
+    reclaim). The workflow must pick up that bump and use it for every
+    activity scheduled afterward, not the stale value captured at initial
+    acquire."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    acquire_calls = {"n": 0}
+
+    def _acquire_side_effect(call):
+        acquire_calls["n"] += 1
+        # 1 = initial acquire (token 5), 2 = renewal after setup (still 5),
+        # 3 = renewal after list_manifest_tools -- simulate a late renewal
+        # that landed past expiry and minted a bump to 6. Every renewal from
+        # here on stays at 6 (no further reclaim).
+        return 5 if acquire_calls["n"] < 3 else 6
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": _acquire_side_effect,
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"},
+                    "redis": {"tool_name": "redis", "username": "u", "password": "p"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": {"success": True, "error": None},
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    # setup_activity was scheduled using the token known at that point (5,
+    # from the initial acquire) -- the bump to 6 hasn't happened yet.
+    assert _call(stub, "setup_activity")["args"][-1] == 5
+    # Everything scheduled after the bumped renewal must use the new value.
+    assert _call(stub, "credentials_activity")["args"][-1] == 6
+    provision_calls = [c for c in stub.calls if c["name"] == "provision_tool_activity"]
+    assert all(c["args"][-1] == 6 for c in provision_calls)
+    assert _call(stub, "deliver_activity")["args"][-1] == 6
+    assert _call(stub, "release_agent_lock_activity")["args"][-1] == 6
+
+
+@pytest.mark.asyncio
+async def test_workflow_skips_compensation_on_stale_fencing_token_failure(tmp_path) -> None:
+    """A mutating activity rejecting a stale fencing token (detected via the
+    Temporal-wrapped marker, not a renewal failure) must be treated exactly
+    like lock_lost: skip unfenced by-agent_id compensation, still mark the
+    job failed, still release."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": 5,
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": _FakeActivityError(
+                "StaleFencingTokenError", "stale token for agent-1"
+            ),
+        }
+    )
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "logger", new=MagicMock()) as mock_logger,
+    ):
+        with pytest.raises(_FakeActivityError):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert "compensate_activity" not in fn_names
+    assert "mark_job_failed_activity" in fn_names
+    assert fn_names[-1] == "release_agent_lock_activity"
+    # The final release still carries the last known-good token (5) -- a
+    # stale-token rejection doesn't retroactively invalidate it.
+    assert _call(stub, "release_agent_lock_activity")["args"][-1] == 5
+    logged = " ".join(str(c) for c in mock_logger.error.call_args_list)
+    assert "stale-fencing-token" in logged
 
 
 @pytest.mark.asyncio
@@ -791,7 +977,7 @@ async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> No
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1"]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", None]
     assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
 
 
@@ -979,8 +1165,40 @@ async def test_deprovisioning_workflow_calls_deprovision_activity() -> None:
     ]
     owner = fake_info.workflow_id
     assert _call(stub, "acquire_agent_lock_activity")["args"] == [owner, "agent-1"]
-    assert _call(stub, "release_agent_lock_activity")["args"] == [owner, "agent-1"]
-    assert _call(stub, "deprovision_activity")["args"] == ["agent-1", True]
+    assert _call(stub, "release_agent_lock_activity")["args"] == [owner, "agent-1", None]
+    assert _call(stub, "deprovision_activity")["args"] == ["agent-1", True, None]
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_threads_fencing_token() -> None:
+    """The token minted by acquire must reach both deprovision_activity and
+    the final release -- there is no renewal loop in this workflow, so the
+    one captured value is used throughout."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": 9,
+            "deprovision_activity": {
+                "agent_id": "agent-1",
+                "success": True,
+                "details": {},
+                "error": None,
+            },
+        }
+    )
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-abc123")
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+    ):
+        await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    assert _call(stub, "deprovision_activity")["args"][-1] == 9
+    assert _call(stub, "release_agent_lock_activity")["args"][-1] == 9
 
 
 @pytest.mark.asyncio

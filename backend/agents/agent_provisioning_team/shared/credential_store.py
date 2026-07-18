@@ -30,7 +30,16 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
+from .fencing import check_fencing_token
 from .path_safety import candidate_paths, safe_path_component
+
+# Reserved key inside the per-agent decrypted blob (which is otherwise
+# ``{tool_name: {...credentials...}}``) used to persist the store's
+# fencing-token high-water mark. Deliberately not a value any real
+# ``tool_name`` could collide with, and filtered out of
+# ``get_credentials``'s whole-dict return path so it never surfaces as a
+# fake "tool".
+_FENCING_TOKEN_KEY = "__khala_fencing_token__"
 
 
 def default_credentials_dir() -> Path:
@@ -355,8 +364,22 @@ class CredentialStore:
         agent_id: str,
         tool_name: str,
         credentials: Dict[str, Any],
+        *,
+        fencing_token: Optional[int] = None,
     ) -> None:
-        """Store credentials for a tool, encrypted at rest."""
+        """Store credentials for a tool, encrypted at rest.
+
+        Preconditions:
+            * ``agent_id``, ``tool_name`` are non-empty.
+        Postconditions:
+            * ``credentials`` is stored under ``tool_name`` in the encrypted
+              per-agent blob.
+            * When ``fencing_token`` is given and lower than this agent's
+              already-recorded fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and leaves the stored blob untouched. Otherwise the given
+              token becomes the new recorded high-water mark.
+        """
         path = self._agent_file(agent_id)
 
         existing: Dict[str, Dict[str, Any]] = {}
@@ -367,6 +390,16 @@ class CredentialStore:
                 existing = json.loads(decrypted.decode())
             except (InvalidToken, ValueError, OSError):
                 existing = {}
+
+        if fencing_token is not None:
+            prior_token = existing.get(_FENCING_TOKEN_KEY)
+            check_fencing_token(
+                agent_id=agent_id,
+                resource="credential_store",
+                provided_token=fencing_token,
+                current_token=prior_token if isinstance(prior_token, int) else None,
+            )
+            existing[_FENCING_TOKEN_KEY] = fencing_token
 
         existing[tool_name] = credentials
 
@@ -379,13 +412,17 @@ class CredentialStore:
         agent_id: str,
         tool_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Retrieve credentials for an agent (all or specific tool)."""
+        """Retrieve credentials for an agent (all or specific tool).
+
+        The whole-dict form (``tool_name`` omitted) never surfaces the
+        internal fencing-token sentinel key.
+        """
         all_creds, _src = self._read_agent_credentials(agent_id)
         if all_creds is None:
             return None
         if tool_name:
             return all_creds.get(tool_name)
-        return all_creds
+        return {k: v for k, v in all_creds.items() if k != _FENCING_TOKEN_KEY}
 
     def rotate_key(self, new_key: str) -> int:
         """Re-encrypt every stored agent file with a new Fernet key.
@@ -423,8 +460,23 @@ class CredentialStore:
                 continue
         return rotated
 
-    def delete_credentials(self, agent_id: str) -> bool:
-        """Delete all credentials for an agent (primary and legacy paths)."""
+    def delete_credentials(self, agent_id: str, *, fencing_token: Optional[int] = None) -> bool:
+        """Delete all credentials for an agent (primary and legacy paths).
+
+        When ``fencing_token`` is given and lower than this agent's
+        already-recorded fencing token, raises
+        :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        and deletes nothing.
+        """
+        if fencing_token is not None:
+            existing, _src = self._read_agent_credentials(agent_id)
+            prior_token = existing.get(_FENCING_TOKEN_KEY) if existing else None
+            check_fencing_token(
+                agent_id=agent_id,
+                resource="credential_store",
+                provided_token=fencing_token,
+                current_token=prior_token if isinstance(prior_token, int) else None,
+            )
         deleted = False
         for path in self._agent_file_candidates(agent_id):
             if path.exists():

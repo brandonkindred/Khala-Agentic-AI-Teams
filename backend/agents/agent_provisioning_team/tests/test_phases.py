@@ -107,6 +107,40 @@ def test_run_setup_creates_new_container(tmp_path: Path) -> None:
     assert stored.updated_at == stored.created_at
 
 
+def test_run_setup_threads_fencing_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    manifest = ToolManifest()
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-new",
+            "container_name": "agent-a2",
+            "ssh_port": 22002,
+            "workspace_path": "/workspace/a2",
+        },
+    )
+
+    result = run_setup(
+        agent_id="a2",
+        manifest=manifest,
+        environment_store=env_store,
+        docker_provisioner=docker,
+        fencing_token=5,
+    )
+
+    assert result.success is True
+    assert docker.provision.call_args.kwargs["fencing_token"] == 5
+    stored = env_store._read_env_data("a2")[0]
+    assert stored["fencing_token"] == 5
+
+
 def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
     tmp_path: Path,
 ) -> None:
@@ -192,8 +226,19 @@ def test_cleanup_setup_calls_docker_and_env_store(tmp_path: Path) -> None:
 
     result = cleanup_setup("a1", environment_store=env_store, docker_provisioner=docker)
     assert result is True
-    docker.deprovision.assert_called_once_with("a1")
-    env_store.remove.assert_called_once_with("a1")
+    docker.deprovision.assert_called_once_with("a1", fencing_token=None)
+    env_store.remove.assert_called_once_with("a1", fencing_token=None)
+
+
+def test_cleanup_setup_threads_fencing_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases.setup import cleanup_setup
+
+    docker = MagicMock()
+    env_store = MagicMock()
+
+    cleanup_setup("a1", environment_store=env_store, docker_provisioner=docker, fencing_token=7)
+    docker.deprovision.assert_called_once_with("a1", fencing_token=7)
+    env_store.remove.assert_called_once_with("a1", fencing_token=7)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +361,44 @@ def test_run_credential_generation_with_progress_callback(tmp_path: Path) -> Non
     assert any(c[0] == "complete" for c in progress_calls)
 
 
+def test_run_credential_generation_rejects_stale_fencing_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases.credential_generation import run_credential_generation
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    cred_store = CredentialStore(storage_dir=tmp_path)
+    cred_store.store_credentials("a", "pg", {"password": "p1"}, fencing_token=5)
+    manifest = ToolManifest(
+        tools=[ToolDefinition(name="pg", provisioner="postgres_provisioner", config={})]
+    )
+
+    with pytest.raises(StaleFencingTokenError):
+        run_credential_generation(
+            agent_id="a", manifest=manifest, credential_store=cred_store, fencing_token=4
+        )
+
+
+def test_store_credentials_payload_threads_fencing_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases.credential_generation import store_credentials_payload
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    cred_store = CredentialStore(storage_dir=tmp_path)
+    store_credentials_payload(
+        "a", "pg", {"username": "u", "password": "p"}, credential_store=cred_store, fencing_token=5
+    )
+
+    with pytest.raises(StaleFencingTokenError):
+        store_credentials_payload(
+            "a",
+            "pg",
+            {"username": "u", "password": "p2"},
+            credential_store=cred_store,
+            fencing_token=4,
+        )
+
+
 # ---------------------------------------------------------------------------
 # account_provisioning phase
 # ---------------------------------------------------------------------------
@@ -434,6 +517,103 @@ def test_run_account_provisioning_success(tmp_path: Path) -> None:
     assert any(c[2] == "complete" for c in cb_calls)
 
 
+def test_run_account_provisioning_threads_fencing_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases.account_provisioning import run_account_provisioning
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentInfo as StoreEnvInfo,
+    )
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    env_store.register(
+        StoreEnvInfo(
+            agent_id="a1", container_id="c1", container_name="agent-a1", workspace_path="/w"
+        ),
+        fencing_token=5,
+    )
+
+    good = MagicMock()
+    good.provision.return_value = ToolProvisionResult(
+        tool_name="t", success=True, provisioner_key="generic_provisioner", permissions=["read"]
+    )
+
+    manifest = ToolManifest(
+        tools=[ToolDefinition(name="t", provisioner="generic_provisioner", config={})]
+    )
+
+    result = run_account_provisioning(
+        agent_id="a1",
+        manifest=manifest,
+        credentials={"t": GeneratedCredentials(tool_name="t")},
+        provisioners={"generic_provisioner": good},
+        environment_store=env_store,
+        fencing_token=5,
+    )
+
+    assert result.success is True
+    assert good.provision.call_args.kwargs["fencing_token"] == 5
+    stored = env_store._read_env_data("a1")[0]
+    assert stored["fencing_token"] == 5
+
+
+def test_run_account_provisioning_propagates_stale_fencing_token_from_provision(
+    tmp_path: Path,
+) -> None:
+    """A stale-token rejection is a caller/ownership error, not an ordinary
+    tool failure -- it must propagate, not become a success=False result."""
+    from agent_provisioning_team.phases.account_provisioning import run_account_provisioning
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    bad_prov = MagicMock()
+    bad_prov.provision.side_effect = StaleFencingTokenError("a1", "generic_provisioner", 4, 5)
+
+    manifest = ToolManifest(
+        tools=[ToolDefinition(name="t", provisioner="generic_provisioner", config={})]
+    )
+
+    with pytest.raises(StaleFencingTokenError):
+        run_account_provisioning(
+            agent_id="a1",
+            manifest=manifest,
+            credentials={"t": GeneratedCredentials(tool_name="t")},
+            provisioners={"generic_provisioner": bad_prov},
+            environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+            fencing_token=4,
+        )
+
+
+def test_run_account_provisioning_propagates_stale_fencing_token_from_env_store(
+    tmp_path: Path,
+) -> None:
+    from agent_provisioning_team.phases.account_provisioning import run_account_provisioning
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    good = MagicMock()
+    good.provision.return_value = ToolProvisionResult(
+        tool_name="t", success=True, provisioner_key="generic_provisioner", permissions=["read"]
+    )
+    env_store = MagicMock()
+    env_store.add_tool.side_effect = StaleFencingTokenError("a1", "environment_store", 4, 5)
+
+    manifest = ToolManifest(
+        tools=[ToolDefinition(name="t", provisioner="generic_provisioner", config={})]
+    )
+
+    with pytest.raises(StaleFencingTokenError):
+        run_account_provisioning(
+            agent_id="a1",
+            manifest=manifest,
+            credentials={"t": GeneratedCredentials(tool_name="t")},
+            provisioners={"generic_provisioner": good},
+            environment_store=env_store,
+            fencing_token=4,
+        )
+
+
 def test_deprovision_tools_all() -> None:
     from agent_provisioning_team.models import DeprovisionResult
     from agent_provisioning_team.phases.account_provisioning import deprovision_tools
@@ -472,6 +652,35 @@ def test_deprovision_tools_keys_by_provisioner_registry_key() -> None:
 
     results = deprovision_tools("a1", provisioners={"generic_provisioner": prov})
     assert results == {"generic_provisioner": True}
+
+
+def test_deprovision_tools_threads_fencing_token() -> None:
+    from agent_provisioning_team.models import DeprovisionResult
+    from agent_provisioning_team.phases.account_provisioning import deprovision_tools
+
+    prov = MagicMock()
+    prov.deprovision.return_value = DeprovisionResult(tool_name="p1", success=True)
+
+    deprovision_tools("a1", provisioners={"p1": prov}, fencing_token=7)
+    prov.deprovision.assert_called_once_with("a1", fencing_token=7)
+
+
+def test_deprovision_tools_catches_stale_fencing_token_per_provisioner() -> None:
+    """One provisioner's stale-token rejection must not abort the loop --
+    each provisioner tracks its own high-water mark independently, so
+    another, untouched provisioner may still legitimately accept the same
+    token."""
+    from agent_provisioning_team.models import DeprovisionResult
+    from agent_provisioning_team.phases.account_provisioning import deprovision_tools
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    stale = MagicMock()
+    stale.deprovision.side_effect = StaleFencingTokenError("a1", "p1", 4, 5)
+    ok = MagicMock()
+    ok.deprovision.return_value = DeprovisionResult(tool_name="p2", success=True)
+
+    results = deprovision_tools("a1", provisioners={"p1": stale, "p2": ok}, fencing_token=4)
+    assert results == {"p1": False, "p2": True}
 
 
 def test_deprovision_tools_requires_agent_id() -> None:
@@ -887,6 +1096,39 @@ def test_run_deliver_updates_status(tmp_path: Path) -> None:
     # status was bumped to "ready"
     env_after = env_store.get("a1")
     assert env_after.status == "ready"
+
+
+def test_run_deliver_rejects_stale_fencing_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.phases.deliver import run_deliver
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentInfo as StoreEnvInfo,
+    )
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        StoreEnvInfo(
+            agent_id="a1", container_id="c1", container_name="agent-a1", workspace_path="/w"
+        ),
+        fencing_token=5,
+    )
+
+    env = EnvironmentInfo(container_id="c1", container_name="agent-a1")
+    with pytest.raises(StaleFencingTokenError):
+        run_deliver(
+            agent_id="a1",
+            environment=env,
+            credentials={},
+            tool_results=[],
+            access_audit=None,
+            onboarding=None,
+            environment_store=env_store,
+            fencing_token=4,
+        )
+
+    # The rejected call did not bump status.
+    assert env_store.get("a1").status == "running"
 
 
 def test_run_deliver_without_environment_does_not_update(tmp_path: Path) -> None:

@@ -338,7 +338,9 @@ def test_environment_store_list_all_dedupes_by_agent_id_not_stem(tmp_path: Path)
     """A legacy file whose stem differs from its agent_id must not produce a duplicate."""
     store = EnvironmentStore(storage_dir=tmp_path)
     store.register(
-        StoreEnvInfo(agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w")
+        StoreEnvInfo(
+            agent_id="agent_123", container_id="c1", container_name="c1", workspace_path="/w"
+        )
     )
     # Legacy file named differently from the agent_id it contains.
     (tmp_path / "backup.json").write_text(
@@ -589,6 +591,76 @@ def test_environment_store_allows_dotted_agent_id(tmp_path: Path) -> None:
     )
     assert store.get("blog.writer").container_id == "c1"
     assert store.exists("blog.writer") is True
+
+
+# ---------------------------------------------------------------------------
+# environment_store — fencing token enforcement
+# ---------------------------------------------------------------------------
+
+
+def _register_env(store: EnvironmentStore, agent_id: str = "a1", **kwargs) -> None:
+    store.register(
+        StoreEnvInfo(
+            agent_id=agent_id, container_id="c1", container_name="c1", workspace_path="/w"
+        ),
+        **kwargs,
+    )
+
+
+def test_environment_store_register_bootstraps_fencing_token(tmp_path: Path) -> None:
+    """First write for an agent_id accepts any token (nothing to compare against)."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    _register_env(store, fencing_token=5)
+    assert store.exists("a1")
+
+
+def test_environment_store_write_methods_reject_stale_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    store = EnvironmentStore(storage_dir=tmp_path)
+    _register_env(store, fencing_token=5)
+
+    with pytest.raises(StaleFencingTokenError):
+        store.update_status("a1", "ready", fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        store.add_tool("a1", "postgres", fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        store.add_tools("a1", ["postgres"], fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        store.remove("a1", fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        _register_env(store, fencing_token=4)
+
+    # None of the rejected calls above mutated the record.
+    assert store.get("a1").status == "running"
+
+
+def test_environment_store_write_methods_accept_equal_token(tmp_path: Path) -> None:
+    """The concurrent tool fan-out presents the SAME token from many callers;
+    a strict '>' comparison would wrongly reject the 2nd..Nth writer."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    _register_env(store, fencing_token=5)
+
+    assert store.add_tool("a1", "postgres", fencing_token=5) is True
+    assert store.add_tool("a1", "redis", fencing_token=5) is True
+    assert store.update_status("a1", "ready", fencing_token=5) is True
+
+
+def test_environment_store_write_methods_accept_higher_token(tmp_path: Path) -> None:
+    store = EnvironmentStore(storage_dir=tmp_path)
+    _register_env(store, fencing_token=5)
+    assert store.update_status("a1", "ready", fencing_token=6) is True
+
+
+def test_environment_store_fencing_token_none_is_full_noop(tmp_path: Path) -> None:
+    """Omitting fencing_token entirely must behave exactly as before this
+    feature existed -- no bootstrap, no check, no stamping."""
+    store = EnvironmentStore(storage_dir=tmp_path)
+    _register_env(store, fencing_token=5)
+
+    assert store.update_status("a1", "ready") is True
+    assert store.add_tool("a1", "postgres") is True
+    assert store.remove("a1") is True
 
 
 # ---------------------------------------------------------------------------
@@ -1305,6 +1377,88 @@ def test_provisioner_state_list_agents(tmp_path: Path) -> None:
     store.put("a2", {"y": 2})
     out = store.list_agents()
     assert out == {"a1": {"x": 1}, "a2": {"y": 2}}
+
+
+def test_provisioner_state_write_methods_reject_stale_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.shared.provisioner_state import (
+        CompensationRecord,
+        ProvisionerStateStore,
+    )
+
+    store = ProvisionerStateStore("xx", storage_dir=tmp_path)
+    store.put("a1", {"x": 1}, fencing_token=5)
+
+    with pytest.raises(StaleFencingTokenError):
+        store.put("a1", {"x": 2}, fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        store.add_compensation("a1", CompensationRecord(kind="k", payload={}), fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        store.clear_compensations("a1", fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        store.check_fencing_token("a1", 4)
+    with pytest.raises(StaleFencingTokenError):
+        store.delete("a1", fencing_token=4)
+
+    # None of the rejected calls above mutated the record.
+    assert store.get("a1") == {"x": 1}
+
+
+def test_provisioner_state_write_methods_accept_equal_and_higher_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+
+    store = ProvisionerStateStore("xx", storage_dir=tmp_path)
+    store.put("a1", {"x": 1}, fencing_token=5)
+
+    store.check_fencing_token("a1", 5)  # equal: must not raise
+    store.put("a1", {"x": 2}, fencing_token=5)
+    store.put("a1", {"x": 3}, fencing_token=6)
+    assert store.get("a1") == {"x": 3}
+    assert store.delete("a1", fencing_token=6) is True
+
+
+def test_provisioner_state_check_fencing_token_bootstraps(tmp_path: Path) -> None:
+    """No prior record for this agent_id -> any token is accepted (nothing
+    to compare against), and the preflight does not persist anything."""
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+
+    store = ProvisionerStateStore("xx", storage_dir=tmp_path)
+    store.check_fencing_token("never-seen", 1)
+    assert store.get("never-seen") is None
+
+
+def test_provisioner_state_get_or_create_rejects_stale_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.shared.provisioner_state import ProvisionerStateStore
+
+    store = ProvisionerStateStore("xx", storage_dir=tmp_path)
+    store.put("a1", {"x": 1}, fencing_token=5)
+
+    calls: list[int] = []
+
+    def _creator() -> dict:
+        calls.append(1)
+        return {"x": 99}
+
+    with pytest.raises(StaleFencingTokenError):
+        store.get_or_create("a1", _creator, fencing_token=4)
+    assert calls == []  # creator must not run when the token is stale
+
+
+def test_provisioner_state_fencing_token_none_is_full_noop(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.provisioner_state import (
+        CompensationRecord,
+        ProvisionerStateStore,
+    )
+
+    store = ProvisionerStateStore("xx", storage_dir=tmp_path)
+    store.put("a1", {"x": 1}, fencing_token=5)
+
+    # Unfenced calls (fencing_token omitted) must behave exactly as before.
+    store.put("a1", {"x": 2})
+    store.add_compensation("a1", CompensationRecord(kind="k", payload={}))
+    store.clear_compensations("a1")
+    assert store.delete("a1") is True
 
 
 def test_compensation_record_serialization() -> None:

@@ -161,14 +161,19 @@ def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
 
 
 @activity.defn(name="agent_provisioning_acquire_lock")
-def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
+def acquire_agent_lock_activity(job_id: str, agent_id: str) -> int:
     """Claim exclusive ownership of ``agent_id`` for this workflow run.
 
     Preconditions:
         * ``job_id`` (a provisioning ``job_id`` or a deprovisioning workflow
           id) and ``agent_id`` are non-empty.
     Postconditions:
-        * On return, ``agent_id``'s lock record is owned by ``job_id``.
+        * On return, ``agent_id``'s lock record is owned by ``job_id``, and
+          the fencing token now associated with ``agent_id`` (see
+          ``AgentLockStore.acquire``) is returned. The calling workflow must
+          present this token (or the value of its most recent renewal,
+          whichever is more recent) on every subsequent mutating activity
+          call and on ``release_agent_lock_activity``.
         * Raises ``RuntimeError`` when a different, non-expired owner
           currently holds the lock — deliberately a plain (retryable)
           exception rather than a non-retryable one, so Temporal's retry
@@ -182,20 +187,26 @@ def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("acquire-lock")
     try:
-        AgentLockStore(ttl_seconds=LOCK_TTL_S).acquire(agent_id, owner=job_id)
+        return AgentLockStore(ttl_seconds=LOCK_TTL_S).acquire(agent_id, owner=job_id)
     except AgentLockBusyError as e:
         raise RuntimeError(str(e)) from e
 
 
 @activity.defn(name="agent_provisioning_release_lock")
-def release_agent_lock_activity(job_id: str, agent_id: str) -> None:
+def release_agent_lock_activity(
+    job_id: str, agent_id: str, fencing_token: Optional[int] = None
+) -> None:
     """Release this workflow's ownership of ``agent_id`` (best-effort, idempotent).
 
     Preconditions:
         * ``job_id`` and ``agent_id`` are non-empty.
     Postconditions:
-        * Releases the lock only if ``job_id`` is still the current owner; a
-          no-op otherwise (already released, or owned by someone else).
+        * Releases the lock only if ``job_id`` is still the current owner and
+          ``fencing_token`` (when given) is not stale; a no-op otherwise
+          (already released, owned by someone else, or a stale token —
+          defense-in-depth, not load-bearing: the owner check alone already
+          rejects a stale caller since owner and token always advance
+          together).
         * May raise on a transient I/O failure so Temporal retries — the
           calling workflow wraps this activity in its own try/except so a
           persistent release failure is logged, not fatal to the workflow's
@@ -207,7 +218,9 @@ def release_agent_lock_activity(job_id: str, agent_id: str) -> None:
 
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
-    AgentLockStore(ttl_seconds=LOCK_TTL_S).release(agent_id, owner=job_id)
+    AgentLockStore(ttl_seconds=LOCK_TTL_S).release(
+        agent_id, owner=job_id, fencing_token=fencing_token
+    )
 
 
 @activity.defn(name="agent_provisioning_setup")
@@ -216,6 +229,7 @@ def setup_activity(
     agent_id: str,
     manifest_path: str,
     prior_setup: Optional[Dict[str, Any]] = None,
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run (or restore) the Docker/environment setup phase.
 
@@ -227,6 +241,9 @@ def setup_activity(
         * Returns ``{"success": True, "environment": <dump|None>}``.
         * Writes setup progress (or restore status) into ``job_store``.
         * Raises ``RuntimeError`` when a fresh setup fails.
+        * When ``fencing_token`` is given and stale, raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (propagated — not converted to ``RuntimeError``).
     """
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
@@ -244,7 +261,8 @@ def setup_activity(
             "environment": snap.environment.model_dump() if snap.environment else None,
         }
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="setup",
         progress=5,
@@ -257,6 +275,7 @@ def setup_activity(
         manifest=manifest,
         environment_store=orch.environment_store,
         docker_provisioner=orch.tool_agents.get("docker_provisioner"),
+        fencing_token=fencing_token,
     )
     if not result.success:
         raise RuntimeError(f"setup failed: {result.error}")
@@ -278,6 +297,7 @@ def credentials_activity(
     manifest_path: str,
     prior_credentials: Optional[Dict[str, Any]] = None,
     tool_specs: Optional[List[Dict[str, Any]]] = None,
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Generate (or restore) per-tool credentials for the agent.
 
@@ -291,6 +311,9 @@ def credentials_activity(
         * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
         * Job-store checkpoint never stores plaintext secrets.
         * Raises ``RuntimeError`` when credential generation fails.
+        * When ``fencing_token`` is given and stale, raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (propagated — not converted to ``RuntimeError``).
     """
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
@@ -321,7 +344,9 @@ def credentials_activity(
             )
 
             for name, cred in snap.credentials.items():
-                store_credentials_payload(agent_id, name, cred.model_dump())
+                store_credentials_payload(
+                    agent_id, name, cred.model_dump(), fencing_token=fencing_token
+                )
             tool_names = sorted(snap.credentials.keys()) or list(snap.tool_names)
             _js.add_completed_phase(
                 job_id,
@@ -347,7 +372,8 @@ def credentials_activity(
             "credentials": {k: v.model_dump() for k, v in stored.items()},
         }
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="credential_generation",
         progress=20,
@@ -364,6 +390,7 @@ def credentials_activity(
         manifest=manifest,
         credential_store=orch.credential_store,
         tool_names=frozen_names,
+        fencing_token=fencing_token,
     )
     if not result.success:
         raise RuntimeError(f"credential generation failed: {result.error}")
@@ -392,6 +419,7 @@ def provision_tool_activity(
     tools_total: int,
     provisioner: str,
     tool_config: Optional[Dict[str, Any]] = None,
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Provision a single tool — one activity per tool so fan-out is natural.
 
@@ -412,6 +440,10 @@ def provision_tool_activity(
         * Updates ``job_store`` with the current tool / phase progress.
           Does not write ``tools_completed`` — parallel fan-out indexes are not
           completion counts and would race/regress under ``asyncio.gather``.
+        * When ``fencing_token`` is given and stale, raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          — registered as non-retryable (``TOOL_RETRY_POLICY``) so Temporal
+          does not keep retrying a doomed-to-fail-again fan-out call.
     """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
@@ -440,6 +472,7 @@ def provision_tool_activity(
         agent_id=agent_id,
         config=dict(tool_config or {}),
         credentials=creds,
+        fencing_token=fencing_token,
     )
     # Mirror run_account_provisioning: stamp the registry key so compensate()
     # can look the provisioner back up (built-ins leave provisioner_key=None).
@@ -481,7 +514,8 @@ def audit_activity(
         _record_phase_restored(job_id, "access_audit", 75)
         return result.model_dump()
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="access_audit",
         progress=70,
@@ -536,7 +570,8 @@ def documentation_activity(
             "onboarding": snap.onboarding.model_dump() if snap.onboarding else None,
         }
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="documentation",
         progress=85,
@@ -558,7 +593,9 @@ def documentation_activity(
         "onboarding": result.onboarding.model_dump() if result.onboarding else None,
     }
     _js.add_completed_phase(job_id, "documentation", payload)
-    _best_effort_job_store(_js.update_job, job_id, progress=92, status_text="Documentation complete")
+    _best_effort_job_store(
+        _js.update_job, job_id, progress=92, status_text="Documentation complete"
+    )
     return payload
 
 
@@ -571,6 +608,7 @@ def deliver_activity(
     tool_results_dump: List[Dict[str, Any]],
     audit_dump: Optional[Dict[str, Any]],
     onboarding_dump: Optional[Dict[str, Any]],
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Finalize provisioning and mark the job completed or failed.
 
@@ -582,6 +620,8 @@ def deliver_activity(
         * Marks the job completed (redacted result) or failed in ``job_store``.
         * Raises when the terminal job-store write fails so Temporal retries
           (status must not stay running after a successful deliver).
+        * When ``fencing_token`` is given and stale, raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`.
     """
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
@@ -599,7 +639,8 @@ def deliver_activity(
     )
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
 
-    _best_effort_job_store(_js.update_job,
+    _best_effort_job_store(
+        _js.update_job,
         job_id,
         current_phase="deliver",
         progress=95,
@@ -621,6 +662,7 @@ def deliver_activity(
         access_audit=audit,
         onboarding=onboarding,
         environment_store=EnvironmentStore(),
+        fencing_token=fencing_token,
     )
 
     final = build_final_result(
@@ -647,6 +689,7 @@ def record_account_provisioning_activity(
     job_id: str,
     tool_results_dump: List[Dict[str, Any]],
     agent_id: str = "",
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Persist a successful account-provisioning checkpoint for ``/resume``.
 
@@ -668,6 +711,8 @@ def record_account_provisioning_activity(
           ``EnvironmentStore.add_tools`` (safe after parallel fan-out).
         * Raises when job-store / credential-store writes fail so Temporal
           retries the checkpoint before later phases run.
+        * When ``fencing_token`` is given and stale, raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`.
     """
     assert job_id, "job_id must be non-empty"
     from agent_provisioning_team.phases.deliver import sanitize_tool_results_for_checkpoint
@@ -689,14 +734,16 @@ def record_account_provisioning_activity(
             tool_name = raw.get("tool_name")
             creds = raw.get("credentials")
             if isinstance(tool_name, str) and tool_name and isinstance(creds, dict):
-                store_credentials_payload(agent_id, tool_name, creds)
+                store_credentials_payload(agent_id, tool_name, creds, fencing_token=fencing_token)
 
         names = [
             r.get("tool_name")
             for r in results
             if isinstance(r, dict) and r.get("success") and r.get("tool_name")
         ]
-        EnvironmentStore().add_tools(agent_id, [n for n in names if isinstance(n, str)])
+        EnvironmentStore().add_tools(
+            agent_id, [n for n in names if isinstance(n, str)], fencing_token=fencing_token
+        )
 
     # Job-store checkpoint must not retain plaintext credentials / connection strings.
     sanitized = sanitize_tool_results_for_checkpoint(results)
@@ -718,6 +765,7 @@ def compensate_activity(
     agent_id: str,
     succeeded_tools: List[Dict[str, Any]],
     job_id: Optional[str] = None,
+    fencing_token: Optional[int] = None,
 ) -> None:
     """Roll back a partially-provisioned agent (best effort).
 
@@ -730,7 +778,11 @@ def compensate_activity(
           checkpoints must be cleared after teardown.
     Postconditions:
         * Invokes ``ProvisioningOrchestrator.compensate`` once. Failures inside
-          compensation are absorbed by the orchestrator (best effort).
+          compensation are absorbed by the orchestrator (best effort) —
+          including a stale ``fencing_token`` for any individual resource,
+          which is logged and skipped rather than raised (see
+          ``ProvisioningOrchestrator.compensate``'s per-resource fencing
+          contract).
         * When ``job_id`` is set: clears ``completed_phases`` / ``phase_results``
           so a later ``/resume`` cannot skip credential_generation (or setup)
           after CredentialStore / Docker were torn down. Missing jobs are a
@@ -747,7 +799,7 @@ def compensate_activity(
         )
         for t in succeeded_tools
     ]
-    orch.compensate(agent_id, shims)
+    orch.compensate(agent_id, shims, fencing_token=fencing_token)
     if job_id:
         # Compensate tears down Docker, env, and CredentialStore — no prior
         # phase remains safe to skip on resume.
@@ -781,7 +833,9 @@ def mark_job_failed_activity(job_id: str, error: str) -> None:
 
 
 @activity.defn(name="agent_provisioning_deprovision")
-def deprovision_activity(agent_id: str, force: bool = False) -> Dict[str, Any]:
+def deprovision_activity(
+    agent_id: str, force: bool = False, fencing_token: Optional[int] = None
+) -> Dict[str, Any]:
     """Deprovision an agent's resources durably.
 
     Thin durable wrapper over ``ProvisioningOrchestrator.deprovision`` — which
@@ -800,13 +854,27 @@ def deprovision_activity(agent_id: str, force: bool = False) -> Dict[str, Any]:
         * Returns ``DeprovisionResponse.model_dump()`` — a JSON-serializable dict
           with ``agent_id``/``success``/``details``/``error``. Cleanup is
           best-effort: ``success`` is ``True`` when no tool errored or ``force``
-          was set. The activity does not raise on partial-cleanup failure (the
-          response carries the error), so Temporal does not retry a run that was
-          intentionally reported as a soft failure.
+          was set. The activity does not raise on ordinary partial-cleanup
+          failure (the response carries the error), so Temporal does not retry
+          a run that was intentionally reported as a soft failure.
+        * Exception to the above: when ``fencing_token`` is given and the
+          Docker/credential/environment teardown rejects it as stale, this
+          activity DOES raise
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (registered non-retryable) rather than folding it into a soft
+          ``success=False`` response — a resumed-but-stale caller must get a
+          clean, non-retryable failure, not an infinite retry into the same
+          rejection. Tool-provisioner-level rejections (via
+          ``deprovision_tools``) remain folded into the per-provisioner
+          ``details["tools"]`` map, unchanged — each provisioner tracks its
+          own fencing high-water mark independently, so one's rejection must
+          not abort teardown of the others.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("deprovision")
-    response = ProvisioningOrchestrator().deprovision(agent_id, force=force)
+    response = ProvisioningOrchestrator().deprovision(
+        agent_id, force=force, fencing_token=fencing_token
+    )
     return response.model_dump()

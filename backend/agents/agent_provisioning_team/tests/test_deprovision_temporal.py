@@ -56,10 +56,30 @@ def test_deprovision_activity_calls_orchestrator() -> None:
     ):
         payload = activities.deprovision_activity("a", force=True)
 
-    fake_orch.deprovision.assert_called_once_with("a", force=True)
+    fake_orch.deprovision.assert_called_once_with("a", force=True, fencing_token=None)
     assert payload["agent_id"] == "a"
     assert payload["success"] is True
     assert payload["details"] == {"tools": {"pg": True}}
+
+
+def test_deprovision_activity_threads_fencing_token() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.deprovision.return_value = DeprovisionResponse(
+        agent_id="a", success=True, details={}, error=None
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        activities.deprovision_activity("a", force=False, fencing_token=8)
+
+    fake_orch.deprovision.assert_called_once_with("a", force=False, fencing_token=8)
 
 
 def test_deprovision_activity_rejects_blank_agent() -> None:
@@ -114,7 +134,7 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
         "release_agent_lock_activity",
     ]
     captured = next(c for c in calls if c["name"] == "deprovision_activity")
-    assert captured["args"] == ["a", True]
+    assert captured["args"] == ["a", True, None]
     assert captured["schedule_to_close_timeout"] == PHASE_TIMEOUT
     assert captured["retry_policy"] is wf.DEFAULT_RETRY_POLICY
 

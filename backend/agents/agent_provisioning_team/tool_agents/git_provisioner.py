@@ -7,7 +7,7 @@ Sets up Git configuration, SSH keys, and initializes repositories.
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..models import (
     AccessVerification,
@@ -42,6 +42,7 @@ class GitProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Set up Git for the agent with optional SSH keys and repos."""
         return self.run_idempotent(
@@ -49,6 +50,7 @@ class GitProvisionerTool(BaseToolProvisioner):
             credentials=credentials,
             create=lambda _register: self._do_provision(agent_id, config, credentials),
             hydrate_extras=("workspace_path", "repos"),
+            fencing_token=fencing_token,
         )
 
     def _do_provision(
@@ -245,8 +247,16 @@ class GitProvisionerTool(BaseToolProvisioner):
             errors=errors,
         )
 
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
-        """Clean up Git provisioning (removes SSH keys, keeps repos)."""
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
+        """Clean up Git provisioning (removes SSH keys, keeps repos).
+
+        ``fencing_token``, when given, is checked *before* the SSH key files
+        are unlinked, not just before the final state persist, so a stale
+        caller is rejected before it can touch the live workspace.
+        """
+        if fencing_token is not None:
+            self._state.check_fencing_token(agent_id, fencing_token)
+
         prov_info = self._state.get(agent_id)
 
         if not prov_info:
@@ -267,7 +277,7 @@ class GitProvisionerTool(BaseToolProvisioner):
                 if public_key.exists():
                     public_key.unlink()
 
-            self._state.delete(agent_id)
+            self._state.delete(agent_id, fencing_token=fencing_token)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,

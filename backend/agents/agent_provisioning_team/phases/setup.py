@@ -24,6 +24,7 @@ def run_setup(
     environment_store: Optional[EnvironmentStore] = None,
     docker_provisioner: Optional[DockerProvisionerTool] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    fencing_token: Optional[int] = None,
 ) -> SetupResult:
     """
     Execute the setup phase: create Docker container for the agent.
@@ -34,6 +35,8 @@ def run_setup(
         environment_store: Store for tracking environments
         docker_provisioner: Docker provisioner instance
         progress_callback: Optional callback for progress updates
+        fencing_token: Caller's fencing token (see ``shared.fencing``);
+            ``None`` skips enforcement.
 
     Returns:
         SetupResult with environment info
@@ -76,6 +79,7 @@ def run_setup(
         agent_id=agent_id,
         config=docker_config,
         credentials=credentials,
+        fencing_token=fencing_token,
     )
 
     if not result.success:
@@ -111,7 +115,8 @@ def run_setup(
             # for a brand-new registration, leave it unset so it defaults to
             # the same created_at value rather than a few microseconds before it.
             updated_at=(datetime.now(timezone.utc).isoformat() if existing else None),
-        )
+        ),
+        fencing_token=fencing_token,
     )
 
     return SetupResult(
@@ -124,6 +129,8 @@ def cleanup_setup(
     agent_id: str,
     environment_store: Optional[EnvironmentStore] = None,
     docker_provisioner: Optional[DockerProvisionerTool] = None,
+    *,
+    fencing_token: Optional[int] = None,
 ) -> bool:
     """
     Clean up a failed setup by removing any partially created resources.
@@ -134,7 +141,7 @@ def cleanup_setup(
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
 
-    docker.deprovision(agent_id)
-    env_store.remove(agent_id)
+    docker.deprovision(agent_id, fencing_token=fencing_token)
+    env_store.remove(agent_id, fencing_token=fencing_token)
 
     return True

@@ -28,6 +28,7 @@ def run_deliver(
     onboarding: Optional[OnboardingPacket],
     environment_store: Optional[EnvironmentStore] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    fencing_token: Optional[int] = None,
 ) -> DeliverResult:
     """
     Execute the deliver phase.
@@ -46,6 +47,8 @@ def run_deliver(
         onboarding: Onboarding documentation
         environment_store: Store for updating environment
         progress_callback: Callback for progress updates
+        fencing_token: Caller's fencing token (see ``shared.fencing``);
+            ``None`` skips enforcement.
 
     Returns:
         DeliverResult indicating success
@@ -56,7 +59,7 @@ def run_deliver(
         progress_callback("Finalizing provisioning...")
 
     if environment:
-        env_store.update_status(agent_id, "ready")
+        env_store.update_status(agent_id, "ready", fencing_token=fencing_token)
 
     if progress_callback:
         progress_callback("Provisioning complete")

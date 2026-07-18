@@ -92,10 +92,13 @@ class AgentLockStore:
     Invariants:
         * At most one owner token is recorded per ``agent_id`` at any time
           (barring TTL-expired records, which any caller may reclaim).
-        * A record is only ever removed by :meth:`release` called with the
-          owner token that currently holds it, or overwritten by
-          :meth:`acquire` when the prior record is absent, expired, or
-          already owned by the same token.
+        * A record file, once created, is never deleted: :meth:`release`
+          force-expires it (in place) rather than removing it, and
+          :meth:`acquire` overwrites it when the prior record is absent,
+          expired, or already owned by the same token. This keeps each
+          record's fencing token (see :meth:`acquire`) monotonically
+          increasing for the full lifetime of its ``agent_id``, not just
+          within one acquire/release cycle.
     """
 
     def __init__(
@@ -203,7 +206,7 @@ class AgentLockStore:
         return not isinstance(expires_at, (int, float)) or expires_at < now
 
     # ---- Public API ----
-    def acquire(self, agent_id: str, owner: str, *, now: Optional[float] = None) -> None:
+    def acquire(self, agent_id: str, owner: str, *, now: Optional[float] = None) -> int:
         """Claim exclusive ownership of ``agent_id`` for ``owner``.
 
         Preconditions:
@@ -217,6 +220,22 @@ class AgentLockStore:
               self-deadlocks.
             * Raises :class:`AgentLockBusyError` when a *different*,
               non-expired owner currently holds the lock.
+            * Returns the fencing token now associated with ``agent_id`` — a
+              per-``agent_id`` monotonic counter, persisted alongside the
+              lease. It is unchanged from the immediately-prior acquire only
+              when this call is a *live* same-owner renewal; it is minted as
+              ``prior_token + 1`` (or ``1`` if no prior record ever existed)
+              in every other accepted case, including a reclaim-after-expiry
+              by the *same* owner. That case must still mint a new token: a
+              resuming caller cannot distinguish "nobody touched this lock
+              while I was gone" from "someone acquired and released it while
+              I was gone" — both read identically as "expired" — so treating
+              a same-owner-but-expired reclaim as a free renewal would
+              reopen the exact gap fencing tokens exist to close. Callers
+              (workflows) must use the most recently returned token for
+              every subsequent privileged operation, not a value captured
+              earlier in their run, since a late renewal that lands just
+              after expiry still mints a new one via this same rule.
         """
         assert agent_id, "agent_id must be non-empty"
         assert owner, "owner must be non-empty"
@@ -232,35 +251,92 @@ class AgentLockStore:
                 and not self._is_expired(record, now)
             ):
                 raise AgentLockBusyError(agent_id, record.get("owner"))
+            live_renewal = (
+                record is not None
+                and record.get("owner") == owner
+                and not self._is_expired(record, now)
+            )
+            prior_token = record.get("token") if record is not None else None
+            if live_renewal and isinstance(prior_token, int):
+                token = prior_token
+            else:
+                token = (prior_token + 1) if isinstance(prior_token, int) else 1
             self._write_record(
                 agent_id,
-                {"owner": owner, "acquired_at": now, "expires_at": now + self.ttl_seconds},
+                {
+                    "owner": owner,
+                    "acquired_at": now,
+                    "expires_at": now + self.ttl_seconds,
+                    "token": token,
+                },
             )
+            return token
 
-    def release(self, agent_id: str, owner: str, *, now: Optional[float] = None) -> None:
+    def release(
+        self,
+        agent_id: str,
+        owner: str,
+        *,
+        now: Optional[float] = None,
+        fencing_token: Optional[int] = None,
+    ) -> None:
         """Release ``owner``'s ownership of ``agent_id`` (best-effort, idempotent).
 
         Preconditions:
             * ``agent_id`` and ``owner`` are non-empty strings.
         Postconditions:
-            * The record is removed only if it is still owned by ``owner``.
-            * A no-op — never raises — when the record is already absent or
-              owned by a different token (release is best-effort cleanup,
-              matching ``cleanup_setup``/``ProvisioningOrchestrator.compensate``'s
-              existing idiom elsewhere in this package).
+            * The record's lease is force-expired only if it is still owned
+              by ``owner`` — never deleted. Preserving the record (rather
+              than removing it, as this method did before fencing tokens
+              existed) keeps the token monotonic across a release/re-acquire
+              cycle: the next :meth:`acquire` for this ``agent_id`` mints
+              from the real prior high-water mark instead of restarting at
+              1. Observable behavior via :meth:`get_owner`/:meth:`acquire`
+              is unchanged — an expired record is indistinguishable from an
+              absent one to every existing caller.
+            * A no-op — never raises — when the record is already absent,
+              owned by a different token, or ``fencing_token`` is given and
+              is lower than the record's current token (release is
+              best-effort cleanup, matching
+              ``cleanup_setup``/``ProvisioningOrchestrator.compensate``'s
+              existing idiom elsewhere in this package). The token check is
+              defense-in-depth, not load-bearing for the race this module
+              defends against: the owner-string check above already rejects
+              a stale caller, since ``owner`` and ``token`` are always
+              advanced together by the same :meth:`acquire` call.
             * Raises :class:`AgentLockError` (same fail-closed contract as
               :meth:`acquire`) when a record exists but cannot be read — we
-              cannot verify it is safe to delete, so it is left untouched
+              cannot verify it is safe to expire, so it is left untouched
               rather than guessed at.
         """
         assert agent_id, "agent_id must be non-empty"
         assert owner, "owner must be non-empty"
+        now = time.time() if now is None else now
         lock_path = self._flock_path(agent_id)
         with open(lock_path, "a+") as handle:
             self._lock_exclusive(handle)
             record = self._read_record(agent_id)
-            if record is not None and record.get("owner") == owner:
-                self._delete_record(agent_id)
+            if record is None or record.get("owner") != owner:
+                return
+            current_token = record.get("token")
+            if (
+                fencing_token is not None
+                and isinstance(current_token, int)
+                and fencing_token < current_token
+            ):
+                return
+            self._write_record(
+                agent_id,
+                {
+                    "owner": owner,
+                    "acquired_at": record.get("acquired_at", now),
+                    # Strictly less than `now`, not equal: _is_expired uses a
+                    # strict "<" comparison, so expires_at = now would read as
+                    # "not yet expired" for a get_owner(now=<same value>) call.
+                    "expires_at": now - 1,
+                    "token": current_token if isinstance(current_token, int) else 1,
+                },
+            )
 
     def get_owner(self, agent_id: str, *, now: Optional[float] = None) -> Optional[str]:
         """Return the current non-expired owner of ``agent_id``, or ``None``.

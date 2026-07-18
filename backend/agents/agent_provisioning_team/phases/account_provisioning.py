@@ -12,6 +12,7 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.environment_store import EnvironmentStore
+from ..shared.fencing import StaleFencingTokenError
 from ..shared.tool_agent_registry import build_default_tool_agents
 from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.base import ToolProvisionerInterface
@@ -24,6 +25,7 @@ def run_account_provisioning(
     provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
     environment_store: Optional[EnvironmentStore] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    fencing_token: Optional[int] = None,
 ) -> AccountProvisioningResult:
     """
     Execute the account provisioning phase.
@@ -39,6 +41,8 @@ def run_account_provisioning(
         provisioners: Dict of provisioner instances (keyed by provisioner name)
         environment_store: Store for tracking tool provisioning
         progress_callback: Callback(done, total, tool_name) for progress updates
+        fencing_token: Caller's fencing token (see ``shared.fencing``);
+            ``None`` skips enforcement.
 
     Returns:
         AccountProvisioningResult with per-tool results
@@ -87,6 +91,7 @@ def run_account_provisioning(
                 agent_id=agent_id,
                 config=tool.config,
                 credentials=tool_creds,
+                fencing_token=fencing_token,
             )
 
             # Stamp the registry key so compensate() can look the provisioner
@@ -96,9 +101,14 @@ def run_account_provisioning(
             tool_results.append(result)
 
             if result.success:
-                env_store.add_tool(agent_id, tool_name)
+                env_store.add_tool(agent_id, tool_name, fencing_token=fencing_token)
                 completed += 1
 
+        except StaleFencingTokenError:
+            # Propagate rather than convert to an ordinary failed-tool
+            # result: a stale fencing token is a caller/ownership error, not
+            # an infrastructure failure, and must not be silently swallowed.
+            raise
         except Exception as e:
             tool_results.append(
                 ToolProvisionResult(
@@ -127,6 +137,8 @@ def deprovision_tools(
     agent_id: str,
     provisioner_keys: Optional[List[str]] = None,
     provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
+    *,
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, bool]:
     """
     Deprovision an agent's tools by running each provisioner's teardown.
@@ -144,6 +156,8 @@ def deprovision_tools(
             every provisioner in ``provisioners``.
         provisioners: Provisioner instances keyed by registry key. Defaults to
             ``build_default_tool_agents()``.
+        fencing_token: Caller's fencing token (see ``shared.fencing``);
+            ``None`` skips enforcement.
 
     Preconditions:
         * ``agent_id`` is non-empty.
@@ -159,8 +173,14 @@ def deprovision_tools(
           that passes the ``provisioner_keys`` filter, and no other keys.
 
     Invariants:
-        * Best-effort teardown: never raises on a single provisioner failure, so
-          one failing provisioner cannot block the rest.
+        * Best-effort teardown: never raises on a single provisioner failure —
+          including a stale-fencing-token rejection from one provisioner — so
+          one failing/rejected provisioner cannot block the rest. Each
+          provisioner tracks its own fencing high-water mark independently
+          (no cross-provisioner coordination), so a stale token for one
+          resource does not imply the others have moved on too; aborting the
+          whole loop on the first rejection would leave the others' real
+          infrastructure never even attempted.
     """
     assert agent_id, "agent_id must be non-empty"
 
@@ -170,7 +190,7 @@ def deprovision_tools(
     for key, provisioner in provs.items():
         if provisioner_keys is None or key in provisioner_keys:
             try:
-                result = provisioner.deprovision(agent_id)
+                result = provisioner.deprovision(agent_id, fencing_token=fencing_token)
                 results[key] = result.success
             except Exception:
                 results[key] = False

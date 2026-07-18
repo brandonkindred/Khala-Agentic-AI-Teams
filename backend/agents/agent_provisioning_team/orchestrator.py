@@ -22,6 +22,7 @@ from .phases.setup import cleanup_setup, run_setup
 from .shared.credential_store import CredentialStore
 from .shared.environment_queries import get_agent_status_dict, list_agent_status_dicts
 from .shared.environment_store import EnvironmentStore
+from .shared.fencing import StaleFencingTokenError
 from .shared.logging_context import install_filter as _install_log_filter
 from .shared.phase_state import (
     restore_access_audit,
@@ -84,6 +85,8 @@ class ProvisioningOrchestrator:
         skip_phases: Optional[set] = None,
         prior_results: Optional[Dict[str, Any]] = None,
         shutdown_event: Optional[threading.Event] = None,
+        *,
+        fencing_token: Optional[int] = None,
     ) -> ProvisioningResult:
         """
         Execute the full provisioning workflow through all phases.
@@ -97,6 +100,10 @@ class ProvisioningOrchestrator:
             shutdown_event: Optional threading.Event that signals cooperative
                 cancellation at phase boundaries. When set, the orchestrator
                 compensates and raises ProvisioningShutdownError.
+            fencing_token: Caller's fencing token (see ``shared.fencing``);
+                ``None`` skips enforcement. Threaded into every phase call
+                and into ``compensate()`` so a stale caller's mutations are
+                rejected exactly as they would be on the Temporal path.
 
         Returns:
             ProvisioningResult with complete provisioning information
@@ -131,7 +138,7 @@ class ProvisioningOrchestrator:
                     agent_id,
                     phase_name,
                 )
-                self.compensate(agent_id, tool_results_ref)
+                self.compensate(agent_id, tool_results_ref, fencing_token=fencing_token)
                 raise ProvisioningShutdownError(agent_id=agent_id, phase=phase_name)
 
         def _update(
@@ -180,6 +187,7 @@ class ProvisioningOrchestrator:
                 environment_store=self.environment_store,
                 docker_provisioner=self.tool_agents.get("docker_provisioner"),
                 progress_callback=lambda msg: _update(status_text=msg),
+                fencing_token=fencing_token,
             )
             if not setup_result.success:
                 return ProvisioningResult(
@@ -214,9 +222,10 @@ class ProvisioningOrchestrator:
                     tools_total=total,
                     status_text=f"Generating credentials for {tool}...",
                 ),
+                fencing_token=fencing_token,
             )
             if not cred_result.success:
-                cleanup_setup(agent_id, self.environment_store)
+                cleanup_setup(agent_id, self.environment_store, fencing_token=fencing_token)
                 return ProvisioningResult(
                     agent_id=agent_id,
                     current_phase=Phase.CREDENTIAL_GENERATION,
@@ -252,6 +261,7 @@ class ProvisioningOrchestrator:
                     progress=35 + int((done / max(total, 1)) * 30),
                     status_text=f"Provisioning {tool}...",
                 ),
+                fencing_token=fencing_token,
             )
 
             # Compensation: if any tool failed, roll back already-provisioned
@@ -263,7 +273,7 @@ class ProvisioningOrchestrator:
                     agent_id,
                     account_result.error,
                 )
-                self.compensate(agent_id, account_result.tool_results)
+                self.compensate(agent_id, account_result.tool_results, fencing_token=fencing_token)
                 return ProvisioningResult(
                     agent_id=agent_id,
                     current_phase=Phase.ACCOUNT_PROVISIONING,
@@ -334,6 +344,7 @@ class ProvisioningOrchestrator:
             onboarding=doc_result.onboarding,
             environment_store=self.environment_store,
             progress_callback=lambda msg: _update(status_text=msg),
+            fencing_token=fencing_token,
         )
 
         final_result = build_final_result(
@@ -355,6 +366,8 @@ class ProvisioningOrchestrator:
         self,
         agent_id: str,
         tool_results: List[Any],
+        *,
+        fencing_token: Optional[int] = None,
     ) -> None:
         """Roll back partial provisioning after a phase failure.
 
@@ -362,6 +375,15 @@ class ProvisioningOrchestrator:
         shutdown compensation. Best-effort: deprovisions any tools that did
         succeed, tears down the Docker environment, and removes encrypted
         credentials so a failed run doesn't leak resources or secrets to disk.
+
+        ``fencing_token``, when given, is checked per-resource (each
+        provisioner tracks its own high-water mark independently) rather
+        than once for the whole call: a stale token for one resource does
+        not imply the others have moved on too, since a replacement owner
+        may not have touched every resource yet. A rejected resource is
+        logged and skipped — consistent with this method's existing
+        best-effort, one-failure-never-blocks-the-rest idiom — rather than
+        aborting the rest of compensation.
         """
         # Look each successfully-provisioned tool back up by its registry key
         # (stamped onto the result in run_account_provisioning). Prior to #293
@@ -384,6 +406,14 @@ class ProvisioningOrchestrator:
             if provisioner is None:
                 logger.warning("Compensation: no provisioner registered for key=%s", key)
                 continue
+            if fencing_token is not None:
+                try:
+                    provisioner._state.check_fencing_token(agent_id, fencing_token)
+                except StaleFencingTokenError:
+                    logger.warning(
+                        "Compensation: stale fencing token for %s; skipping rollback", key
+                    )
+                    continue
             # Prefer persisted per-step compensations when the provisioner
             # registered any during `_do_provision`: replay in LIFO order,
             # then drop the whole state row. Provisioners that register
@@ -405,30 +435,30 @@ class ProvisioningOrchestrator:
                             "Compensation: replay failed kind=%s for %s", rec.kind, key
                         )
                 try:
-                    provisioner.clear_compensations(agent_id)
-                    provisioner._state.delete(agent_id)
+                    provisioner.clear_compensations(agent_id, fencing_token=fencing_token)
+                    provisioner._state.delete(agent_id, fencing_token=fencing_token)
                 except Exception:  # noqa: BLE001
                     logger.exception("Compensation: post-replay state cleanup failed for %s", key)
             else:
                 try:
-                    provisioner.deprovision(agent_id)
+                    provisioner.deprovision(agent_id, fencing_token=fencing_token)
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     logger.exception("Compensation: deprovision failed for %s", key)
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker is not None:
             try:
-                docker.deprovision(agent_id)
+                docker.deprovision(agent_id, fencing_token=fencing_token)
             except Exception:  # noqa: BLE001
                 logger.exception("Compensation: docker teardown failed")
 
         try:
-            self.credential_store.delete_credentials(agent_id)
+            self.credential_store.delete_credentials(agent_id, fencing_token=fencing_token)
         except Exception:  # noqa: BLE001
             logger.exception("Compensation: credential cleanup failed")
 
         try:
-            cleanup_setup(agent_id, self.environment_store)
+            cleanup_setup(agent_id, self.environment_store, fencing_token=fencing_token)
         except Exception:  # noqa: BLE001
             logger.exception("Compensation: environment cleanup failed")
 
@@ -436,6 +466,8 @@ class ProvisioningOrchestrator:
         self,
         agent_id: str,
         force: bool = False,
+        *,
+        fencing_token: Optional[int] = None,
     ) -> DeprovisionResponse:
         """
         Deprovision an agent: remove all resources and access.
@@ -443,6 +475,15 @@ class ProvisioningOrchestrator:
         Args:
             agent_id: Agent to deprovision
             force: Force removal even if errors occur
+            fencing_token: Caller's fencing token (see ``shared.fencing``);
+                ``None`` skips enforcement. Tool-provisioner rejections are
+                folded into the per-provisioner ``tools`` results (matching
+                ``deprovision_tools``'s existing best-effort contract,
+                unchanged here). The Docker/credential/environment calls
+                below are, as before this parameter existed, not wrapped in
+                a try/except — a stale-token rejection from any of them
+                propagates as :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+                exactly as any other exception already would.
 
         Returns:
             DeprovisionResponse with results
@@ -453,6 +494,7 @@ class ProvisioningOrchestrator:
         tool_results = deprovision_tools(
             agent_id=agent_id,
             provisioners=self.tool_agents,
+            fencing_token=fencing_token,
         )
         results["tools"] = tool_results
 
@@ -462,15 +504,17 @@ class ProvisioningOrchestrator:
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker:
-            docker_result = docker.deprovision(agent_id)
+            docker_result = docker.deprovision(agent_id, fencing_token=fencing_token)
             results["docker"] = docker_result.success
             if not docker_result.success and docker_result.error:
                 errors.append(f"Docker: {docker_result.error}")
 
-        cred_removed = self.credential_store.delete_credentials(agent_id)
+        cred_removed = self.credential_store.delete_credentials(
+            agent_id, fencing_token=fencing_token
+        )
         results["credentials_removed"] = cred_removed
 
-        env_removed = self.environment_store.remove(agent_id)
+        env_removed = self.environment_store.remove(agent_id, fencing_token=fencing_token)
         results["environment_removed"] = env_removed
 
         success = len(errors) == 0 or force

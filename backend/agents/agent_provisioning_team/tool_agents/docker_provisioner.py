@@ -44,6 +44,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Create and start a Docker container for the agent (idempotent)."""
         return self.run_idempotent(
@@ -51,6 +52,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
             credentials=credentials,
             create=lambda _register: self._do_provision(agent_id, config, credentials),
             reuse=lambda existing: self._on_reuse(existing, credentials),
+            fencing_token=fencing_token,
         )
 
     def _do_provision(
@@ -166,8 +168,17 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 errors=[str(e)],
             )
 
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
-        """Stop and remove the Docker container."""
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
+        """Stop and remove the Docker container.
+
+        ``fencing_token``, when given, is checked *before* the real
+        ``docker stop``/``docker rm`` calls run, not just before the final
+        state persist, so a stale caller is rejected before it can touch the
+        live container.
+        """
+        if fencing_token is not None:
+            self._state.check_fencing_token(agent_id, fencing_token)
+
         container_info = self._state.get(agent_id)
 
         if not container_info:
@@ -192,7 +203,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 timeout=30,
             )
 
-            self._state.delete(agent_id)
+            self._state.delete(agent_id, fencing_token=fencing_token)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,
