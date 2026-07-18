@@ -46,6 +46,7 @@ import type {
   StrategyLabResultsResponse,
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
+  StrategyLabProgressEvent,
   StrategyLabPhase,
   TradeRecord,
 } from '../../models';
@@ -794,7 +795,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // Activity log
   // ---------------------------------------------------------------------------
 
-  private addLogEntry(phase: string, subPhase: string | undefined, data: Record<string, unknown>): void {
+  private addLogEntry(phase: string, subPhase: string | undefined, data: StrategyLabProgressEvent): void {
     const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     // Mark previous active entry as done (if it's still active when a new entry arrives)
@@ -827,7 +828,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }, 50);
   }
 
-  private buildLogMessage(phase: string, subPhase: string | undefined, data: Record<string, unknown>): string {
+  private buildLogMessage(phase: string, subPhase: string | undefined, data: StrategyLabProgressEvent): string {
     const strategy = data['strategy'] as { asset_class?: string; hypothesis?: string } | undefined;
     const round = data['refinement_round'] as number | undefined;
 

@@ -25,13 +25,9 @@ def build_disk_repo_reader(repo_path: Any) -> Any:
           (best-effort, logged) if the reader cannot be constructed, so review
           never breaks on reader setup.
     """
-    try:
-        from software_engineering_team.code_review_agent.repo_reader import DiskRepoReader
+    from software_engineering_team.code_review_agent.repo_reader import disk_repo_reader_from_root
 
-        return DiskRepoReader(str(repo_path))
-    except Exception as exc:  # noqa: BLE001 - the reader is an optional enhancement
-        logger.debug("Could not build DiskRepoReader for %s: %s", repo_path, exc)
-        return None
+    return disk_repo_reader_from_root(None if repo_path is None else str(repo_path))
 
 
 def call_code_review_agent(
