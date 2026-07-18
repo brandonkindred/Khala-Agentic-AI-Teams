@@ -842,7 +842,15 @@ def test_worker_start_defaults_temporal_address_when_unset(
     delegation test above, which sets TEMPORAL_ADDRESS first)."""
     from code_review_agent.temporal import worker as worker_mod
 
-    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    # setenv("") rather than delenv(raising=False): the boot hook below writes
+    # os.environ["TEMPORAL_ADDRESS"] directly (not through monkeypatch), so
+    # teardown can only undo it if monkeypatch already has an undo entry for
+    # this key. delenv(raising=False) on an already-absent key registers no
+    # such entry, silently leaking the boot hook's write into every later test
+    # in the same worker process. An empty value satisfies the same "unset"
+    # check the boot hook makes (``.strip()`` is falsy either way) while
+    # guaranteeing monkeypatch tracks and reverts the key.
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "")
     monkeypatch.setattr(worker_mod, "code_review_temporal_enabled", lambda: True)
     monkeypatch.setattr(worker_mod, "resolve_code_review_temporal_address", lambda: "resolved:7233")
     monkeypatch.setattr(worker_mod, "start_team_worker", lambda *a, **kw: True)

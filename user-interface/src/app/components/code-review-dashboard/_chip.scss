@@ -23,12 +23,12 @@
     text-transform: capitalize;
 
     &--completed {
-      color: var(--mat-sys-primary, #1a7f37);
+      color: var(--kh-success);
       font-weight: 600;
     }
 
     &--failed {
-      color: var(--mat-sys-error, #b3261e);
+      color: var(--kh-error);
       font-weight: 600;
     }
   }
