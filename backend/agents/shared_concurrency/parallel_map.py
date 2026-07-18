@@ -41,6 +41,7 @@ def parallel_map(
     skip_none: bool = True,
     propagate_context: bool = True,
     on_first_exception: Optional[Callable[[], None]] = None,
+    wait_for_stragglers: bool = False,
 ) -> list[Optional[R]]:
     """Run ``fn(item)`` concurrently across *items* in a bounded thread pool.
 
@@ -81,6 +82,15 @@ def parallel_map(
             worker exception is the one that propagates; a ``BaseException`` from
             the hook (e.g. ``KeyboardInterrupt``) is left to propagate, never
             swallowed.
+        wait_for_stragglers: When True, the first worker exception still
+            cancels every not-yet-started task, but ``parallel_map`` blocks
+            until every **already-running** task finishes before re-raising —
+            no task is left executing in the background after the call
+            returns. Default False keeps the original fast-fail contract
+            (return immediately; already-running tasks finish unobserved).
+            Opt in when a worker's side effects (provider fetches, cache
+            writes, subprocess calls) must not outlive the caller's failure
+            handling.
 
     Returns:
         ``list[Optional[R]]`` — results in input (or completion) order. With the
@@ -110,10 +120,13 @@ def parallel_map(
         - Empty *items* returns ``[]`` without creating an executor.
         - At most ``min(max_workers, len(items))`` workers run concurrently.
         - Error policy is **fast-fail**: the first worker exception is observed as
-          it happens (never delayed behind a slower earlier task), pending tasks
-          are cancelled, ``on_first_exception`` fires once, and the exception
-          propagates with its original traceback. Already-running tasks are left
-          to finish in the background rather than blocking the failure.
+          it happens (never delayed behind a slower earlier task), not-yet-started
+          tasks are cancelled, ``on_first_exception`` fires once, and the exception
+          propagates with its original traceback. With the default
+          ``wait_for_stragglers=False``, already-running tasks are left to finish
+          in the background rather than blocking the failure; with
+          ``wait_for_stragglers=True``, the shutdown instead blocks until every
+          already-running task finishes before the exception propagates.
         - On success with ``preserve_order`` True, ``result[i]`` corresponds to
           ``items[i]`` (before any ``skip_none`` filtering).
 
@@ -187,7 +200,7 @@ def parallel_map(
                         "exception will still propagate"
                     )
         finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+            pool.shutdown(wait=wait_for_stragglers, cancel_futures=True)
         raise
     pool.shutdown(wait=True)
 

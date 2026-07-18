@@ -306,8 +306,16 @@ def run_backtest(
         parallel_indices = list(range(parallel_start, len(multipliers)))
         if parallel_indices:
             workers = min(len(parallel_indices), os.cpu_count() or 4)
+            # wait_for_stragglers: _stress_row hits the provider-backed cache
+            # (see the stampede-guard comment above) — an in-flight replay's
+            # fetch/cache-write must finish, not race a later run, before we
+            # propagate this failure.
             stressed_rows = parallel_map(
-                parallel_indices, _stress_row, max_workers=workers, skip_none=False
+                parallel_indices,
+                _stress_row,
+                max_workers=workers,
+                skip_none=False,
+                wait_for_stragglers=True,
             )
             for idx, row in zip(parallel_indices, stressed_rows):
                 rows_by_index[idx] = row
