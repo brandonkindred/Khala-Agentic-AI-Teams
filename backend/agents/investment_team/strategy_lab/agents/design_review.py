@@ -21,15 +21,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set
 
 from pydantic import BaseModel, Field, model_validator
-from strands import Agent
 
 from ...models import StrategySpec
 from ..quality_gates.models import QualityGateResult
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ._agent_runner import invoke_json_agent
 from ._llm_budget import charge_active_budget
-from ._llm_envelope import invoke_agent
-from ._parse_helpers import extract_json_object
-from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -479,26 +476,19 @@ class DesignReviewAgent:
             prior_critiques_block=prior_block,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_design_review"),
-            system_prompt=_SYSTEM_PROMPT,
-            tools=[],
-        )
-
         # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
         # propagates to ``_run_design_loop`` instead of being converted into
         # a fail-closed critique that would let the loop continue past budget.
         charge_active_budget()
 
         try:
-            raw = invoke_agent(
-                agent,
+            parsed = invoke_json_agent(
                 user_prompt,
                 agent_key="strategy_design_review",
                 phase="design_review",
+                system_prompt=_SYSTEM_PROMPT,
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
             logger.warning("DesignReviewAgent failed to produce parseable JSON: %s", exc)
             return _fail_closed_critique(exc, readiness_findings)

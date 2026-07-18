@@ -477,7 +477,7 @@ def test_propose_code_fix_fails_closed_after_envelope_retries(
     monkeypatch: pytest.MonkeyPatch, no_sleep: List[float]
 ) -> None:
     from investment_team.models import StrategySpec
-    from investment_team.strategy_lab.agents import alignment as alignment_mod
+    from investment_team.strategy_lab.agents import _agent_runner as agent_runner_mod
     from investment_team.strategy_lab.agents.alignment import (
         AlignmentAuditError,
         TradeAlignmentAgent,
@@ -491,8 +491,8 @@ def test_propose_code_fix_fails_closed_after_envelope_retries(
     )
 
     stub = _Stub(httpx.ConnectError("alignment LLM down"))
-    monkeypatch.setattr(alignment_mod, "Agent", _fake_agent_class(stub))
-    monkeypatch.setattr(alignment_mod, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_runner_mod, "Agent", _fake_agent_class(stub))
+    monkeypatch.setattr(agent_runner_mod, "get_strands_model", lambda *_a, **_k: None)
     monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")
 
     spec = StrategySpec(

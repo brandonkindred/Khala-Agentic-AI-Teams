@@ -62,7 +62,9 @@ def _patch_agent(monkeypatch: pytest.MonkeyPatch, responder: Any) -> List[Dict[s
     return constructions
 
 
-def _patch_get_strands_model(monkeypatch: pytest.MonkeyPatch) -> Tuple[List[Dict[str, Any]], object]:
+def _patch_get_strands_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Tuple[List[Dict[str, Any]], object]:
     """Patch ``_agent_runner.get_strands_model`` to record each call's
     ``agent_key``/``response_format`` and return a fixed sentinel "model"
     object. Returns ``(calls, sentinel)``.
@@ -121,7 +123,9 @@ def test_invoke_json_agent_passes_system_prompt_and_empty_tools_to_agent_constru
     assert constructions[0]["model"] is sentinel
 
 
-def test_invoke_json_agent_defaults_response_format_to_json(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invoke_json_agent_defaults_response_format_to_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_agent(monkeypatch, lambda _p: "{}")
     model_calls, _sentinel = _patch_get_strands_model(monkeypatch)
 
@@ -130,7 +134,9 @@ def test_invoke_json_agent_defaults_response_format_to_json(monkeypatch: pytest.
     assert model_calls == [{"agent_key": "strategy_ideation", "response_format": "json"}]
 
 
-def test_invoke_text_agent_defaults_response_format_to_text(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invoke_text_agent_defaults_response_format_to_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_agent(monkeypatch, lambda _p: "raw")
     model_calls, _sentinel = _patch_get_strands_model(monkeypatch)
 
@@ -141,7 +147,9 @@ def test_invoke_text_agent_defaults_response_format_to_text(monkeypatch: pytest.
     assert model_calls == [{"agent_key": "strategy_code_synthesis", "response_format": "text"}]
 
 
-def test_invoke_text_agent_response_format_override_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invoke_text_agent_response_format_override_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _patch_agent(monkeypatch, lambda _p: "raw")
     model_calls, _sentinel = _patch_get_strands_model(monkeypatch)
 

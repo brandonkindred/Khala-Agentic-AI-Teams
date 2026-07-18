@@ -33,13 +33,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_envelope import invoke_agent
-from ._parse_helpers import extract_json_object
-from .model_factory import get_strands_model
+from ._agent_runner import invoke_json_agent
 
 logger = logging.getLogger(__name__)
 
@@ -307,20 +304,14 @@ class TradeAlignmentAgent:
             symbol=symbol,
             entry_date=entry_date,
         )
-        agent = Agent(
-            model=get_strands_model("strategy_ideation"),
-            system_prompt=system_prompt,
-            tools=[],
-        )
         try:
-            raw = invoke_agent(
-                agent,
+            parsed = invoke_json_agent(
                 user_prompt,
                 agent_key="strategy_ideation",
                 phase="alignment_near_miss",
+                system_prompt=system_prompt,
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Near-miss adjudicator failed to produce parseable JSON: %s",
@@ -385,21 +376,15 @@ class TradeAlignmentAgent:
             prior_attempts_text=prior_text,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_ideation"),
-            system_prompt=system_prompt,
-            tools=[],
-        )
         try:
-            raw = invoke_agent(
-                agent,
+            parsed = invoke_json_agent(
                 user_prompt,
                 agent_key="strategy_ideation",
                 phase="alignment_propose_fix",
+                system_prompt=system_prompt,
                 max_attempts=_alignment_max_attempts(),
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Alignment fix proposer failed to produce parseable JSON: %s",

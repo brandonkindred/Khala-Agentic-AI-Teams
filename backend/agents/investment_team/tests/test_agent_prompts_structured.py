@@ -132,11 +132,11 @@ def _patch_refinement(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
 
 def _patch_zero_trade_repair(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.zero_trade_repair.Agent",
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
         lambda **kwargs: _FakeStrandsAgentReturning(payload),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.zero_trade_repair.get_strands_model",
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda *_a, **_k: object(),
     )
 

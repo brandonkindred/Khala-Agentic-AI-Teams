@@ -19,14 +19,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
 
 from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec, ZeroTradeCategory
 from ..coverage_probe import format_coverage_report
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_envelope import invoke_agent
-from ._parse_helpers import StrategySpecParseError, extract_json_object, validate_structured_rules
-from .model_factory import get_strands_model
+from ._agent_runner import invoke_json_agent
+from ._parse_helpers import StrategySpecParseError, validate_structured_rules
 
 logger = logging.getLogger(__name__)
 
@@ -197,21 +195,14 @@ class ZeroTradeRepairAgent:
             prior_attempts_text=prior_text,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_ideation"),
-            system_prompt=system_prompt,
-            tools=[],
-        )
-
         try:
-            raw = invoke_agent(
-                agent,
+            parsed = invoke_json_agent(
                 user_prompt,
                 agent_key="strategy_ideation",
                 phase="zero_trade_repair",
+                system_prompt=system_prompt,
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.exception("Zero-trade repair agent failed to produce parseable JSON")
             return ZeroTradeRepairReport(

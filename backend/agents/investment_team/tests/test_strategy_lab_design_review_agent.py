@@ -106,11 +106,11 @@ def _patch_review(
         assert payload is not None
         agent = _CapturingAgent(payload)
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.design_review.Agent",
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
         lambda **_kwargs: agent,
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.design_review.get_strands_model",
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda *_a, **_k: object(),
     )
     return agent

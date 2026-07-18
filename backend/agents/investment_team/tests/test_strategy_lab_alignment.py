@@ -762,6 +762,7 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
     ``AlignmentAuditError`` when the LLM response cannot be parsed —
     the orchestrator's retry wrapper translates that into a fail-closed
     report."""
+    from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
     from investment_team.strategy_lab.agents import alignment as alignment_module
 
     class _StubStrandsAgent:
@@ -771,9 +772,9 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
         def __call__(self, _prompt: str) -> str:
             return "not json at all"
 
-    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubStrandsAgent)
     monkeypatch.setattr(
-        alignment_module,
+        agent_runner_module,
         "get_strands_model",
         lambda *_a, **_k: None,
     )
@@ -802,6 +803,7 @@ def test_propose_code_fix_fails_open_preserving_patch_on_coercion_error(monkeypa
     returned parseable JSON with ``proposed_code``; if ``_coerce_report`` then
     raises, ``propose_code_fix`` fails OPEN — it preserves the patch (aligned
     stays False) instead of propagating a fail-closed AlignmentAuditError."""
+    from investment_team.strategy_lab.agents import _agent_runner as agent_runner_module
     from investment_team.strategy_lab.agents import alignment as alignment_module
 
     class _StubStrandsAgent:
@@ -814,8 +816,8 @@ def test_propose_code_fix_fails_open_preserving_patch_on_coercion_error(monkeypa
                 '"proposed_code": "def fixed(): pass", "changes_made": "c"}'
             )
 
-    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
-    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(agent_runner_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(agent_runner_module, "get_strands_model", lambda *_a, **_k: None)
 
     def _boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("synthetic coercion failure")

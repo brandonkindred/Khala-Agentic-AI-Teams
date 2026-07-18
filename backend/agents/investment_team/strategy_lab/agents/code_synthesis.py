@@ -20,12 +20,9 @@ import logging
 import re
 from pathlib import Path
 
-from strands import Agent
-
 from ...models import StrategySpec
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_envelope import invoke_agent
-from .model_factory import get_strands_model
+from ._agent_runner import invoke_text_agent
 
 logger = logging.getLogger(__name__)
 
@@ -101,21 +98,16 @@ class CodeSynthesisAgent:
             risk_limits=spec.risk_limits.model_dump_json(),
         )
 
-        agent = Agent(
+        try:
             # ``response_format="text"``: code synthesis emits a raw Python file
             # (recovered via ``_strip_code_fence``), not a JSON object, so it
             # must not be routed through the llm_service ``json_object`` wire mode.
-            model=get_strands_model("strategy_code_synthesis", response_format="text"),
-            system_prompt=_SYSTEM_PROMPT,
-            tools=[],
-        )
-
-        try:
-            raw = invoke_agent(
-                agent,
+            raw = invoke_text_agent(
                 user_prompt,
                 agent_key="strategy_code_synthesis",
                 phase="code_synthesis",
+                system_prompt=_SYSTEM_PROMPT,
+                response_format="text",
                 logger=logger,
             )
         except Exception as exc:  # noqa: BLE001 — wrap any transport fault
