@@ -906,15 +906,20 @@ def compensate_activity(
           whose removal itself failed inside ``compensate`` also still has
           one; only the "nothing ever got registered, or it did and was
           since removed" case has none, and that is exactly when a container
-          matching the name is unambiguously orphaned. When NO record
-          exists at all, this also probes the deterministic container name
+          matching the name is unambiguously orphaned. When no record exists
+          at all AND ``tear_down_environment`` is ``False`` (ownership was
+          never settled), this also probes the deterministic container name
           directly (mirroring ``check_existing_environment_activity``)
           before concluding that: a record and its container are
           independently losable, so an absent record alone is not proof the
           container is an orphan — e.g. the setup name-conflict path, where
           Docker/idempotency state was lost but ``agent-<agent_id>`` is a
           real container that predates this run and was never registered
-          here at all.
+          here at all. When ``tear_down_environment`` is ``True``, ownership
+          is already settled — this run is known to own the environment — so
+          that probe is skipped: a surviving container in that case is this
+          run's own leaked orphan to reclaim via ``verify_and_remove_orphan``,
+          not something a name match should protect from removal.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -947,15 +952,22 @@ def compensate_activity(
         # flag: unreadable counts as "might have a record" — conservative,
         # same as everywhere else this ambiguity shows up.
         record_may_exist = env_store.get(agent_id) is not None or not env_store.readable(agent_id)
-        if not record_may_exist:
-            # No EnvironmentStore record — but the record and the container
-            # are independently losable (mirrors
+        if not record_may_exist and not tear_down_environment:
+            # No EnvironmentStore record, and ownership is still ambiguous
+            # (tear_down_environment=False) — but the record and the
+            # container are independently losable (mirrors
             # check_existing_environment_activity's own reasoning): a
             # pre-existing container can still be sitting there under the
             # deterministic name with no record at all, e.g. the setup
             # name-conflict path where Docker/idempotency state was lost
             # but the container itself predates this run. Probe it directly
             # before concluding there is nothing left to protect.
+            #
+            # When tear_down_environment=True, ownership is already settled
+            # — this run is known to have created/own the environment — so
+            # this probe must NOT run: a container that still exists there
+            # is our own leaked orphan to reclaim, not something to protect
+            # from verify_and_remove_orphan.
             record_may_exist = docker._container_exists(f"agent-{agent_id}") is not False
         if not record_may_exist and not docker.verify_and_remove_orphan(agent_id):
             raise RuntimeError(

@@ -1169,6 +1169,44 @@ def test_compensate_activity_skips_orphan_probe_when_deterministic_container_sti
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
 
 
+def test_compensate_activity_raises_when_tear_down_environment_true_and_container_survives() -> (
+    None
+):
+    """When ownership is already settled (tear_down_environment=True), a
+    surviving container with no EnvironmentStore record must be treated as
+    this run's own leaked orphan — not protected by the by-name probe that
+    exists only to cover the genuinely-ambiguous tear_down_environment=False
+    case.
+
+    Regression guard: the probe fallback used to run unconditionally, so a
+    container that was still alive after both local rollback and
+    orchestrator-level compensate() failed to remove it would flip
+    record_may_exist to True here, suppressing verify_and_remove_orphan and
+    letting compensate_activity return successfully — masking a real leak
+    instead of raising for Temporal to retry.
+    """
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.environment_store.get.return_value = None
+    fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = False
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch.object(activities._js, "clear_completed_phases"),
+    ):
+        with pytest.raises(RuntimeError, match="did not complete"):
+            activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=True)
+
+    # The container-name probe must never run when ownership is already
+    # settled — only verify_and_remove_orphan decides the outcome.
+    fake_orch.tool_agents.get.return_value._container_exists.assert_not_called()
+    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
+
+
 def test_compensate_activity_skips_verification_without_docker_provisioner() -> None:
     """No docker_provisioner registered (e.g. a non-docker tool manifest) must
     not spuriously raise — there is nothing to verify."""

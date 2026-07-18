@@ -209,6 +209,40 @@ def test_credential_store_delete_tool_credentials_purges_stale_copy_alongside_pr
     assert legacy_reader.get_credentials("a1", "redis") == {"password": "r"}
 
 
+def test_credential_store_delete_tool_credentials_purges_legacy_when_primary_lacks_tool(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A legacy-only copy of ``tool_name`` must be purged even when the primary
+    file exists but never held that tool.
+
+    Gating the whole method on whichever single file ``_read_agent_credentials``
+    preferred (primary, since it exists) would return ``False`` immediately and
+    never even look at the legacy candidate — leaving its stale copy of the
+    tool's secret behind. Each candidate must be inspected independently.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    primary = tmp_path / "primary"
+    store = CredentialStore(storage_dir=primary, encryption_key=key)
+    store.store_credentials("a1", "redis", {"password": "current"})  # no "pg" here
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_file = legacy_dir / "a1.enc"
+    legacy_store = CredentialStore(storage_dir=legacy_dir, encryption_key=key)
+    legacy_store.store_credentials("a1", "pg", {"password": "stale"})
+    assert legacy_file.exists()
+
+    assert store.delete_tool_credentials("a1", "pg") is True
+
+    # Primary untouched: its own "redis" entry survives, still no "pg".
+    assert store.get_credentials("a1", "redis") == {"password": "current"}
+    # Legacy: the stale "pg" copy is gone, and the now-empty legacy file removed.
+    assert not legacy_file.exists()
+
+
 def test_credential_store_list_agents(tmp_path: Path) -> None:
     from agent_provisioning_team.shared.credential_store import CredentialStore
 

@@ -438,37 +438,47 @@ class CredentialStore:
         Preconditions:
             * ``agent_id`` / ``tool_name`` are non-empty.
         Postconditions:
-            * When ``agent_id`` has no stored credentials, or none for
-              ``tool_name``, returns ``False`` and nothing is written.
-            * Otherwise ``tool_name``'s entry is removed and the remaining
-              entries are re-encrypted back to the primary store path (the
-              same target ``store_credentials`` always writes to); returns
-              ``True``. Used by compensation to purge a single tool's
-              generated-but-now-stale secret (its account was just rolled
-              back) without discarding the agent's other, still-valid tools'
-              credentials the way ``delete_credentials`` would.
-            * ``tool_name``'s entry is ALSO purged from every OTHER
-              candidate path (legacy locations) that independently contains
-              it, not just the one location ``_read_agent_credentials``
-              happened to read from — a legacy file can hold a stale copy
-              of this tool's secret alongside (or even when a newer) primary
-              file exists, e.g. left over from before the primary store
-              cut over, and reads fall back to legacy candidates whenever
-              the primary is missing or unreadable. Leaving such a copy
-              behind would let the purged secret resurface later. A
-              candidate whose OTHER entries survive is rewritten in place;
-              one left fully empty is removed instead.
+            * When ``agent_id`` has no stored credentials anywhere (primary or
+              legacy), or none of them contain ``tool_name``, returns
+              ``False`` and nothing is written.
+            * Otherwise every candidate path that independently contains
+              ``tool_name`` is purged of that entry: the primary store path
+              (the same target ``store_credentials`` always writes to) is
+              rewritten in place if it contains ``tool_name`` (never
+              unlinked, even if left empty, so a later ``store_credentials``
+              call — which only ever checks the primary path's existence —
+              does not silently start from an empty file while a legacy
+              candidate still holds other tools); every OTHER (legacy)
+              candidate containing ``tool_name`` is rewritten if other
+              entries survive, or removed if left fully empty. Returns
+              ``True`` iff at least one candidate was purged. Used by
+              compensation to purge a single tool's generated-but-now-stale
+              secret (its account was just rolled back) without discarding
+              the agent's other, still-valid tools' credentials the way
+              ``delete_credentials`` would.
+            * Each candidate is inspected independently for ``tool_name``'s
+              presence — not gated on whichever single file
+              ``_read_agent_credentials`` would have preferred — because a
+              legacy file can hold a stale copy of this tool's secret even
+              when the primary file exists but does not (yet) contain that
+              tool, e.g. left over from before the primary store cut over.
+              Leaving such a copy behind would let the purged secret
+              resurface later via the legacy-fallback read path.
         """
         assert agent_id, "agent_id must be non-empty"
         assert tool_name, "tool_name must be non-empty"
-        existing, _src = self._read_agent_credentials(agent_id)
-        if not existing or tool_name not in existing:
-            return False
-        del existing[tool_name]
+        removed_any = False
         primary = self._agent_file(agent_id)
-        encrypted = self.multifernet.encrypt(json.dumps(existing).encode())
-        primary.write_bytes(encrypted)
-        primary.chmod(0o600)
+        if primary.exists():
+            try:
+                data = json.loads(self.multifernet.decrypt(primary.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                data = None
+            if isinstance(data, dict) and tool_name in data:
+                del data[tool_name]
+                primary.write_bytes(self.multifernet.encrypt(json.dumps(data).encode()))
+                primary.chmod(0o600)
+                removed_any = True
 
         for path in self._agent_file_candidates(agent_id):
             if path == primary or not path.exists():
@@ -485,7 +495,8 @@ class CredentialStore:
                 path.chmod(0o600)
             else:
                 path.unlink()
-        return True
+            removed_any = True
+        return removed_any
 
     def list_agents(self) -> List[str]:
         """List all agent IDs with stored credentials."""
