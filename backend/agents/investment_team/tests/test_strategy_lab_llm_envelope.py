@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, List
+from typing import Any, Dict, List
 
 import httpx
 import pytest
 
 from investment_team.strategy_lab.agents import _llm_envelope as env
+from investment_team.strategy_lab.agents._llm_budget import (
+    DesignBudgetExhausted,
+    LLMCallBudget,
+    use_budget,
+)
 from investment_team.strategy_lab.agents._llm_envelope import (
     _backoff_delay,
     _call_with_timeout,
@@ -26,6 +31,7 @@ from investment_team.strategy_lab.agents._llm_envelope import (
     _resolve_config,
     classify_strands_exception,
     invoke_agent,
+    run_structured_agent,
 )
 from investment_team.strategy_lab.exceptions import StrategyLabLLMError
 from llm_service.interface import (
@@ -538,7 +544,7 @@ def test_design_invoke_charges_once_despite_transport_retry(
     monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: None)
     monkeypatch.setattr(design_mod, "validate_structured_rules", lambda _parsed: None)
     monkeypatch.setattr(
-        design_mod, "charge_active_budget", lambda: charges.__setitem__("n", charges["n"] + 1)
+        env, "charge_active_budget", lambda: charges.__setitem__("n", charges["n"] + 1)
     )
 
     agent = design_mod.DesignAgent()
@@ -550,6 +556,161 @@ def test_design_invoke_charges_once_despite_transport_retry(
     # envelope must NOT re-charge.
     assert charges["n"] == 1
     assert stub.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# run_structured_agent
+# ---------------------------------------------------------------------------
+
+
+def test_run_structured_agent_happy_path_no_coerce() -> None:
+    stub = _Stub('{"a": 1}')
+    result = run_structured_agent(
+        stub,
+        "p",
+        agent_key="strategy_design",
+        phase="x",
+        parse=lambda raw: {"parsed": raw},
+        charge=False,
+    )
+    assert result == {"parsed": '{"a": 1}'}
+
+
+def test_run_structured_agent_applies_coerce_when_given() -> None:
+    stub = _Stub("raw")
+    result = run_structured_agent(
+        stub,
+        "p",
+        agent_key="strategy_design",
+        phase="x",
+        parse=lambda raw: raw.upper(),
+        coerce=lambda parsed: f"coerced:{parsed}",
+        charge=False,
+    )
+    assert result == "coerced:RAW"
+
+
+def test_run_structured_agent_charge_true_charges_before_invoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[str] = []
+
+    monkeypatch.setattr(env, "charge_active_budget", lambda: calls.append("charge"))
+
+    def _recording_agent(prompt: str) -> str:
+        calls.append("invoke")
+        return "raw"
+
+    result = run_structured_agent(
+        _recording_agent,
+        "p",
+        agent_key="strategy_design",
+        phase="x",
+        parse=lambda raw: raw,
+        charge=True,
+    )
+
+    assert result == "raw"
+    assert calls == ["charge", "invoke"]
+
+
+def test_run_structured_agent_charge_false_never_charges(monkeypatch: pytest.MonkeyPatch) -> None:
+    charges = {"n": 0}
+    monkeypatch.setattr(
+        env, "charge_active_budget", lambda: charges.__setitem__("n", charges["n"] + 1)
+    )
+    run_structured_agent(
+        _Stub("raw"),
+        "p",
+        agent_key="strategy_design",
+        phase="x",
+        parse=lambda raw: raw,
+        charge=False,
+    )
+    assert charges["n"] == 0
+
+
+def test_run_structured_agent_parse_exception_propagates_unmodified() -> None:
+    def _boom(_raw: str) -> Any:
+        raise ValueError("bad json")
+
+    with pytest.raises(ValueError, match="bad json"):
+        run_structured_agent(
+            _Stub("raw"), "p", agent_key="strategy_design", phase="x", parse=_boom, charge=False
+        )
+
+
+def test_run_structured_agent_coerce_exception_propagates_unmodified() -> None:
+    def _boom(_parsed: Any) -> Any:
+        raise RuntimeError("bad coerce")
+
+    with pytest.raises(RuntimeError, match="bad coerce"):
+        run_structured_agent(
+            _Stub("raw"),
+            "p",
+            agent_key="strategy_design",
+            phase="x",
+            parse=lambda raw: raw,
+            coerce=_boom,
+            charge=False,
+        )
+
+
+def test_run_structured_agent_coerce_none_returns_parsed_verbatim() -> None:
+    sentinel = object()
+    result = run_structured_agent(
+        _Stub("raw"),
+        "p",
+        agent_key="strategy_design",
+        phase="x",
+        parse=lambda _raw: sentinel,
+        coerce=None,
+        charge=False,
+    )
+    assert result is sentinel
+
+
+def test_run_structured_agent_design_budget_exhausted_propagates_uncaught() -> None:
+    """Charging must never be caught inside the helper — a caller wrapping the
+    whole call in ``except Exception`` still sees ``DesignBudgetExhausted``
+    escape unmodified when the helper itself adds no swallowing.
+    """
+    budget = LLMCallBudget(limit=1)
+    budget.charge()  # exhaust the single admitted charge before the helper runs
+    with use_budget(budget):
+        with pytest.raises(DesignBudgetExhausted):
+            run_structured_agent(
+                _Stub("raw"),
+                "p",
+                agent_key="strategy_design",
+                phase="x",
+                parse=lambda raw: raw,
+                charge=True,
+            )
+
+
+def test_run_structured_agent_agent_key_flows_through_to_invoke_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: Dict[str, Any] = {}
+    real_invoke_agent = env.invoke_agent
+
+    def _spy(agent_callable, prompt, *, agent_key, phase, **kwargs):
+        captured["agent_key"] = agent_key
+        captured["phase"] = phase
+        return real_invoke_agent(agent_callable, prompt, agent_key=agent_key, phase=phase, **kwargs)
+
+    monkeypatch.setattr(env, "invoke_agent", _spy)
+    run_structured_agent(
+        _Stub("raw"),
+        "p",
+        agent_key="strategy_zero_trade_repair",
+        phase="zero_trade_repair",
+        parse=lambda raw: raw,
+        charge=False,
+    )
+    assert captured["agent_key"] == "strategy_zero_trade_repair"
+    assert captured["phase"] == "zero_trade_repair"
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,8 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
 from pydantic import ValidationError
 
+from shared_env_config import env_int
+
 from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
 from ..execution.metrics import (
     bootstrap_sharpe_ci,
@@ -309,11 +311,7 @@ def _design_review_rounds() -> int:
     completeness issues; a sub-1 override floors to 1 so the loop runs at
     least once.
     """
-    raw = os.environ.get("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "20")
-    try:
-        return max(int(raw), 1)
-    except ValueError:
-        return 20
+    return env_int("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", 20, floor=1)
 
 
 def _design_review_stall_rounds() -> int:
@@ -328,11 +326,7 @@ def _design_review_stall_rounds() -> int:
     ``status="failed: design_stalled"`` so oscillation aborts are observable
     apart from specs that simply ran out of rounds.
     """
-    raw = os.environ.get("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "3")
-    try:
-        return max(int(raw), 1)
-    except ValueError:
-        return 3
+    return env_int("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", 3, floor=1)
 
 
 def _design_max_llm_calls() -> int:
@@ -347,11 +341,7 @@ def _design_max_llm_calls() -> int:
     cycle with ``status="failed: budget_exhausted"`` before runaway cloud
     spend rather than burning the full multiplicative worst case.
     """
-    raw = os.environ.get("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", "120")
-    try:
-        return max(int(raw), 1)
-    except ValueError:
-        return 120
+    return env_int("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", 120, floor=1)
 
 
 def _env_flag(name: str, *, default: bool = True) -> bool:

@@ -34,14 +34,16 @@ Timeout semantics (layered, by design):
   the leak. Relying on the guard alone would leak unboundedly under a hung
   endpoint, so both layers are required.
 
-This module imports only stdlib + ``llm_service`` (no ``strategy_lab`` imports)
-so it cannot create an import cycle with the agents that consume it.
+This module imports only stdlib + ``llm_service`` (no ``strategy_lab`` imports),
+with one narrow carve-out: ``._llm_budget`` for ``charge_active_budget``. That
+sibling module is itself stdlib-only (a leaf), so the carve-out introduces no
+dependency on the rest of ``strategy_lab`` and cannot create an import cycle
+with the agents that consume this module.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import random
 import threading
 import time
@@ -60,9 +62,10 @@ from llm_service.interface import (
     LLMSemanticExhaustionError,
     LLMTemporaryError,
 )
-from shared_env_config import env_int
+from shared_env_config import env_float, env_int
 
 from ..exceptions import StrategyLabLLMError
+from ._llm_budget import charge_active_budget
 
 _module_logger = logging.getLogger(__name__)
 
@@ -90,21 +93,6 @@ class _EnvelopeTimeout(Exception):
 # ---------------------------------------------------------------------------
 # Config resolution
 # ---------------------------------------------------------------------------
-
-
-def _env_float(name: str, default: float) -> float:
-    """Read ``name`` as a float; garbage / empty falls back to ``default``.
-
-    Preconditions: ``name`` is an env var name.
-    Postconditions: returns a float — never raises.
-    """
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
 
 
 class _EnvelopeConfig:
@@ -170,34 +158,32 @@ def _resolve_config(
     if timeout_s is None:
         # resolve_timeout already honours LLM_TIMEOUT; the STRATEGY_LAB_*
         # override takes precedence over it when set.
-        timeout_s = _env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key))
+        timeout_s = env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key))
     timeout_s = max(0.001, float(timeout_s))
 
     if backoff_base is None:
-        backoff_base = _env_float(
-            "STRATEGY_LAB_LLM_BACKOFF_BASE", _env_float("LLM_BACKOFF_BASE", 2.0)
+        backoff_base = env_float(
+            "STRATEGY_LAB_LLM_BACKOFF_BASE", env_float("LLM_BACKOFF_BASE", 2.0)
         )
     backoff_base = max(1.0, float(backoff_base))
 
     if backoff_max is None:
-        backoff_max = _env_float(
-            "STRATEGY_LAB_LLM_BACKOFF_MAX", _env_float("LLM_BACKOFF_MAX", 60.0)
-        )
+        backoff_max = env_float("STRATEGY_LAB_LLM_BACKOFF_MAX", env_float("LLM_BACKOFF_MAX", 60.0))
     backoff_max = max(0.0, float(backoff_max))
 
     if total_budget_s is None:
-        total_budget_s = _env_float("STRATEGY_LAB_LLM_TOTAL_BUDGET", attempts * timeout_s * 1.5)
+        total_budget_s = env_float("STRATEGY_LAB_LLM_TOTAL_BUDGET", attempts * timeout_s * 1.5)
     total_budget_s = max(0.001, float(total_budget_s))
 
     # Rate-limit (429) backoff schedule. STRATEGY_LAB_LLM_RATE_LIMIT_* override the
     # global LLM_RATE_LIMIT_* policy (whose parsed values are the defaults here).
     _, global_rl_initial, global_rl_cap = parse_rate_limit_retry_config()
     rl_initial = max(
-        1.0, _env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", global_rl_initial)
+        1.0, env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", global_rl_initial)
     )
     # Floor the cap at the initial so rate_limit_retry_delay's precondition
     # (cap >= initial) always holds even under a misconfigured override.
-    rl_cap = max(rl_initial, _env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX", global_rl_cap))
+    rl_cap = max(rl_initial, env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX", global_rl_cap))
 
     return _EnvelopeConfig(
         max_attempts=attempts,
@@ -490,4 +476,92 @@ def invoke_agent(
     )
 
 
-__all__ = ["invoke_agent", "classify_strands_exception", "_is_rate_limit_kind"]
+def run_structured_agent(
+    agent_callable: Callable[[str], Any],
+    prompt: str,
+    *,
+    agent_key: str,
+    phase: str,
+    parse: Callable[[str], Any],
+    coerce: Optional[Callable[[Any], Any]] = None,
+    charge: bool = True,
+    logger: Optional[logging.Logger] = None,
+    **invoke_kwargs: Any,
+) -> Any:
+    """Collapse the charge → invoke → parse → (coerce) sequence shared by every
+    Strategy Lab structured-output LLM call into one call.
+
+    This is a thin, non-swallowing pipeline: it adds no exception handling of
+    its own. Every exception raised while charging, invoking, parsing, or
+    coercing propagates to the caller completely unmodified, so callers keep
+    wrapping this single call in whatever try/except shape (fail-closed,
+    fail-open, narrow parse-retry) they used to wrap the multi-line
+    invoke+parse sequence, with identical resulting behavior.
+
+    Preconditions:
+      * ``agent_callable`` is callable as ``agent_callable(prompt) -> Any``
+        (normally a constructed ``strands.Agent``) built with the SAME
+        ``agent_key`` passed here — a mismatched key silently mis-routes
+        per-agent telemetry, timeouts, and model selection (see
+        ``model_factory._resolve_strands_timeout``).
+      * ``prompt`` / ``agent_key`` / ``phase`` are non-empty strings.
+      * ``parse`` accepts the raw ``str`` result of the LLM call and returns
+        the parsed value, raising on malformed input.
+      * ``coerce``, if given, accepts ``parse``'s return value and returns the
+        final result, raising on failure. Leave it ``None`` when a call
+        site's own coercion step has different-shaped extra arguments or
+        asymmetric fail-open/fail-closed semantics that don't fit a single
+        pass-through callable — call it explicitly after this function
+        returns instead (e.g. ``alignment.py``'s fail-open
+        ``_coerce_report`` step, or ``design_review.py``'s
+        ``_coerce_critique``, both of which stay outside this helper).
+      * ``charge=True`` is only safe when the caller does not wrap this call
+        in a handler that would catch ``DesignBudgetExhausted`` (e.g. a bare
+        ``except Exception``) — such a handler would otherwise swallow a
+        budget trip that must propagate to the design loop. A call site with
+        such a broad handler must charge explicitly, before entering its
+        try block, and pass ``charge=False`` here (see ``design_review.py``).
+      * ``**invoke_kwargs`` are forwarded verbatim to :func:`invoke_agent`
+        (e.g. ``max_attempts``).
+
+    Postconditions:
+      * When ``charge`` is True, charges the active design-phase budget
+        exactly once, as the very first action, before any transport call —
+        with no enclosing try/except in this function, so
+        ``DesignBudgetExhausted`` is raised and propagates immediately,
+        never caught here.
+      * Otherwise invokes ``agent_callable`` via :func:`invoke_agent`,
+        forwarding ``agent_key``, ``phase``, ``logger``, and
+        ``**invoke_kwargs``; raises :class:`StrategyLabLLMError` on
+        transport exhaustion (see :func:`invoke_agent`'s contract —
+        unchanged).
+      * Calls ``parse(raw)``; propagates any exception it raises.
+      * Returns ``coerce(parsed)`` when ``coerce`` is given, else ``parsed``;
+        propagates any exception ``coerce`` raises.
+      * Raises no exception type of its own.
+
+    Invariant: stateless and side-effect-free beyond the budget charge and
+    the transport call — safe to call concurrently (inherits thread-safety
+    from :func:`invoke_agent` and the ``contextvars``-backed
+    ``charge_active_budget``).
+    """
+    if charge:
+        charge_active_budget()
+    raw = invoke_agent(
+        agent_callable,
+        prompt,
+        agent_key=agent_key,
+        phase=phase,
+        logger=logger,
+        **invoke_kwargs,
+    )
+    parsed = parse(raw)
+    return coerce(parsed) if coerce is not None else parsed
+
+
+__all__ = [
+    "invoke_agent",
+    "run_structured_agent",
+    "classify_strands_exception",
+    "_is_rate_limit_kind",
+]

@@ -141,6 +141,30 @@ def _patch_zero_trade_repair(monkeypatch: pytest.MonkeyPatch, payload: str) -> N
     )
 
 
+def test_zero_trade_repair_agent_key_is_not_ideation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard: the call site must identify itself as
+    ``strategy_zero_trade_repair`` (not the mislabeled ``strategy_ideation``
+    copied from an unrelated agent) so per-agent telemetry/timeout/model
+    routing is not mis-attributed."""
+    model_keys: list = []
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.zero_trade_repair.Agent",
+        lambda **kwargs: _FakeStrandsAgentReturning(_zero_trade_payload()),
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.zero_trade_repair.get_strands_model",
+        lambda key, *_a, **_k: model_keys.append(key) or object(),
+    )
+
+    ZeroTradeRepairAgent().run(
+        spec=_spec(),
+        code="# original",
+        diagnostics=_zero_trade_diagnostics(),
+    )
+
+    assert model_keys == ["strategy_zero_trade_repair"]
+
+
 def _zero_trade_diagnostics() -> BacktestExecutionDiagnostics:
     return BacktestExecutionDiagnostics(
         orders_emitted=0,
