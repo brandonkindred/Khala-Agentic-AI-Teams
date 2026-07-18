@@ -779,6 +779,42 @@ def test_security_unsafe_fix_breaks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Per-piece QA/security verdict cache (AgentReviewCache)
+# ---------------------------------------------------------------------------
+
+
+def test_qa_and_security_gates_share_one_cache_instance_across_cycles(tmp_path):
+    """QA and security gates receive the same ``AgentReviewCache`` on every cycle
+    of one microtask's review loop; the code-review gate never receives one (it
+    has its own, separate cross-cycle cache).
+    """
+    from software_engineering_team.shared.agent_review import AgentReviewCache
+
+    cr = _CapturingGate()
+    qa = _CapturingGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
+    sec = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(code_review_gate=cr, qa_gate=qa, security_gate=sec),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=1),
+        progress=lambda *a: None,
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(qa.calls_kwargs) == 2  # failed once (-> restart from code review), passed next cycle
+    assert len(sec.calls_kwargs) == 1  # cycle 1 never reached security (QA restarted the cycle)
+
+    for call_kwargs in cr.calls_kwargs:
+        assert "cache" not in call_kwargs  # code review keeps its own separate cache
+
+    caches = [c["cache"] for c in qa.calls_kwargs] + [c["cache"] for c in sec.calls_kwargs]
+    assert all(isinstance(c, AgentReviewCache) for c in caches)
+    assert len({id(c) for c in caches}) == 1  # every gate call shares the one instance
+
+
+# ---------------------------------------------------------------------------
 # Max-cycles semantics (the one genuine per-team behavioural fork)
 # ---------------------------------------------------------------------------
 

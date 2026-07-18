@@ -807,7 +807,8 @@ export interface QualityGateResult {
 
 export interface StrategyLabCycleProgress {
   cycle_index: number;
-  phase: StrategyLabPhase;
+  /** `string`, not `StrategyLabPhase`, for the same reason as StrategyLabProgressEvent.phase below: the backend's real phase set is open-ended. */
+  phase: string;
   sub_phase?: string;
   refinement_round?: number;
   strategy?: { asset_class: string; hypothesis: string };

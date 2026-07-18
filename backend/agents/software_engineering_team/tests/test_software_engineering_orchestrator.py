@@ -460,7 +460,12 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
                     "software_engineering_team.product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
-                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
+                    with (
+                        patch("planning_team.orchestrator.run_workflow") as mock_run_planning,
+                        patch(
+                            "software_engineering_team.shared.planning_audit.record_se_planning_run"
+                        ) as mock_record_planning_run,
+                    ):
                         mock_run_planning.return_value = {
                             "success": False,
                             "failure_reason": "Planning failed",
@@ -471,6 +476,7 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
     assert len(failed_calls) >= 1
     assert "planning" in failed_calls[0][1].get("error", "").lower()
     assert len(arch_inputs_received) == 0
+    mock_record_planning_run.assert_not_called()
 
 
 # ``test_run_orchestrator_fails_job_when_project_planning_raises`` previously
@@ -567,9 +573,14 @@ def test_run_orchestrator_invokes_coding_team_not_v2_workers(
                             "software_engineering_team.planning_adapter.adapt_planning_result",
                             return_value=adapter_result,
                         ):
-                            with patch(
-                                "software_engineering_team.coding_team.orchestrator.run_coding_team_orchestrator",
-                                side_effect=capture_run_coding_team,
+                            with (
+                                patch(
+                                    "software_engineering_team.coding_team.orchestrator.run_coding_team_orchestrator",
+                                    side_effect=capture_run_coding_team,
+                                ),
+                                patch(
+                                    "software_engineering_team.shared.planning_audit.record_se_planning_run"
+                                ) as mock_record_planning_run,
                             ):
                                 orchestrator.run_orchestrator(job_id, str(tmp_path))
 
@@ -587,3 +598,4 @@ def test_run_orchestrator_invokes_coding_team_not_v2_workers(
     # ``.run.assert_not_called`` would pass even if ``run_workflow`` ran).
     mock_agents["frontend_code_v2"].run_workflow.assert_not_called()
     mock_agents["backend"].run_workflow.assert_not_called()
+    mock_record_planning_run.assert_called_once_with(job_id, mock_run_planning.return_value)

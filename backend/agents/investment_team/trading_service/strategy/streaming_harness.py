@@ -597,6 +597,23 @@ _HARNESS_SCRIPT = textwrap.dedent('''\
         # Use the bar_index-tagging emit so strategies can never forge
         # bar_index regardless of what they do with ``ctx`` attributes.
         ctx = contract.StrategyContext(emit=_tagged_emit)
+        # Standalone indicator wrappers (`from indicators import sma`) fall
+        # back to strategy_indicators' _active_registries contextvar, then a
+        # thread-local cache, when given no owning context (see
+        # _shared_registry's docstring). Point the contextvar at ctx's own
+        # registries so a strategy mixing ctx.indicator() and standalone
+        # wrapper calls for the same symbol shares one warm registry instead
+        # of two disjoint caches. Set once here, never reset: this
+        # subprocess is dedicated to exactly one execution for its entire
+        # lifetime, so there is only ever one ctx to point at — unlike
+        # predicate_conformance.py's shadow gate, which reuses one worker
+        # thread across many executions and must bracket per fixture.
+        try:
+            from indicators import _active_registries  # type: ignore[import-not-found]
+        except ImportError:
+            pass
+        else:
+            _active_registries.set(ctx._indicator_registries)
         started = False
 
         for raw in sys.stdin:

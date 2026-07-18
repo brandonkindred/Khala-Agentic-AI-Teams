@@ -1,7 +1,7 @@
 """Concurrent near-miss adjudication equivalence.
 
 Near-miss LLM adjudications are now collected during the trade loop and
-dispatched through a bounded ``ThreadPoolExecutor`` instead of blocking the
+dispatched through ``shared_concurrency.parallel_map`` instead of blocking the
 loop one trade at a time. These tests assert the concurrent path is
 observationally identical to the serial path: every candidate adjudicated
 exactly once, verdicts mapped to the correct trade, and the findings list in
@@ -10,6 +10,7 @@ the same order regardless of completion timing or the configured concurrency.
 
 from __future__ import annotations
 
+import contextvars
 import threading
 from typing import Any, Dict, List
 
@@ -174,6 +175,41 @@ def test_serial_fallback_when_no_collector(monkeypatch) -> None:
     entry = next(f for f in findings if f.check_name == "entry_signal")
     assert entry.passed is True
     assert len(gate_results) == len(findings)
+
+
+def test_adjudicator_sees_calling_threads_contextvar(monkeypatch) -> None:
+    """Regression for the raw-``pool.map`` contextvar drop: a value bound on
+    the calling thread before ``check()`` must be visible inside every
+    concurrently-dispatched adjudicator call, not silently reset to the
+    worker thread's empty context."""
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT", "0.01")
+    monkeypatch.setenv("STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY", "4")
+    symbols = ["AAA", "BBB", "CCC", "DDD"]
+    spec, trades, md = _scenario(symbols)
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar(
+        "test_attribution_probe", default="unset"
+    )
+    lock = threading.Lock()
+    seen: List[str] = []
+
+    def adjudicator(**kwargs) -> NearMissVerdict:
+        with lock:
+            seen.append(probe.get())
+        return NearMissVerdict(legitimate=True, rationale="ok")
+
+    token = probe.set("parent-value")
+    try:
+        DeterministicAlignmentChecker().check(
+            spec=spec,
+            trades=trades,
+            market_data=md,
+            initial_capital=100_000.0,
+            near_miss_adjudicator=adjudicator,
+        )
+    finally:
+        probe.reset(token)
+
+    assert seen == ["parent-value"] * len(symbols)
 
 
 @pytest.mark.parametrize("raw, expected", [("0", 1), ("3", 3), ("garbage", 4), ("", 4)])

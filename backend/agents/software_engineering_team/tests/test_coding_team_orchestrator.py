@@ -297,6 +297,300 @@ def test_swarm_completes_when_dependency_fails(tmp_path, monkeypatch):
     assert swarm._is_complete()
 
 
+# ----------------------------------------------------- review-verdict cache (_review_verdict_cache)
+
+
+def test_identical_diff_reuses_cached_verdict_without_second_review_call(tmp_path, monkeypatch):
+    """A task reviewed twice with a byte-identical diff only pays for one Tech Lead call."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    _patch_git(monkeypatch, diff="same diff every time")
+    tech_lead = StubTechLead(approved=False, reason="needs work", requested_changes=["fix X"])
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+    assert len(tech_lead.review_calls) == 1
+    first_feedback = graph.get_task("t1").revision_feedback[-1]
+
+    graph.set_task_in_review("t1")  # simulate the task coming back into review with no changes
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert len(tech_lead.review_calls) == 1  # second round reused the cached verdict
+    second_feedback = graph.get_task("t1").revision_feedback[-1]
+    assert second_feedback["reason"] == first_feedback["reason"] == "needs work"
+    assert second_feedback["requested_changes"] == ["fix X"]
+
+
+def test_changed_diff_triggers_fresh_review_call(tmp_path, monkeypatch):
+    """A task reviewed twice with a genuinely different diff is reviewed both times."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    diffs = iter(["diff-round-1", "diff-round-2"])
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: next(diffs))
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+    assert len(tech_lead.review_calls) == 1
+
+    graph.set_task_in_review("t1")
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert len(tech_lead.review_calls) == 2  # different diff each round -> reviewed both times
+
+
+def test_errored_review_is_never_cached(tmp_path, monkeypatch):
+    """An ``error`` verdict is never cached — the next call for the same diff retries for real."""
+    _patch_git(monkeypatch, diff="same diff")
+
+    class FlakyTechLead(StubTechLead):
+        def run_code_review(self, **kw):
+            self.review_calls.append(kw.get("changes_summary", ""))
+            if len(self.review_calls) == 1:
+                return {
+                    "approved": False,
+                    "error": True,
+                    "reason": "transient",
+                    "requested_changes": [],
+                }
+            return {
+                "approved": False,
+                "error": False,
+                "reason": "reject",
+                "requested_changes": ["y"],
+            }
+
+    tech_lead = FlakyTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    _, review1 = swarm._compute_review(task)
+    assert review1["error"] is True
+
+    _, review2 = swarm._compute_review(task)
+    assert review2["error"] is False
+    assert review2["reason"] == "reject"
+    assert len(tech_lead.review_calls) == 2  # the errored call was never cached, so it retried
+
+    # A third call with the same diff now hits the cache seeded by the second (non-error) call.
+    _, review3 = swarm._compute_review(task)
+    assert review3["reason"] == "reject"
+    assert len(tech_lead.review_calls) == 2
+
+
+def test_approved_verdict_is_also_cached(tmp_path, monkeypatch):
+    """An approved verdict is cached too — only ``error`` verdicts are excluded."""
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=True, reason="looks good")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    swarm._compute_review(task)
+    swarm._compute_review(task)
+
+    assert len(tech_lead.review_calls) == 1
+
+
+def test_cached_review_verdict_is_an_independent_copy(tmp_path, monkeypatch):
+    """A cache hit returns its own copy — mutating it never corrupts the cached entry."""
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False, requested_changes=["fix X"])
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    _, review1 = swarm._compute_review(task)
+    review1["requested_changes"].append("mutated!")  # mutate the caller's copy
+
+    _, review2 = swarm._compute_review(task)  # cache hit
+    assert review2["requested_changes"] == ["fix X"]  # unaffected by the mutation above
+    assert len(tech_lead.review_calls) == 1
+
+
+def test_review_verdict_cache_is_scoped_per_task(tmp_path, monkeypatch):
+    """Two different tasks with byte-identical diffs are each reviewed once — no cross-task reuse."""
+    _patch_git(monkeypatch, diff="same diff for both tasks")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1"), StubWorker("a2")])
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+    graph.set_task_in_review("t1")
+    graph.set_task_in_review("t2")
+
+    swarm._compute_review(graph.get_task("t1"))
+    swarm._compute_review(graph.get_task("t2"))
+
+    assert len(tech_lead.review_calls) == 2  # each task's own first review, not shared
+
+
+def test_new_user_decision_invalidates_cache_even_with_unchanged_diff(tmp_path, monkeypatch):
+    """A HITL decision answered mid-loop must reach the reviewer even when the branch
+    diff hasn't changed since the last cached verdict.
+
+    Regression test: the verdict cache previously keyed on the branch digest alone, so
+    a newly answered decision (which _escalate_decision appends to revision_feedback
+    without necessarily changing the branch) was silently invisible to a cache hit.
+    """
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+    task = graph.get_task("t1")
+
+    swarm._compute_review(task)
+    assert len(tech_lead.review_calls) == 1
+    assert tech_lead.decision_calls[-1] == []  # no decisions yet
+
+    # Simulate a HITL decision answered mid-loop, in the same shape _escalate_decision
+    # (swarm_implementation.py) appends — without driving the full pause machinery.
+    graph.update_task(
+        "t1",
+        revision_feedback=list(task.revision_feedback or [])
+        + [
+            {
+                "source": "user_decision",
+                "reason": "Q? → A",
+                "requested_changes": [],
+                "decisions": [{"question": "Q?", "answer": "A"}],
+            }
+        ],
+    )
+
+    swarm._compute_review(graph.get_task("t1"))
+
+    assert len(tech_lead.review_calls) == 2  # new decision -> cache correctly missed
+    assert tech_lead.decision_calls[-1] == ["Q? → A"]
+
+
+def test_changed_summary_invalidates_cache_even_with_unchanged_diff(tmp_path, monkeypatch):
+    """A new changes_summary must reach the reviewer even when the branch diff hasn't
+    changed since the last cached verdict.
+
+    Regression test: _implement_and_verify unconditionally overwrites task.changes_summary
+    on every run_implement call, whether or not the resulting diff actually changed — so an
+    ordinary revision round can change the reviewer's evidence text without moving the
+    branch digest at all.
+    """
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.update_task("t1", changes_summary="first summary")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._compute_review(graph.get_task("t1"))
+    assert len(tech_lead.review_calls) == 1
+    assert "first summary" in tech_lead.review_calls[-1]
+
+    graph.update_task("t1", changes_summary="second summary")
+    swarm._compute_review(graph.get_task("t1"))
+
+    assert len(tech_lead.review_calls) == 2  # changed summary -> cache correctly missed
+    assert "second summary" in tech_lead.review_calls[-1]
+    assert "first summary" not in tech_lead.review_calls[-1]
+
+
+def test_changed_acceptance_criteria_invalidates_cache_even_with_unchanged_diff(
+    tmp_path, monkeypatch
+):
+    """Updated acceptance criteria must reach the reviewer even when the branch diff,
+    changes_summary, and decisions are all unchanged.
+
+    Regression test: TaskGraphService.update_task supports updating acceptance_criteria
+    on an in-flight task (e.g. a scope change); the cache previously covered only the
+    changes-summary/diff evidence and user decisions, so this went unnoticed.
+    """
+    _patch_git(monkeypatch, diff="same diff")
+    tech_lead = StubTechLead(approved=False)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1", acceptance_criteria=["first criterion"])
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._compute_review(graph.get_task("t1"))
+    assert len(tech_lead.review_calls) == 1
+
+    graph.update_task("t1", acceptance_criteria=["second criterion"])
+    swarm._compute_review(graph.get_task("t1"))
+
+    assert len(tech_lead.review_calls) == 2  # changed criteria -> cache correctly missed
+
+
+def test_review_verdict_cache_key_covers_every_reviewer_input():
+    """The cache key changes when any of run_code_review's six inputs changes —
+    task title/description/acceptance criteria and spec_content, not just the
+    changes-summary/diff evidence and user decisions (spec_content is swarm-level
+    and never actually varies within one run, so this is exercised directly here
+    rather than through an end-to-end swarm scenario)."""
+    from software_engineering_team.coding_team.swarm_review import _review_verdict_cache_key
+
+    base = dict(
+        task_title="T",
+        task_description="D",
+        acceptance_criteria=["a", "b"],
+        evidence="ev",
+        user_decisions=["Q -> A"],
+        spec_content="spec",
+    )
+    baseline = _review_verdict_cache_key(**base)
+    assert _review_verdict_cache_key(**base) == baseline  # deterministic
+
+    for field, new_value in [
+        ("task_title", "T2"),
+        ("task_description", "D2"),
+        ("acceptance_criteria", ["a", "c"]),
+        ("evidence", "ev2"),
+        ("user_decisions", ["Q -> A2"]),
+        ("spec_content", "spec2"),
+    ]:
+        variant = dict(base, **{field: new_value})
+        assert _review_verdict_cache_key(**variant) != baseline, (
+            f"changing {field} did not invalidate the cache key"
+        )
+
+
+def test_review_verdict_cache_key_does_not_collide_across_list_boundaries():
+    """Shifting an element between acceptance_criteria and user_decisions (the
+    two variable-length lists sandwiched around evidence) must not produce the
+    same key.
+
+    Regression test: a flat separator-joined encoding cannot tell where one
+    variable-length list ends and the next begins, so
+    acceptance_criteria=["a", "b"], evidence="c", user_decisions=[] and
+    acceptance_criteria=["a"], evidence="b", user_decisions=["c"] previously
+    flattened to an identical sequence and collided.
+    """
+    from software_engineering_team.coding_team.swarm_review import _review_verdict_cache_key
+
+    base = dict(task_title="T", task_description="D", spec_content="spec")
+
+    key_a = _review_verdict_cache_key(
+        acceptance_criteria=["a", "b"], evidence="c", user_decisions=[], **base
+    )
+    key_b = _review_verdict_cache_key(
+        acceptance_criteria=["a"], evidence="b", user_decisions=["c"], **base
+    )
+
+    assert key_a != key_b
+
+
 # ----------------------------------------------------- review retry / failure handling
 
 
@@ -3039,7 +3333,9 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
     assert progresses, "orchestrator must write job-level progress"
     assert progresses[0] == progress_mod._DEFAULT_PROGRESS_BASE
     # 1 of 2 tasks terminal mid-run
-    expected_mid = progress_mod._DEFAULT_PROGRESS_BASE + int(progress_mod._DEFAULT_PROGRESS_SPAN / 2)
+    expected_mid = progress_mod._DEFAULT_PROGRESS_BASE + int(
+        progress_mod._DEFAULT_PROGRESS_SPAN / 2
+    )
     assert expected_mid in progresses
     assert progresses[-1] == 100
     assert progresses == sorted(progresses), "progress must be monotone non-decreasing"

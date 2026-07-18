@@ -408,6 +408,25 @@ class StrategyContext:
         self._now: str = ""
         self._is_warmup: bool = False
         self._next_client_order_id: int = 0
+        # indicator() shares one IndicatorRegistry per (symbol, source) across
+        # this instance's calls for performance (see
+        # strategy_indicators._shared_registry). Owned here — not a
+        # module/thread-level cache — so this execution's indicator state is
+        # never visible to any other StrategyContext, including one for the
+        # same symbol constructed on the same thread whose bar ingestion
+        # happens to interleave with this one's rather than running to
+        # completion first (a thread-local cache can't tell those apart; a
+        # fresh dict per instance doesn't need to).
+        self._indicator_registries: dict = {}
+        # This dict only covers indicator() calls. Generated strategy code
+        # may instead call the 16 standalone wrapper functions directly
+        # (`from indicators import sma`, a documented, supported call shape
+        # — see strategy_indicators' module docstring), which never see this
+        # dict directly either. The harness instead sets strategy_indicators'
+        # _active_registries contextvar to this dict right after
+        # constructing ctx (see streaming_harness.py's _HARNESS_SCRIPT), so a
+        # standalone wrapper call resolves to it too — see
+        # _shared_registry's docstring for the mechanism.
 
     # ------------------------------------------------------------------
     # Read-only accessors
@@ -476,7 +495,9 @@ class StrategyContext:
             from indicators import indicator_value  # type: ignore[import-not-found]
         except ImportError:
             from ...strategy_lab.executor.strategy_indicators import indicator_value
-        return indicator_value(name, history, source=source, **params)
+        return indicator_value(
+            name, history, source=source, registries=self._indicator_registries, **params
+        )
 
     # ------------------------------------------------------------------
     # Mutators — produce OrderRequest / CancelRequest records that the

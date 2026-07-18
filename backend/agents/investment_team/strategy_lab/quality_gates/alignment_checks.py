@@ -44,13 +44,14 @@ import math
 import os
 import time
 from bisect import bisect_right
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Protocol
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
+
+from shared_concurrency import parallel_map
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict, Severity
 from ..executor.predicate_evaluator import (
@@ -1325,23 +1326,24 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         is non-empty).
         Post: every reserved slot holds the finding/gate row produced from
         that trade's verdict — identical to what the serial path would have
-        emitted, independent of completion order. Adjudications run on a
-        bounded :class:`ThreadPoolExecutor` (``STRATEGY_LAB_ALIGNMENT_
+        emitted, independent of completion order. Adjudications run through
+        :func:`shared_concurrency.parallel_map` (``STRATEGY_LAB_ALIGNMENT_
         ADJUDICATION_CONCURRENCY`` workers) since the underlying adjudicator
-        is synchronous.
+        is synchronous; ``propagate_context`` keeps LLM attribution/request-id
+        contextvars visible inside each worker.
         """
         if not pending:
             return
         assert adjudicator is not None, "pending near-misses require an adjudicator"
 
-        max_workers = min(_adjudication_concurrency(), len(pending))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            verdicts = list(
-                pool.map(
-                    lambda item: self._consult_near_miss(adjudicator, item.evaluation, item.trade),
-                    pending,
-                )
-            )
+        verdicts = parallel_map(
+            pending,
+            lambda item: self._consult_near_miss(adjudicator, item.evaluation, item.trade),
+            max_workers=_adjudication_concurrency(),
+            preserve_order=True,
+            skip_none=False,
+            propagate_context=True,
+        )
 
         for item, verdict in zip(pending, verdicts):
             finding = self._build_near_miss_finding(item.trade, item.evaluation, verdict)

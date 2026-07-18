@@ -71,14 +71,20 @@ omit = [
     "agents/blogging/agent_implementations/run_writer_agent.py",
     "agents/blogging/agent_implementations/run_publication_agent.py",
     "agents/blogging/agent_implementations/run_copy_editor_agent.py",
-    # blog_writing_process_v2 is an orchestrator script (1800+ LOC) that wires
-    # together many polling/event-driven loops; tightly coupled to live LLM/job
-    # state and not meaningfully unit-testable in isolation. Hot paths are
-    # covered by integration tests; targeted unit tests still import named
-    # helpers (e.g. _run_title_selection) directly. Coverage is measured via
-    # those targeted tests on _path_setup.py and the other agent files; this
-    # script itself is excluded from the line-coverage gate.
-    "agents/blogging/agent_implementations/blog_writing_process_v2.py",
+    # blog_writing_process_v2's former orchestrator body now lives in
+    # agent_implementations/pipeline/ (one module per stage); the monolith itself
+    # is a thin re-export shim that needs no coverage exemption of its own. The
+    # three stage modules below wire together many polling/event-driven HITL
+    # loops; tightly coupled to live LLM/job state and not meaningfully
+    # unit-testable in isolation. Hot paths are covered by integration tests;
+    # targeted unit tests still import named helpers (e.g. _run_title_selection,
+    # in pipeline/_common.py, which is NOT exempted and carries its own coverage)
+    # directly. These three stage-orchestration modules are excluded from the
+    # line-coverage gate; pipeline/_common.py, context.py, constants.py, and
+    # runner.py are ordinary, fully-gated modules.
+    "agents/blogging/agent_implementations/pipeline/planning_stage.py",
+    "agents/blogging/agent_implementations/pipeline/draft_stage.py",
+    "agents/blogging/agent_implementations/pipeline/gates_stage.py",
     # Temporal entry-point scripts (worker bootstrap, workflow starter, activity
     # wrappers) only exercise correctly inside a live Temporal cluster — the
     # actual orchestrator logic they delegate to is covered separately.

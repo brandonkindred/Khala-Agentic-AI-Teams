@@ -500,7 +500,7 @@
   &.status-spawned .node-status-dot { background: var(--kh-info, #93c5fd); }
   &.status-analysing .node-status-dot,
   &.status-decomposing .node-status-dot {
-    background: var(--kh-warning, #fbbf24);
+    background: var(--kh-warning, #d97706);
     animation: pulse 1.5s ease-in-out infinite;
   }
   &.status-answering .node-status-dot,
@@ -687,7 +687,7 @@
       font-size: 14px;
       width: 14px;
       height: 14px;
-      color: var(--kh-warning, #fbbf24);
+      color: var(--kh-warning, #d97706);
       flex-shrink: 0;
       margin-top: 1px;
     }

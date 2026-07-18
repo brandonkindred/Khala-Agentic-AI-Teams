@@ -1,9 +1,17 @@
 """Tests for the run-team API endpoint.
 
 Routed through the in-memory ``FakeJobServiceClient`` via the autouse
-``_autouse_patched_job_store`` fixture, so every job-store call (including
-those made by orchestrator background threads spawned from API endpoints)
-lands in a per-test in-memory dict.
+``_autouse_patched_job_store`` fixture, so a job-store call made while a
+test is executing lands in a per-test in-memory dict. That alone is not
+enough for the orchestrator/retry background threads these endpoints spawn:
+``monkeypatch`` (which backs ``patched_job_store``) reverts at the end of
+*this* test function, not when the spawned daemon thread finishes — which
+can be tens of seconds later, running the real multi-phase pipeline. The
+autouse ``_stub_background_workflow`` fixture below replaces those threads'
+targets with a no-op, the same pattern every sibling endpoint-test file
+(``test_frontend_code_v2_api.py``, ``test_backend_code_v2_api.py``) already
+uses, so no thread outlives its test and none can fall through to a real
+HTTP call against the unroutable placeholder ``JOB_SERVICE_URL``.
 """
 
 import os
@@ -29,6 +37,23 @@ app = _api_main.app
 @pytest.fixture(autouse=True)
 def _autouse_patched_job_store(patched_job_store):
     return patched_job_store
+
+
+@pytest.fixture(autouse=True)
+def _stub_background_workflow(monkeypatch):
+    """Replace the fire-and-forget orchestrator/retry background threads with no-ops.
+
+    POST /run-team (and resume/restart/retry) spawn a daemon thread running the
+    real (integration-only) multi-phase pipeline. Without this stub the thread
+    keeps running after the test (and its monkeypatch-scoped job-store patch)
+    tears down, and can later make a real HTTP call against the unroutable
+    placeholder JOB_SERVICE_URL — surfacing as an unrelated, later test's
+    failure. Every synchronous assertion in this file (status codes, the
+    immediate job-store write the route handler makes before spawning the
+    thread) is unaffected: only the background pipeline execution is skipped.
+    """
+    monkeypatch.setattr(_api_main, "_run_orchestrator_background", lambda *a, **k: None)
+    monkeypatch.setattr(_api_main, "_run_retry_background", lambda *a, **k: None)
 
 
 @pytest.fixture
@@ -123,7 +148,10 @@ def test_architect_design_success(client: TestClient) -> None:
 
     with (
         patch("software_engineering_team.spec_parser.parse_spec_with_llm", return_value=fake_reqs),
-        patch("software_engineering_team.architect_agents.architecture_expert.ArchitectureExpertAgent", return_value=mock_agent),
+        patch(
+            "software_engineering_team.architect_agents.architecture_expert.ArchitectureExpertAgent",
+            return_value=mock_agent,
+        ),
         patch("llm_service.get_client"),
     ):
         r = client.post("/architect/design", json={"spec": spec})
@@ -218,9 +246,12 @@ def test_run_team_poll_status(client: TestClient, temp_work_path: Path) -> None:
     # Brief delay so job file is fully written before first poll
     time.sleep(0.2)
 
-    # Poll until completed or failed (max 60s)
+    # The background pipeline is stubbed to a no-op (see _stub_background_workflow),
+    # so status never leaves "running" here — a handful of quick polls is enough
+    # to prove the polling mechanism works without waiting out a real completion
+    # that (per the LLM_PROVIDER=dummy branch below) isn't guaranteed anyway.
     data = None
-    for _ in range(60):
+    for _ in range(5):
         r = client.get(f"/run-team/{job_id}")
         assert r.status_code == 200
         data = r.json()
@@ -228,7 +259,7 @@ def test_run_team_poll_status(client: TestClient, temp_work_path: Path) -> None:
         assert data["status"] in ("pending", "running", "completed", "failed")
         if data["status"] in ("completed", "failed"):
             break
-        time.sleep(1)
+        time.sleep(0.05)
 
     assert data is not None
     # When LLM_PROVIDER=dummy (CI without a real LLM) the job may still be
