@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { of, throwError, Subject } from 'rxjs';
 import { SimpleChange } from '@angular/core';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
@@ -111,6 +111,40 @@ describe('TeamAssistantChatComponent', () => {
     component.chatForm.setValue({ message: 'hello' });
     component.onSubmit();
     expect(component.error).toBe('oops');
+  });
+
+  it('onSubmit announces the reply once sendMessage resolves', () => {
+    fixture.detectChanges();
+    component.chatForm.setValue({ message: 'hello' });
+    component.onSubmit();
+    expect(component.lastAssistantAnnouncement).toBe('Assistant replied');
+  });
+
+  it('onSubmit announces typing before the reply arrives', () => {
+    fixture.detectChanges();
+    const subject = new Subject<typeof stateResponse>();
+    apiSpy.sendMessage.mockReturnValue(subject);
+    component.chatForm.setValue({ message: 'hello' });
+    component.onSubmit();
+    expect(component.lastAssistantAnnouncement).toBe('Assistant is typing…');
+    subject.next(stateResponse);
+    subject.complete();
+    expect(component.lastAssistantAnnouncement).toBe('Assistant replied');
+  });
+
+  it('onSubmit error clears the announcement', () => {
+    fixture.detectChanges();
+    apiSpy.sendMessage.mockReturnValue(throwError(() => ({ error: { detail: 'oops' } })));
+    component.chatForm.setValue({ message: 'hello' });
+    component.onSubmit();
+    expect(component.lastAssistantAnnouncement).toBe('');
+  });
+
+  it('does not echo the user-typed message into the announcement', () => {
+    fixture.detectChanges();
+    component.chatForm.setValue({ message: 'a very distinctive user message' });
+    component.onSubmit();
+    expect(component.lastAssistantAnnouncement).not.toContain('a very distinctive user message');
   });
 
   it('onSuggestedQuestion calls sendMessage', () => {

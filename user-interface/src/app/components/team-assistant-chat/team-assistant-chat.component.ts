@@ -82,6 +82,8 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
   suggestedQuestions: string[] = [];
   loading = false;
   error: string | null = null;
+  /** aria-live message announcing chat activity: typing state or a new assistant reply. */
+  lastAssistantAnnouncement = '';
   ready = false;
   missingFields: string[] = [];
 
@@ -264,14 +266,17 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
     ];
     this.loading = true;
     this.error = null;
+    this.lastAssistantAnnouncement = `${this.teamName} is typing…`;
     this.api.sendMessage(this.teamApiUrl, message, this.conversationId ?? undefined).subscribe({
       next: res => {
         this.applyState(res);
         this.loading = false;
+        this.lastAssistantAnnouncement = `${this.teamName} replied`;
       },
       error: err => {
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to send message';
         this.loading = false;
+        this.lastAssistantAnnouncement = '';
       },
     });
   }
