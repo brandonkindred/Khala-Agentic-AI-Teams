@@ -85,6 +85,7 @@ def run_chunked_agent_review(
     context: str = "",
     cache: Optional[AgentReviewCache] = None,
     cache_context: str = "",
+    failure_severity: str = "critical",
 ) -> List[IssueT]:
     """Run a quality agent over each file's raw, function-aware-split source.
 
@@ -102,6 +103,10 @@ def run_chunked_agent_review(
           raw content affects the agent's verdict (e.g. language/task
           description); a caller that omits it while distinguishing calls only
           by those fields risks a false cache hit.
+        - ``failure_severity`` should be a severity the caller's blocking policy
+          treats as blocking (e.g. "critical"/"high") — it drives the synthetic
+          "review incomplete" issue below, and a non-blocking value would defeat
+          its purpose.
 
     Postconditions:
         - Each non-blank file is split at function/method boundaries via
@@ -120,6 +125,16 @@ def run_chunked_agent_review(
           from the other pieces are still returned (one bad piece never aborts
           the whole review). Such a piece is never cached, so it is retried for
           real on the next call.
+        - If every piece failed (no partial coverage to fall back on — the
+          agent produced zero completed reviews for this call), a single
+          synthetic issue at ``failure_severity`` is appended instead of
+          silently returning an empty list: an empty result is otherwise
+          indistinguishable from "reviewed cleanly, no findings," and a
+          downstream gate that only checks for blocking issues would pass a
+          microtask that was never actually reviewed. Only a *total* failure
+          triggers this — a mix of failed and successful pieces keeps today's
+          lenient "one bad piece never aborts the whole review" behavior,
+          since partial coverage is still real coverage.
         - A file that fits in one segment is reviewed in a single call.
         - When ``cache`` is given, a piece whose exact LLM input (``source`` +
           ``cache_context`` + raw content) was already reviewed earlier in the
@@ -160,6 +175,7 @@ def run_chunked_agent_review(
             context,
         )
     issues: List[IssueT] = []
+    failed = 0
     for idx, (path, piece) in enumerate(pieces, start=1):
         cache_key = _piece_cache_key(source, cache_context, piece) if cache is not None else None
         items = cache.get(cache_key) if cache_key is not None else None
@@ -176,6 +192,7 @@ def run_chunked_agent_review(
                     context,
                     exc,
                 )
+                failed += 1
                 continue
             if cache_key is not None:
                 cache.put(cache_key, list(items or []))
@@ -194,6 +211,21 @@ def run_chunked_agent_review(
                     recommendation=getattr(item, "recommendation", ""),
                 )
             )
+    if failed and failed == len(pieces):
+        # Zero completed reviews: every piece failed, so there is no partial
+        # coverage to fall back on (unlike the mixed-outcome case above, which
+        # stays lenient). An empty `issues` here would be indistinguishable from
+        # a genuine clean pass, silently defeating a downstream gate that only
+        # checks for blocking issues -- surface it instead.
+        issues.append(
+            issue_factory(
+                source=source,
+                severity=failure_severity,
+                description=(f"{label} could not complete review: all {failed} piece(s) failed"),
+                file_path="",
+                recommendation=f"Investigate and re-run {label.lower()}; no pieces were reviewed.",
+            )
+        )
     return issues
 
 
@@ -251,6 +283,11 @@ def run_qa_agent(
         context=context,
         cache=cache,
         cache_context=f"{language}\x00{task_description}",
+        # Matches _QA_TESTING_PHASE_SPEC.missing_severity (backend_code_v2_team/
+        # phases/review.py) -- the same severity already used one layer up when
+        # the whole QA-agent call fails outright, so a total per-piece failure
+        # here blocks the gate exactly as consistently as that existing path.
+        failure_severity="high",
     )
 
 
@@ -307,4 +344,7 @@ def run_security_agent(
         context=context,
         cache=cache,
         cache_context=f"{language}\x00{task_description}",
+        # Matches _SECURITY_TESTING_PHASE_SPEC.missing_severity (backend_code_v2_team/
+        # phases/review.py) -- see run_qa_agent's identical rationale above.
+        failure_severity="critical",
     )

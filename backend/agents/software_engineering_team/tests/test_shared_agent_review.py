@@ -193,6 +193,40 @@ def test_failing_piece_skipped_others_survive():
     assert all(i.description == "real bug" for i in issues)
 
 
+def test_all_pieces_failing_appends_one_synthetic_issue_not_a_false_clean_list():
+    """When every piece of a multi-piece file fails (not just one), exactly one
+    synthetic issue is appended -- not one per failed piece, and not the empty
+    list that would be indistinguishable from a genuine clean pass. Also
+    exercises ``failure_severity``'s default ("critical"), since this call
+    doesn't override it."""
+    calls = {"n": 0}
+
+    def run_chunk(code: str):
+        calls["n"] += 1
+        raise RuntimeError("agent unavailable")
+
+    issues = run_chunked_agent_review(
+        run_chunk=run_chunk,
+        files={"big.py": _big_source()},
+        source="qa",
+        default_severity="medium",
+        label="QA agent",
+        task_id="t1",
+        issue_factory=_Issue,
+        max_chars=MAX,
+        warn_threshold=0,  # exercise the many-pieces warning path too
+    )
+    assert calls["n"] > 1  # confirms this is genuinely a multi-piece file
+    assert len(issues) == 1  # one synthetic issue, not one per failed piece
+    assert issues[0].severity == "critical"  # failure_severity's default
+    assert issues[0].source == "qa"
+    assert issues[0].file_path == ""
+    assert (
+        issues[0].description
+        == f"QA agent could not complete review: all {calls['n']} piece(s) failed"
+    )
+
+
 def test_file_path_defaults_to_sent_file_when_agent_gives_none():
     """When the agent reports location=None, the finding is attributed to the
     file actually sent rather than left blank."""
@@ -444,8 +478,9 @@ def test_failed_piece_is_not_cached_and_is_retried():
     second = run_chunked_agent_review(**kwargs)
 
     assert calls["n"] == 2  # the failed first call was not cached, so it retried
-    assert first == []  # nothing returned when the only piece failed
-    assert len(second) == 1  # the retry succeeded and returned an issue
+    # The only piece failed -> a synthetic "review incomplete" issue, not a false-clean [].
+    assert len(first) == 1 and first[0].severity == "critical"
+    assert len(second) == 1 and second[0].description == "real bug"  # the retry succeeded
 
 
 def test_cache_none_default_is_unchanged_passthrough():
@@ -564,7 +599,9 @@ def test_qa_agent_fallback_is_not_cached_and_is_retried():
     )
 
     first = run_qa_agent(**kwargs)
-    assert first == []  # the fallback piece was skipped, not turned into a false-clean issue set
+    # The only piece hit the fallback -> a synthetic "review incomplete" issue,
+    # not a false-clean [] (which a downstream gate would treat as "no findings").
+    assert len(first) == 1 and first[0].severity == "high"
     assert calls["n"] == 1
 
     second = run_qa_agent(**kwargs)
@@ -665,7 +702,9 @@ def test_security_agent_fallback_is_not_cached_and_is_retried():
     )
 
     first = run_security_agent(**kwargs)
-    assert first == []
+    # The only piece hit the fallback -> a synthetic "review incomplete" issue,
+    # not a false-clean [] (which a downstream gate would treat as "no findings").
+    assert len(first) == 1 and first[0].severity == "critical"
     assert calls["n"] == 1
 
     second = run_security_agent(**kwargs)
