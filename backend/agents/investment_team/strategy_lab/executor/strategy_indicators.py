@@ -155,11 +155,33 @@ def _shared_registry(
     wrapper functions have no ``source`` concept (they always read whatever
     field the caller passed as "the" series) and all share the default.
 
-    ``len(reference)`` is *also* part of the bucket key, even within one
-    correctly-scoped ``registries`` dict (an execution's own, or the current
-    ``_active_registries``). A caller reading the same symbol at two
-    different window depths — e.g. ``bollinger_bands(ctx.history(sym, 20))``
-    then ``bollinger_bands(ctx.history(sym, 50))`` for the same bar — passes
+    ``len(reference)`` is *also* part of the bucket key, but **only** on the
+    ``_active_registries`` fallback path (``registries is None`` on entry) —
+    not when a caller passes ``registries`` explicitly. The two production
+    callers that pass ``registries`` explicitly (``StrategyContext.indicator()``
+    and ``_ShadowContext.indicator()``, see ``contract.py``/
+    ``predicate_conformance.py``) always hand this function their own
+    ``history`` — the *full*, internally-managed retained history for that
+    symbol, never a caller-chosen slice. ``StrategyContext._ingest_bar``
+    grows it by exactly one bar per ingested bar and then holds it fixed at
+    ``STREAMING_WINDOW_BARS`` (``runtime_window.py``) once that cap is
+    reached, so its length is a deterministic function of how many bars have
+    been ingested so far, not something two different call sites can pick
+    independently for the same symbol — the "same symbol, two different
+    window depths" collision the length component exists to prevent cannot
+    occur here, and length-bucketing this path anyway would only cost an
+    extra registry construction per bar during warm-up for zero safety
+    benefit, permanently defeating the incremental-caching win on
+    ``ctx.indicator()``, the primary prescribed hot-loop path this change
+    targets.
+
+    The wrapper functions below (and any direct ``indicator_value`` call
+    with no context in scope) are exactly the opposite: they take no
+    ``registries`` parameter of their own, so they always resolve through
+    ``_active_registries``, and a caller *can* legitimately request two
+    different window depths for the same symbol in the same execution — e.g.
+    ``bollinger_bands(ctx.history(sym, 20))`` then
+    ``bollinger_bands(ctx.history(sym, 50))`` for the same bar — passing
     genuinely different-length bar sequences that would otherwise share one
     registry under plain ``(symbol, source)``. ``IndicatorRegistry``'s own
     ``_advance_kind`` checks ``id(bars[-2])`` against its cached fingerprint
@@ -170,7 +192,7 @@ def _shared_registry(
     back-to-back with no other same-size allocation between them, CPython's
     allocator reuses that address far more often than not (reproduced 100%
     across 2000 trials for a `bollinger_bands` depth-20-then-21 pair, not a
-    rare coincidence). Splitting the bucket by length sidesteps that
+    rare coincidence). Splitting this path's bucket by length sidesteps that
     ``IndicatorRegistry``-internal behavior entirely — out of scope to
     change directly — rather than trying to out-guess it. The cost is
     bounded and one-time: during warm-up, a caller whose depth grows every
@@ -233,14 +255,16 @@ def _shared_registry(
         own, initially-empty dict). Never raises.
     Postconditions:
         Returns an ``IndicatorRegistry``. When the trailing element exposes
-        both a non-``None`` ``timestamp`` and a non-``None`` ``symbol``,
-        AND ``registries`` (or, if ``None``, the current
-        ``_active_registries``) resolves to a dict, constructs and caches one
-        per ``(symbol, source, len(reference))`` in that dict the first time
-        it's seen and returns that same instance on every subsequent call for
-        that key against that same dict; otherwise (missing timestamp/symbol,
-        or no dict available at all) returns a fresh, never-cached instance.
-        Never mutates ``reference``.
+        both a non-``None`` ``timestamp`` and a non-``None`` ``symbol``: if
+        ``registries`` was passed explicitly (not ``None``), constructs and
+        caches one per ``(symbol, source)`` in that dict; otherwise, when the
+        current ``_active_registries`` resolves to a dict, constructs and
+        caches one per ``(symbol, source, len(reference))`` in that dict —
+        either way, the first time the key is seen, and returns that same
+        instance on every subsequent call for that key against that same
+        dict. Otherwise (missing timestamp/symbol, or no dict available via
+        either path) returns a fresh, never-cached instance. Never mutates
+        ``reference``.
     """
     last = _trailing_element(reference)
     if last is None:
@@ -258,11 +282,13 @@ def _shared_registry(
     symbol = last.get("symbol") if isinstance(last, dict) else _safe_getattr(last, "symbol")
     if symbol is None:
         return IndicatorRegistry()
-    if registries is None:
+    if registries is not None:
+        key = (symbol, source)
+    else:
         registries = _active_registries.get()
-    if registries is None:
-        return IndicatorRegistry()
-    key = (symbol, source, len(reference))
+        if registries is None:
+            return IndicatorRegistry()
+        key = (symbol, source, len(reference))
     reg = registries.get(key)
     if reg is None:
         reg = IndicatorRegistry()

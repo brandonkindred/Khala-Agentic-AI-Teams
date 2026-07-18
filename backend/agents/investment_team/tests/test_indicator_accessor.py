@@ -210,14 +210,18 @@ def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.Monk
     ``test_ad_hoc_sequential_calls_with_overlapping_timestamps_no_longer_corrupt``
     in ``test_strategy_indicators.py`` for why that's deliberate.
 
-    Reads a fixed-size sliding window each call (matching ``StrategyContext``
-    ``_ingest_bar``'s bounded retention window, not an ever-growing prefix):
-    the registry cache is also keyed by window length (see
+    Reads an ever-growing prefix each call, the way a real backtest's history
+    actually behaves before ``STREAMING_WINDOW_BARS`` caps it. This is safe
+    here specifically because ``registries`` is passed explicitly:
+    ``_shared_registry`` only adds ``len(reference)`` to its bucket key on
+    the ``_active_registries`` fallback path used by the standalone wrapper
+    functions (see ``_shared_registry``'s docstring, and
     ``test_shared_registry_does_not_blend_different_window_depths_for_one_
-    symbol`` in ``test_strategy_indicators.py``), so a history that never
-    stopped growing would never actually settle on one registry either, in
-    production or here — ``ctx.indicator()``'s own ``history`` argument
-    always caps at ``STREAMING_WINDOW_BARS`` for exactly this reason.
+    symbol`` in ``test_strategy_indicators.py`` for that path's own
+    coverage) — the explicit-``registries`` path ``ctx.indicator()`` uses
+    keys on ``(symbol, source)`` alone, because its ``history`` argument is
+    always the context's own monotonically-growing (then capped) retained
+    history, never a caller-chosen depth.
     """
     from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 
@@ -232,11 +236,9 @@ def test_indicator_value_shares_one_registry_per_symbol(monkeypatch: pytest.Monk
 
     registries: dict = {}
     bars = _make_bars(n=40, symbol="QQQ")
-    window = 20
-    for i in range(window, len(bars) + 1):
-        recent = bars[i - window : i]
-        indicator_value("sma", recent, period=10, registries=registries)
-        indicator_value("macd", recent, registries=registries)
+    for i in range(20, len(bars) + 1):
+        indicator_value("sma", bars[:i], period=10, registries=registries)
+        indicator_value("macd", bars[:i], registries=registries)
 
     assert len(constructed) == 1
 
@@ -247,9 +249,10 @@ def test_indicator_value_registry_count_scales_with_distinct_symbols(
     """'Once per backtest' means once per symbol-stream within a backtest, not
     a single flat instance: a multi-symbol backtest constructs one registry
     per symbol it actually reads — still far below one-per-call, but not a
-    literal singleton either. Passes an explicit ``registries`` dict and a
-    fixed-size sliding window — see
-    ``test_indicator_value_shares_one_registry_per_symbol`` above."""
+    literal singleton either. Passes an explicit ``registries`` dict and an
+    ever-growing prefix — see
+    ``test_indicator_value_shares_one_registry_per_symbol`` above for why
+    that's safe on this path."""
     from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
 
     constructed: list[object] = []
@@ -264,10 +267,9 @@ def test_indicator_value_registry_count_scales_with_distinct_symbols(
     registries: dict = {}
     aaa = _make_bars(n=30, symbol="AAA")
     bbb = _make_bars(n=30, symbol="BBB")
-    window = 20
-    for i in range(window, 31):
-        indicator_value("sma", aaa[i - window : i], period=10, registries=registries)
-        indicator_value("sma", bbb[i - window : i], period=10, registries=registries)
+    for i in range(20, 31):
+        indicator_value("sma", aaa[:i], period=10, registries=registries)
+        indicator_value("sma", bbb[:i], period=10, registries=registries)
 
     assert len(constructed) == 2
 
