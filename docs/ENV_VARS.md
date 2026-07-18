@@ -564,6 +564,48 @@ per cited file). The two phases run sequentially, so this is a single budget,
 not two. Default `4`, floor `1` (`1` runs both phases' calls sequentially).
 Results merge in deterministic order regardless of completion order.
 
+**Applies only to the in-process thread-mode fallback** (`coordinator.run_coordinator`,
+via `mapping.py`'s parallel-map helper) — used only when Temporal is disabled or
+unavailable. It has **no effect** on the default Temporal-dispatch path (code
+review runs Temporal by default; see `TEMPORAL_ADDRESS (code review agent
+default)` above): there, each chunk is reviewed by its own durable
+`review_chunk_activity`, and fan-out concurrency is governed instead by the
+Temporal worker's own activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`
+(below) — raising `CODE_REVIEW_MAP_PARALLELISM` does nothing to speed up a large
+PR review running in the (default) Temporal mode.
+
+### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
+Int (default `8`, floor `1`). Ceiling on how many `code_review-queue` activities
+the code review Temporal worker runs at once — this is what actually bounds
+map-phase fan-out concurrency in the default Temporal dispatch mode (see
+`CODE_REVIEW_MAP_PARALLELISM` above, which does **not** apply here). The shared
+framework default (`4`) is sized for narrow, fixed-width fan-out; code review
+fans out one `review_chunk_activity` per review chunk, and a large PR can
+produce dozens of chunks, so a low ceiling turns a large review into many
+sequential rounds — this was the root cause of a review timing out its
+whole-review client wait (`CODE_REVIEW_EXECUTE_TIMEOUT_S` below) even though it
+was still executing durably. `8` mirrors `SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`
+and `INVESTMENT_MAX_CONCURRENT_ACTIVITIES`. Parsed via the shared `env_int`
+(unset/garbage/`<=0` → default, with a warning on a set-but-unparseable value).
+Only read by the code review worker (`code_review_agent/temporal/worker.py`).
+
+### CODE_REVIEW_EXECUTE_TIMEOUT_S
+Int seconds (default `21600` = 6h, floor `60`). Ceiling on how long
+`CodeReviewAgent.run`'s synchronous Temporal dispatch
+(`execute_code_review_workflow_sync`) waits for the whole durable review before
+giving up client-side. This is a pragmatic ceiling, not a proven worst-case
+bound: the map phase's chunk count scales with PR size with no enforced cap, so
+no finite number is formally guaranteed to exceed every run's worst case.
+`CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES` (above) is the primary lever for keeping
+large-PR reviews inside this ceiling; raise this var (rather than expecting the
+default to cover every PR size) if your fleet regularly reviews very large PRs.
+Parsed via the shared `env_int`. A Temporal-side `execution_timeout` derived
+from this value (minus a fixed 120s margin, floored at 60s — see
+`resolve_execution_timeout_s` in `code_review_agent/temporal/config.py`) is also
+applied to the workflow execution itself, so an execution this client gives up
+waiting on is reclaimed (freeing its worker slots) at essentially the same
+moment, rather than running unbounded server-side.
+
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
 A failing chunk smaller than twice this is retried once as-is instead of being
 bisected. Default `8000`, floor `1000`.

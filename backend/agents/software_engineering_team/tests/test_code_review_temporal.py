@@ -16,6 +16,7 @@ registered.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict
 
 import pytest
@@ -93,6 +94,42 @@ def test_dummy_harness_disables(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "")  # not forced
     assert cfg.code_review_temporal_enabled() is False
+
+
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [
+        (None, 21600),
+        ("3600", 3600),
+        ("30", 60),  # below the 60s floor -> clamped up to the floor
+        ("garbage", 21600),
+    ],
+)
+def test_resolve_execute_timeout_s_env_parsing(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("CODE_REVIEW_EXECUTE_TIMEOUT_S", raising=False)
+    else:
+        monkeypatch.setenv("CODE_REVIEW_EXECUTE_TIMEOUT_S", env_value)
+    assert cfg.resolve_execute_timeout_s() == expected
+
+
+def test_resolve_execution_timeout_s_stays_below_client_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CODE_REVIEW_EXECUTE_TIMEOUT_S", raising=False)
+    # Default: 120s margin subtracted from the 6h default client ceiling.
+    assert cfg.resolve_execution_timeout_s(21600) == 21480
+    # The server-side timeout must always come in strictly below whatever
+    # client ceiling it was derived from, so the server always wins the race.
+    execute_timeout_s = cfg.resolve_execute_timeout_s()
+    assert cfg.resolve_execution_timeout_s(execute_timeout_s) < execute_timeout_s
+
+
+def test_resolve_execution_timeout_s_floors_for_tiny_override() -> None:
+    # Below margin + floor, the floor takes over instead of going non-positive.
+    assert cfg.resolve_execution_timeout_s(90) == 60
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +495,30 @@ def test_run_maps_workflow_unavailable_marker(monkeypatch: pytest.MonkeyPatch) -
         CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
 
 
+def test_run_via_temporal_enriches_bare_timeout_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("code_review_agent.agent._code_review_temporal_enabled", lambda: True)
+    monkeypatch.setattr(
+        "code_review_agent.temporal.worker.start_code_review_temporal_worker_thread",
+        lambda: True,
+    )
+
+    def _timeout(payload, **kw):
+        raise TimeoutError()
+
+    monkeypatch.setattr(
+        "code_review_agent.temporal.start_workflow.execute_code_review_workflow_sync", _timeout
+    )
+    with pytest.raises(TimeoutError) as exc_info:
+        CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+    # The bare TimeoutError() the client-side wait raises has no message;
+    # _run_via_temporal must attach real context (the configured duration and a
+    # hint this is a wait timeout, not a reviewer content failure) rather than
+    # letting the empty exception propagate as-is.
+    message = str(exc_info.value)
+    assert "timed out after" in message
+    assert "not a reviewer content failure" in message
+
+
 def test_reports_review_unavailable_walks_cause_chain() -> None:
     from code_review_agent.agent import _reports_review_unavailable
     from temporalio.exceptions import ApplicationError
@@ -534,3 +595,91 @@ def test_workflow_and_activities_are_registered() -> None:
     assert "prepare_review_activity" in names
     assert "find_architecture_and_redundancy_activity" in names
     assert "find_side_effect_impact_activity" in names
+
+
+# ---------------------------------------------------------------------------
+# 5. Worker boot: concurrency ceiling + start_team_worker delegation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [
+        (None, 8),
+        ("16", 16),
+        ("0", 1),
+        ("-5", 1),
+        ("not-a-number", 8),
+    ],
+)
+def test_worker_max_concurrent_activities_env_parsing(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
+) -> None:
+    from code_review_agent.temporal import worker as worker_mod
+
+    if env_value is None:
+        monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    else:
+        monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", env_value)
+
+    assert worker_mod._max_concurrent_activities() == expected
+
+
+def test_worker_start_delegates_to_start_team_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When enabled, the boot hook delegates to ``start_team_worker`` with the
+    resolved concurrency ceiling instead of the shared framework's 4-slot
+    default."""
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
+    from code_review_agent.temporal import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "code_review_temporal_enabled", lambda: True)
+    monkeypatch.setattr(worker_mod, "resolve_code_review_temporal_address", lambda: "temporal:7233")
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
+    monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    captured: dict = {}
+
+    def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities):
+        captured.update(
+            team=team,
+            workflows=workflows,
+            activities=activities,
+            task_queue=task_queue,
+            max_concurrent_activities=max_concurrent_activities,
+        )
+        return True
+
+    monkeypatch.setattr(worker_mod, "start_team_worker", _fake_start)
+
+    assert worker_mod.start_code_review_temporal_worker_thread() is True
+    assert captured == {
+        "team": "code_review",
+        "workflows": WORKFLOWS,
+        "activities": ACTIVITIES,
+        "task_queue": TASK_QUEUE,
+        "max_concurrent_activities": 8,
+    }
+
+
+def test_worker_start_returns_false_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from code_review_agent.temporal import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "code_review_temporal_enabled", lambda: False)
+    assert worker_mod.start_code_review_temporal_worker_thread() is False
+
+
+def test_worker_start_defaults_temporal_address_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With TEMPORAL_ADDRESS unset, the boot hook points the shared client at
+    the resolved default so it has something to connect to, without ever
+    overwriting an operator's explicit value (covered separately by the
+    delegation test above, which sets TEMPORAL_ADDRESS first)."""
+    from code_review_agent.temporal import worker as worker_mod
+
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+    monkeypatch.setattr(worker_mod, "code_review_temporal_enabled", lambda: True)
+    monkeypatch.setattr(worker_mod, "resolve_code_review_temporal_address", lambda: "resolved:7233")
+    monkeypatch.setattr(worker_mod, "start_team_worker", lambda *a, **kw: True)
+
+    assert worker_mod.start_code_review_temporal_worker_thread() is True
+    assert os.environ["TEMPORAL_ADDRESS"] == "resolved:7233"
