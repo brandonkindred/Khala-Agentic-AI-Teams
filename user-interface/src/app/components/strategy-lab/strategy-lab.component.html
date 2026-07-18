@@ -344,9 +344,15 @@
               <mat-icon aria-hidden="true">{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
             <div class="strategy-card-header-text">
-              <mat-card-title>
-                {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
-              </mat-card-title>
+              @if (showTitle) {
+                <h3 mat-card-title>
+                  {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+                </h3>
+              } @else {
+                <h2 mat-card-title>
+                  {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+                </h2>
+              }
               <mat-card-subtitle>
                 {{ record.created_at | date:'MMM d, y, h:mm a' }} &bull; {{ record.strategy.strategy_id }}
               </mat-card-subtitle>

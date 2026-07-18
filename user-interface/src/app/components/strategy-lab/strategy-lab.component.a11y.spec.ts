@@ -115,7 +115,7 @@ const RECORD: StrategyLabRecord = {
 };
 
 describe('StrategyLabComponent a11y — result card disclosure', () => {
-  async function createFixture() {
+  async function createFixture(showTitle?: boolean) {
     const apiSpy = {
       runStrategyLab: vi.fn().mockReturnValue(NEVER),
       streamRunStatus: vi.fn().mockReturnValue(NEVER),
@@ -148,6 +148,9 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
+    if (showTitle !== undefined) {
+      fixture.componentInstance.showTitle = showTitle;
+    }
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
     return fixture;
   }
@@ -155,6 +158,24 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
   it('has no axe violations collapsed', async () => {
     const fixture = await createFixture();
     expect(fixture.nativeElement.querySelector('.strategy-card')).toBeTruthy();
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=true (default): exposes the card title as an <h3>, nested under the component\'s own <h2>', async () => {
+    const fixture = await createFixture();
+    const title: HTMLElement = fixture.nativeElement.querySelector('.strategy-card-header-text [mat-card-title]');
+    expect(title).toBeTruthy();
+    expect(title.tagName).toBe('H3');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=false: exposes the card title as an <h2>, so it sits directly under the wrapper\'s <h1>', async () => {
+    const fixture = await createFixture(false);
+    const title: HTMLElement = fixture.nativeElement.querySelector('.strategy-card-header-text [mat-card-title]');
+    expect(title).toBeTruthy();
+    expect(title.tagName).toBe('H2');
+
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
