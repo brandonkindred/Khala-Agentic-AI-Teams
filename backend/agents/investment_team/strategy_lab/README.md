@@ -278,6 +278,24 @@ former `STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle and the per-call `respons
 have been retired. The canonical wire-shape definitions still live in `agents/_response_schemas.py`
 (validated for well-formedness by the test suite).
 
+`RefinementAgent` is a narrow, deliberate exception to the above: `_invoke_and_parse` requests
+provider-enforced schema-conformant decoding for `REFINEMENT_SCHEMA` via
+`LLMClient.complete_json(schema=...)` — bypassing the strands `Agent`/`chat()` path, which does not
+forward a `schema` — whenever `llm_service.provider_supports_structured_output(resolve_provider())`
+is `True` (Ollama only today). This is a safe re-introduction of the idea behind the retired
+`STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle, not a regression of it: unlike that mechanism, it is
+capability-gated per call site rather than applied unconditionally to every agent, it is bounded to a
+single attempt (`run_structured_agent` never loops on a structured call — a schema-conformant decode
+either succeeds or signals starvation, with no "malformed JSON" middle state to re-prompt), and it
+degrades immediately and deterministically to the exact legacy `extract_json_object` +
+`build_json_correction_prompt` retry loop the moment the client raises
+`LLMSemanticExhaustionError(schema_forced=True)` — the same starvation signal that caused the original
+mechanism's revert, now caught on the first occurrence instead of being retried blind. On success it
+eliminates the happy-path correction resend that made refinement the most token-heavy call in the
+pipeline (a full strategy program re-emitted as a JSON string on every retry). The other
+spec-authoring/reviewing agents (design, design-review, zero-trade repair, alignment fix-proposer) are
+unchanged and still rely solely on the prompt-embedded-schema + `json_object` contract described above.
+
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
 Per-cycle hard cap on the total number of LLM calls the design phase may make within a single
 `run_cycle`, spanning all `MAX_DESIGN_REENTRIES` re-entries (default `120`, sub-1 values floored to

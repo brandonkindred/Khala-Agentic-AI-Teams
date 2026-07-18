@@ -62,6 +62,19 @@ class _ScriptedAgent:
 _GOOD = '{"strategy_code": "# fixed", "changes_made": "tightened guard"}'
 
 
+@pytest.fixture(autouse=True)
+def _force_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This file exercises the unconstrained parse-retry loop exclusively.
+
+    Force the structured-output seam off so these tests are deterministic
+    regardless of ambient ``LLM_PROVIDER`` (unset defaults to ``"ollama"``,
+    whose capability flag is True) — see
+    ``refinement._structured_output_available``. The structured path itself
+    is covered by ``test_strategy_lab_refinement_structured_output.py``.
+    """
+    monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
+
+
 def test_agent_key_is_strategy_refinement_not_ideation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression guard: the call site must identify itself as
     ``strategy_refinement`` (not the mislabeled ``strategy_ideation`` copied
