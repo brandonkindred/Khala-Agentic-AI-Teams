@@ -555,6 +555,33 @@ def test_code_review_agent_receives_architecture_and_spec_content(tmp_path: Path
     assert cr_input_default.spec_content == ""
 
 
+def test_code_review_input_carries_repo_root_for_durable_reader(tmp_path: Path) -> None:
+    """The ``CodeReviewInput`` built for the external agent carries ``repo_root`` set
+    to the workspace path, so a durable Temporal review can rebuild the whole-repo
+    reader worker-side (the live reader cannot cross that boundary)."""
+    config = _build_config()
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.repo_root == str(tmp_path)
+
+
 def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
     """The microtask QA/security branches emit their detail-callback messages."""
     config = _build_config()
