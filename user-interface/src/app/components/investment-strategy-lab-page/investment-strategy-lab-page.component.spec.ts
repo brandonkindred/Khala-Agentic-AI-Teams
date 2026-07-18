@@ -91,4 +91,15 @@ describe('InvestmentStrategyLabPageComponent', () => {
     fixture = await createFixture();
     expect(fixture.nativeElement.querySelector('app-strategy-lab')).toBeTruthy();
   });
+
+  it('shows the "Strategy Lab" title exactly once — the wrapper\'s <h1>, with the nested component\'s own <h2> suppressed', async () => {
+    fixture = await createFixture();
+    const h1: HTMLElement = fixture.nativeElement.querySelector('h1');
+    expect(h1.textContent?.trim()).toBe('Strategy Lab');
+    expect(fixture.nativeElement.querySelector('h2')).toBeNull();
+
+    const region: HTMLElement = fixture.nativeElement.querySelector('.strategy-lab');
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Strategy Lab');
+  });
 });
