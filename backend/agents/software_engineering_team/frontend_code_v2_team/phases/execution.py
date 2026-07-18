@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
@@ -190,6 +191,7 @@ def _qa_gate(
     files: Dict[str, str],
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
+    cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
     """Run the frontend QA gate (QA agent only), keeping only ``source == "qa"`` issues."""
     from .review import run_microtask_review
@@ -207,6 +209,7 @@ def _qa_gate(
         linting_tool_agent=None,
         tool_agents=deps.tool_agents,
         detail_callback=detail_callback,
+        cache=cache,
     )
     qa_issues = [i for i in r.issues if i.source == "qa"]
     return GateOutcome(passed=not qa_issues, issues=qa_issues, summary=r.summary)
@@ -221,6 +224,7 @@ def _security_gate(
     files: Dict[str, str],
     deps: ReviewDependencies,
     detail_callback: Callable[[str], None],
+    cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
     """Run the frontend security gate (security agent only), keeping only ``source == "security"``."""
     from .review import run_microtask_review
@@ -238,6 +242,7 @@ def _security_gate(
         linting_tool_agent=None,
         tool_agents=deps.tool_agents,
         detail_callback=detail_callback,
+        cache=cache,
     )
     sec_issues = [i for i in r.issues if i.source == "security"]
     return GateOutcome(passed=not sec_issues, issues=sec_issues, summary=r.summary)
