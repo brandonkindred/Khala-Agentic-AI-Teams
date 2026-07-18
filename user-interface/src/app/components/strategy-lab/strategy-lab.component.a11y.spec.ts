@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, NEVER, Subject } from 'rxjs';
+import { of, NEVER, Subject, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
@@ -300,6 +300,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     const apiSpy = {
       runStrategyLab: vi.fn().mockReturnValue(of(START_RESPONSE)),
       streamRunStatus: vi.fn(),
+      getRunStatus: vi.fn(),
       getStrategyLabConfig: vi.fn().mockReturnValue(
         of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
       ),
@@ -410,6 +411,33 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('clamps the announced batch number instead of announcing an impossible batch position', async () => {
+    // Regression: after the last batch's batch_complete, current_batch is
+    // null and completed_batches already equals batch_count — the same
+    // terminal gap as the strategy-count fix above, one level up.
+    const { fixture } = await createFixture();
+    fixture.componentInstance.running = true;
+    fixture.componentInstance.runStatus = {
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 15,
+      completed_cycles: 15,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      batch_count: 3,
+      completed_batches: 3,
+      current_batch: null,
+    };
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Batch 3 of 3 — Finishing up.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -591,6 +619,33 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('does not announce success when SSE fails over to polling and polling itself then fails', async () => {
+    // Regression: fallbackToPolling's own `error` handler used to call
+    // onRunComplete() with no outcome. The last known runStatus.status at
+    // that point is always still 'running' (takeWhile only lets a
+    // non-running status through, which takes the `next` branch instead),
+    // so the generic default wrongly announced "Strategy Lab run complete."
+    // for what is actually a lost-connectivity failure.
+    const { fixture, apiSpy } = await createFixture();
+    apiSpy.streamRunStatus.mockReturnValue(throwError(() => new Error('stream failed')));
+    apiSpy.getRunStatus.mockReturnValue(throwError(() => new Error('poll failed')));
+
+    // fallbackToPolling's timer(0, 5000) needs a tick to fire; fake timers
+    // are scoped to this test only (try/finally) so they can't interfere
+    // with the other real-time/async-axe tests in this file.
+    vi.useFakeTimers();
+    try {
+      fixture.componentInstance.runNewStrategy();
+      vi.advanceTimersByTime(0);
+    } finally {
+      vi.useRealTimers();
+    }
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab lost track of the run — status unavailable.');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

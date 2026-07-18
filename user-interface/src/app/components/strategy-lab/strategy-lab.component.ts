@@ -669,8 +669,13 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         }
       },
       error: () => {
-        // Polling also failed — stop tracking
-        this.onRunComplete();
+        // Polling also failed — stop tracking. Pass an explicit outcome:
+        // the last known runStatus.status here is always still 'running'
+        // (takeWhile only lets a non-running status through, which would
+        // have gone through the `next` branch above instead), so falling
+        // through to describeLastKnownRunStatus()'s default would wrongly
+        // announce success for what is actually a lost-connectivity failure.
+        this.onRunComplete('Strategy Lab lost track of the run — status unavailable.');
       },
     });
   }
@@ -934,7 +939,14 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       const status = this.runStatus;
       const segments: string[] = [];
       if (status.batch_count && status.batch_count > 1) {
-        const batchNum = status.current_batch ?? (status.completed_batches ?? 0) + 1;
+        // After the last batch's batch_complete, current_batch is null and
+        // completed_batches already equals batch_count — the same terminal
+        // gap as the strategy count below. Clamp so this can't announce an
+        // impossible "Batch 4 of 3".
+        const batchNum = Math.min(
+          status.current_batch ?? (status.completed_batches ?? 0) + 1,
+          status.batch_count,
+        );
         segments.push(`Batch ${batchNum} of ${status.batch_count}`);
       }
       // Once the last cycle's cycle_complete lands, completed_cycles already
