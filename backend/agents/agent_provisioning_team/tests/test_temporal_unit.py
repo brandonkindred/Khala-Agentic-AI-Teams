@@ -756,6 +756,85 @@ def test_provision_tool_activity_calls_provisioner() -> None:
     fake_provisioner.provision.assert_called_once()
 
 
+def test_provision_tool_activity_injects_job_id_for_docker_provisioner() -> None:
+    """The write side of the labeling contract: provision_tool_activity must
+    actually stash job_id into the config dict it hands to
+    DockerProvisionerTool.provision, under docker_provisioner.JOB_ID_CONFIG_KEY
+    -- every test elsewhere only exercises the read side (_do_provision
+    handling a hand-built config), never this construction.
+    """
+    from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
+    from agent_provisioning_team.temporal import activities
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
+
+    fake_provisioner = MagicMock()
+    fake_provisioner.provision.return_value = ToolProvisionResult(
+        tool_name="docker", success=True, provisioner_key=None
+    )
+
+    with (
+        patch.object(activities, "_best_effort_job_store"),
+        patch(
+            "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
+            return_value={"docker_provisioner": fake_provisioner},
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        creds = GeneratedCredentials(tool_name="docker")
+        activities.provision_tool_activity(
+            "job-77",
+            "a",
+            "docker",
+            credentials_dump=creds.model_dump(),
+            tools_total=1,
+            provisioner="docker_provisioner",
+            tool_config={"base_image": "python:3.11"},
+        )
+
+    _args, kwargs = fake_provisioner.provision.call_args
+    assert kwargs["config"][JOB_ID_CONFIG_KEY] == "job-77"
+    assert kwargs["config"]["base_image"] == "python:3.11"
+
+
+def test_provision_tool_activity_does_not_inject_job_id_for_non_docker_provisioner() -> None:
+    """Regression guard: job_id must NOT be injected for any provisioner other
+    than docker_provisioner. generic_provisioner in particular echoes its
+    whole config dict verbatim into persisted/returned state with no
+    redaction for an unrecognized key -- injecting unconditionally would leak
+    the internal job_id into checkpoints and API responses.
+    """
+    from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
+    from agent_provisioning_team.temporal import activities
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
+
+    fake_provisioner = MagicMock()
+    fake_provisioner.provision.return_value = ToolProvisionResult(
+        tool_name="generic", success=True, provisioner_key=None
+    )
+
+    with (
+        patch.object(activities, "_best_effort_job_store"),
+        patch(
+            "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
+            return_value={"generic_provisioner": fake_provisioner},
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        creds = GeneratedCredentials(tool_name="api_token", username="u", password="p")
+        activities.provision_tool_activity(
+            "job-77",
+            "a",
+            "api_token",
+            credentials_dump=creds.model_dump(),
+            tools_total=1,
+            provisioner="generic_provisioner",
+            tool_config={},
+        )
+
+    _args, kwargs = fake_provisioner.provision.call_args
+    assert JOB_ID_CONFIG_KEY not in kwargs["config"]
+
+
 def test_provision_tool_activity_raises_when_provisioner_missing() -> None:
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.temporal import activities
@@ -1113,23 +1192,23 @@ def test_compensate_activity_skips_docker_verification_when_registry_unreadable(
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
 
 
-def test_compensate_activity_verifies_orphan_even_when_tear_down_environment_false() -> None:
-    """A conservative tear_down_environment=False must not itself suppress the orphan check.
-
-    This is the compound-failure gap: the pre-run ownership check can fail
-    (leaving pre_existing_environment's conservative True default, hence
-    tear_down_environment=False) and setup can still create-then-fail with
-    its own local rollback also failing. Nothing ever gets registered in
-    EnvironmentStore in that case, so the live record check must still let
-    the by-name orphan probe run and catch the leak.
+def test_compensate_activity_reclaims_self_leaked_container_by_job_id_label() -> None:
+    """No EnvironmentStore record, and DockerProvisionerTool.is_pre_existing
+    says the container is NOT pre-existing (e.g. its khala.job_id label
+    matches this run's own job_id, or it's confirmed absent) -- this is
+    unambiguously this attempt's own leak (setup created it, failed before
+    registration completed, and its own local rollback also failed to
+    remove it) or nothing to protect at all. Either way, verification must
+    proceed to verify_and_remove_orphan, not treat it as "possibly
+    pre-existing" the way is_pre_existing()=True would.
     """
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
     fake_orch.environment_store.get.return_value = None
     fake_orch.environment_store.readable.return_value = True
+    fake_orch.tool_agents.get.return_value.is_pre_existing.return_value = False
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
-    fake_orch.tool_agents.get.return_value._container_exists.return_value = False
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
@@ -1139,30 +1218,23 @@ def test_compensate_activity_verifies_orphan_even_when_tear_down_environment_fal
     ):
         activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
 
+    fake_orch.tool_agents.get.return_value.is_pre_existing.assert_called_once_with("a1", "j-comp")
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
 
 
 def test_compensate_activity_skips_orphan_probe_when_deterministic_container_still_exists() -> None:
-    """No EnvironmentStore record, but the deterministic container itself still exists.
-
-    Mirrors check_existing_environment_activity's own reasoning: the record
-    and the container are independently losable, e.g. the setup
-    name-conflict path where Docker/idempotency state was lost but
-    agent-<agent_id> is a real pre-existing container. An absent record
-    alone must not be treated as proof the container is an orphan. The
-    container carries no khala.job_id label (a legacy container, or one
-    created before this labeling primitive existed) -- pinned explicitly so
-    this test stays scoped to the "no ownership signal" branch rather than
-    the separate foreign-job-label branch covered by
-    test_compensate_activity_protects_foreign_job_label_container.
+    """No EnvironmentStore record, but DockerProvisionerTool.is_pre_existing
+    says the container might still predate this run (e.g. no label, or a
+    different job's label) -- an absent record alone must not be treated as
+    proof the container is an orphan, so verify_and_remove_orphan must not
+    run.
     """
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
     fake_orch.environment_store.get.return_value = None
     fake_orch.environment_store.readable.return_value = True
-    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
-    fake_orch.tool_agents.get.return_value._container_owner_job_id.return_value = None
+    fake_orch.tool_agents.get.return_value.is_pre_existing.return_value = True
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
@@ -1175,73 +1247,18 @@ def test_compensate_activity_skips_orphan_probe_when_deterministic_container_sti
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
 
 
-def test_compensate_activity_reclaims_self_leaked_container_by_job_id_label() -> None:
-    """A container labeled with THIS run's own job_id and no EnvironmentStore
-    record is unambiguously this attempt's own leak -- e.g. setup created it,
-    failed before registration completed, and its own local rollback also
-    failed to remove it. Must be reclaimed via verify_and_remove_orphan, not
-    protected as "possibly pre-existing" the way an unlabeled container is.
+def test_compensate_activity_still_consults_is_pre_existing_without_job_id() -> None:
+    """job_id omitted (None) is passed straight through to is_pre_existing --
+    which itself falls back to its own conservative "protect" default for a
+    missing job_id -- rather than compensate_activity trying to special-case
+    that decision itself.
     """
     from agent_provisioning_team.temporal import activities
 
     fake_orch = MagicMock()
     fake_orch.environment_store.get.return_value = None
     fake_orch.environment_store.readable.return_value = True
-    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
-    fake_orch.tool_agents.get.return_value._container_owner_job_id.return_value = "j-comp"
-    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.return_value = True
-    with (
-        patch(
-            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
-            return_value=fake_orch,
-        ),
-        patch.object(activities._js, "clear_completed_phases"),
-    ):
-        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
-
-    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
-
-
-def test_compensate_activity_protects_foreign_job_label_container(caplog) -> None:
-    """A container labeled with a DIFFERENT job's job_id must stay protected,
-    same as an unlabeled one -- the #1489 per-agent_id lock should already
-    rule out a live concurrent job at this agent_id, so this is unexpected
-    and worth a distinct warning rather than silent removal.
-    """
-    from agent_provisioning_team.temporal import activities
-
-    fake_orch = MagicMock()
-    fake_orch.environment_store.get.return_value = None
-    fake_orch.environment_store.readable.return_value = True
-    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
-    fake_orch.tool_agents.get.return_value._container_owner_job_id.return_value = "some-other-job"
-    with (
-        patch(
-            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
-            return_value=fake_orch,
-        ),
-        patch.object(activities._js, "clear_completed_phases"),
-        caplog.at_level("WARNING"),
-    ):
-        activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=False)
-
-    fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
-    assert "some-other-job" in caplog.text
-    assert "j-comp" in caplog.text
-
-
-def test_compensate_activity_falls_back_to_conservative_protect_without_job_id() -> None:
-    """When compensate_activity itself was called with no job_id, there is
-    nothing to compare a label against -- must fall back to the original
-    conservative behavior (protect) without even consulting the label, so
-    every pre-labeling-era caller keeps working exactly as before.
-    """
-    from agent_provisioning_team.temporal import activities
-
-    fake_orch = MagicMock()
-    fake_orch.environment_store.get.return_value = None
-    fake_orch.environment_store.readable.return_value = True
-    fake_orch.tool_agents.get.return_value._container_exists.return_value = True
+    fake_orch.tool_agents.get.return_value.is_pre_existing.return_value = True
     with (
         patch(
             "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
@@ -1251,7 +1268,7 @@ def test_compensate_activity_falls_back_to_conservative_protect_without_job_id()
     ):
         activities.compensate_activity("a1", [], job_id=None, tear_down_environment=False)
 
-    fake_orch.tool_agents.get.return_value._container_owner_job_id.assert_not_called()
+    fake_orch.tool_agents.get.return_value.is_pre_existing.assert_called_once_with("a1", None)
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_not_called()
 
 
@@ -1260,16 +1277,16 @@ def test_compensate_activity_raises_when_tear_down_environment_true_and_containe
 ):
     """When ownership is already settled (tear_down_environment=True), a
     surviving container with no EnvironmentStore record must be treated as
-    this run's own leaked orphan — not protected by the by-name probe that
+    this run's own leaked orphan — not protected by the ownership check that
     exists only to cover the genuinely-ambiguous tear_down_environment=False
     case.
 
-    Regression guard: the probe fallback used to run unconditionally, so a
-    container that was still alive after both local rollback and
-    orchestrator-level compensate() failed to remove it would flip
-    record_may_exist to True here, suppressing verify_and_remove_orphan and
-    letting compensate_activity return successfully — masking a real leak
-    instead of raising for Temporal to retry.
+    Regression guard: the check used to run unconditionally, so a container
+    that was still alive after both local rollback and orchestrator-level
+    compensate() failed to remove it would flip record_may_exist to True
+    here, suppressing verify_and_remove_orphan and letting
+    compensate_activity return successfully — masking a real leak instead of
+    raising for Temporal to retry.
     """
     from agent_provisioning_team.temporal import activities
 
@@ -1287,9 +1304,9 @@ def test_compensate_activity_raises_when_tear_down_environment_true_and_containe
         with pytest.raises(RuntimeError, match="did not complete"):
             activities.compensate_activity("a1", [], job_id="j-comp", tear_down_environment=True)
 
-    # The container-name probe must never run when ownership is already
-    # settled — only verify_and_remove_orphan decides the outcome.
-    fake_orch.tool_agents.get.return_value._container_exists.assert_not_called()
+    # is_pre_existing must never run when ownership is already settled —
+    # only verify_and_remove_orphan decides the outcome.
+    fake_orch.tool_agents.get.return_value.is_pre_existing.assert_not_called()
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with("a1")
 
 
@@ -1582,33 +1599,15 @@ def test_check_existing_environment_activity_true_when_running(tmp_path: Path) -
         assert t_acts.check_existing_environment_activity("a1") is True
 
 
-def test_check_existing_environment_activity_false_when_absent(tmp_path: Path) -> None:
-    from agent_provisioning_team.shared.environment_store import EnvironmentStore
-    from agent_provisioning_team.temporal import activities as t_acts
-    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
-
-    with (
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-            return_value=EnvironmentStore(storage_dir=tmp_path),
-        ),
-        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
-    ):
-        assert t_acts.check_existing_environment_activity("missing-agent") is False
-
-
-def test_check_existing_environment_activity_true_when_record_missing_but_container_exists(
+def test_check_existing_environment_activity_delegates_false_to_is_pre_existing(
     tmp_path: Path,
 ) -> None:
-    """A record can go missing while its container (or docker's own state) survives.
-
-    The record and the container are two independently-losable things — a
-    prior compensation could have removed the record but not the container,
-    or the record file could simply be lost to a disk issue. Since
-    docker.provision() would still reuse that container via its own
-    _on_reuse check regardless of what EnvironmentStore says, this must
-    probe the deterministic container name directly rather than assuming
-    absence just because EnvironmentStore has nothing.
+    """No record at all — the record and its container are two
+    independently-losable things (a prior compensation could have removed
+    the record but not the container, or the record file could simply be
+    lost to a disk issue), so this defers to DockerProvisionerTool's own
+    label-aware ownership check rather than assuming absence just because
+    EnvironmentStore has nothing.
     """
     from agent_provisioning_team.shared.environment_store import EnvironmentStore
     from agent_provisioning_team.temporal import activities as t_acts
@@ -1619,11 +1618,51 @@ def test_check_existing_environment_activity_true_when_record_missing_but_contai
             "agent_provisioning_team.shared.environment_store.EnvironmentStore",
             return_value=EnvironmentStore(storage_dir=tmp_path),
         ),
-        patch.object(DockerProvisionerTool, "_container_exists", return_value=True) as mock_probe,
+        patch.object(DockerProvisionerTool, "is_pre_existing", return_value=False) as mock_ipe,
     ):
-        assert t_acts.check_existing_environment_activity("orphan-agent") is True
+        assert t_acts.check_existing_environment_activity("missing-agent", job_id="job-1") is False
 
-    mock_probe.assert_called_once_with("agent-orphan-agent")
+    mock_ipe.assert_called_once_with("missing-agent", "job-1")
+
+
+def test_check_existing_environment_activity_delegates_true_to_is_pre_existing(
+    tmp_path: Path,
+) -> None:
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=EnvironmentStore(storage_dir=tmp_path),
+        ),
+        patch.object(DockerProvisionerTool, "is_pre_existing", return_value=True) as mock_ipe,
+    ):
+        assert t_acts.check_existing_environment_activity("orphan-agent", job_id="job-1") is True
+
+    mock_ipe.assert_called_once_with("orphan-agent", "job-1")
+
+
+def test_check_existing_environment_activity_passes_none_job_id_when_omitted(
+    tmp_path: Path,
+) -> None:
+    """job_id omitted (the pre-labeling-primitive call shape) must still reach
+    is_pre_existing as an explicit None, not be silently dropped."""
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.temporal import activities as t_acts
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with (
+        patch(
+            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
+            return_value=EnvironmentStore(storage_dir=tmp_path),
+        ),
+        patch.object(DockerProvisionerTool, "is_pre_existing", return_value=True) as mock_ipe,
+    ):
+        assert t_acts.check_existing_environment_activity("a9") is True
+
+    mock_ipe.assert_called_once_with("a9", None)
 
 
 def test_check_existing_environment_activity_true_when_not_running(tmp_path: Path) -> None:
@@ -1769,105 +1808,6 @@ def test_check_existing_environment_activity_true_when_registry_unreadable(
         assert t_acts.check_existing_environment_activity("a4") is True
 
 
-def test_check_existing_environment_activity_false_when_confirmed_absent(
-    tmp_path: Path,
-) -> None:
-    """A confirmed-readable, confirmed-empty registry AND confirmed-absent container is False."""
-    from agent_provisioning_team.shared.environment_store import EnvironmentStore
-    from agent_provisioning_team.temporal import activities as t_acts
-    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
-
-    env_store = EnvironmentStore(storage_dir=tmp_path)
-    with (
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-            return_value=env_store,
-        ),
-        patch.object(DockerProvisionerTool, "_container_exists", return_value=False),
-    ):
-        assert t_acts.check_existing_environment_activity("a5") is False
-
-
-def test_check_existing_environment_activity_false_when_container_labeled_with_own_job_id(
-    tmp_path: Path,
-) -> None:
-    """No record, but the container is labeled with THIS run's own job_id.
-
-    A resumed job reuses job_id (start_workflow.py derives the Temporal
-    workflow id deterministically from it), so a container this same job_id's
-    earlier attempt created and labeled is not something that predates this
-    run -- must return False, not the conservative True an unlabeled or
-    foreign-labeled container would get.
-    """
-    from agent_provisioning_team.shared.environment_store import EnvironmentStore
-    from agent_provisioning_team.temporal import activities as t_acts
-    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
-
-    env_store = EnvironmentStore(storage_dir=tmp_path)
-    with (
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-            return_value=env_store,
-        ),
-        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
-        patch.object(DockerProvisionerTool, "_container_owner_job_id", return_value="job-42"),
-    ):
-        assert t_acts.check_existing_environment_activity("a6", job_id="job-42") is False
-
-
-def test_check_existing_environment_activity_true_when_container_labeled_with_foreign_job_id(
-    tmp_path: Path, caplog
-) -> None:
-    """No record, container exists, label belongs to a DIFFERENT job.
-
-    The #1489 per-agent_id lock should already rule out a live concurrent job
-    at this agent_id, so this is unexpected -- log a warning and protect the
-    container as pre-existing (same outcome as no label at all).
-    """
-    from agent_provisioning_team.shared.environment_store import EnvironmentStore
-    from agent_provisioning_team.temporal import activities as t_acts
-    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
-
-    env_store = EnvironmentStore(storage_dir=tmp_path)
-    with (
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-            return_value=env_store,
-        ),
-        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
-        patch.object(
-            DockerProvisionerTool, "_container_owner_job_id", return_value="some-other-job"
-        ),
-        caplog.at_level("WARNING"),
-    ):
-        assert t_acts.check_existing_environment_activity("a7", job_id="job-42") is True
-
-    assert "some-other-job" in caplog.text
-    assert "job-42" in caplog.text
-
-
-def test_check_existing_environment_activity_true_when_job_id_omitted(tmp_path: Path) -> None:
-    """job_id omitted (the pre-labeling-primitive call shape) leaves behavior
-    byte-for-byte unchanged: no label consultation at all, just the
-    conservative "container exists" fallback."""
-    from agent_provisioning_team.shared.environment_store import EnvironmentStore
-    from agent_provisioning_team.temporal import activities as t_acts
-    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
-
-    env_store = EnvironmentStore(storage_dir=tmp_path)
-    with (
-        patch(
-            "agent_provisioning_team.shared.environment_store.EnvironmentStore",
-            return_value=env_store,
-        ),
-        patch.object(DockerProvisionerTool, "_container_exists", return_value=True),
-        patch.object(DockerProvisionerTool, "_container_owner_job_id") as mock_owner,
-    ):
-        assert t_acts.check_existing_environment_activity("a8") is True
-
-    mock_owner.assert_not_called()
-
-
 def test_check_existing_environment_activity_rejects_empty_agent_id() -> None:
     from agent_provisioning_team.temporal import activities as t_acts
 
@@ -1918,6 +1858,40 @@ def test_setup_activity_progress_path() -> None:
     assert "mark_job_running" in fn_names
     assert "update_job" in fn_names
     mock_phase.assert_called_once()
+
+
+def test_setup_activity_passes_its_own_job_id_to_run_setup() -> None:
+    """setup_activity must forward its own job_id into run_setup, or the
+    khala.job_id label never reaches the real environment container -- the
+    only code path check_existing_environment_activity/compensate_activity
+    actually inspect.
+    """
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_setup_result = SetupResult(
+        success=True,
+        environment=EnvironmentInfo(container_id="c1", container_name="c1"),
+    )
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase"),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=fake_setup_result,
+        ) as mock_run_setup,
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t_acts.setup_activity("job-77", "a", "default.yaml")
+
+    _args, kwargs = mock_run_setup.call_args
+    assert kwargs["job_id"] == "job-77"
 
 
 def test_setup_activity_checkpoints_inside_run_setup_rollback_boundary() -> None:

@@ -75,12 +75,15 @@ _FULL_DOCKER_PERMISSIONS: list[str] = [
 # its own (see those activities' docstrings for the full reasoning).
 JOB_ID_LABEL = "khala.job_id"
 
-# Config-dict key provision_tool_activity stashes job_id under before calling
-# agent.provision(...). Underscore-prefixed so it can never collide with a
-# real manifest-supplied config key (base_image, expose_ssh, etc.). Every
-# non-Docker provisioner already ignores unknown config keys via plain
-# dict.get(...), so threading this through the generic config dict is inert
-# for postgres/redis/git/generic — only DockerProvisionerTool reads it.
+# Config-dict key provision_tool_activity/run_setup stash job_id under before
+# calling DockerProvisionerTool.provision(...). Underscore-prefixed, internal
+# naming so it's vanishingly unlikely to collide with a real manifest-supplied
+# config key (base_image, expose_ssh, etc.) — though manifest config schemas
+# allow arbitrary extra keys, so this is a naming convention, not an enforced
+# guarantee. Only ever injected when the target provisioner is specifically
+# "docker_provisioner" (see provision_tool_activity), since at least one
+# other provisioner (generic_provisioner) echoes its whole config dict
+# verbatim into persisted/returned state with no redaction for unknown keys.
 JOB_ID_CONFIG_KEY = "_provisioning_job_id"
 
 
@@ -147,14 +150,18 @@ class DockerProvisionerTool(BaseToolProvisioner):
         for key, value in env_vars.items():
             build_cmd.extend(["-e", f"{key}={value}"])
 
-        # Stamped so a later, disjoint activity invocation (compensate_activity,
-        # or this same job_id's own retried check_existing_environment_activity)
-        # can positively attribute this container to THIS attempt even if the
-        # local idempotency state that would otherwise prove it never gets
-        # written — the label lives on the container itself, independent of
-        # anything local (issue: self-leaked vs pre-existing disambiguation).
-        job_id = config.get(JOB_ID_CONFIG_KEY)
+        # Normalized (not just truthy) so a stamped label and a later
+        # equality comparison against it (DockerProvisionerTool.is_pre_existing)
+        # can never disagree over incidental leading/trailing whitespace —
+        # the read side already strips, so the written value must match.
+        job_id = (config.get(JOB_ID_CONFIG_KEY) or "").strip() or None
         if job_id:
+            # Stamped so a later, disjoint activity invocation (compensate_activity,
+            # or this same job_id's own retried check_existing_environment_activity)
+            # can positively attribute this container to THIS attempt even if the
+            # local idempotency state that would otherwise prove it never gets
+            # written — the label lives on the container itself, independent of
+            # anything local (issue: self-leaked vs pre-existing disambiguation).
             build_cmd.extend(["--label", f"{JOB_ID_LABEL}={job_id}"])
 
         if config.get("expose_ssh", False):
@@ -173,7 +180,16 @@ class DockerProvisionerTool(BaseToolProvisioner):
         # though: a run that failed against a pre-existing same-named container
         # (e.g. the state row was lost while the container lives on) must not
         # destroy that container — it may be a healthy agent.
-        existed_before = self._container_exists(container_name)
+        existed_before, existed_owner_job_id = self._inspect_existence_and_owner(container_name)
+        if existed_before is True and job_id and existed_owner_job_id == job_id:
+            # This name is blocked by a container THIS SAME job_id's own
+            # earlier, orphaned attempt created (e.g. local idempotency state
+            # was lost after a retried activity) — the label proves
+            # self-ownership, so it's safe to reclaim before attempting
+            # `docker run`, rather than hard-failing a same-job_id retry that
+            # should be able to converge cleanly on its own.
+            self._best_effort_remove_container(container_name)
+            existed_before = False
         try:
             result = subprocess.run(
                 build_cmd,
@@ -298,6 +314,41 @@ class DockerProvisionerTool(BaseToolProvisioner):
             )
 
     @staticmethod
+    def _run_docker_inspect(container_name: str, format_str: str) -> Optional[Tuple[int, str, str]]:
+        """Run one ``docker inspect --type=container --format <format_str> <name>``.
+
+        Shared transport for every docker-inspect-based probe on this class
+        (``_container_exists``, ``_inspect_existence_and_owner``) — each
+        interprets the raw result differently, but none re-implement the
+        subprocess/timeout/exception envelope independently.
+
+        Preconditions:
+            * ``container_name`` is non-empty.
+        Postconditions:
+            * Returns ``(returncode, stdout, stderr)`` from the completed
+              process on any exit code.
+            * Returns ``None`` when the probe itself failed to run (daemon
+              unreachable, timeout) — callers must treat this as unknown.
+            * Never raises.
+
+        ``--type=container`` restricts the probe to the container namespace:
+        without it, ``docker inspect NAME`` also matches images, networks, or
+        volumes sharing that name, which would report a match for a name no
+        *container* actually holds.
+        """
+        assert container_name, "container_name must be non-empty"
+        try:
+            probe = subprocess.run(
+                ["docker", "inspect", "--type=container", "--format", format_str, container_name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:  # noqa: BLE001 — probe is advisory only
+            return None
+        return probe.returncode, probe.stdout, probe.stderr
+
+    @staticmethod
     def _container_exists(container_name: str) -> Optional[bool]:
         """Probe whether a container named ``container_name`` currently exists.
 
@@ -309,71 +360,104 @@ class DockerProvisionerTool(BaseToolProvisioner):
               when the probe itself failed (daemon unreachable, timeout) —
               callers must treat ``None`` as unknown and act conservatively.
             * Never raises.
-
-        ``--type=container`` restricts the probe to the container namespace:
-        without it, ``docker inspect NAME`` also matches images, networks, or
-        volumes sharing that name, which would report ``True`` (an object
-        exists) for a name no *container* actually holds.
         """
-        assert container_name, "container_name must be non-empty"
-        try:
-            probe = subprocess.run(
-                ["docker", "inspect", "--type=container", "--format", "{{.Id}}", container_name],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-        except Exception:  # noqa: BLE001 — probe is advisory only
+        probe = DockerProvisionerTool._run_docker_inspect(container_name, "{{.Id}}")
+        if probe is None:
             return None
-        if probe.returncode == 0:
+        returncode, _stdout, stderr = probe
+        if returncode == 0:
             return True
-        if _reports_container_absent(probe.stderr):
+        if _reports_container_absent(stderr):
             return False
         return None
 
     @staticmethod
-    def _container_owner_job_id(container_name: str) -> Optional[str]:
-        """Read the ``khala.job_id`` label off a container, if any.
+    def _inspect_existence_and_owner(container_name: str) -> Tuple[Optional[bool], Optional[str]]:
+        """Probe existence and the ``khala.job_id`` label in one ``docker inspect`` call.
 
         Preconditions:
             * ``container_name`` is non-empty.
-            * Callers invoke this only AFTER separately confirming the
-              container exists (e.g. via ``_container_exists``) — this does
-              not itself distinguish "absent container" from "container with
-              no/empty label" from "probe inconclusive": all three collapse
-              to ``None`` below, which is safe precisely because existence is
-              already established elsewhere before this is called.
         Postconditions:
-            * Returns the label's value when the daemon reports one non-empty.
-            * Returns ``None`` when the container is absent, the label key is
-              absent or empty (Docker's Go-template ``index`` on a missing map
-              key yields ``""``, not an error — the same behavior already
-              relied on by ``sandbox/provisioner.py``'s read of
-              docker-compose's own ``com.docker.compose.project`` label), or
-              the probe itself failed (daemon unreachable, timeout).
+            * Returns ``(exists, owner_job_id)``: ``exists`` follows
+              ``_container_exists``'s own tri-state contract (``True``/
+              ``False``/``None``); ``owner_job_id`` is the label's value when
+              the daemon reports one non-empty, else ``None`` (absent
+              container, absent/empty label — Docker's Go-template ``index``
+              on a missing map key yields ``""``, not an error, the same
+              behavior already relied on by ``sandbox/provisioner.py``'s read
+              of docker-compose's own ``com.docker.compose.project`` label —
+              or inconclusive probe). ``owner_job_id`` is only ever
+              meaningful when ``exists`` is ``True``.
+            * A single subprocess call answers both questions, instead of two
+              sequential ``docker inspect`` round-trips.
             * Never raises.
         """
-        assert container_name, "container_name must be non-empty"
-        try:
-            probe = subprocess.run(
-                [
-                    "docker",
-                    "inspect",
-                    "--type=container",
-                    "--format",
-                    f'{{{{ index .Config.Labels "{JOB_ID_LABEL}" }}}}',
-                    container_name,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
+        probe = DockerProvisionerTool._run_docker_inspect(
+            container_name, f'{{{{.Id}}}}|||{{{{ index .Config.Labels "{JOB_ID_LABEL}" }}}}'
+        )
+        if probe is None:
+            return None, None
+        returncode, stdout, stderr = probe
+        if returncode != 0:
+            if _reports_container_absent(stderr):
+                return False, None
+            return None, None
+        _id_part, _sep, label_part = stdout.partition("|||")
+        return True, (label_part.strip() or None)
+
+    @staticmethod
+    def is_pre_existing(agent_id: str, job_id: Optional[str]) -> bool:
+        """Report whether ``agent-{agent_id}``'s container might predate this run.
+
+        The single, shared entry point ``check_existing_environment_activity``
+        and ``compensate_activity`` (``temporal/activities.py``) both call
+        once no ``EnvironmentStore`` record can answer the question on its
+        own: a container matching the deterministic name is ambiguous by
+        name alone, since one this same run's own setup phase created and
+        failed to clean up locally looks identical, by name, to one that
+        genuinely predates this run. The ``khala.job_id`` label (stamped at
+        creation time, see ``JOB_ID_LABEL``) resolves that ambiguity.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+            * ``job_id``, when given, is the calling run's own job id.
+        Postconditions:
+            * Returns ``False`` when the container is confirmed absent —
+              nothing to protect or attribute to any run.
+            * Returns ``False`` when the container exists (or its existence
+              is inconclusive) and its label is confirmed equal to
+              ``job_id`` — unambiguously this run's own container.
+            * Returns ``True`` (conservative) otherwise: the container exists
+              or its existence is inconclusive, and either ``job_id`` wasn't
+              given to compare against, the label is absent, or the label
+              names a different job. A different job's label is logged
+              (informational, not alarming) — the per-agent_id ownership
+              lock ordinarily prevents a live *concurrent* job from creating
+              one here, so a foreign label most often means a distinct,
+              later job legitimately re-provisioned this same ``agent_id``
+              after this run's own lock was released (e.g. a re-run against
+              an already-delivered agent), not a lock violation.
+            * Never raises.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        exists, owner_job_id = DockerProvisionerTool._inspect_existence_and_owner(
+            f"agent-{agent_id}"
+        )
+        if exists is False:
+            return False
+        if job_id and owner_job_id == job_id:
+            return False
+        if job_id and owner_job_id:
+            logger.info(
+                "agent_id=%r container is labeled with a different job (owner=%r, this "
+                "run=%r) — likely a later, separate run against the same agent_id after "
+                "this run's own ownership lock was released; treating it as possibly "
+                "pre-existing",
+                agent_id,
+                owner_job_id,
+                job_id,
             )
-        except Exception:  # noqa: BLE001 — probe is advisory only
-            return None
-        if probe.returncode != 0:
-            return None
-        value = probe.stdout.strip()
-        return value or None
+        return True
 
     @staticmethod
     def _best_effort_remove_container(container_name: str) -> None:
