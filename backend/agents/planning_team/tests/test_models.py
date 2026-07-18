@@ -77,6 +77,36 @@ def test_planning_result_response():
     assert r.handoff_package == {"a": 1}
 
 
+def test_planning_response_shapes_are_additive_only():
+    """Pin the field names of the three planning HTTP response models so a future
+    change can only add fields, never silently remove or rename one relied on by
+    existing callers (e.g. if open_questions/resolved_questions are ever wired onto
+    the wire, it must be additive)."""
+    assert {"job_id", "status", "message"} <= PlanningRunResponse.model_fields.keys()
+    assert {
+        "job_id",
+        "status",
+        "repo_path",
+        "current_phase",
+        "status_text",
+        "progress",
+        "pending_questions",
+        "waiting_for_answers",
+        "error",
+        "summary",
+    } <= PlanningStatusResponse.model_fields.keys()
+    assert {
+        "job_id",
+        "success",
+        "handoff_package",
+        "client_context_document_path",
+        "validated_spec_path",
+        "prd_path",
+        "summary",
+        "failure_reason",
+    } <= PlanningResultResponse.model_fields.keys()
+
+
 def test_client_context():
     c = ClientContext(
         client_name="Acme", problem_summary="Need faster reports", target_users=["analysts"]

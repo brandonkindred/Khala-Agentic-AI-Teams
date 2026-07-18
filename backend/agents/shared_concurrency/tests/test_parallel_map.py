@@ -2,8 +2,10 @@
 
 Covers every variation point the migrated callers rely on: empty-input
 short-circuit, worker bounding, order preservation (and completion order),
-``skip_none`` filtering, contextvar propagation (and its opt-out), and the
-fast-fail error policy with the ``on_first_exception`` hook.
+``skip_none`` filtering, contextvar propagation (and its opt-out), the
+fast-fail error policy with the ``on_first_exception`` hook, and the opt-in
+``wait_for_stragglers`` policy for callers that must not leave in-flight work
+running in the background after a failure.
 """
 
 from __future__ import annotations
@@ -226,6 +228,93 @@ def test_fast_fail_does_not_wait_for_inflight_tasks() -> None:
         assert slow_finished["done"] is False
     finally:
         release.set()
+
+
+def test_wait_for_stragglers_blocks_until_inflight_tasks_finish() -> None:
+    """wait_for_stragglers=True still fails fast on the exception itself, but
+    blocks until an already-running sibling finishes before re-raising — no
+    task is left executing in the background after parallel_map returns."""
+    slow_started = threading.Event()
+    slow_finished = {"done": False}
+
+    def fn(x: int) -> int:
+        if x == 0:
+            slow_started.wait(timeout=10)  # don't raise until the sibling is running
+            raise RuntimeError("fast")
+        slow_started.set()
+        time.sleep(0.1)
+        slow_finished["done"] = True
+        return x
+
+    with pytest.raises(RuntimeError, match="fast"):
+        parallel_map([0, 1], fn, max_workers=2, wait_for_stragglers=True)
+
+    # The slow task was awaited before the exception surfaced.
+    assert slow_finished["done"] is True
+
+
+def test_wait_for_stragglers_still_cancels_not_yet_started_tasks() -> None:
+    """wait_for_stragglers=True only waits for *already-running* tasks — tasks
+    still queued behind a single busy worker are cancelled rather than run to
+    completion, exactly like the default policy.
+
+    Item 1 may or may not slip in: a freed worker racing the internal abort
+    flag (set the instant the first exception is caught — see
+    ``test_abort_is_set_before_a_slow_hook_so_queued_tasks_never_start`` for
+    the deterministic half of this contract) can win that single race. But
+    items 2 and 3 can't — each item that *does* start sleeps a full second,
+    which is ample time for the flag to land before the next one would be
+    dispatched — so the leak is bounded to at most one extra item, never the
+    whole remaining queue.
+    """
+    started = {"count": 0}
+    lock = threading.Lock()
+
+    def fn(x: int) -> int:
+        with lock:
+            started["count"] += 1
+        if x == 0:
+            raise RuntimeError("fast")
+        time.sleep(1)
+        return x
+
+    with pytest.raises(RuntimeError, match="fast"):
+        parallel_map([0, 1, 2, 3], fn, max_workers=1, wait_for_stragglers=True)
+
+    assert 1 <= started["count"] <= 2
+
+
+def test_abort_is_set_before_a_slow_hook_so_queued_tasks_never_start() -> None:
+    """The internal abort flag is set before ``on_first_exception`` runs, so
+    a slow hook can't widen the window for a freed worker to start another
+    queued item — cancellation would otherwise only happen after the hook
+    returns, inside ``shutdown(cancel_futures=True)``. Unlike the sibling
+    "no hook" test above, this scenario is fully deterministic: the hook's
+    sleep gives the freed worker ample time to observe the flag, which was
+    already set before the hook was even called."""
+    started = {"count": 0}
+    lock = threading.Lock()
+
+    def fn(x: int) -> int:
+        with lock:
+            started["count"] += 1
+        if x == 0:
+            raise RuntimeError("fast")
+        return x
+
+    def slow_hook() -> None:
+        time.sleep(0.2)
+
+    with pytest.raises(RuntimeError, match="fast"):
+        parallel_map(
+            [0, 1, 2, 3],
+            fn,
+            max_workers=1,
+            wait_for_stragglers=True,
+            on_first_exception=slow_hook,
+        )
+
+    assert started["count"] == 1
 
 
 def test_on_first_exception_hook_raising_does_not_mask_worker_error(caplog) -> None:
