@@ -48,8 +48,6 @@ const TEAMS = [
     desc: 'Email, calendar, tasks, deals, reservations.' },
   { group: 'personal', name: 'Accessibility Audit', route: '/api/accessibility-audit',
     desc: 'WCAG 2.2 and Section 508 auditing for web and mobile.' },
-  { group: 'personal', name: 'Nutrition & Meal Planning', route: '/api/nutrition-meal-planning',
-    desc: 'Personalized meal plans that learn from your feedback.' },
   { group: 'personal', name: 'Road Trip Planning', route: '/api/road-trip-planning',
     desc: 'Profiling, route optimization, activity recs, logistics.' }
 ];

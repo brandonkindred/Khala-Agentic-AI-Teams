@@ -110,7 +110,6 @@ TEAM_SERVICE_URL_ENVS: dict[str, str] = {
     "accessibility_audit": "ACCESSIBILITY_AUDIT_SERVICE_URL",
     "ai_systems": "AI_SYSTEMS_SERVICE_URL",
     "investment": "INVESTMENT_SERVICE_URL",
-    "nutrition_meal_planning": "NUTRITION_MEAL_PLANNING_SERVICE_URL",
     "planning": "PLANNING_SERVICE_URL",
     "coding_team": "CODING_TEAM_SERVICE_URL",
     "sales_team": "SALES_TEAM_SERVICE_URL",

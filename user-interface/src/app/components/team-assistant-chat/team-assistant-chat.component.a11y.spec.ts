@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 import { vi } from 'vitest';
 import { TeamAssistantApiService } from '../../services/team-assistant-api.service';
 import { TeamAssistantChatComponent } from './team-assistant-chat.component';
@@ -30,6 +30,7 @@ describe('TeamAssistantChatComponent a11y', () => {
       imports: [TeamAssistantChatComponent, NoopAnimationsModule],
       providers: [{ provide: TeamAssistantApiService, useValue: api }],
     }).compileComponents();
+    return api;
   };
 
   it('has no axe violations with a loaded conversation', async () => {
@@ -74,6 +75,25 @@ describe('TeamAssistantChatComponent a11y', () => {
 
     const btn = fixture.nativeElement.querySelector('.field-value');
     expect(btn?.tagName.toLowerCase()).toBe('button');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  });
+
+  it('has no axe violations while the typing indicator is shown', async () => {
+    const api = await setup(stateResponse.messages);
+    const pending = new Subject<typeof stateResponse>();
+    api.sendMessage.mockReturnValue(pending);
+
+    const fixture = TestBed.createComponent(TeamAssistantChatComponent);
+    fixture.componentInstance.teamApiUrl = '/api/x/assistant';
+    fixture.detectChanges();
+
+    fixture.componentInstance.chatForm.setValue({ message: 'hello' });
+    fixture.componentInstance.onSubmit();
+    fixture.detectChanges();
+
+    // Guard: the typing indicator is actually rendered while sendMessage is pending.
+    expect(fixture.nativeElement.querySelector('.typing-indicator')).toBeTruthy();
 
     await expectNoAxeViolations(fixture.nativeElement);
   });

@@ -123,7 +123,6 @@ Today Khala ships with 24 specialist teams behind one gateway, grouped loosely f
 |---|---|---|
 | **Personal Assistant** | `/api/personal-assistant` | Email, calendar, tasks, deals, reservations — the mundane stuff, handled. |
 | **Accessibility Audit** | `/api/accessibility-audit` | WCAG 2.2 and Section 508 findings for web and mobile, without the slow consultancy. |
-| **Nutrition & Meal Planning** | `/api/nutrition-meal-planning` | Personalized meal plans that learn what you actually ate and liked. |
 | **Road Trip Planning** | `/api/road-trip-planning` | Tell it where, who, and what you care about. It builds the day-by-day and reworks it on the fly. |
 | **Job Matching** | `/api/job-matching` | Scans open roles against your profile and hands back a ranked, best-to-apply-first shortlist. |
 
@@ -153,7 +152,7 @@ Full details — ports, volumes, observability — in [`docker/README.md`](docke
 
 ### The local way (hack on the code)
 
-Local dev runs the Unified API as a single FastAPI process that mounts every enabled team's router in-process (no per-team containers). Teams that need Postgres (blogging, branding, startup_advisor, user_agent_founder, agentic_team_provisioning, nutrition, team_assistant, unified_api credentials) require a running Postgres — start one from `docker/docker-compose.yml` and export the `POSTGRES_*` env vars from [`CLAUDE.md`](CLAUDE.md) before launching.
+Local dev runs the Unified API as a single FastAPI process that mounts every enabled team's router in-process (no per-team containers). Teams that need Postgres (blogging, branding, startup_advisor, user_agent_founder, agentic_team_provisioning, team_assistant, unified_api credentials) require a running Postgres — start one from `docker/docker-compose.yml` and export the `POSTGRES_*` env vars from [`CLAUDE.md`](CLAUDE.md) before launching.
 
 ```bash
 # 1) Backend (terminal 1)
@@ -242,7 +241,6 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 ### Personal
 - [`backend/agents/personal_assistant_team/`](backend/agents/personal_assistant_team/README.md)
 - [`backend/agents/accessibility_audit_team/`](backend/agents/accessibility_audit_team/README.md)
-- [`backend/agents/nutrition_meal_planning_team/`](backend/agents/nutrition_meal_planning_team/README.md)
 - [`backend/agents/road_trip_planning_team/`](backend/agents/road_trip_planning_team/README.md)
 - [`backend/agents/user_profile/`](backend/agents/user_profile/README.md)
 
@@ -263,7 +261,7 @@ This list is not exhaustive — cross-check the roster tables above (24 teams) a
 | `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | Pick and configure the LLM backend |
 | `OLLAMA_API_KEY` | Required for Ollama Cloud |
 | `TEMPORAL_ADDRESS` / `TEMPORAL_NAMESPACE` / `TEMPORAL_TASK_QUEUE` | Enable durable workflows when set |
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Required for migrated teams (blogging, branding, startup_advisor, nutrition, agentic_team_provisioning, team_assistant, user_agent_founder, unified_api credentials) |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Required for migrated teams (blogging, branding, startup_advisor, agentic_team_provisioning, team_assistant, user_agent_founder, unified_api credentials) |
 | `SECURITY_GATEWAY_ENABLED` | Toggle the request-scanning gateway (default: `true`) |
 | `AGENT_CACHE` | Shared cache root; each team namespaces under `{team_name}/` |
 

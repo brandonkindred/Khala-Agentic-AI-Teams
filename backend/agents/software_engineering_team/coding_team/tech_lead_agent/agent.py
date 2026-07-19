@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Callable, Collection, Dict, List, Optional
 
 from strands import Agent
 
 from llm_service import call_llm_with_retries
+from shared_env import parse_int
 from shared_llm_recovery import agent_call_json
 from software_engineering_team.coding_team.hitl import (
     normalize_open_questions as _normalize_open_questions,
@@ -33,11 +33,7 @@ def _review_retry_attempts() -> int:
     CODING_TEAM_REVIEW_RETRIES (default 2 retries → 3 attempts; garbage/negative → default;
     floored at 1 attempt).
     """
-    raw = os.environ.get("CODING_TEAM_REVIEW_RETRIES")
-    try:
-        retries = int(raw) if raw is not None and raw.strip() != "" else 2
-    except (TypeError, ValueError):
-        retries = 2
+    retries = parse_int("CODING_TEAM_REVIEW_RETRIES", 2)
     # A negative value is meaningless as a retry count; rather than silently collapsing it to a
     # single attempt (which would strip all transient-failure protection for a disabling-style
     # value like -1), treat it as garbage and restore the documented default.

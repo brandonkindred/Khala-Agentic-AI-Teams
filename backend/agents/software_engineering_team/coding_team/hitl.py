@@ -25,7 +25,6 @@ Invariants:
 from __future__ import annotations
 
 import logging
-import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -33,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from shared_env import parse_float
 from software_engineering_team.coding_team.models import JobStatus
 
 logger = logging.getLogger(__name__)
@@ -132,12 +132,8 @@ def answer_wait_timeout_s() -> float:
         - Returns a positive float; env ``CODING_TEAM_ANSWER_WAIT_TIMEOUT_S`` overrides the
           default; garbage / non-positive values fall back to the default.
     """
-    raw = os.getenv("CODING_TEAM_ANSWER_WAIT_TIMEOUT_S", "")
-    try:
-        val = float(raw)
-        return val if val > 0 else _DEFAULT_ANSWER_WAIT_TIMEOUT_S
-    except (TypeError, ValueError):
-        return _DEFAULT_ANSWER_WAIT_TIMEOUT_S
+    value = parse_float("CODING_TEAM_ANSWER_WAIT_TIMEOUT_S", _DEFAULT_ANSWER_WAIT_TIMEOUT_S)
+    return value if value > 0 else _DEFAULT_ANSWER_WAIT_TIMEOUT_S
 
 
 def _normalize_options(raw: Any) -> List[Dict[str, Any]]:

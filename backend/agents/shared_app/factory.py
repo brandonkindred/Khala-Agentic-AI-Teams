@@ -2,20 +2,15 @@
 
 Almost every team's ``api/main.py`` opens with the same four moves: call
 :func:`shared_observability.init_otel`, build a ``FastAPI`` with a lifespan that
-registers the team's Postgres schema(s) on startup and closes the pool on
-shutdown, then :func:`shared_observability.instrument_fastapi_app`.
-:func:`create_team_app` collapses that boilerplate into one call while leaving
-room for team-specific startup/shutdown work via optional hooks. A team can
-also depend on another team's schema (e.g. shared user-profile tables) via
-``extra_postgres_schemas`` — every schema given, primary and extra alike, is
-exposed together on ``app.state.postgres_schemas`` for early bootstrap paths
-(e.g. the team-service wrapper) to register before starting background workers.
+registers the team's Postgres schema on startup and closes the pool on shutdown,
+then :func:`shared_observability.instrument_fastapi_app`. :func:`create_team_app`
+collapses that boilerplate into one call while leaving room for team-specific
+startup/shutdown work via optional hooks.
 
-Degrades cleanly: omitting both ``postgres_schema`` and
-``extra_postgres_schemas`` skips all Postgres wiring, and the
-``shared_postgres`` import is lazy so a team without it is never forced to
-depend on it. Schema registration and pool teardown are defensive (logged,
-never raised into app startup), matching the per-team lifespans this replaces.
+Degrades cleanly: ``postgres_schema=None`` skips all Postgres wiring, and the
+``shared_postgres`` import is lazy so a team without it is never forced to depend
+on it. Schema registration and pool teardown are defensive (logged, never raised
+into app startup), matching the per-team lifespans this replaces.
 """
 
 from __future__ import annotations
@@ -59,7 +54,7 @@ def create_team_app(
     title: str,
     version: str = "1.0.0",
     postgres_schema: "Optional[TeamSchema]" = None,
-    extra_postgres_schemas: "Sequence[TeamSchema]" = (),
+    extra_postgres_schemas: "Optional[Sequence[TeamSchema]]" = None,
     on_startup: Optional[LifecycleHook] = None,
     on_shutdown: Optional[LifecycleHook] = None,
     excluded_urls: Optional[str] = None,
@@ -71,14 +66,11 @@ def create_team_app(
         - ``service_name``/``team_key``/``title``/``version`` are non-empty strings.
         - ``postgres_schema`` (when given) is a ``shared_postgres.TeamSchema``.
         - ``extra_postgres_schemas`` (when given) is a sequence of additional
-          ``shared_postgres.TeamSchema`` — e.g. a schema owned by another team
-          that this one also depends on. Registered after ``postgres_schema``,
-          in the given order; ``None`` is treated the same as omitting it (no
-          extras). A schema appearing in both ``postgres_schema`` and
-          ``extra_postgres_schemas`` is **not** deduplicated — it is registered
-          once per occurrence (harmless, since DDL is idempotent, but a
-          wasted round-trip callers should avoid by not repeating a schema
-          between the two params).
+          ``shared_postgres.TeamSchema`` values (no ``None`` elements) a team
+          needs registered alongside its primary schema — e.g. a second schema
+          it would otherwise register from an ``on_startup`` hook, which runs
+          too late to close the Temporal cold-start race (see ``postgres_schemas``
+          below).
         - ``fastapi_kwargs`` must not contain ``lifespan`` (set explicitly here);
           passing it raises ``ValueError``. ``title``/``version`` are named
           parameters, so duplicating them raises ``TypeError`` from Python itself.
@@ -91,25 +83,22 @@ def create_team_app(
           instrumented; ``excluded_urls`` (when given) is forwarded to the
           instrumentor to override its default span-exclusion list — e.g. so a
           business route whose path contains ``metrics`` stays traced. Its
-          lifespan registers every schema in ``postgres_schema`` and
-          ``extra_postgres_schemas`` on startup via
-          :func:`shared_postgres.register_team_schemas_many` — each
-          independently best-effort, so one schema's registration failure
-          (including one whose ``.team`` attribute is itself unreadable) never
-          blocks another's, nor ``on_startup`` — and closes the Postgres pool
-          on shutdown (both no-ops/guarded when Postgres is unconfigured),
-          wrapping the optional hooks. ``fastapi_kwargs`` pass through to the
-          ``FastAPI`` constructor.
+          lifespan registers every schema in ``postgres_schema`` plus
+          ``extra_postgres_schemas`` on startup and closes the Postgres pool on
+          shutdown (both no-ops/guarded when Postgres is unconfigured), wrapping
+          the optional hooks. A single schema's registration failure is logged
+          and does not stop the remaining schemas from registering. ``fastapi_kwargs``
+          pass through to the ``FastAPI`` constructor.
         - The returned app exposes its ``postgres_schema`` (the given
-          ``TeamSchema`` or ``None``, unchanged) via ``app.state.postgres_schema``,
-          and the full ordered set — ``postgres_schema`` first, then
-          ``extra_postgres_schemas``, with any ``None`` filtered — via
-          ``app.state.postgres_schemas`` (always a tuple, empty when neither is
-          given), so early bootstrap paths (e.g. the team-service wrapper) can
-          register every schema's DDL before starting background workers that
-          write to any of them.
+          ``TeamSchema`` or ``None``, unchanged for backward compatibility) via
+          ``app.state.postgres_schema``, and the full combined set (primary
+          followed by ``extra_postgres_schemas``, ``[]`` when neither is given)
+          via ``app.state.postgres_schemas``, so early bootstrap paths (e.g. the
+          team-service wrapper) can register every schema's DDL before starting
+          background workers that write to it.
     Invariants:
-        - Postgres wiring fires iff ``app.state.postgres_schemas`` is non-empty.
+        - Postgres wiring fires iff the combined schema set (``postgres_schema``
+          plus ``extra_postgres_schemas``) is non-empty.
     """
     # Validate the required identifiers explicitly (not via assert, so the check
     # holds under ``python -O``): empty values otherwise surface as obscure
@@ -135,32 +124,29 @@ def create_team_app(
 
     init_otel(service_name=service_name, team_key=team_key)
 
-    # Primary schema first, then extras, in the given order; None filtered so
-    # callers never need to check "was a primary schema even given" separately.
-    # `extra_postgres_schemas or ()` normalizes an explicit None the same as
-    # omitting it, matching postgres_schema's own None-means-none convention.
-    # Computed once here (not inside _lifespan) since app.state needs it too.
-    all_postgres_schemas: tuple = tuple(
-        s for s in (postgres_schema, *(extra_postgres_schemas or ())) if s is not None
-    )
+    # Primary schema first, then any extras, in declaration order.
+    _all_schemas: "tuple[TeamSchema, ...]" = (
+        (postgres_schema,) if postgres_schema is not None else ()
+    ) + (tuple(extra_postgres_schemas) if extra_postgres_schemas else ())
 
     @asynccontextmanager
     async def _lifespan(application: FastAPI):
-        if all_postgres_schemas:
+        if _all_schemas:
             try:
-                from shared_postgres import register_team_schemas_many
-
-                # Best-effort per schema (one failure never blocks another's,
-                # nor on_startup below) is register_team_schemas_many's own
-                # contract; this try only guards against something registering
-                # itself can't recover from, e.g. shared_postgres failing to
-                # import.
-                register_team_schemas_many(all_postgres_schemas)
+                from shared_postgres import register_team_schemas
             except Exception:
-                logger.exception("%s postgres schema registration failed", team_key)
+                logger.exception("%s postgres schema registration failed (import)", team_key)
+            else:
+                for schema in _all_schemas:
+                    # Each schema registers independently so one failure doesn't
+                    # stop the rest of the team's schemas from registering.
+                    try:
+                        register_team_schemas(schema)
+                    except Exception:
+                        logger.exception("%s postgres schema registration failed", team_key)
         # on_startup runs inside the try so that a raising hook still triggers
-        # teardown — register_team_schemas_many may have opened the process-wide
-        # pool above, and a startup failure must not leak it.
+        # teardown — register_team_schemas may have opened the process-wide pool
+        # above, and a startup failure must not leak it.
         try:
             await _maybe_call(on_startup)
             yield
@@ -172,7 +158,7 @@ def create_team_app(
                 await _maybe_call(on_shutdown)
             except Exception:
                 logger.exception("%s on_shutdown hook failed", team_key)
-            if all_postgres_schemas:
+            if _all_schemas:
                 try:
                     from shared_postgres import close_pool
 
@@ -181,13 +167,12 @@ def create_team_app(
                     logger.warning("%s shared_postgres close_pool failed", team_key, exc_info=True)
 
     app = FastAPI(title=title, version=version, lifespan=_lifespan, **fastapi_kwargs)
-    # Expose the team's schema (or None) so early bootstrap paths that run before
-    # the lifespan fires — e.g. the team-service wrapper starting a Temporal worker
-    # at import time — can register the DDL first and avoid racing a best-effort
-    # write against schema creation on a fresh database. postgres_schemas is the
-    # full ordered set (primary + extras) those bootstrap paths should use;
-    # postgres_schema stays the primary alone for backward compatibility.
+    # Expose the team's primary schema (or None) — unchanged, for backward
+    # compatibility — plus the full combined set, so early bootstrap paths that
+    # run before the lifespan fires — e.g. the team-service wrapper starting a
+    # Temporal worker at import time — can register every schema's DDL first and
+    # avoid racing a best-effort write against schema creation on a fresh database.
     app.state.postgres_schema = postgres_schema
-    app.state.postgres_schemas = all_postgres_schemas
+    app.state.postgres_schemas = list(_all_schemas)
     instrument_fastapi_app(app, team_key=team_key, excluded_urls=excluded_urls)
     return app

@@ -398,4 +398,4 @@ def test_postgres_schemas_include_user_profile() -> None:
     from job_matching_team.postgres import SCHEMA as JOB_MATCHING_SCHEMA
     from user_profile import SCHEMA as USER_PROFILE_SCHEMA
 
-    assert api_main.app.state.postgres_schemas == (JOB_MATCHING_SCHEMA, USER_PROFILE_SCHEMA)
+    assert api_main.app.state.postgres_schemas == [JOB_MATCHING_SCHEMA, USER_PROFILE_SCHEMA]

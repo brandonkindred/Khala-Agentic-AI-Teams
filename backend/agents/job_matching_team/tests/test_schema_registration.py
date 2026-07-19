@@ -98,18 +98,17 @@ def _assert_fallback_logged(caplog, *, expected: bool) -> None:
 
 def test_registering_all_exposed_schemas_closes_the_race(fresh_user_profile_tables, caplog) -> None:
     """Registering every schema in app.state.postgres_schemas — the set the
-    team-service wrapper now registers before starting the Temporal worker,
-    via the same shared_postgres.register_team_schemas_many helper — means
-    user_profiles exists by the time career_store's best-effort read runs, so
-    it no longer falls back silently."""
+    team-service wrapper now registers before starting the Temporal worker —
+    means user_profiles exists by the time career_store's best-effort read
+    runs, so it no longer falls back silently."""
     from job_matching_team.api.main import app as job_matching_app
     from job_matching_team.profile.career_store import load_career_profile
-    from shared_postgres import register_team_schemas_many
+    from shared_postgres import register_team_schemas
 
     schemas = job_matching_app.state.postgres_schemas
     assert len(schemas) >= 2  # sanity: both JOB_MATCHING_SCHEMA and USER_PROFILE_SCHEMA present
-    applied = register_team_schemas_many(schemas)
-    assert applied == schemas  # every schema registered cleanly, none skipped
+    for schema in schemas:
+        assert register_team_schemas(schema) is True  # every schema registered cleanly
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=_CAREER_STORE_LOGGER):

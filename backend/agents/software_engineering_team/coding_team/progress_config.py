@@ -53,6 +53,27 @@ def _review_concurrency() -> int:
     return parse_int("CODING_TEAM_REVIEW_CONCURRENCY", REVIEW_CONCURRENCY, minimum=1)
 
 
+# Max Tech-Lead task-grooming LLM calls dispatched concurrently right after planning. Grooming is
+# independent per task (each call is driven only by that task's own id/title/description/
+# dependencies plus the shared plan context), so a task graph with k tasks costs ~one grooming
+# latency instead of k. The effective pool is min(this, number of planned tasks).
+GROOM_CONCURRENCY = 4
+
+
+def _groom_concurrency() -> int:
+    """Max concurrent Tech-Lead task-grooming calls right after planning.
+
+    Configurable via CODING_TEAM_GROOM_CONCURRENCY (default 4; garbage/empty → default; floored at
+    1 so grooming always makes progress even if the value is set to 0/negative).
+
+    Preconditions:
+        - None (reads only the optional environment variable).
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    return parse_int("CODING_TEAM_GROOM_CONCURRENCY", GROOM_CONCURRENCY, minimum=1)
+
+
 # Max implementation workers dispatched concurrently in one round. Each worker operates in its
 # own git worktree (see coding_team.worktree_manager), so concurrent workers no longer share (and
 # corrupt) a single working tree. The effective pool is min(this, number of workers with an

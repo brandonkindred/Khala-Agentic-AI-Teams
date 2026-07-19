@@ -548,6 +548,7 @@
               </app-inline-banner>
             }
             @if (jobStatus.thinking) {
+              <div class="visually-hidden thinking-announcement" aria-live="polite">{{ thinkingAnnouncement }}</div>
               <mat-expansion-panel class="thinking-panel">
                 <mat-expansion-panel-header>
                   <mat-panel-title>

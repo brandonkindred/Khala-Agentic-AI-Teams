@@ -169,12 +169,9 @@ def test_wrapper_omits_temporal_worker_when_not_configured() -> None:
     assert "TEMPORAL_ADDRESS" not in body_partial
 
 
-def test_wrapper_registers_schema_before_temporal_worker() -> None:
-    """When both patterns are configured, the wrapper registers every schema the
-    app exposes *before* starting the Temporal worker, closing the cold-start race
-    where a replayed activity could write to a not-yet-created table — whether
-    that table belongs to the team's own primary schema or an auxiliary one it
-    merely depends on."""
+def test_wrapper_iterates_all_schemas_before_temporal_worker() -> None:
+    """The wrapper reads the plural app.state.postgres_schemas and loops over
+    every schema, registering each before the Temporal worker starts."""
     body = entrypoint.build_wrapper_body(
         "planning_team",
         "planning_team.api.main",
@@ -183,23 +180,12 @@ def test_wrapper_registers_schema_before_temporal_worker() -> None:
         "start_planning_temporal_worker_thread",
     )
     _compile(body)
-    # Every schema is resolved off the imported app (the full ordered set, not
-    # just the primary) and registered via the shared best-effort helper —
-    # register_team_schemas_many — so one schema's failure can't skip another's
-    # registration (that loop's own isolation is factory.py/shared_postgres's
-    # responsibility now, not something duplicated in the generated source).
-    assert "app, 'state'" in body
     assert "postgres_schemas" in body
-    assert "register_team_schemas_many" in body
-    # DDL is gated on TEMPORAL_ADDRESS (only runs when the worker will actually
-    # start), so thread/local mode stays side-effect-free at import time.
+    assert "for _schema in _schemas" in body
     addr_idx = body.index("_os.environ.get('TEMPORAL_ADDRESS', '').strip()")
-    reg_idx = body.index("register_team_schemas_many")
+    reg_idx = body.index("register_team_schemas")
     worker_idx = body.index("_il.import_module('planning_team.temporal.worker')")
-    assert addr_idx < reg_idx
-    # Ordering: registration must precede the worker-start block so the worker never
-    # picks up an activity before its tables exist.
-    assert reg_idx < worker_idx
+    assert addr_idx < reg_idx < worker_idx
 
 
 def test_wrapper_omits_schema_registration_without_temporal() -> None:
@@ -213,17 +199,15 @@ def test_wrapper_omits_schema_registration_without_temporal() -> None:
     assert "postgres_schema" not in body
 
 
-def test_wrapper_temporal_block_delegates_to_shared_helper_and_continues_past_failure(
+def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failure(
     monkeypatch,
 ) -> None:
     """Executes the generated Temporal-block source (not just compiles it)
-    against the REAL shared_postgres.register_team_schemas_many — only its
-    internal register_team_schemas call is faked — proving the generated code
-    correctly delegates every schema to the shared best-effort helper. Includes
-    a schema lacking .team ahead of a valid one: the exact shape that used to
-    make the wrapper's old hand-rolled loop abort early and silently skip
-    every schema after it (see backend/agents/shared_postgres/tests for the
-    helper's own, more exhaustive coverage of that behavior)."""
+    against the REAL shared_postgres module — only its register_team_schemas
+    function is faked — proving the generated per-schema loop actually
+    delegates every schema in app.state.postgres_schemas and that one
+    schema's failure doesn't stop the rest from being attempted or block the
+    worker from starting."""
     import logging
     import sys
     import types
@@ -240,7 +224,7 @@ def test_wrapper_temporal_block_delegates_to_shared_helper_and_continues_past_fa
     temporal_block = body[body.index("try:\n    import os as _os") :]
 
     ok1 = types.SimpleNamespace(team="ok1")
-    boom = object()  # deliberately lacks .team
+    boom = types.SimpleNamespace(team="boom")
     ok2 = types.SimpleNamespace(team="ok2")
     fake_app = types.SimpleNamespace(state=types.SimpleNamespace(postgres_schemas=(ok1, boom, ok2)))
 

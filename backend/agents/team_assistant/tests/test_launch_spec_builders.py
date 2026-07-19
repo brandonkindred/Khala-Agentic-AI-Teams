@@ -211,11 +211,6 @@ def test_investment_builder_preserves_native_numeric_values() -> None:
     assert built.json["annual_gross_income"] == 500000.0
 
 
-def test_nutrition_builder_declarative() -> None:
-    built = _builder("nutrition_meal_planning")({"client_id": "c-1", "message": "build me a plan"})
-    assert built.json == {"client_id": "c-1", "message": "build me a plan"}
-
-
 def test_agentic_team_provisioning_declarative() -> None:
     built = _builder("agentic_team_provisioning")(
         {"name": "QA Pod", "description": "handles QA automation"}

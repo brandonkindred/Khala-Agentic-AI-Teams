@@ -14,6 +14,7 @@ so consumers import a single module (mirrors ``alignment.py``).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -25,10 +26,11 @@ from strands import Agent
 
 from ...models import StrategySpec
 from ..quality_gates.models import QualityGateResult
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
+from ._prompt_context import spec_prompt_fields
+from ._response_schemas import CRITIQUE_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,10 @@ _SYSTEM_PROMPT = (
     + "\n\n"
     + _STOP_ORDER_SEMANTICS
 )
+
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
+_CRITIQUE_SCHEMA_JSON = json.dumps(CRITIQUE_SCHEMA, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +410,14 @@ issue you raise is advisory only), and there is NO max-drawdown
 constraint: a strategy may lose up to 100% by design, so never flag
 drawdown reachability.
 
-Return ONLY a JSON object — no markdown — with this shape:
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
+
+Return ONLY a JSON object — no markdown — with this shape (a
+representative example — the schema above is authoritative):
 
 {{
   "ready": false,
@@ -463,20 +476,15 @@ class DesignReviewAgent:
         prior_block = format_prior_critiques(prior_critiques)
 
         user_prompt = _REVIEW_USER_TEMPLATE.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
+            **spec_prompt_fields(spec),
             timeframe=spec.timeframe,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
             target_symbols=list(spec.target_symbols),
-            risk_limits=spec.risk_limits.model_dump_json(),
             speculative=spec.speculative,
             n_readiness=len(readiness_results or []),
             readiness_block=readiness_block,
             n_prior_critiques=len(prior_critiques or []),
             prior_critiques_block=prior_block,
+            response_schema_json=_CRITIQUE_SCHEMA_JSON,
         )
 
         agent = Agent(

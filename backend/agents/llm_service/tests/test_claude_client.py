@@ -97,6 +97,14 @@ def test_complete_json_repairs_fenced_json():
     assert out == {"a": 1, "b": [1, 2, 3]}
 
 
+def test_complete_json_accepts_schema_kwarg_as_noop():
+    """Claude has no decoder-level schema enforcement — schema= is silently ignored."""
+    client, _ = _make_client(_text_message('{"answer": 42}'))
+    assert client.supports_structured_output() is False
+    out = client.complete_json("q", objective="test", schema={"type": "object"})
+    assert out == {"answer": 42}
+
+
 def test_complete_json_never_sends_temperature():
     client, capture = _make_client(_text_message('{"ok": true}'))
     client.complete_json("q", objective="test", temperature=0.9)

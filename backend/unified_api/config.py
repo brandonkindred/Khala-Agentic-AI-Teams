@@ -147,14 +147,6 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         parent_team_key="investment",
         cell="business",
     ),
-    "nutrition_meal_planning": TeamConfig(
-        name="Nutrition & Meal Planning",
-        prefix="/api/nutrition-meal-planning",
-        description="Personal nutrition and meal planning with learning from feedback",
-        tags=["nutrition", "meal-planning", "health"],
-        cell="personal",
-        timeout_seconds=120.0,
-    ),
     "planning": TeamConfig(
         name="Planning",
         prefix="/api/planning",

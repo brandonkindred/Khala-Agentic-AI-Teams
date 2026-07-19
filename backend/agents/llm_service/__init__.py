@@ -19,6 +19,7 @@ from .attribution import (
     new_request_id,
 )
 from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
+from .capabilities import provider_supports_structured_output
 from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
 from .compaction import clear_compaction_cache, compact_text
 from .factory import (
@@ -140,4 +141,5 @@ __all__ = [
     "estimate_cost_usd",
     "get_recent_calls",
     "get_usage_summary",
+    "provider_supports_structured_output",
 ]

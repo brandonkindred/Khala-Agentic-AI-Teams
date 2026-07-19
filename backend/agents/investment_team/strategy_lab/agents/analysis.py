@@ -9,9 +9,9 @@ from typing import Any, List, Optional
 from strands import Agent
 
 from ...models import WINNING_THRESHOLD, BacktestResult, StrategySpec, TradeRecord
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
+from ._prompt_context import spec_prompt_fields
 from .alignment import TradeAlignmentReport
 from .model_factory import get_strands_model
 
@@ -181,12 +181,7 @@ class AnalysisAgent:
         system_prompt = _ANALYSIS_SYSTEM_PROMPT
 
         draft_prompt = draft_template.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
+            **spec_prompt_fields(spec),
             sizing_line_reading=_SIZING_LINE_READING,
             rationale=rationale,
             annualized_return_pct=metrics.annualized_return_pct,
@@ -227,12 +222,7 @@ class AnalysisAgent:
         if on_sub_phase:
             on_sub_phase("review")
         review_prompt = _SELF_REVIEW_PROMPT.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
+            **spec_prompt_fields(spec),
             risk_model_check=_RISK_MODEL_CHECK,
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,

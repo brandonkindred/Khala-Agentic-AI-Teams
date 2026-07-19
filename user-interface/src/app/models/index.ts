@@ -15,7 +15,6 @@ export * from './agent-runner.model';
 export * from './agent-history.model';
 export * from './ai-systems.model';
 export * from './investment.model';
-export * from './nutrition.model';
 export * from './jobs-dashboard.model';
 export * from './integrations.model';
 export * from './planning.model';

@@ -72,6 +72,51 @@ def test_acquire_succeeds_after_ttl_expiry(tmp_path: Path) -> None:
     assert store.get_owner("agent-1", now=1200.0) == "job-2"
 
 
+def test_acquire_returns_fencing_token_one_for_fresh_agent_id(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    token = store.acquire("agent-1", owner="job-1")
+
+    assert token == 1
+    assert store._read_record("agent-1")["fencing_token"] == 1
+
+
+def test_acquire_fencing_token_unchanged_on_same_owner_renew(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first_token = store.acquire("agent-1", owner="job-1", now=1000.0)
+    second_token = store.acquire("agent-1", owner="job-1", now=2000.0)
+
+    assert second_token == first_token == 1
+    assert store._read_record("agent-1")["fencing_token"] == 1
+
+
+def test_acquire_fencing_token_increments_on_reclaim_after_expiry(tmp_path: Path) -> None:
+    store = _store(tmp_path, ttl_seconds=100)
+    first_token = store.acquire("agent-1", owner="job-1", now=1000.0)
+    second_token = store.acquire("agent-1", owner="job-2", now=1200.0)
+    third_token = store.acquire("agent-1", owner="job-3", now=1400.0)
+
+    assert first_token == 1
+    assert second_token == 2
+    assert third_token == 3
+    assert store._read_record("agent-1")["fencing_token"] == 3
+
+
+def test_acquire_fencing_token_persists_across_store_instances(tmp_path: Path) -> None:
+    """A fresh AgentLockStore pointed at the same storage_dir must read back
+    the persisted token, since separate Temporal activities each construct
+    their own AgentLockStore instance."""
+    from agent_provisioning_team.shared.agent_lock import AgentLockStore
+
+    sdir = tmp_path / "locks"
+    AgentLockStore(storage_dir=sdir, ttl_seconds=100).acquire("agent-1", owner="job-1", now=1000.0)
+
+    second_store = AgentLockStore(storage_dir=sdir, ttl_seconds=100)
+    token = second_store.acquire("agent-1", owner="job-2", now=1200.0)
+
+    assert token == 2
+    assert second_store._read_record("agent-1")["fencing_token"] == 2
+
+
 def test_release_clears_only_for_current_owner(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.acquire("agent-1", owner="job-1")

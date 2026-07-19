@@ -72,106 +72,90 @@ def test_postgres_schema_exposed_on_app_state() -> None:
     assert app_none.state.postgres_schema is None
 
 
-def test_extra_postgres_schemas_none_treated_as_omitted() -> None:
-    """An explicit extra_postgres_schemas=None degrades the same as omitting
-    it, matching postgres_schema=None's own "no schema" convention — it must
-    not crash the unpack of `*extra_postgres_schemas`."""
-    app = create_team_app(
-        service_name="svc",
-        team_key="tk",
-        title="T",
-        postgres_schema=object(),
-        extra_postgres_schemas=None,  # type: ignore[arg-type]
-    )
-    assert len(app.state.postgres_schemas) == 1  # just the primary, no crash
-
-
-def test_extra_postgres_schemas_exposed_on_app_state() -> None:
-    """app.state.postgres_schemas is the full ordered set (primary first, then
-    extras) so bootstrap paths that need every schema (not just the primary)
-    have one place to read them from."""
-    primary, extra = object(), object()
-    app = create_team_app(
-        service_name="svc",
-        team_key="tk",
-        title="T",
-        postgres_schema=primary,
-        extra_postgres_schemas=[extra],
-    )
-    assert app.state.postgres_schema is primary  # unchanged, backward compat
-    assert app.state.postgres_schemas == (primary, extra)  # primary first
-
-
-def test_postgres_schemas_empty_tuple_when_nothing_given() -> None:
-    app = create_team_app(service_name="svc", team_key="tk", title="T")
-    assert app.state.postgres_schemas == ()
-
-
-def test_extra_postgres_schemas_all_registered_on_startup(monkeypatch) -> None:
+def test_extra_postgres_schemas_exposed_and_registered(monkeypatch) -> None:
+    """extra_postgres_schemas combine with the primary schema on app.state and
+    all of them are registered on startup, in primary-then-extras order."""
     import shared_postgres
 
     registered = []
     monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: registered.append(s))
     monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
 
-    primary, extra1, extra2 = object(), object(), object()
+    schema1, schema2, schema3 = object(), object(), object()
     app = create_team_app(
         service_name="svc",
         team_key="tk",
         title="T",
-        postgres_schema=primary,
-        extra_postgres_schemas=[extra1, extra2],
+        postgres_schema=schema1,
+        extra_postgres_schemas=[schema2, schema3],
     )
+    assert app.state.postgres_schema is schema1  # unchanged, backward compatible
+    assert app.state.postgres_schemas == [schema1, schema2, schema3]
     with TestClient(app):
-        assert registered == [primary, extra1, extra2]
+        assert registered == [schema1, schema2, schema3]
 
 
-def test_one_extra_schema_failure_does_not_block_others_or_startup(monkeypatch) -> None:
+def test_extra_schemas_only_no_primary(monkeypatch) -> None:
+    """The wiring fires from extra_postgres_schemas alone, with no primary schema."""
     import shared_postgres
 
-    class _Schema:
-        def __init__(self, team: str) -> None:
-            self.team = team
+    registered = []
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: registered.append(s))
+    monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
 
-    registered, started = [], []
+    schema2 = object()
+    app = create_team_app(
+        service_name="svc", team_key="tk", title="T", extra_postgres_schemas=[schema2]
+    )
+    assert app.state.postgres_schema is None
+    assert app.state.postgres_schemas == [schema2]
+    with TestClient(app):
+        assert registered == [schema2]
 
-    def _rts(s):
-        if s.team == "boom":
-            raise RuntimeError("pg down")
-        registered.append(s.team)
 
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", _rts)
+def test_no_schemas_at_all_exposes_empty_list() -> None:
+    app = create_team_app(service_name="svc", team_key="tk", title="T")
+    assert app.state.postgres_schemas == []
+
+
+def test_one_schema_registration_failure_does_not_block_others(monkeypatch) -> None:
+    """A single schema's registration failure is logged but does not prevent the
+    remaining schemas in the set from registering."""
+    import shared_postgres
+
+    schema1, schema2 = object(), object()
+    registered = []
+
+    def _register(schema):
+        if schema is schema1:
+            raise RuntimeError("pg down for schema1")
+        registered.append(schema)
+
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", _register)
     monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
 
     app = create_team_app(
         service_name="svc",
         team_key="tk",
         title="T",
-        postgres_schema=_Schema("ok1"),
-        extra_postgres_schemas=[_Schema("boom"), _Schema("ok2")],
-        on_startup=lambda: started.append(True),
+        postgres_schema=schema1,
+        extra_postgres_schemas=[schema2],
     )
     with TestClient(app):
-        pass
-    assert registered == ["ok1", "ok2"]  # "boom" skipped, "ok2" still attempted
-    assert started == [True]  # on_startup still ran despite the mid-loop failure
+        assert registered == [schema2]  # schema1 failed, schema2 still registered
 
 
-def test_close_pool_fires_with_only_extra_schemas_and_no_primary(monkeypatch) -> None:
-    # Regression guard for the shutdown gate change: postgres_schema=None but
-    # extra_postgres_schemas non-empty must still close the pool.
+def test_schema_import_failure_does_not_break_startup(monkeypatch) -> None:
+    """If shared_postgres.register_team_schemas can't even be imported, the
+    import failure is logged and startup still proceeds."""
     import shared_postgres
 
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: None)
-    closed = []
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: closed.append(True))
+    monkeypatch.delattr(shared_postgres, "register_team_schemas", raising=False)
+    monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
 
-    app = create_team_app(
-        service_name="svc", team_key="tk", title="T", extra_postgres_schemas=[object()]
-    )
+    app = create_team_app(service_name="svc", team_key="tk", title="T", postgres_schema=object())
     with TestClient(app):
-        pass
-    assert closed == [True]
+        pass  # startup must not raise despite the import failure
 
 
 def test_no_postgres_schema_skips_db_wiring(monkeypatch) -> None:

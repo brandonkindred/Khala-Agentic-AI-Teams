@@ -172,17 +172,15 @@ def build_wrapper_body(
     diagnostics + the memory watchdog, imports/builds the FastAPI ``app``,
     instruments it, and exposes ``/metrics``. When ``temporal_module`` and
     ``temporal_func`` are both provided it also registers every schema the app
-    exposes via ``app.state.postgres_schemas`` (via
-    ``shared_postgres.register_team_schemas_many`` — the same best-effort loop
-    ``shared_app.create_team_app``'s own lifespan uses, so the two can't drift)
-    and then starts the team's Temporal worker *in this worker process* (gated
-    on ``TEMPORAL_ADDRESS``), so the module-level Temporal client lives in the
-    same process that serves requests — workers are forked after the
-    supervisor starts, so a worker started in the supervisor would never be
-    visible here. Registering every schema *before* the worker starts closes a
-    cold-start race: the worker must not pick up an activity that writes to a
-    table — belonging to the team's primary schema or one it merely depends
-    on — that hasn't been created yet.
+    exposes via ``app.state.postgres_schemas`` and then starts the team's
+    Temporal worker *in this worker process* (gated on ``TEMPORAL_ADDRESS``),
+    so the module-level Temporal client lives in the same process that serves
+    requests — workers are forked after the supervisor starts, so a worker
+    started in the supervisor would never be visible here. Registering every
+    schema *before* the worker starts closes a cold-start race: the worker must
+    not pick up an activity that writes to a table that its own schema hasn't
+    created yet — one schema's registration failure is logged but does not
+    skip the rest, or the worker start.
 
     The OTel *import* and the ``init_otel()`` *call* sit in separate try blocks
     on purpose: a transient init failure must not discard the successfully
@@ -288,29 +286,24 @@ def build_wrapper_body(
     # idempotent and self-disables when Temporal is off. Names are embedded via
     # repr() (injection-safe) and resolved with importlib at runtime.
     if temporal_module and temporal_func:
-        # Register every schema the app exposes BEFORE starting the Temporal
-        # worker, but only when TEMPORAL_ADDRESS is set — i.e. only when the
-        # worker will actually start. The worker begins picking up (possibly
+        # Register every one of the team's Postgres schemas BEFORE starting the
+        # Temporal worker, but only when TEMPORAL_ADDRESS is set — i.e. only when
+        # the worker will actually start. The worker begins picking up (possibly
         # replayed) activities as soon as it starts, and a best-effort Postgres
         # write from an activity would hit an undefined-table error — silently
         # dropping the row — if the worker outran schema creation on a fresh
         # database (the lifespan's registration doesn't run until uvicorn starts
-        # serving, after this import-time block). This covers not just a team's
-        # own primary schema but any additional schema it depends on (e.g.
-        # another team's schema passed as extra_postgres_schemas to
-        # create_team_app) — app.state.postgres_schemas is the full ordered set.
-        # Gating on TEMPORAL_ADDRESS keeps thread/local mode side-effect-free: no
-        # worker start ⇒ no race ⇒ leave DDL to the lifespan, honoring
-        # shared_postgres's "DDL only from the lifespan" contract. The app was
-        # imported above, so its schemas are on app.state.
-        # register_team_schemas_many is the single shared "register each,
-        # independently best-effort" loop create_team_app's own lifespan also
-        # uses — one schema's failure (including one whose .team is itself
-        # unreadable) is logged but never blocks another schema's registration
-        # or the worker start below, and it's a no-op per schema when
-        # POSTGRES_HOST is unset. CREATE TABLE IF NOT EXISTS is idempotent, so
-        # re-running it in the lifespan later is harmless. Names are embedded
-        # via repr() (injection-safe) and resolved with importlib at runtime.
+        # serving, after this import-time block). Gating on TEMPORAL_ADDRESS keeps
+        # thread/local mode side-effect-free: no worker start ⇒ no race ⇒ leave DDL
+        # to the lifespan, honoring shared_postgres's "DDL only from the lifespan"
+        # contract. The app was imported above, so its schemas are on
+        # app.state.postgres_schemas (primary + any extras). register_team_schemas
+        # is a no-op when POSTGRES_HOST is unset, and CREATE TABLE IF NOT EXISTS is
+        # idempotent, so re-running it in the lifespan later is harmless. Each
+        # schema registers in its own try so one schema's failure is logged but
+        # doesn't block the remaining schemas or the worker start. Names are
+        # embedded via repr() (injection-safe) and resolved with importlib at
+        # runtime.
         body += (
             "try:\n"
             "    import os as _os\n"
@@ -318,10 +311,13 @@ def build_wrapper_body(
             "        try:\n"
             "            _schemas = getattr(getattr(app, 'state', None), 'postgres_schemas', None) or ()\n"
             "            if _schemas:\n"
-            "                from shared_postgres import register_team_schemas_many as _rtsm\n"
-            "                _applied = _rtsm(_schemas)\n"
-            "                if _applied:\n"
-            f"                    _log.info('Postgres schema(s) %s registered before Temporal worker for %s', [getattr(_s, 'team', _s) for _s in _applied], {team_name!r})\n"
+            "                from shared_postgres import register_team_schemas as _rts\n"
+            "                for _schema in _schemas:\n"
+            "                    try:\n"
+            "                        if _rts(_schema):\n"
+            f"                            _log.info('Postgres schema registered before Temporal worker for %s', {team_name!r})\n"
+            "                    except Exception:\n"
+            "                        _log.warning('pre-Temporal Postgres schema registration failed', exc_info=True)\n"
             "        except Exception:\n"
             "            _log.warning('pre-Temporal Postgres schema registration failed', exc_info=True)\n"
             "        import importlib as _il\n"
