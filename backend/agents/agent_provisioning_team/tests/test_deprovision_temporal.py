@@ -145,7 +145,7 @@ def test_deprovision_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),

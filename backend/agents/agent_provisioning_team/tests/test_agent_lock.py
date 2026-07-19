@@ -327,8 +327,9 @@ def test_check_fencing_token_rejects_lower_token(tmp_path: Path) -> None:
         store.check_fencing_token("agent-1", 1)
 
     assert exc_info.value.agent_id == "agent-1"
-    assert exc_info.value.token == 1
+    assert exc_info.value.provided_token == 1
     assert exc_info.value.current_token == 2
+    assert exc_info.value.resource == "agent_lock"
 
 
 def test_check_fencing_token_is_noop_when_no_record_exists(tmp_path: Path) -> None:

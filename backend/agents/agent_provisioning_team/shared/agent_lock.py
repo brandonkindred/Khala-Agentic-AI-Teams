@@ -45,7 +45,17 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .fencing import StaleFencingTokenError
 from .path_safety import safe_path_component
+from .state_reaping import state_retention_seconds
+
+# Re-exported for callers that import it from here (this module is the one that
+# *detects* a stale lock token via :meth:`AgentLockStore.check_fencing_token`).
+# It is the SAME class the resource stores raise — deliberately one type, not
+# two same-named ones — so ``non_retryable_error_types=["StaleFencingTokenError"]``
+# and the workflow's cause-chain check cover both the lock-level and the
+# store-level rejection without depending on a name coincidence.
+__all__ = ["StaleFencingTokenError"]
 
 try:
     import fcntl
@@ -84,30 +94,6 @@ class AgentLockBusyError(AgentLockError):
         self.agent_id = agent_id
         self.holder = holder
         super().__init__(f"agent {agent_id!r} is currently locked by owner {holder!r}")
-
-
-class StaleFencingTokenError(AgentLockError):
-    """Raised by :meth:`AgentLockStore.check_fencing_token` when a caller's
-    token has been superseded by a later acquisition for the same agent.
-
-    A resumed-but-stale workflow presenting a fencing token lower than the
-    highest one already recorded for ``agent_id`` proves a different owner
-    has since reclaimed the lease — this error is the caller's signal to
-    abandon its mutation rather than apply it.
-
-    Attributes:
-        agent_id: The agent whose fencing token was checked.
-        token: The presented (stale) token.
-        current_token: The highest token currently recorded for ``agent_id``.
-    """
-
-    def __init__(self, agent_id: str, token: int, current_token: int) -> None:
-        self.agent_id = agent_id
-        self.token = token
-        self.current_token = current_token
-        super().__init__(
-            f"stale fencing token {token} for agent {agent_id!r}: current token is {current_token}"
-        )
 
 
 class AgentLockStore:
@@ -412,4 +398,55 @@ class AgentLockStore:
             return
         current_token = record.get("fencing_token")
         if isinstance(current_token, (int, float)) and token < current_token:
-            raise StaleFencingTokenError(agent_id, token, int(current_token))
+            raise StaleFencingTokenError(
+                agent_id=agent_id,
+                resource="agent_lock",
+                provided_token=token,
+                current_token=int(current_token),
+            )
+
+    def reap_stale(
+        self, *, now: Optional[float] = None, retention_s: Optional[float] = None
+    ) -> int:
+        """Delete lock records force-expired for longer than the retention window.
+
+        Preconditions:
+            * None (safe to call any time; best-effort).
+        Postconditions:
+            * Unlinks every record file whose ``expires_at`` is more than
+              ``retention_s`` (default :func:`state_retention_seconds`) seconds
+              in the past — i.e. a lease :meth:`release` force-expired, or one
+              abandoned long ago. A live or recently-released lease (its
+              ``expires_at`` within the window, or in the future) is never
+              touched, so an in-flight or resumable owner's fencing high-water
+              mark always survives. See ``shared/state_reaping.py`` for why the
+              window is safe.
+            * Returns the number of records removed. Never raises; unreadable
+              or unremovable files are skipped.
+
+        Invariant: this only removes the JSON record, never the ``.lock``
+        flock sidecar (which any concurrent :meth:`acquire` may hold open).
+        """
+        now = time.time() if now is None else now
+        retention_s = state_retention_seconds() if retention_s is None else retention_s
+        cutoff = now - retention_s
+        try:
+            entries = list(self.storage_dir.glob("*.json"))
+        except OSError:
+            return 0
+        reaped = 0
+        for path in entries:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            expires_at = record.get("expires_at")
+            if isinstance(expires_at, (int, float)) and expires_at < cutoff:
+                try:
+                    path.unlink()
+                    reaped += 1
+                except OSError:
+                    continue
+        return reaped

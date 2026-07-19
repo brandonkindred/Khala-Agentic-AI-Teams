@@ -245,6 +245,42 @@ def test_credential_store_delete_tool_credentials_removes_emptied_primary_to_exp
     assert store.get_credentials("a1", "pg") is None
 
 
+def test_credential_store_delete_tool_credentials_sentinel_only_primary_unlinked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A primary reduced to just the fencing sentinel must be unlinked, not kept.
+
+    When the only real tool is purged from a primary that also carries the
+    fencing-token sentinel, the leftover ``{sentinel}`` blob is still non-empty
+    — so, before the fix, ``delete_tool_credentials`` rewrote it instead of
+    unlinking it, and that surviving primary then masked an untouched legacy
+    entry for a completely different tool. The sentinel must be treated like an
+    empty blob: unlink so the read falls through to legacy.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.chdir(tmp_path)
+    key = CredentialStore.generate_key()
+    primary = tmp_path / "primary"
+    store = CredentialStore(storage_dir=primary, encryption_key=key)
+    # fencing_token stamps the reserved sentinel into the primary blob.
+    store.store_credentials("a1", "pg", {"password": "current"}, fencing_token=5)
+
+    legacy_dir = tmp_path / ".agent_cache" / "provisioning_credentials"
+    legacy_dir.mkdir(parents=True)
+    legacy_store = CredentialStore(storage_dir=legacy_dir, encryption_key=key)
+    legacy_store.store_credentials("a1", "redis", {"password": "r"})  # legacy-only survivor
+
+    assert store.delete_tool_credentials("a1", "pg", fencing_token=6) is True
+
+    # Primary held only {sentinel, pg}; after purging pg only the sentinel would
+    # remain, so the file must be gone entirely.
+    assert not (primary / "a1.enc").exists()
+    # The legacy "redis" entry is no longer masked.
+    assert store.get_credentials("a1", "redis") == {"password": "r"}
+    assert store.get_credentials("a1", "pg") is None
+
+
 def test_credential_store_delete_tool_credentials_purges_legacy_when_primary_lacks_tool(
     tmp_path: Path, monkeypatch
 ) -> None:

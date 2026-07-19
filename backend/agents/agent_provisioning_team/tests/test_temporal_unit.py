@@ -770,7 +770,7 @@ def test_credentials_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -782,6 +782,32 @@ def test_credentials_activity_rejects_stale_fencing_token() -> None:
         with pytest.raises(StaleFencingTokenError):
             activities.credentials_activity("j", "a", "default.yaml", fencing_token=1)
 
+    fake_run.assert_not_called()
+
+
+def test_deliver_activity_rejects_stale_fencing_token() -> None:
+    """deliver_activity must reject a stale token up front via the lock-store
+    preflight, before run_deliver's own EnvironmentStore check — closing the
+    window where a reclaiming owner has bumped the lock but not yet the env."""
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch.object(activities, "_best_effort_job_store"),
+        patch("agent_provisioning_team.phases.deliver.run_deliver") as fake_run,
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.deliver_activity("j", "a", None, {}, [], None, None, fencing_token=1)
+
+    # Rejected before any deliver-phase mutation ran.
     fake_run.assert_not_called()
 
 
@@ -963,7 +989,7 @@ def test_provision_tool_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -1290,7 +1316,7 @@ def test_compensate_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -1608,7 +1634,7 @@ def test_record_account_provisioning_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -2377,7 +2403,7 @@ def test_setup_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     prior = {"success": True, "environment": None}
     with (

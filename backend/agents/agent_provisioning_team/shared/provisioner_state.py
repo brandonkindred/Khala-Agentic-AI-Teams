@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .fencing import check_fencing_token
 from .path_safety import safe_path_component
+from .state_reaping import state_retention_seconds
 
 DEFAULT_STATE_DIR = (
     Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
@@ -98,11 +99,19 @@ def _as_row(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if "details" in raw and isinstance(raw["details"], dict):
         comps = raw.get("compensations") or []
         token = raw.get("fencing_token")
-        return {
+        row: Dict[str, Any] = {
             "details": raw["details"],
             "compensations": list(comps),
             "fencing_token": token if isinstance(token, int) else None,
         }
+        # Carry the tombstone timestamp through reload so ``_save``'s reaper can
+        # still recognise (and eventually drop) a tombstone written by an
+        # earlier process. Only tombstones (see :meth:`ProvisionerStateStore.delete`)
+        # carry it, so live rows stay free of the key.
+        tombstoned_at = raw.get("tombstoned_at")
+        if isinstance(tombstoned_at, (int, float)):
+            row["tombstoned_at"] = tombstoned_at
+        return row
     # Legacy flat row — treat the whole thing as details.
     return {"details": dict(raw), "compensations": [], "fencing_token": None}
 
@@ -144,7 +153,42 @@ class ProvisionerStateStore:
         # Migrate legacy flat rows on read so every in-memory view is nested.
         return {agent_id: _as_row(row) for agent_id, row in raw.items()}
 
+    @staticmethod
+    def _reap_expired_tombstones(
+        data: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return ``data`` with fully-expired tombstone rows dropped.
+
+        A tombstone (see :meth:`delete`) has empty ``details`` **and** empty
+        ``compensations`` **and** a numeric ``tombstoned_at``. Once it is older
+        than :func:`state_retention_seconds`, no resumable stale worker can
+        still hold a lower token for that ``agent_id`` (see
+        ``shared/state_reaping.py``), so the row is safe to remove outright,
+        reclaiming space in this store's single, wholly-rewritten file. Live
+        rows (any details or compensations) and recent tombstones are always
+        kept. Never raises: on any error the input is returned unchanged so a
+        reap problem can never block a legitimate write.
+        """
+        try:
+            retention = state_retention_seconds()
+            now = time.time()
+        except Exception:  # noqa: BLE001 - reaping must never block a write
+            return data
+        kept: Dict[str, Dict[str, Any]] = {}
+        for agent_id, row in data.items():
+            tombstoned_at = row.get("tombstoned_at")
+            if (
+                not row.get("details")
+                and not row.get("compensations")
+                and isinstance(tombstoned_at, (int, float))
+                and (now - tombstoned_at) > retention
+            ):
+                continue
+            kept[agent_id] = row
+        return kept
+
     def _save(self, data: Dict[str, Dict[str, Any]]) -> None:
+        data = self._reap_expired_tombstones(data)
         # Atomic write: tempfile → fsync → rename.
         fd, tmp_path = tempfile.mkstemp(
             prefix=f".{self.provisioner_name}.", suffix=".json", dir=str(self.storage_dir)
@@ -263,6 +307,10 @@ class ProvisionerStateStore:
                 "fencing_token": fencing_token
                 if fencing_token is not None
                 else row.get("fencing_token"),
+                # Stamped so ``_save``'s reaper can eventually drop this
+                # tombstone once no resumable stale worker could still present
+                # a lower token (see shared/state_reaping.py).
+                "tombstoned_at": time.time(),
             }
             return had_content
 
@@ -280,16 +328,23 @@ class ProvisionerStateStore:
         Raises :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
         when ``fencing_token`` is lower than this agent's already-recorded
         fencing token; otherwise returns ``None``.
+
+        Intentionally lock-free (mirrors :meth:`get`): it only *reads* the
+        high-water mark, so it must not enter the read-modify-write path.
+        Using ``self._locked()`` here would re-serialise + fsync + atomically
+        rename the entire store on every preflight — and this runs as the
+        first statement of every provision/deprovision — purely to compare
+        one integer. ``_load`` observes a whole committed snapshot via the
+        mutators' atomic ``os.replace``, which is all this comparison needs.
         """
-        with self._locked() as data:
-            row = data.get(agent_id) or {"details": {}, "compensations": []}
-            prior_token = row.get("fencing_token")
-            check_fencing_token(
-                agent_id=agent_id,
-                resource=f"provisioner_state:{self.provisioner_name}",
-                provided_token=fencing_token,
-                current_token=prior_token if isinstance(prior_token, int) else None,
-            )
+        row = self._load().get(agent_id) or {"details": {}, "compensations": []}
+        prior_token = row.get("fencing_token")
+        check_fencing_token(
+            agent_id=agent_id,
+            resource=f"provisioner_state:{self.provisioner_name}",
+            provided_token=fencing_token,
+            current_token=prior_token if isinstance(prior_token, int) else None,
+        )
 
     def list_agents(self) -> Dict[str, Dict[str, Any]]:
         """Return every agent's flat details dict (legacy shape preserved).

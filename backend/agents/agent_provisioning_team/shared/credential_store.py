@@ -25,6 +25,7 @@ import json
 import os
 import secrets
 import string
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +33,7 @@ from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from .fencing import check_fencing_token
 from .path_safety import candidate_paths, safe_path_component
+from .state_reaping import state_retention_seconds
 
 # Reserved key inside the per-agent decrypted blob (which is otherwise
 # ``{tool_name: {...credentials...}}``) used to persist the store's
@@ -609,7 +611,14 @@ class CredentialStore:
                 data = None
             if isinstance(data, dict) and tool_name in data:
                 del data[tool_name]
-                if data:
+                # Keep the primary only if a REAL tool entry still remains. A
+                # blob left holding nothing but the fencing-token sentinel
+                # must be unlinked, exactly like a fully-empty one: otherwise
+                # ``_read_agent_credentials`` (which stops at the first
+                # candidate path that EXISTS, regardless of content) would
+                # halt at this sentinel-only primary and mask any still-present
+                # legacy entries for OTHER tools from ever being read again.
+                if any(k != _FENCING_TOKEN_KEY for k in data):
                     primary.write_bytes(self.multifernet.encrypt(json.dumps(data).encode()))
                     primary.chmod(0o600)
                 else:
@@ -626,13 +635,63 @@ class CredentialStore:
             if not isinstance(other, dict) or tool_name not in other:
                 continue
             del other[tool_name]
-            if other:
+            # Same rule as the primary above: a candidate reduced to nothing
+            # but the sentinel (or nothing at all) is unlinked so it can't
+            # shadow a later candidate. Legacy files never carry the sentinel
+            # today, so this collapses to ``if other`` for them, but stays
+            # correct if that ever changes.
+            if any(k != _FENCING_TOKEN_KEY for k in other):
                 path.write_bytes(self.multifernet.encrypt(json.dumps(other).encode()))
                 path.chmod(0o600)
             else:
                 path.unlink()
             removed_any = True
         return removed_any
+
+    def reap_stale(
+        self, *, now: Optional[float] = None, retention_s: Optional[float] = None
+    ) -> int:
+        """Delete fencing tombstones left by :meth:`delete_credentials` once stale.
+
+        Preconditions:
+            * None (safe to call any time; best-effort).
+        Postconditions:
+            * Scans the primary ``storage_dir`` and unlinks each ``*.enc`` blob
+              that (a) has not been modified for more than ``retention_s``
+              (default :func:`state_retention_seconds`) seconds and (b) decrypts
+              to a fencing tombstone — a blob holding no real tool entry (only
+              the reserved fencing sentinel, or empty). A blob young enough to
+              still shadow a resumable stale worker, or one holding any real
+              tool credential, is never removed. Decryption is required to make
+              this distinction, so a store built without the right key simply
+              reaps nothing (every read fails and is skipped).
+            * Returns the number of tombstones removed. Never raises; unreadable
+              or unremovable blobs are skipped.
+        """
+        now = time.time() if now is None else now
+        retention_s = state_retention_seconds() if retention_s is None else retention_s
+        cutoff = now - retention_s
+        try:
+            entries = list(self.storage_dir.glob("*.enc"))
+        except OSError:
+            return 0
+        reaped = 0
+        for path in entries:
+            try:
+                if path.stat().st_mtime > cutoff:
+                    continue
+                blob = json.loads(self.multifernet.decrypt(path.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                continue
+            # A tombstone holds no real tool entry — only the fencing sentinel
+            # (or nothing). Any real tool key means live credentials: keep it.
+            if isinstance(blob, dict) and not any(k != _FENCING_TOKEN_KEY for k in blob):
+                try:
+                    path.unlink()
+                    reaped += 1
+                except OSError:
+                    continue
+        return reaped
 
     def list_agents(self) -> List[str]:
         """List all agent IDs with stored credentials."""
