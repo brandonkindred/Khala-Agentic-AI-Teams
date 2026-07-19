@@ -26,10 +26,10 @@
       }
       @if (status.progress !== null) {
         <p><strong>Progress:</strong> {{ status.progress }}%</p>
-        <mat-progress-bar [value]="status.progress"></mat-progress-bar>
+        <mat-progress-bar [value]="status.progress" aria-label="Job progress"></mat-progress-bar>
       }
       @if ((status.status === 'running' || status.status === 'pending') && !status.waiting_for_answers) {
-        <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+        <mat-progress-bar mode="indeterminate" aria-label="Job progress"></mat-progress-bar>
       }
       <app-stall-warning [status]="status" />
       @if (status.error) {

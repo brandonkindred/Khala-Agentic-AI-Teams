@@ -10,7 +10,7 @@
         <p><strong>ETA:</strong> {{ status.eta_hint }}</p>
       }
       @if (status.status === 'running' || status.status === 'pending') {
-        <mat-progress-bar [value]="status.progress"></mat-progress-bar>
+        <mat-progress-bar [value]="status.progress" aria-label="Social marketing job progress"></mat-progress-bar>
       }
       @if (status.error) {
         <p class="error">{{ status.error }}</p>

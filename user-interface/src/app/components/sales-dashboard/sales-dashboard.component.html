@@ -116,6 +116,7 @@
                 mode="determinate"
                 [value]="s.progress"
                 class="status-progress"
+                [attr.aria-label]="(s.product_name || 'Sales pipeline run') + ' progress'"
               />
               <div class="status-progress-label">{{ s.progress }}%</div>
 

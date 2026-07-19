@@ -13,7 +13,7 @@
         <p><strong>Repo:</strong> {{ status.repo_path }}</p>
       }
       @if (status.status === 'running' || status.status === 'pending') {
-        <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+        <mat-progress-bar mode="indeterminate" aria-label="SOC2 audit progress"></mat-progress-bar>
       }
       @if (status.error) {
         <p class="error">{{ status.error }}</p>

@@ -436,13 +436,11 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     expect(log.getAttribute('role')).toBe('group');
     expect(log.getAttribute('aria-label')).toBe('Strategy run activity log, scrollable');
 
-    // Pre-existing gaps in the "run in progress" header — the run-btn's spinner
-    // and the phase progress-bar/spinners lack accessible names, and the
-    // running run-btn nests a focusable spinner. Both predate this fix, are
-    // unrelated to the activity-log focus-indicator under test here, and are
-    // only surfaced now because this is the first a11y spec to set `running`.
+    // Pre-existing gap: the running run-btn nests a focusable spinner. Predates
+    // this fix, is unrelated to the activity-log focus-indicator under test
+    // here, and is only surfaced now because this is the first a11y spec to
+    // set `running`.
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -533,7 +531,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -560,7 +557,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Strategy 2 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -585,7 +581,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -608,7 +603,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Strategy 2 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -634,7 +628,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Finishing up.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -659,7 +652,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Strategy 3 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -687,7 +679,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     expect(sightedText).toContain('Strategy 3 of 5');
     expect(liveRegionText(fixture)).toContain('Strategy 3 of 5');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -718,7 +709,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     expect(sightedText).not.toContain('Batch 4 of 3');
     expect(liveRegionText(fixture)).toBe('Batch 3 of 3 — Finishing up.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -752,7 +742,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     // Without the correction this would read "Strategy 4 of 5" (2 + 0 + 1 + 1).
     expect(liveRegionText(fixture)).toBe('Strategy 3 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -792,7 +781,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Strategy 61 of 70.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -819,7 +807,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Finishing up.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -846,7 +833,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Batch 3 of 3 — Finishing up.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -870,7 +856,6 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
 
     expect(liveRegionText(fixture)).toBe('Batch 2 of 3 — Strategy 1 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -1387,11 +1372,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       expect(entry.textContent).toContain('Executing strategy backtest...');
     }
 
-    // Same pre-existing gaps as before (run-btn spinner, phase progress-bar/
-    // spinners lack accessible names; the running run-btn nests a focusable
+    // Same pre-existing gap as before (the running run-btn nests a focusable
     // spinner) — unrelated to the activity-log visibility under test here.
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
@@ -1627,7 +1610,6 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     expect(phaseIcon.getAttribute('aria-hidden')).toBe('true');
 
     await expectNoAxeViolations(fixture.nativeElement, {
-      'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);

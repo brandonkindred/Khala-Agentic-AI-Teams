@@ -91,7 +91,7 @@
             }
           </div>
           <span class="run-date">Started {{ run.created_at }}</span>
-          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+          <mat-progress-bar mode="indeterminate" [attr.aria-label]="personaName(run.persona_id) + ' test run progress'"></mat-progress-bar>
           <div class="run-actions">
             <button
               mat-icon-button

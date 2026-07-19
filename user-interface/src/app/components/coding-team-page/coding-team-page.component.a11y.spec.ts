@@ -172,19 +172,12 @@ describe('CodingTeamPageComponent a11y', () => {
     await expectNoAxeViolations(el);
   }, 15000);
 
-  // Pre-existing gap: the embedded <app-coding-team-monitor> always renders a `mat-progress-bar`
-  // with no aria-label/aria-labelledby, so axe's aria-progressbar-name rule fires whenever a run
-  // is open (mirrors the same known gap disabled in coding-team-monitor.component.a11y.spec.ts and
-  // in strategy-lab.component.a11y.spec.ts). Out of scope for this test-only coverage issue;
-  // tracked separately for a production fix.
-  const KNOWN_GAPS = { 'aria-progressbar-name': { enabled: false } };
-
   it('has no axe violations on the Jobs view with a running run open', async () => {
     await setup();
     openRun(ghRun({ status: 'running' }), { job_id: 'j-run', status: 'running', phase: 'coding' });
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('app-coding-team-monitor')).not.toBeNull();
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations on the Jobs view with a failed run open', async () => {
@@ -192,6 +185,6 @@ describe('CodingTeamPageComponent a11y', () => {
     openRun(ghRun({ status: 'failed' }), { job_id: 'j-run', status: 'failed' });
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('app-coding-team-monitor')).not.toBeNull();
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 });
