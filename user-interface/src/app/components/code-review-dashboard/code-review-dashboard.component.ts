@@ -1,8 +1,12 @@
 import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
@@ -13,12 +17,14 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { PrReviewDetailComponent } from './pr-review-detail/pr-review-detail.component';
 import { PrReviewRunsService } from './pr-review-runs.service';
+import { badgeIcon, friendlyBadgeLabel } from './review-metrics';
 import type { GitHubPullRequestItem, GitHubRepoItem } from '../../models/integrations.model';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { EmptyStateComponent } from '../../shared/empty-state/empty-state.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
+import { resultCountAnnouncement } from '../../shared/result-count-announcement';
 
 /**
  * Code Review dashboard: lists every repository the configured PAT can access and, per
@@ -41,9 +47,13 @@ import { LatestOnly } from '../../shared/latest-only';
   standalone: true,
   imports: [
     CommonModule,
+    FormsModule,
     MatIconModule,
     MatButtonModule,
+    MatFormFieldModule,
+    MatInputModule,
     MatProgressSpinnerModule,
+    MatSlideToggleModule,
     MatTooltipModule,
     MatPaginatorModule,
     RouterLink,
@@ -62,6 +72,12 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   private readonly integrationsApi = inject(IntegrationsApiService);
   /** Exposed (not private) so the template can bind to it directly, e.g. `reviewRuns.badgeLabel(...)`. */
   protected readonly reviewRuns = inject(PrReviewRunsService);
+
+  // Friendly badge text/icon are pure functions in `review-metrics.ts` (unit-tested
+  // there in isolation), applied to `reviewRuns.badgeLabel(...)`'s raw output. Exposed
+  // as fields so the template calls them unchanged.
+  readonly friendlyBadgeLabel = friendlyBadgeLabel;
+  readonly badgeIcon = badgeIcon;
 
   /**
    * Latest review completion/failure/connection-lost sentence for the visually-hidden
@@ -86,6 +102,8 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   repoError: string | null = null;
   /** The expanded repo whose pull requests are shown; null when all repo rows are collapsed. */
   selectedRepo: GitHubRepoItem | null = null;
+  /** Case-insensitive text narrowing `repos` to `filteredRepos`; empty shows every repo. */
+  repoFilter = '';
 
   // Pull-request list (scoped to the expanded repo)
   pulls: GitHubPullRequestItem[] = [];
@@ -93,6 +111,11 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
   pullsLoaded = false;
   // Top-level banner: errors loading the PR list only.
   pullError: string | null = null;
+  /** Case-insensitive text narrowing `pulls` to `filteredPulls` (matches `#<number>` or title). */
+  pullFilter = '';
+  /** When true, `filteredPulls` excludes draft PRs. Persists across repo switches (a
+   *  cross-repo preference, like `pageSize` already does) — only `pullFilter` is repo-scoped. */
+  hideDrafts = false;
 
   // Client-side pagination over the fully-fetched PR array
   readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
@@ -213,6 +236,7 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
     this.pullsLoaded = false;
     this.expandedPrNumber = null;
     this.pullError = null;
+    this.pullFilter = '';
     this.reviewRuns.reset(this.selectedRepo);
   }
 
@@ -252,16 +276,143 @@ export class CodeReviewDashboardComponent implements OnInit, OnDestroy {
       });
   }
 
+  /**
+   * `repos` narrowed by `repoFilter`, matching case-insensitively on `full_name` or
+   * `description`.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `repos` itself (same reference) when `repoFilter` is empty
+   * or whitespace-only; otherwise a new array of the `repos` entries whose `full_name`
+   * or `description` contains `repoFilter`, case-insensitively. Does not mutate `repos`.
+   */
+  get filteredRepos(): GitHubRepoItem[] {
+    const q = this.repoFilter.trim().toLowerCase();
+    if (!q) return this.repos;
+    return this.repos.filter(
+      (r) => r.full_name.toLowerCase().includes(q) || (r.description ?? '').toLowerCase().includes(q),
+    );
+  }
+
+  /**
+   * Polite live-region text for how many repos `filteredRepos` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before `repos` has loaded or when the token has no
+   * repo access at all (`repos.length === 0`) — in both cases the search UI isn't
+   * rendered, so there's nothing to announce. Otherwise returns
+   * `resultCountAnnouncement(filteredRepos.length, 'repository', 'repositories')`.
+   */
+  get repoCountAnnouncement(): string {
+    if (!this.reposLoaded || this.repos.length === 0) return '';
+    return resultCountAnnouncement(this.filteredRepos.length, 'repository', 'repositories');
+  }
+
+  /**
+   * Update the repo text filter, collapsing the expanded repo if the new filter
+   * excludes it from `filteredRepos` — an expanded row that's no longer in the visible
+   * list shouldn't stay silently expanded off-screen.
+   *
+   * Preconditions: `value` is the search input's current text.
+   * Postconditions: `repoFilter` is set to `value`. If `selectedRepo` is set and is no
+   * longer present in `filteredRepos` under the new filter, `selectedRepo` is cleared
+   * and repo-scoped PR state is reset via `resetRepoScopedState` — identical to
+   * collapsing that repo through `toggleRepo`. Otherwise `selectedRepo` and PR state
+   * are left untouched.
+   */
+  onRepoFilterChange(value: string): void {
+    this.repoFilter = value;
+    const selected = this.selectedRepo;
+    if (selected && !this.filteredRepos.some((r) => r.full_name === selected.full_name)) {
+      this.selectedRepo = null;
+      this.resetRepoScopedState();
+    }
+  }
+
+  /**
+   * `pulls` narrowed by `pullFilter` (substring match against `"#<number> <title>"`,
+   * case-insensitively) and, when `hideDrafts` is set, with draft PRs excluded.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `pulls` itself (same reference) when `hideDrafts` is false
+   * and `pullFilter` is empty or whitespace-only; otherwise a new array of the `pulls`
+   * entries that pass both the draft exclusion (when `hideDrafts`) and the text match
+   * (when `pullFilter` is non-empty). Does not mutate `pulls`.
+   */
+  get filteredPulls(): GitHubPullRequestItem[] {
+    const q = this.pullFilter.trim().toLowerCase();
+    if (!this.hideDrafts && !q) return this.pulls;
+    return this.pulls.filter((p) => {
+      if (this.hideDrafts && p.draft) return false;
+      if (!q) return true;
+      return `#${p.number} ${p.title}`.toLowerCase().includes(q);
+    });
+  }
+
+  /**
+   * Polite live-region text for how many PRs `filteredPulls` currently shows.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `''` before `pulls` has loaded or when the expanded repo
+   * has no open PRs at all (`pulls.length === 0`) — in both cases the search UI isn't
+   * rendered, so there's nothing to announce. Otherwise returns
+   * `resultCountAnnouncement(filteredPulls.length, 'pull request', 'pull requests')`.
+   */
+  get pullCountAnnouncement(): string {
+    if (!this.pullsLoaded || this.pulls.length === 0) return '';
+    return resultCountAnnouncement(this.filteredPulls.length, 'pull request', 'pull requests');
+  }
+
+  /**
+   * Tailored copy for the "No pull requests match" empty state, naming only the
+   * filter(s) actually active so the suggested remedy is never irrelevant.
+   *
+   * Preconditions: called only while `filteredPulls.length === 0` and
+   * `pulls.length > 0` (i.e. at least one of `pullFilter`/`hideDrafts` is narrowing the
+   * list — otherwise `filteredPulls` would equal `pulls`, per its own postcondition).
+   * Postconditions: returns copy mentioning "Hide drafts" only when `hideDrafts` is
+   * true, and mentions searching only when `pullFilter` is non-empty (mentions both
+   * when both are active).
+   */
+  get noPullMatchDescription(): string {
+    const hasQuery = this.pullFilter.trim().length > 0;
+    if (hasQuery && this.hideDrafts) return 'Try a different search or turn off Hide drafts.';
+    if (this.hideDrafts) return 'Turn off Hide drafts to see more.';
+    return 'Try a different search.';
+  }
+
   /** The slice of PRs visible on the current page. */
   get pagedPulls(): GitHubPullRequestItem[] {
     const start = this.pageIndex * this.pageSize;
-    return this.pulls.slice(start, start + this.pageSize);
+    return this.filteredPulls.slice(start, start + this.pageSize);
   }
 
   /** Adopt a new page index/size from the paginator (the `pagedPulls` getter re-slices). */
   onPageChange(event: PageEvent): void {
     this.pageIndex = event.pageIndex;
     this.pageSize = event.pageSize;
+  }
+
+  /**
+   * Update the PR text filter and reset to page 1 — the current page may no longer
+   * exist against the narrowed result set.
+   *
+   * Preconditions: `value` is the search input's current text.
+   * Postconditions: `pullFilter` is set to `value` and `pageIndex` is set to 0.
+   */
+  onPullFilterChange(value: string): void {
+    this.pullFilter = value;
+    this.pageIndex = 0;
+  }
+
+  /**
+   * Toggle whether `filteredPulls` excludes draft PRs, resetting to page 1.
+   *
+   * Preconditions: `value` is the toggle's new checked state.
+   * Postconditions: `hideDrafts` is set to `value` and `pageIndex` is set to 0.
+   */
+  onHideDraftsChange(value: boolean): void {
+    this.hideDrafts = value;
+    this.pageIndex = 0;
   }
 
   /** Toggle the accordion expansion for a PR (only one open at a time). */

@@ -571,7 +571,7 @@ flowchart LR
           Yes. Local dev runs the Unified API as a single FastAPI process with every enabled team's
           router mounted in-process on port 8080, and agents run as Python threads. You still need
           Postgres for the migrated teams (blogging, branding, startup_advisor, user_agent_founder,
-          agentic_team_provisioning, nutrition, team_assistant, and unified_api credentials) — the
+          agentic_team_provisioning, team_assistant, and unified_api credentials) — the
           easiest way is to start just Postgres from the Docker compose file and export the
           <code>POSTGRES_*</code> env vars.
         </p>

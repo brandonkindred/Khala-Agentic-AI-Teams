@@ -921,6 +921,45 @@ describe('CodingTeamPageComponent', () => {
       expect(component.jobStatusTerminal).toBe(false);
     });
 
+    it('announces streaming thinking output, then a settled line count', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        component.jobStatus = { job_id: 'j1', status: 'running' };
+        expect(component.thinkingAnnouncement).toBe('');
+
+        // First thinking token: an immediate streaming cue, never the raw stream text.
+        component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
+        expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+
+        // A re-render with unchanged thinking text doesn't restart the settle window.
+        await vi.advanceTimersByTimeAsync(1000);
+        component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
+        expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+        await vi.advanceTimersByTimeAsync(500);
+        expect(component.thinkingAnnouncement).toBe('1 line of reasoning');
+
+        // New output arriving mid-settle restarts the window instead of announcing early.
+        component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one\nStep two' };
+        expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+        await vi.advanceTimersByTimeAsync(500);
+        expect(component.thinkingAnnouncement).toBe('2 lines of reasoning');
+        expect(component.thinkingAnnouncement).not.toContain('Step');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('clears the thinking announcement once thinking output is gone', async () => {
+      await setup();
+      component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
+      expect(component.thinkingAnnouncement).toBe('Agent is thinking…');
+      component.jobStatus = { job_id: 'j1', status: 'completed' };
+      expect(component.thinkingAnnouncement).toBe('');
+    });
+
     it('precomputes the selected issue\'s open-dependency refs when an issue is selected', async () => {
       await setup();
       component.selectIssue(
@@ -1099,6 +1138,23 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running' });
       expect(fixture.nativeElement.querySelector('.thinking-stream')).toBeNull();
+    });
+
+    it('renders a polite live region announcing thinking activity, separate from the raw stream', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running', thinking: 'weighing the approach' });
+      const live = fixture.nativeElement.querySelector('.thinking-announcement');
+      expect(live).not.toBeNull();
+      expect(live?.getAttribute('aria-live')).toBe('polite');
+      expect(live?.textContent?.trim()).toBe('Agent is thinking…');
+      // The announcer never echoes the raw (potentially verbose) stream text.
+      expect(live?.textContent).not.toContain('weighing the approach');
+    });
+
+    it('renders no thinking live region when there is no thinking text', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running' });
+      expect(fixture.nativeElement.querySelector('.thinking-announcement')).toBeNull();
     });
 
     it('renders the questions panel and waiting banner when the run is paused', async () => {
@@ -1711,6 +1767,14 @@ describe('CodingTeamPageComponent', () => {
       expect(component['copyResetTimer']).not.toBeNull();
       fixture.destroy();
       expect(component['copyResetTimer']).toBeNull();
+    });
+
+    it('cancels the thinking-announcement settle timer on destroy', async () => {
+      await setup();
+      component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'Step one' };
+      expect(component['thinkingAnnounceTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['thinkingAnnounceTimer']).toBeNull();
     });
   });
 });

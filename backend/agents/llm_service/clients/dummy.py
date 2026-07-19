@@ -686,44 +686,6 @@ class DummyLLMClient(LLMClient, Model):
                 "all_satisfied": True,
                 "summary": "All acceptance criteria satisfied (dummy).",
             }
-        # Nutrition & Meal Planning: intake profile prompt
-        elif "client profile" in lowered and (
-            "dietary_needs" in lowered
-            or "household" in lowered
-            or "produce a single complete client profile" in lowered
-        ):
-            return {
-                "household": {
-                    "number_of_people": 2,
-                    "description": "couple",
-                    "ages_if_relevant": [],
-                },
-                "dietary_needs": ["vegetarian"],
-                "allergies_and_intolerances": [],
-                "lifestyle": {
-                    "max_cooking_time_minutes": 30,
-                    "lunch_context": "remote",
-                    "equipment_constraints": [],
-                    "other_constraints": "",
-                },
-                "preferences": {
-                    "cuisines_liked": [],
-                    "cuisines_disliked": [],
-                    "ingredients_disliked": [],
-                    "preferences_free_text": "",
-                },
-                "goals": {"goal_type": "maintain", "notes": ""},
-            }
-        # Nutrition: nutrition plan / meal planning prompts (minimal valid structure)
-        elif "nutrition" in lowered and "plan" in lowered:
-            return {
-                "daily_calories": 2000,
-                "macros": {"protein": 100, "carbs": 200, "fat": 67},
-                "meals_per_day": 3,
-                "notes": "Dummy nutrition plan.",
-            }
-        elif "meal" in lowered and ("suggestions" in lowered or "recommendations" in lowered):
-            return {"suggestions": [{"meal": "Dummy meal", "reason": "Dummy reason"}]}
         elif (
             system_prompt
             and "senior software engineer" in system_prompt.lower()

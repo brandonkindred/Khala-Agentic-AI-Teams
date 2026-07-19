@@ -9,9 +9,9 @@ from typing import Any, List, Optional
 from strands import Agent
 
 from ...models import WINNING_THRESHOLD, BacktestResult, StrategySpec, TradeRecord
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_envelope import invoke_agent
+from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
+from ._prompt_context import spec_prompt_fields
 from .alignment import TradeAlignmentReport
 from .model_factory import get_strands_model
 
@@ -44,7 +44,9 @@ _DRAFT_TEMPLATES = {
     for name in ("analysis_win.md", "analysis_lose.md")
 }
 _ANALYSIS_SYSTEM_PROMPT = (
-    (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8") + "\n\n" + _STOP_ORDER_SEMANTICS
+    (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8")
+    + "\n\n"
+    + _STOP_ORDER_SEMANTICS
 )
 
 # The self-review risk-model check (instruction "1a"). Kept as its own
@@ -179,12 +181,7 @@ class AnalysisAgent:
         system_prompt = _ANALYSIS_SYSTEM_PROMPT
 
         draft_prompt = draft_template.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
+            **spec_prompt_fields(spec),
             sizing_line_reading=_SIZING_LINE_READING,
             rationale=rationale,
             annualized_return_pct=metrics.annualized_return_pct,
@@ -200,18 +197,19 @@ class AnalysisAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_ideation"), system_prompt=system_prompt, tools=[]
+            model=get_strands_model("strategy_analysis"), system_prompt=system_prompt, tools=[]
         )
 
         try:
-            draft_raw = invoke_agent(
+            draft_parsed = run_structured_agent(
                 agent,
                 draft_prompt,
-                agent_key="strategy_ideation",
+                agent_key="strategy_analysis",
                 phase="analysis_draft",
+                parse=extract_json_object,
+                charge=False,
                 logger=logger,
             )
-            draft_parsed = extract_json_object(draft_raw)
             draft_narrative = draft_parsed.get("draft_narrative", "")
         except Exception:
             logger.exception("Draft analysis failed")
@@ -224,12 +222,7 @@ class AnalysisAgent:
         if on_sub_phase:
             on_sub_phase("review")
         review_prompt = _SELF_REVIEW_PROMPT.format(
-            asset_class=spec.asset_class,
-            hypothesis=spec.hypothesis,
-            signal_definition=spec.signal_definition,
-            entry_rules=format_rules_for_prompt(spec.entry_rules),
-            exit_rules=format_rules_for_prompt(spec.exit_rules),
-            sizing_rules=format_sizing_rule(spec.sizing),
+            **spec_prompt_fields(spec),
             risk_model_check=_RISK_MODEL_CHECK,
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
@@ -256,18 +249,19 @@ class AnalysisAgent:
         )
 
         review_agent = Agent(
-            model=get_strands_model("strategy_ideation"), system_prompt=review_system, tools=[]
+            model=get_strands_model("strategy_analysis"), system_prompt=review_system, tools=[]
         )
 
         try:
-            review_raw = invoke_agent(
+            review_parsed = run_structured_agent(
                 review_agent,
                 review_prompt,
-                agent_key="strategy_ideation",
+                agent_key="strategy_analysis",
                 phase="analysis_review",
+                parse=extract_json_object,
+                charge=False,
                 logger=logger,
             )
-            review_parsed = extract_json_object(review_raw)
             revised = review_parsed.get("revised_narrative", "")
             if revised:
                 return _ensure_misalignment_disclaimer(revised, alignment_report)

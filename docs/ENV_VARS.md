@@ -440,6 +440,26 @@ The docker stack sets `2`.
 
 ---
 
+## Agent Provisioning
+
+`agent_provisioning_team`'s per-`agent_id` ownership lock
+(`shared/agent_lock.py`) is gated behind `workflow.patched(...)` markers in
+`temporal/workflows.py` so a workflow history recorded before the lock
+existed keeps replaying its original, lock-free command sequence. The
+markers can only be safely removed once no such pre-lock history is still
+open.
+
+### AGENT_PROVISIONING_LOCK_PATCH_CUTOFF_AT
+ISO-8601 timestamp (e.g. `2026-07-17T00:00:00Z`) — the deploy time of the
+lock-patch release, set by ops once that release is live. Read by
+`shared/visibility_query.find_open_pre_patch_executions`, which reports every
+open `AgentProvisioningWorkflow`/`AgentDeprovisioningWorkflow` execution
+started before this cutoff — the drain-gate/runbook signal for when the
+`workflow.patched(...)` markers can be deleted. Unset or unparseable values
+are treated as "no cutoff configured" (fail safe: every open execution of
+either workflow type is reported, never silently none) rather than falling
+back to a default timestamp.
+
 ## Agentic Team Provisioning
 
 WAIT-state reliability for Agent Studio pipeline test runs

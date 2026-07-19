@@ -391,9 +391,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       soc2: this.genericJobsApi.listJobs('soc2_compliance_team').pipe(catchError(() => of({ jobs: [] }))),
       pa: this.genericJobsApi.listJobs('personal_assistant_team').pipe(catchError(() => of({ jobs: [] }))),
       roadTrip: this.genericJobsApi.listJobs('road_trip_planning_team').pipe(catchError(() => of({ jobs: [] }))),
-      nutrition: this.genericJobsApi.listJobs('nutrition_meal_planning_team').pipe(catchError(() => of({ jobs: [] }))),
     }).pipe(
-      map(({ se, blogging, ai, prov, social, investment, persona, sales, planning, codingTeam, soc2, pa, roadTrip, nutrition }) => {
+      map(({ se, blogging, ai, prov, social, investment, persona, sales, planning, codingTeam, soc2, pa, roadTrip }) => {
         this.seFetchError = (se as { _error?: string })._error ?? null;
         const seJobs = (se as { jobs: RunningJobSummary[] }).jobs;
         type RowWithSe = DashboardRow & { seSummary?: RunningJobSummary };
@@ -436,9 +435,6 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         }
         for (const s of roadTrip.jobs ?? []) {
           rows.push({ unified: fromGenericJobRecord('road_trip_planning', s) });
-        }
-        for (const s of nutrition.jobs ?? []) {
-          rows.push({ unified: fromGenericJobRecord('nutrition_meal_planning', s) });
         }
         rows.sort((a, b) => (b.unified.createdAt ?? '').localeCompare(a.unified.createdAt ?? ''));
         return rows;

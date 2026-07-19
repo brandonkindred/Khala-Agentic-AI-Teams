@@ -196,6 +196,25 @@ def test_wrapper_registers_schema_before_temporal_worker() -> None:
     assert reg_idx < worker_idx
 
 
+def test_wrapper_iterates_all_schemas_before_temporal_worker() -> None:
+    """The wrapper reads the plural app.state.postgres_schemas and loops over
+    every schema, registering each before the Temporal worker starts."""
+    body = entrypoint.build_wrapper_body(
+        "planning_team",
+        "planning_team.api.main",
+        "app",
+        "planning_team.temporal.worker",
+        "start_planning_temporal_worker_thread",
+    )
+    _compile(body)
+    assert "postgres_schemas" in body
+    assert "for _schema in _schemas" in body
+    addr_idx = body.index("_os.environ.get('TEMPORAL_ADDRESS', '').strip()")
+    reg_idx = body.index("register_team_schemas")
+    worker_idx = body.index("_il.import_module('planning_team.temporal.worker')")
+    assert addr_idx < reg_idx < worker_idx
+
+
 def test_wrapper_omits_schema_registration_without_temporal() -> None:
     """A Pattern-B-only team (no Temporal worker) gets no new wrapper code — the
     lifespan still owns schema registration, so behavior is unchanged."""

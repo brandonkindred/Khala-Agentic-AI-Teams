@@ -26,6 +26,7 @@ entry-point has been removed; its job is now split across the gate
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -36,9 +37,10 @@ from pydantic import BaseModel, Field
 from strands import Agent
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
-from ._llm_envelope import invoke_agent
+from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
+from ._prompt_context import render_prior_attempts, spec_prompt_fields
+from ._response_schemas import ALIGNMENT_FIX_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,13 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # code examples and must never pass through ``str.format``.)
 _NEAR_MISS_SYSTEM_PROMPT = (_PROMPT_DIR / "alignment_near_miss.md").read_text(encoding="utf-8")
 _PROPOSE_FIX_SYSTEM_PROMPT = (_PROMPT_DIR / "alignment_propose_fix.md").read_text(encoding="utf-8")
+
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the *user* prompt only (mirrors
+# ``refinement._REFINEMENT_SCHEMA_JSON``). Never splice this into
+# ``_PROPOSE_FIX_SYSTEM_PROMPT`` — that prompt is held raw on purpose (see
+# above) and is never passed through ``str.format``.
+_ALIGNMENT_FIX_SCHEMA_JSON = json.dumps(ALIGNMENT_FIX_SCHEMA, indent=2)
 
 
 def _alignment_max_attempts() -> int:
@@ -237,6 +246,12 @@ Risk limits: {risk_limits}
 {prior_attempts_text}
 
 Return ONLY a JSON object with no markdown.
+
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
 """
 
 
@@ -308,19 +323,20 @@ class TradeAlignmentAgent:
             entry_date=entry_date,
         )
         agent = Agent(
-            model=get_strands_model("strategy_ideation"),
+            model=get_strands_model("strategy_alignment"),
             system_prompt=system_prompt,
             tools=[],
         )
         try:
-            raw = invoke_agent(
+            parsed = run_structured_agent(
                 agent,
                 user_prompt,
-                agent_key="strategy_ideation",
+                agent_key="strategy_alignment",
                 phase="alignment_near_miss",
+                parse=extract_json_object,
+                charge=False,
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Near-miss adjudicator failed to produce parseable JSON: %s",
@@ -358,48 +374,36 @@ class TradeAlignmentAgent:
 
         critical = [f for f in findings if f.severity == "critical" and not f.passed]
         info_warning = [f for f in findings if f not in critical]
-        prior_text = (
-            "None yet."
-            if not prior_attempts
-            else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
-        )
+        prior_text = render_prior_attempts(prior_attempts)
 
         user_prompt = _PROPOSE_FIX_USER_TEMPLATE.format(
-            asset_class=getattr(spec, "asset_class", "?"),
-            hypothesis=getattr(spec, "hypothesis", "?"),
-            signal_definition=getattr(spec, "signal_definition", "?"),
+            **spec_prompt_fields(spec, defensive=True),
             target_symbols=list(getattr(spec, "target_symbols", []) or []),
-            entry_rules=format_rules_for_prompt(getattr(spec, "entry_rules", []) or []),
-            exit_rules=format_rules_for_prompt(getattr(spec, "exit_rules", []) or []),
-            sizing_rules=format_sizing_rule(spec.sizing)
-            if getattr(spec, "sizing", None) is not None
-            else "(none)",
-            risk_limits=spec.risk_limits.model_dump_json()
-            if hasattr(getattr(spec, "risk_limits", None), "model_dump_json")
-            else str(getattr(spec, "risk_limits", "")),
             n_critical=len(critical),
             n_info_warning=len(info_warning),
             findings_section=_format_findings_section(findings),
             strategy_code=code,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
+            response_schema_json=_ALIGNMENT_FIX_SCHEMA_JSON,
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_ideation"),
+            model=get_strands_model("strategy_alignment"),
             system_prompt=system_prompt,
             tools=[],
         )
         try:
-            raw = invoke_agent(
+            parsed = run_structured_agent(
                 agent,
                 user_prompt,
-                agent_key="strategy_ideation",
+                agent_key="strategy_alignment",
                 phase="alignment_propose_fix",
+                parse=extract_json_object,
+                charge=False,
                 max_attempts=_alignment_max_attempts(),
                 logger=logger,
             )
-            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Alignment fix proposer failed to produce parseable JSON: %s",

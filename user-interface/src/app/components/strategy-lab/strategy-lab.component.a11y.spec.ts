@@ -89,7 +89,7 @@ const RECORD: StrategyLabRecord = {
 };
 
 describe('StrategyLabComponent a11y — result card disclosure', () => {
-  async function createFixture() {
+  async function createFixture(showTitle?: boolean) {
     const apiSpy = {
       runStrategyLab: vi.fn().mockReturnValue(NEVER),
       streamRunStatus: vi.fn().mockReturnValue(NEVER),
@@ -122,6 +122,9 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
+    if (showTitle !== undefined) {
+      fixture.componentInstance.showTitle = showTitle;
+    }
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
     return fixture;
   }
@@ -129,6 +132,24 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
   it('has no axe violations collapsed', async () => {
     const fixture = await createFixture();
     expect(fixture.nativeElement.querySelector('.strategy-card')).toBeTruthy();
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=true (default): exposes the card title as an <h3>, nested under the component\'s own <h2>', async () => {
+    const fixture = await createFixture();
+    const title: HTMLElement = fixture.nativeElement.querySelector('.strategy-card-header-text [mat-card-title]');
+    expect(title).toBeTruthy();
+    expect(title.tagName).toBe('H3');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=false: exposes the card title as an <h2>, so it sits directly under the wrapper\'s <h1>', async () => {
+    const fixture = await createFixture(false);
+    const title: HTMLElement = fixture.nativeElement.querySelector('.strategy-card-header-text [mat-card-title]');
+    expect(title).toBeTruthy();
+    expect(title.tagName).toBe('H2');
+
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
@@ -164,6 +185,73 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
     expect(region.getAttribute('role')).toBe('region');
     expect(btn.getAttribute('aria-controls')).toBe(region.id);
     expect(region.getAttribute('aria-label')).toBe('stocks strategy details');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+});
+
+describe('StrategyLabComponent a11y — root region labelling (showTitle input)', () => {
+  async function createFixture(showTitle?: boolean) {
+    const apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(NEVER),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    const integrationsSpy = {
+      getTradingViewConfig: vi.fn().mockReturnValue(
+        of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+      ),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        { provide: IntegrationsApiService, useValue: integrationsSpy },
+      ],
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
+
+    const fixture = TestBed.createComponent(StrategyLabComponent);
+    if (showTitle !== undefined) {
+      fixture.componentInstance.showTitle = showTitle;
+    }
+    fixture.detectChanges(); // triggers ngOnInit -> loadResults()
+    return fixture;
+  }
+
+  it('showTitle=true (default): renders the <h2> once and labels the region via aria-labelledby', async () => {
+    const fixture = await createFixture();
+    const root: HTMLElement = fixture.nativeElement.querySelector('.strategy-lab');
+    const heading: HTMLElement = fixture.nativeElement.querySelector('#strategy-lab-heading');
+    expect(root.getAttribute('role')).toBe('region');
+    expect(heading).toBeTruthy();
+    expect(heading.tagName).toBe('H2');
+    expect(root.getAttribute('aria-labelledby')).toBe('strategy-lab-heading');
+    expect(root.hasAttribute('aria-label')).toBe(false);
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=false: omits the <h2> (avoiding a duplicate with the wrapper\'s <h1>) and labels the region via a static aria-label', async () => {
+    const fixture = await createFixture(false);
+    const root: HTMLElement = fixture.nativeElement.querySelector('.strategy-lab');
+    expect(root.getAttribute('role')).toBe('region');
+    expect(fixture.nativeElement.querySelector('.lab-title')).toBeNull();
+    expect(fixture.nativeElement.querySelector('#strategy-lab-heading')).toBeNull();
+    expect(root.hasAttribute('aria-labelledby')).toBe(false);
+    expect(root.getAttribute('aria-label')).toBe('Strategy Lab');
 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
@@ -283,6 +371,43 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     expect(wrap.getAttribute('tabindex')).toBe('0');
     expect(wrap.getAttribute('role')).toBe('group');
     expect(wrap.getAttribute('aria-label')).toBe('stocks strategy trade history, scrollable');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('trade-ledger W/L pip announces "Win"/"Loss" alongside the visible letter', async () => {
+    const LOSS_TRADE: TradeRecord = { ...TRADE, trade_num: 2, outcome: 'loss', return_pct: -3.1 };
+    const fixture = await createFixture({
+      ...RECORD_WITH_TRADES,
+      backtest: { ...RECORD_WITH_TRADES.backtest, trades: [TRADE, LOSS_TRADE] },
+    });
+    fixture.componentInstance.toggleCard('rec-1');
+    fixture.detectChanges();
+    fixture.nativeElement.querySelector<HTMLElement>('.ledger-panel mat-expansion-panel-header')?.click();
+    fixture.detectChanges();
+
+    const pips: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.outcome-pip'));
+    expect(pips.length).toBe(2);
+
+    const [winPip, lossPip] = pips;
+    expect(winPip.querySelector('.visually-hidden')?.textContent?.trim()).toBe('Win');
+    expect(winPip.querySelector('[aria-hidden="true"]')?.textContent?.trim()).toBe('W');
+    expect(lossPip.querySelector('.visually-hidden')?.textContent?.trim()).toBe('Loss');
+    expect(lossPip.querySelector('[aria-hidden="true"]')?.textContent?.trim()).toBe('L');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('result-card Annual Return metric announces its color-cue label as text', async () => {
+    // RECORD's annualized_return_pct (12) is > 8 -> returnColor('winning') / returnColorLabel('Above target').
+    const fixture = await createFixture(RECORD_WITH_TRADES);
+    fixture.detectChanges();
+
+    const metric = Array.from(fixture.nativeElement.querySelectorAll<HTMLElement>('.metric')).find((el) =>
+      el.querySelector('.metric-label')?.textContent?.trim() === 'Annual Return',
+    );
+    expect(metric).toBeTruthy();
+    expect(metric!.querySelector('.visually-hidden')?.textContent?.trim()).toBe('Above target:');
 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
@@ -1268,12 +1393,11 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
  * "Material defaulted it".
  *
  * The rule deliberately allows the `aria-hidden="false"` + `aria-label` form
- * too, not just `"true"`: two icons in this template (the phase-stepper node
- * icon and the paper-trading comparison table's "Aligned" cell icon) are the
- * sole signal for their state today and are only marked `aria-hidden="true"`
- * for now because no text alternative exists yet. A guard that required
- * `"true"` unconditionally would fail the moment a future change gives either
- * of them a real accessible name — permanently blocking that fix instead of
+ * too, not just `"true"`: the phase-stepper node icon is still the sole
+ * signal for its state today and is only marked `aria-hidden="true"` for now
+ * because no text alternative exists yet (tracked separately). A guard that
+ * required `"true"` unconditionally would fail the moment a future change
+ * gives it a real accessible name — permanently blocking that fix instead of
  * just catching an accidentally-omitted attribute.
  *
  * Path is resolved relative to this spec file, independent of the vitest
@@ -1549,7 +1673,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     expect(after).toEqual(before);
   }, 15000);
 
-  it('paper-trading verdict icon and comparison-table aligned icon are aria-hidden', async () => {
+  it('paper-trading verdict icon is aria-hidden', async () => {
     const fixture = await createFixture();
     stubOf(fixture).paperTradingSessions.set({ 'rec-1': PAPER_SESSION });
     fixture.detectChanges();
@@ -1557,12 +1681,28 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     const verdictIcon: HTMLElement = fixture.nativeElement.querySelector('.paper-verdict-badge mat-icon');
     expect(verdictIcon.getAttribute('aria-hidden')).toBe('true');
 
-    // Sole content of its table cell, with no text fallback yet (that's separate
-    // color-cue/disclosure follow-up work). Still carries aria-hidden="true" —
-    // same as mat-icon's own built-in default — so this isn't a new AT gap.
-    const alignedIcon: HTMLElement = fixture.nativeElement.querySelector('.cmp-aligned mat-icon');
-    expect(alignedIcon).toBeTruthy();
-    expect(alignedIcon.getAttribute('aria-hidden')).toBe('true');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('comparison-table aligned icon announces "Aligned"/"Not aligned" to assistive tech', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).paperTradingSessions.set({
+      'rec-1': { ...PAPER_SESSION, comparison: { ...COMPARISON, win_rate_aligned: false } },
+    });
+    fixture.detectChanges();
+
+    const alignedIcons: HTMLElement[] = Array.from(
+      fixture.nativeElement.querySelectorAll('.cmp-aligned mat-icon'),
+    );
+    expect(alignedIcons.length).toBeGreaterThan(1);
+
+    const misaligned = alignedIcons[0]; // Win Rate row, forced misaligned above
+    expect(misaligned.getAttribute('aria-hidden')).toBe('false');
+    expect(misaligned.getAttribute('aria-label')).toBe('Not aligned');
+
+    const aligned = alignedIcons[1]; // Annual Return row, still aligned
+    expect(aligned.getAttribute('aria-hidden')).toBe('false');
+    expect(aligned.getAttribute('aria-label')).toBe('Aligned');
 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);

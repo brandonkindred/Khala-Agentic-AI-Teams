@@ -58,7 +58,7 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
   /**
    * Emitted after the backend launch completes. For async teams, consumers
    * typically read ``job_id`` and navigate to a jobs view. For synchronous
-   * teams (market_research, branding, nutrition, deepthought, road_trip,
+   * teams (market_research, branding, deepthought, road_trip,
    * agentic_team_provisioning, investment), ``job_id`` is ``null`` and the
    * actual results are carried in ``upstream_body`` — dashboards that
    * embed a sync team should read that directly.
@@ -82,6 +82,8 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
   suggestedQuestions: string[] = [];
   loading = false;
   error: string | null = null;
+  /** aria-live message announcing chat activity: typing state or a new assistant reply. */
+  lastAssistantAnnouncement = '';
   ready = false;
   missingFields: string[] = [];
 
@@ -264,14 +266,17 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
     ];
     this.loading = true;
     this.error = null;
+    this.lastAssistantAnnouncement = `${this.teamName} is typing…`;
     this.api.sendMessage(this.teamApiUrl, message, this.conversationId ?? undefined).subscribe({
       next: res => {
         this.applyState(res);
         this.loading = false;
+        this.lastAssistantAnnouncement = `${this.teamName} replied`;
       },
       error: err => {
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to send message';
         this.loading = false;
+        this.lastAssistantAnnouncement = '';
       },
     });
   }

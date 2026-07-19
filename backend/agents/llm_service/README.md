@@ -220,6 +220,36 @@ model = get_strands_model(agent_key="test_agent", client=DummyLLMClient())
 
 See `tests/test_strands_adapter.py` for message-conversion, tool-loop, and `structured_output` examples.
 
+## Provider-enforced structured output (capability check)
+
+`client.supports_structured_output()` is a synchronous, no-network capability
+flag: `False` by default, `True` for `OllamaLLMClient` (and for
+`get_strands_model(...)`/`LLMClientModel`, which delegate to their backing
+client). When it's `True`, pass `schema=` (a JSON Schema `dict` or a
+`pydantic.BaseModel` subclass) to `complete_json` to request provider-enforced
+schema-conformant decoding on the wire instead of the loose `json_object`
+mode — Ollama sends the OpenAI-compatible `{"type": "json_schema", ...}`
+`response_format` shape. Passing `schema` to a client that doesn't support it
+is not an error; it's silently ignored.
+
+For integration paths with no `LLMClient` instance at all (e.g. Strategy
+Lab's Bedrock-via-strands path, which constructs a raw
+`strands.models.BedrockModel` directly), use the provider-keyed
+`llm_service.provider_supports_structured_output(provider)` instead — it
+returns `True` only for `"ollama"`; `False` for `"bedrock"` (recorded as
+unsupported *on that integration path*, not a claim about Bedrock's Converse
+API in general) and any other provider.
+
+If schema-forced decoding starves the content channel (a known risk on long,
+code-emitting, thinking-enabled completions — see
+`investment_team/strategy_lab/agents/_response_schemas.py`), the Ollama
+client raises `LLMSemanticExhaustionError(schema_forced=True)` immediately on
+the first empty response, with no retry ladder — an explicit, catchable
+fallback signal so a caller can retry with `schema=None` (today's
+unconstrained + correction-retry path via `complete_validated`).
+
+No Strategy Lab agent is wired to use this yet — it is infrastructure only.
+
 ### Migration rule: keep pattern anchors in the **user** prompt
 
 `DummyLLMClient.complete_json` routes to its canned stubs by scanning the **user** prompt only (not the Strands system prompt). When migrating an agent and moving its persona to `Agent(system_prompt=...)`, the user prompt you build in `_build_user_prompt` must still include the distinctive tokens the matching dummy branch looks for — e.g. `bugs_found` + `test_plan` for the QA branch, or `integration expert` + `backend code` + `frontend code` for the Integration branch. An explicit "produce JSON with fields: foo, bar, baz" schema hint in the user prompt usually satisfies this for free. This only affects dummy-client tests; real LLMs see both prompts.
@@ -231,8 +261,10 @@ See `tests/test_strands_adapter.py` for message-conversion, tool-loop, and `stru
 - `LLMTemporaryError` – 5xx / network after retries
 - `LLMPermanentError` – 4xx (except 429)
 - `LLMJsonParseError` – response not valid JSON
+- `LLMSchemaValidationError` – valid JSON that fails Pydantic schema validation after `complete_validated`'s corrective retries
 - `LLMTruncatedError` – finish_reason=length
 - `LLMUnreachableAfterRetriesError` – all retries failed
+- `LLMSemanticExhaustionError` – model produced no assistant content and no proof-of-change retry remains (see "Provider-enforced structured output" above for the `schema_forced` fallback-signal case)
 
 ## Adding a new provider
 

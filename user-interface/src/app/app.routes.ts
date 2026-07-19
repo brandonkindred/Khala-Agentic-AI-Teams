@@ -220,13 +220,6 @@ export const routes: Routes = [
         data: { breadcrumb: 'Sales' },
       },
       {
-        path: 'nutrition',
-        loadComponent: () =>
-          import('./components/nutrition-dashboard/nutrition-dashboard.component').then((m) => m.NutritionDashboardComponent),
-        title: 'Nutritionist',
-        data: { breadcrumb: 'Nutritionist' },
-      },
-      {
         path: 'agentic-teams',
         loadComponent: () =>
           import('./components/agentic-team-dashboard/agentic-team-dashboard.component').then(

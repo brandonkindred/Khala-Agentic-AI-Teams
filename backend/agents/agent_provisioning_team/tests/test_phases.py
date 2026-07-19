@@ -108,6 +108,82 @@ def test_run_setup_creates_new_container(tmp_path: Path) -> None:
     assert stored.updated_at == stored.created_at
 
 
+def test_run_setup_passes_job_id_to_docker_provision(tmp_path: Path) -> None:
+    """run_setup is the ONLY code path that creates the real agent_id
+    environment container -- job_id must reach docker.provision's config
+    here, or the khala.job_id label this feature depends on never gets
+    stamped on the container check_existing_environment_activity /
+    compensate_activity actually inspect.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    manifest = ToolManifest()
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-new",
+            "container_name": "agent-a2",
+            "ssh_port": 22002,
+            "workspace_path": "/workspace/a2",
+        },
+    )
+
+    run_setup(
+        agent_id="a2",
+        manifest=manifest,
+        environment_store=env_store,
+        docker_provisioner=docker,
+        progress_callback=lambda msg: None,
+        job_id="job-77",
+    )
+
+    _args, kwargs = docker.provision.call_args
+    assert kwargs["config"][JOB_ID_CONFIG_KEY] == "job-77"
+
+
+def test_run_setup_omits_job_id_from_docker_provision_when_not_given(tmp_path: Path) -> None:
+    """job_id is optional -- omitting it must not inject anything, keeping
+    non-Temporal callers behaving exactly as before this labeling primitive
+    existed."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    manifest = ToolManifest()
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-new",
+            "container_name": "agent-a2",
+            "ssh_port": 22002,
+            "workspace_path": "/workspace/a2",
+        },
+    )
+
+    run_setup(
+        agent_id="a2",
+        manifest=manifest,
+        environment_store=env_store,
+        docker_provisioner=docker,
+        progress_callback=lambda msg: None,
+    )
+
+    _args, kwargs = docker.provision.call_args
+    assert JOB_ID_CONFIG_KEY not in kwargs["config"]
+
+
 def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
     tmp_path: Path,
 ) -> None:
@@ -1004,6 +1080,33 @@ def test_deprovision_tools_requires_agent_id() -> None:
 
     with pytest.raises(AssertionError):
         deprovision_tools("", provisioners={})
+
+
+def test_deprovision_tools_stops_at_cancellation_checkpoint() -> None:
+    from agent_provisioning_team.models import DeprovisionCancelledError, DeprovisionResult
+    from agent_provisioning_team.phases.account_provisioning import deprovision_tools
+
+    p1 = MagicMock()
+    p1.deprovision.return_value = DeprovisionResult(tool_name="p1", success=True)
+    p2 = MagicMock()
+    p2.deprovision.return_value = DeprovisionResult(tool_name="p2", success=True)
+    p3 = MagicMock()
+    p3.deprovision.return_value = DeprovisionResult(tool_name="p3", success=True)
+
+    calls = {"n": 0}
+
+    def checkpoint() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1  # let p1 run, cancel before p2's teardown call
+
+    with pytest.raises(DeprovisionCancelledError) as exc_info:
+        deprovision_tools("a1", provisioners={"p1": p1, "p2": p2, "p3": p3}, checkpoint=checkpoint)
+
+    p1.deprovision.assert_called_once_with("a1")
+    p2.deprovision.assert_not_called()
+    p3.deprovision.assert_not_called()
+    assert exc_info.value.agent_id == "a1"
+    assert exc_info.value.completed == {"p1": True}
 
 
 def test_build_default_tool_agents_for_account_provisioning() -> None:
