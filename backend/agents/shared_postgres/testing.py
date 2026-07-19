@@ -52,6 +52,42 @@ def truncate_team_tables(schema: TeamSchema) -> int:
     return len(schema.table_names)
 
 
+def drop_team_tables(schema: TeamSchema) -> int:
+    """Drop every table named in ``schema.table_names``.
+
+    Unlike :func:`truncate_team_tables` (which empties rows but leaves the
+    table present), this removes the tables themselves — for tests that need
+    to simulate a genuinely fresh/empty database (e.g. proving a schema gets
+    (re-)created before some other code path reads from it). Returns the
+    number of tables dropped.
+
+    Raises ``RuntimeError`` when Postgres is disabled (matches
+    ``ensure_team_schema``'s policy of failing loudly on misuse).
+    """
+    if not is_postgres_enabled():
+        raise RuntimeError(
+            f"drop_team_tables called for team={schema.team} but POSTGRES_HOST is not set."
+        )
+    if not schema.table_names:
+        return 0
+
+    # Validate every identifier before opening a connection, matching
+    # truncate_team_tables — a bad name must fail fast, not after a pool wait.
+    quoted = [_quote_ident(name) for name in schema.table_names]
+
+    with get_conn(schema.database) as conn, conn.cursor() as cur:
+        for ident in quoted:
+            cur.execute(f"DROP TABLE IF EXISTS {ident} CASCADE")
+
+    logger.debug(
+        "drop_team_tables: team=%s dropped=%d tables=%s",
+        schema.team,
+        len(schema.table_names),
+        schema.table_names,
+    )
+    return len(schema.table_names)
+
+
 def truncate_all_teams(schemas: Iterable[TeamSchema]) -> int:
     """Truncate every team's tables in a single call.
 

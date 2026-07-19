@@ -19,6 +19,20 @@ from agent_provisioning_team.models import DeprovisionCancelledError, Deprovisio
 
 
 @pytest.fixture(autouse=True)
+def _no_open_pre_patch_executions():
+    """Default the rollout drain gate to "nothing open" for every test here.
+
+    Without this, ``deprovision_agent`` would call the real
+    ``find_open_pre_patch_executions``, which blocks on a Temporal client/loop
+    that doesn't exist in this unit-test module.
+    """
+    from agent_provisioning_team.api import main
+
+    with patch.object(main, "find_open_pre_patch_executions", return_value=[]):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _patched_true(monkeypatch):
     """Default every test to the post-lock-deploy replay branch.
 
@@ -120,6 +134,28 @@ def test_deprovision_activity_rejects_blank_agent() -> None:
     with patch("temporalio.activity.heartbeat"):
         with pytest.raises(AssertionError):
             activities.deprovision_activity("")
+
+
+def test_deprovision_activity_rejects_stale_fencing_token() -> None:
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator") as fake_orch_cls,
+        patch("temporalio.activity.heartbeat"),
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.deprovision_activity("a", fencing_token=1)
+
+    fake_orch_cls.assert_not_called()
 
 
 def test_deprovision_activity_checkpoint_heartbeats_and_checks_cancellation() -> None:

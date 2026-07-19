@@ -169,33 +169,6 @@ def test_wrapper_omits_temporal_worker_when_not_configured() -> None:
     assert "TEMPORAL_ADDRESS" not in body_partial
 
 
-def test_wrapper_registers_schema_before_temporal_worker() -> None:
-    """When both patterns are configured, the wrapper registers the app's Postgres
-    schema *before* starting the Temporal worker, closing the cold-start race where
-    a replayed activity could write to a not-yet-created table."""
-    body = entrypoint.build_wrapper_body(
-        "planning_team",
-        "planning_team.api.main",
-        "app",
-        "planning_team.temporal.worker",
-        "start_planning_temporal_worker_thread",
-    )
-    _compile(body)
-    # The schema is resolved off the imported app and registered via the shared helper.
-    assert "app, 'state'" in body
-    assert "postgres_schema" in body
-    assert "register_team_schemas" in body
-    # DDL is gated on TEMPORAL_ADDRESS (only runs when the worker will actually
-    # start), so thread/local mode stays side-effect-free at import time.
-    addr_idx = body.index("_os.environ.get('TEMPORAL_ADDRESS', '').strip()")
-    reg_idx = body.index("register_team_schemas")
-    worker_idx = body.index("_il.import_module('planning_team.temporal.worker')")
-    assert addr_idx < reg_idx
-    # Ordering: registration must precede the worker-start block so the worker never
-    # picks up an activity before its tables exist.
-    assert reg_idx < worker_idx
-
-
 def test_wrapper_iterates_all_schemas_before_temporal_worker() -> None:
     """The wrapper reads the plural app.state.postgres_schemas and loops over
     every schema, registering each before the Temporal worker starts."""
@@ -221,7 +194,61 @@ def test_wrapper_omits_schema_registration_without_temporal() -> None:
     body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
     _compile(body)
     assert "register_team_schemas" not in body
+    # "postgres_schema" is a substring of "postgres_schemas", so this one
+    # assertion proves both the singular and plural forms are absent.
     assert "postgres_schema" not in body
+
+
+def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failure(
+    monkeypatch,
+) -> None:
+    """Executes the generated Temporal-block source (not just compiles it)
+    against the REAL shared_postgres module — only its register_team_schemas
+    function is faked — proving the generated per-schema loop actually
+    delegates every schema in app.state.postgres_schemas and that one
+    schema's failure doesn't stop the rest from being attempted or block the
+    worker from starting."""
+    import logging
+    import sys
+    import types
+
+    import shared_postgres
+
+    body = entrypoint.build_wrapper_body(
+        "planning_team",
+        "planning_team.api.main",
+        "app",
+        "planning_team.temporal.worker",
+        "start_planning_temporal_worker_thread",
+    )
+    temporal_block = body[body.index("try:\n    import os as _os") :]
+
+    ok1 = types.SimpleNamespace(team="ok1")
+    boom = types.SimpleNamespace(team="boom")
+    ok2 = types.SimpleNamespace(team="ok2")
+    fake_app = types.SimpleNamespace(state=types.SimpleNamespace(postgres_schemas=(ok1, boom, ok2)))
+
+    registered: list[str] = []
+
+    def _fake_rts(schema):
+        if schema is boom:
+            raise RuntimeError("boom")
+        registered.append(schema.team)
+        return True
+
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", _fake_rts)
+
+    worker_started: list[bool] = []
+    fake_worker_mod = types.ModuleType("planning_team.temporal.worker")
+    fake_worker_mod.start_planning_temporal_worker_thread = lambda: worker_started.append(True) or True
+    monkeypatch.setitem(sys.modules, "planning_team.temporal.worker", fake_worker_mod)
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
+
+    namespace = {"app": fake_app, "_log": logging.getLogger("test_wrapper_temporal_block")}
+    exec(compile(temporal_block, "<temporal-block>", "exec"), namespace)  # noqa: S102
+
+    assert registered == ["ok1", "ok2"]  # boom skipped, ok2 still attempted despite it
+    assert worker_started == [True]  # worker still starts despite the mid-list failure
 
 
 def test_temporal_names_embedded_safely() -> None:
