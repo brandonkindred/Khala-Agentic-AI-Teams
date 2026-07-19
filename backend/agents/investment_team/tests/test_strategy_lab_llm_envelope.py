@@ -375,10 +375,10 @@ def test_resolve_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(k, raising=False)
     cfg = _resolve_config("strategy_ideation", None, None, None, None, None)
     assert cfg.max_attempts == 3  # 2 retries + 1
-    assert cfg.timeout_s == 900.0
+    assert cfg.timeout_s == 1800.0
     assert cfg.backoff_base == 2.0
     assert cfg.backoff_max == 60.0
-    assert cfg.total_budget_s == pytest.approx(3 * 900.0 * 1.5)
+    assert cfg.total_budget_s == pytest.approx(3 * 1800.0 * 1.5)
 
 
 def test_resolve_config_garbage_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:

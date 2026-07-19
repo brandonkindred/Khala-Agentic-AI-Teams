@@ -140,7 +140,7 @@ for the design rationale and migration notes.
 | `LLM_BASE_URL` | Default Ollama base URL for a provider-list entry whose `base_url` is blank |
 | `LLM_RUNTIME_CONFIG_TTL_S` | TTL (seconds, default 30) for the runtime cache backing the entry-default resolvers |
 | `LLM_PROVIDER_RESET_SWEEP_INTERVAL_S` | Interval (seconds, default 5) for the background sweep that resets an expired provider entry's limit-state off the failover hot path — see [ENV_VARS.md](../../../docs/ENV_VARS.md) |
-| `LLM_TIMEOUT` | Request timeout in seconds (default 900 / 15 min; all calls use streaming) |
+| `LLM_TIMEOUT` | Request timeout in seconds (default 1800 / 30 min; all calls use streaming) |
 | `LLM_CONTEXT_SIZE` | Override context size |
 | `LLM_MAX_TOKENS` | Max output tokens |
 | `LLM_MAX_RETRIES` | Retries for **transient** (5xx / network) errors only — not 429 (default 10) |
