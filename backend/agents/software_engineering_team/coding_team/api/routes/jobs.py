@@ -23,6 +23,7 @@ from software_engineering_team.coding_team.api.models import (
     RunResponse,
     StatusResponse,
 )
+from software_engineering_team.coding_team.models import JobStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,7 +93,7 @@ def post_run(request: RunRequest) -> RunResponse:
             logger.exception("Coding team Temporal dispatch failed: %s", e)
             _main.update_job(
                 job_id,
-                status="failed",
+                status=JobStatus.FAILED.value,
                 error=f"Temporal dispatch failed: {e}",
                 current_activity=None,
             )
@@ -103,7 +104,7 @@ def post_run(request: RunRequest) -> RunResponse:
         if dispatched:
             return RunResponse(
                 job_id=job_id,
-                status="running",
+                status=JobStatus.RUNNING.value,
                 message="Job started (Temporal). Poll GET /status/{job_id} for progress.",
             )
         plan = _main.plan_from_input(request.plan_input, request.repo_path)
@@ -116,7 +117,9 @@ def post_run(request: RunRequest) -> RunResponse:
                 logger.exception("Coding team orchestrator failed: %s", e)
                 # current_activity=None: a crash skips the in-flow clears, and a
                 # failed job must not keep serving a frozen mid-review sub-bar.
-                _main.update_job(job_id, status="failed", error=str(e), current_activity=None)
+                _main.update_job(
+                    job_id, status=JobStatus.FAILED.value, error=str(e), current_activity=None
+                )
             finally:
                 _main._clear_run_thread(job_id)
 
@@ -133,7 +136,7 @@ def get_status(job_id: str) -> StatusResponse:
         raise HTTPException(status_code=404, detail="Job not found")
     return StatusResponse(
         job_id=data.get("job_id", job_id),
-        status=data.get("status", "pending"),
+        status=data.get("status", JobStatus.PENDING.value),
         phase=data.get("phase"),
         status_text=data.get("status_text"),
         thinking=data.get("thinking"),

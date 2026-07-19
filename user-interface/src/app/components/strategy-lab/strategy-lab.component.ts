@@ -50,6 +50,7 @@ import {
 import {
   ASSET_CLASS_ICONS,
   returnColor,
+  returnColorLabel,
   getAssetClassIcon,
   verdictLabel,
   verdictColor,
@@ -819,6 +820,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   readonly returnColor = returnColor;
+  readonly returnColorLabel = returnColorLabel;
 
   // ---------------------------------------------------------------------------
   // Phase stepper state

@@ -45,6 +45,8 @@ import re
 from difflib import SequenceMatcher
 from typing import Any, Iterable, Optional, Protocol
 
+from shared_env import parse_float, parse_int
+
 from .client import Issue, scrub_token_from_text
 
 # GitHub inline review comments on side=RIGHT must target a line the diff adds
@@ -678,14 +680,7 @@ def _duplicate_threshold(env_var: str, default: float) -> float:
           rather than raising -- matches this repo's "garbage -> documented default"
           convention for numeric env vars (see docs/ENV_VARS.md).
     """
-    raw = (os.environ.get(env_var) or "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return max(0.0, min(1.0, value))
+    return parse_float(env_var, default, minimum=0.0, maximum=1.0)
 
 
 # Cap on how many open issues duplicate-detection reads per review. Unbounded
@@ -711,13 +706,7 @@ def duplicate_check_max_open_issues() -> int:
           matches this repo's "garbage -> documented default" convention for
           numeric env vars (see docs/ENV_VARS.md). Never raises.
     """
-    raw = (os.environ.get("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES") or "").strip()
-    if not raw:
-        return _DUPLICATE_CHECK_MAX_OPEN_ISSUES
-    try:
-        value = int(raw)
-    except ValueError:
-        return _DUPLICATE_CHECK_MAX_OPEN_ISSUES
+    value = parse_int("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", _DUPLICATE_CHECK_MAX_OPEN_ISSUES)
     return value if value > 0 else _DUPLICATE_CHECK_MAX_OPEN_ISSUES
 
 
