@@ -47,7 +47,6 @@ from typing import Optional
 
 from .fencing import StaleFencingTokenError
 from .path_safety import safe_path_component
-from .state_reaping import state_retention_seconds
 
 # Re-exported for callers that import it from here (this module is the one that
 # *detects* a stale lock token via :meth:`AgentLockStore.check_fencing_token`).
@@ -404,49 +403,3 @@ class AgentLockStore:
                 provided_token=token,
                 current_token=int(current_token),
             )
-
-    def reap_stale(
-        self, *, now: Optional[float] = None, retention_s: Optional[float] = None
-    ) -> int:
-        """Delete lock records force-expired for longer than the retention window.
-
-        Preconditions:
-            * None (safe to call any time; best-effort).
-        Postconditions:
-            * Unlinks every record file whose ``expires_at`` is more than
-              ``retention_s`` (default :func:`state_retention_seconds`) seconds
-              in the past — i.e. a lease :meth:`release` force-expired, or one
-              abandoned long ago. A live or recently-released lease (its
-              ``expires_at`` within the window, or in the future) is never
-              touched, so an in-flight or resumable owner's fencing high-water
-              mark always survives. See ``shared/state_reaping.py`` for why the
-              window is safe.
-            * Returns the number of records removed. Never raises; unreadable
-              or unremovable files are skipped.
-
-        Invariant: this only removes the JSON record, never the ``.lock``
-        flock sidecar (which any concurrent :meth:`acquire` may hold open).
-        """
-        now = time.time() if now is None else now
-        retention_s = state_retention_seconds() if retention_s is None else retention_s
-        cutoff = now - retention_s
-        try:
-            entries = list(self.storage_dir.glob("*.json"))
-        except OSError:
-            return 0
-        reaped = 0
-        for path in entries:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if not isinstance(record, dict):
-                continue
-            expires_at = record.get("expires_at")
-            if isinstance(expires_at, (int, float)) and expires_at < cutoff:
-                try:
-                    path.unlink()
-                    reaped += 1
-                except OSError:
-                    continue
-        return reaped

@@ -8,14 +8,12 @@ import json
 import os
 import tempfile
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .fencing import check_fencing_token
 from .path_safety import candidate_paths, safe_path_component
-from .state_reaping import state_retention_seconds
 
 
 def default_environments_dir() -> Path:
@@ -617,56 +615,6 @@ class EnvironmentStore:
             if fencing_token is not None:
                 self._write_env_data(agent_id, {"fencing_token": fencing_token})
             return removed
-
-    def reap_stale(
-        self, *, now: Optional[float] = None, retention_s: Optional[float] = None
-    ) -> int:
-        """Delete fencing tombstones left by :meth:`remove` once they are stale.
-
-        Preconditions:
-            * None (safe to call any time; best-effort).
-        Postconditions:
-            * Scans the primary ``storage_dir`` and unlinks each file that (a)
-              has not been modified for more than ``retention_s`` (default
-              :func:`state_retention_seconds`) seconds and (b) is a fencing
-              tombstone — a record carrying ``fencing_token`` but lacking the
-              live-container fields (``container_id``/``container_name``) that
-              :meth:`get`/:meth:`exists`/:meth:`list_all` require. A file young
-              enough to still shadow a resumable stale worker, or one that is a
-              valid live-environment record, is never removed.
-            * Returns the number of tombstones removed. Never raises; unreadable
-              or unremovable files are skipped.
-        """
-        now = time.time() if now is None else now
-        retention_s = state_retention_seconds() if retention_s is None else retention_s
-        cutoff = now - retention_s
-        required = ("agent_id", "container_id", "container_name")
-        try:
-            entries = list(self.storage_dir.glob("*.json"))
-        except OSError:
-            return 0
-        reaped = 0
-        with _lock:
-            for path in entries:
-                try:
-                    if path.stat().st_mtime > cutoff:
-                        continue
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                is_tombstone = (
-                    isinstance(data, dict)
-                    and "fencing_token" in data
-                    and any(k not in data for k in required)
-                )
-                if not is_tombstone:
-                    continue
-                try:
-                    path.unlink()
-                    reaped += 1
-                except OSError:
-                    continue
-        return reaped
 
     def list_all(self, status: Optional[str] = None) -> List[EnvironmentInfo]:
         """List all registered environments, optionally filtered by status.

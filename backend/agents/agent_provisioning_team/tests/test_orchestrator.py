@@ -808,6 +808,36 @@ def test_compensate_skips_resource_with_stale_fencing_token(tmp_path: Path) -> N
     fake_prov.deprovision.assert_not_called()
 
 
+def test_compensate_preserves_credential_of_stale_skipped_tool(tmp_path: Path) -> None:
+    """A tool skipped as stale must have its credential PRESERVED, not purged.
+
+    Skipping the rollback means a newer owner already reclaimed the resource and
+    its account may still be live; the tail credential cleanup must therefore
+    not delete that tool's credential (the only remaining way to reach the
+    account). The stale-skip must add the tool to preserved_credentials, exactly
+    like every other skip path (no provisioner / reused)."""
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    fake_prov = MagicMock()
+    fake_prov._state.check_fencing_token.side_effect = StaleFencingTokenError("a1", "x", 4, 5)
+    cred_store = MagicMock()
+    cred_store.list_tool_names.return_value = {"t"}
+
+    orch = ProvisioningOrchestrator(
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        credential_store=cred_store,
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+    success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    orch.compensate("a1", [success], fencing_token=4)
+
+    # The stale-skipped tool "t" is preserved: neither the blanket
+    # delete_credentials nor a per-tool delete for "t" runs.
+    cred_store.delete_credentials.assert_not_called()
+    for purge_call in cred_store.delete_tool_credentials.call_args_list:
+        assert purge_call.args[1] != "t", "stale-skipped tool's credential must be preserved"
+
+
 def test_compensate_threads_fencing_token_through_replay_and_deprovision_paths(
     tmp_path: Path,
 ) -> None:

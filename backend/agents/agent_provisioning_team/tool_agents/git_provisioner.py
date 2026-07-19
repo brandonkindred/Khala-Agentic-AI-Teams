@@ -15,6 +15,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.fencing import StaleFencingTokenError
 from ..shared.provisioner_state import ProvisionerStateStore
 from ..shared.tool_manifest import assert_path_within_base
 from .base import BaseToolProvisioner
@@ -288,6 +289,11 @@ class GitProvisionerTool(BaseToolProvisioner):
                 },
             )
 
+        except StaleFencingTokenError:
+            # A stale-token rejection from the fenced _state.delete is an
+            # ownership error, not an infra failure: propagate it (non-retryable)
+            # instead of folding it into a soft success=False result.
+            raise
         except Exception as e:
             return DeprovisionResult(
                 tool_name=self.tool_name,

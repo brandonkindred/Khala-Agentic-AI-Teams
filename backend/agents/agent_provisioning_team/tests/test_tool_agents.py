@@ -845,6 +845,48 @@ def test_docker_deprovision_rejects_stale_token_before_touching_docker(tmp_path:
     assert prov._state.get("a1") is not None
 
 
+def test_deprovision_propagates_stale_token_from_trailing_delete(tmp_path: Path) -> None:
+    """A StaleFencingTokenError raised by the FINAL _state.delete (token went
+    stale mid-teardown) must propagate as the non-retryable ownership error, not
+    be swallowed by the broad `except Exception -> success=False` into a soft
+    failure — matching run_idempotent's re-raise and the deprovision contract.
+
+    Covers the generic/git/docker provisioners (redis/postgres early-return in a
+    sandbox without those packages); all five share the identical re-raise guard.
+    """
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+    from agent_provisioning_team.tool_agents.generic_provisioner import GenericProvisionerTool
+    from agent_provisioning_team.tool_agents.git_provisioner import GitProvisionerTool
+
+    def _staled_state(resource: str) -> MagicMock:
+        fake = MagicMock()
+        fake.check_fencing_token.return_value = None  # entry preflight passes
+        fake.get.return_value = {"tool_name": "t", "workspace_path": str(tmp_path / "nope")}
+        fake.delete.side_effect = StaleFencingTokenError("a1", resource, 4, 5)
+        return fake
+
+    generic = GenericProvisionerTool()
+    generic._state = _staled_state("generic_provisioner")
+    with pytest.raises(StaleFencingTokenError):
+        generic.deprovision("a1", fencing_token=4)
+
+    git = GitProvisionerTool()
+    git._state = _staled_state("git_provisioner")
+    with pytest.raises(StaleFencingTokenError):
+        git.deprovision("a1", fencing_token=4)
+
+    docker = DockerProvisionerTool(workspace_base=str(tmp_path))
+    docker._state = _staled_state("docker_provisioner")
+    docker._state.get.return_value = {"container_name": "c1"}
+    with patch(
+        "subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            docker.deprovision("a1", fencing_token=4)
+
+
 def test_docker_deprovision_accepts_current_token(tmp_path: Path) -> None:
     from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 

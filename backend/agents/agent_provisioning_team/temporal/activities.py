@@ -297,12 +297,6 @@ def release_agent_lock_activity(
           persistent release failure is logged, not fatal to the workflow's
           outcome, and never masks the original failure it is cleaning up
           after.
-        * After releasing, opportunistically triggers a throttled, best-effort
-          sweep of long-expired fencing tombstones / lock records (see
-          ``shared/state_reaping.py``). This runs at every provisioning and
-          deprovisioning workflow's end, bounding the on-disk footprint the
-          fencing tombstones would otherwise grow without limit; it never
-          raises and never affects the release outcome.
     """
     from agent_provisioning_team.shared.agent_lock import AgentLockStore
     from agent_provisioning_team.temporal.constants import LOCK_TTL_S
@@ -312,12 +306,6 @@ def release_agent_lock_activity(
     AgentLockStore(ttl_seconds=LOCK_TTL_S).release(
         agent_id, owner=job_id, fencing_token=fencing_token
     )
-    try:
-        from agent_provisioning_team.shared.state_reaping import reap_stale_agent_state
-
-        reap_stale_agent_state()
-    except Exception:  # noqa: BLE001 - reclamation is best-effort, never fatal
-        pass
 
 
 def _reject_stale_fencing_token(agent_id: str, fencing_token: Optional[int]) -> None:

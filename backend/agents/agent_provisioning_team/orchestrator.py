@@ -506,6 +506,13 @@ class ProvisioningOrchestrator:
                     logger.warning(
                         "Compensation: stale fencing token for %s; skipping rollback", key
                     )
+                    # A stale token means a newer owner already reclaimed this
+                    # resource; its rollback is skipped, so its credential must
+                    # be PRESERVED (not purged by the tear-down cleanup below) —
+                    # the account may still be live under the new owner. Mirrors
+                    # every other skip path here (no provisioner, reused).
+                    if tool_name:
+                        preserved_credentials.add(tool_name)
                     continue
             # Prefer persisted per-step compensations when the provisioner
             # registered any during `_do_provision`: replay in LIFO order,
