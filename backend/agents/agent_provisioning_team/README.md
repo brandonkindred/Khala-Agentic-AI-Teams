@@ -87,6 +87,45 @@ activity retried on a *different* worker replica sees empty state. Single-proces
 deployments (the norm here) are unaffected; the concentrated Temporal win is the
 durable, single-instance idle reaper plus per-activity retries/observability.
 
+## Runbook: verifying the lock rollout has drained
+
+`AgentProvisioningWorkflow`/`AgentDeprovisioningWorkflow` gate their per-`agent_id`
+ownership lock (`shared/agent_lock.py`) behind `workflow.patched(...)` markers in
+`temporal/workflows.py`, so a workflow history recorded before the lock existed
+keeps replaying its original, lock-free command sequence for its entire remaining
+lifetime. During rollout, a new request for the same `agent_id` could otherwise
+race that still-open pre-patch execution, since neither ever writes a lock record
+for the other to see. `POST /provision`/`DELETE /environments/{agent_id}` guard
+against this automatically (`AGENT_PROVISIONING_DRAIN_GATE_ENABLED`, default on),
+but use this procedure when the gate is disabled or you want to confirm the drain
+yourself — during initial rollout verification, for example.
+
+**Exact Temporal visibility query** (mirrors the filter
+`shared/visibility_query.py`'s `find_open_pre_patch_executions` builds):
+
+```bash
+temporal workflow list --query "WorkflowType IN ('AgentProvisioningWorkflow', 'AgentDeprovisioningWorkflow') AND ExecutionStatus = 'Running' AND StartTime < '<cutoff-utc>'"
+```
+
+`<cutoff-utc>` is the `AGENT_PROVISIONING_LOCK_PATCH_CUTOFF_AT` value (the
+lock-patch release's deploy time) rendered as `YYYY-MM-DDTHH:MM:SSZ`.
+
+Equivalently, from a shell with the team's environment loaded, run the same
+detection helper the automated gate calls (this also resolves each hit's
+`agent_id`):
+
+```bash
+python -c "from agent_provisioning_team.shared.visibility_query import find_open_pre_patch_executions; print(find_open_pre_patch_executions())"
+```
+
+**Drain complete** once either form returns zero results — no open execution of
+either workflow type predates the cutoff. Only then is it safe to disable the gate
+long-term, and only once no history predates the patch at all can the
+`workflow.patched(...)` markers themselves be deprecated and removed (see the
+`TODO` beside `_PROVISIONING_LOCK_PATCH`/`_DEPROVISIONING_LOCK_PATCH` in
+`temporal/workflows.py`). Full env var semantics:
+[`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md#agent-provisioning).
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
