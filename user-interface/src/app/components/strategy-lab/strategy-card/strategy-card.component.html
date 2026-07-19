@@ -1,0 +1,534 @@
+<mat-card class="strategy-card" [class.is-winning]="record.is_winning" [class.is-losing]="!record.is_winning">
+
+  <!-- Card header -->
+  <mat-card-header class="strategy-card-header-row">
+    <div mat-card-avatar class="strategy-avatar" [class.winning-avatar]="record.is_winning" [class.losing-avatar]="!record.is_winning">
+      <mat-icon aria-hidden="true">{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
+    </div>
+    <div class="strategy-card-header-text">
+      @if (showTitle) {
+        <h3 mat-card-title>
+          {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+        </h3>
+      } @else {
+        <h2 mat-card-title>
+          {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+        </h2>
+      }
+      <mat-card-subtitle>
+        {{ record.created_at | date:'MMM d, y, h:mm a' }} &bull; {{ record.strategy.strategy_id }}
+      </mat-card-subtitle>
+    </div>
+    <button
+      mat-icon-button
+      type="button"
+      class="delete-strategy-btn"
+      aria-label="Delete this strategy lab run"
+      matTooltip="Delete this run"
+      (click)="onDelete(); $event.stopPropagation()"
+      [disabled]="deleteDisabled"
+    >
+      @if (isDeleting) {
+        <mat-spinner diameter="22"></mat-spinner>
+      } @else {
+        <mat-icon aria-hidden="true">delete_outline</mat-icon>
+      }
+    </button>
+  </mat-card-header>
+
+  <mat-card-content>
+
+    <!-- Win/lose badge + key metrics -->
+    <div class="metrics-row">
+      <div class="outcome-badge" [class.winning-badge]="record.is_winning" [class.losing-badge]="!record.is_winning">
+        <mat-icon aria-hidden="true">{{ record.is_winning ? 'emoji_events' : 'close' }}</mat-icon>
+        {{ record.is_winning ? 'WINNING' : 'LOSING' }}
+      </div>
+
+      <div class="metric">
+        <span class="metric-value" [class]="returnColor(record.backtest.result.annualized_return_pct)">
+          <span class="visually-hidden">{{ returnColorLabel(record.backtest.result.annualized_return_pct) }}: </span>{{ record.backtest.result.annualized_return_pct > 0 ? '+' : '' }}{{ record.backtest.result.annualized_return_pct | number:'1.1-1' }}%
+        </span>
+        <span class="metric-label">Annual Return</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value">{{ record.backtest.result.sharpe_ratio | number:'1.2-2' }}</span>
+        <span class="metric-label">Sharpe</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value losing">{{ record.backtest.result.max_drawdown_pct | number:'1.1-1' }}%</span>
+        <span class="metric-label">Max DD</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value">{{ record.backtest.result.win_rate_pct | number:'1.1-1' }}%</span>
+        <span class="metric-label">Win Rate</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value">{{ record.backtest.result.profit_factor | number:'1.2-2' }}</span>
+        <span class="metric-label">Profit Factor</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value">{{ record.backtest.result.volatility_pct | number:'1.1-1' }}%</span>
+        <span class="metric-label">Volatility</span>
+      </div>
+    </div>
+
+    <button
+      mat-icon-button
+      type="button"
+      class="expand-chevron-btn"
+      [attr.aria-expanded]="expanded"
+      [attr.aria-controls]="cardBodyId()"
+      [attr.aria-label]="cardToggleLabel()"
+      (click)="onToggleExpand()"
+    >
+      <mat-icon class="expand-chevron" aria-hidden="true">
+        {{ expanded ? 'expand_less' : 'expand_more' }}
+      </mat-icon>
+    </button>
+
+    @if (expanded) {
+    <div
+      class="card-expanded-region"
+      [id]="cardBodyId()"
+      role="region"
+      [attr.aria-label]="cardRegionLabel()"
+    >
+    <mat-divider class="card-divider"></mat-divider>
+
+    <!-- Hypothesis -->
+    <div class="hypothesis">
+      <mat-icon class="hypothesis-icon" aria-hidden="true">lightbulb</mat-icon>
+      <p>{{ record.strategy.hypothesis }}</p>
+    </div>
+
+    <!-- Analysis narrative -->
+    <div class="narrative">
+      <mat-icon class="narrative-icon" aria-hidden="true">auto_stories</mat-icon>
+      <p>{{ record.analysis_narrative }}</p>
+    </div>
+
+    <!-- Expandable panels -->
+    <mat-accordion class="card-accordion" multi>
+
+      @if (hasSignalBrief()) {
+        <mat-expansion-panel class="signal-panel">
+          <mat-expansion-panel-header>
+            <mat-panel-title>
+              <mat-icon class="panel-icon" aria-hidden="true">radar</mat-icon>
+              Signal intelligence
+            </mat-panel-title>
+            <mat-panel-description>
+              Expert brief for this batch (not financial advice)
+            </mat-panel-description>
+          </mat-expansion-panel-header>
+          <pre class="signal-json">{{ record.signal_intelligence_brief | json }}</pre>
+        </mat-expansion-panel>
+      }
+
+      <!-- Trade Ledger panel -->
+      @if (record.backtest.trades.length > 0) {
+        <mat-expansion-panel class="ledger-panel">
+          <mat-expansion-panel-header>
+            <mat-panel-title>
+              <mat-icon class="panel-icon" aria-hidden="true">receipt_long</mat-icon>
+              Trade Ledger
+            </mat-panel-title>
+            <mat-panel-description>
+              {{ tradeCount() }} trades &bull;
+              {{ winCount() }} wins &bull;
+              Net P&amp;L:
+              <span [class]="totalNetPnl() >= 0 ? 'pnl-pos' : 'pnl-neg'">
+                {{ totalNetPnl() | currency:'USD':'symbol':'1.0-0' }}
+              </span>
+            </mat-panel-description>
+          </mat-expansion-panel-header>
+
+          <!-- Ledger summary bar -->
+          <div class="ledger-summary">
+            <div class="ledger-stat">
+              <span class="ls-value">{{ tradeCount() }}</span>
+              <span class="ls-label">Trades</span>
+            </div>
+            <div class="ledger-stat">
+              <span class="ls-value winning">{{ winCount() }}</span>
+              <span class="ls-label">Wins</span>
+            </div>
+            <div class="ledger-stat">
+              <span class="ls-value losing">{{ tradeCount() - winCount() }}</span>
+              <span class="ls-label">Losses</span>
+            </div>
+            <div class="ledger-stat">
+              <span class="ls-value" [class]="totalNetPnl() >= 0 ? 'winning' : 'losing'">
+                {{ totalNetPnl() | currency:'USD':'symbol':'1.0-0' }}
+              </span>
+              <span class="ls-label">Net P&amp;L</span>
+            </div>
+            <div class="ledger-stat">
+              <span class="ls-value">{{ record.backtest.config.start_date | dateOnly }}</span>
+              <span class="ls-label">Start</span>
+            </div>
+            <div class="ledger-stat">
+              <span class="ls-value">{{ record.backtest.config.end_date | dateOnly }}</span>
+              <span class="ls-label">End</span>
+            </div>
+            <div class="ledger-stat">
+              <span class="ls-value">{{ record.backtest.config.initial_capital | currency:'USD':'symbol':'1.0-0' }}</span>
+              <span class="ls-label">Capital</span>
+            </div>
+          </div>
+
+          <!-- Trade table -->
+          <div
+            class="trade-table-wrap"
+            tabindex="0"
+            role="group"
+            [attr.aria-label]="tradeTableRegionLabel()"
+          >
+            <table mat-table [dataSource]="pagedTrades()" class="trade-table">
+
+              <!-- # -->
+              <ng-container matColumnDef="trade_num">
+                <th mat-header-cell *matHeaderCellDef>#</th>
+                <td mat-cell *matCellDef="let t">{{ t.trade_num }}</td>
+              </ng-container>
+
+              <!-- Entry Date -->
+              <ng-container matColumnDef="entry_date">
+                <th mat-header-cell *matHeaderCellDef>Entry</th>
+                <td mat-cell *matCellDef="let t">{{ t.entry_date | dateOnly }}</td>
+              </ng-container>
+
+              <!-- Exit Date -->
+              <ng-container matColumnDef="exit_date">
+                <th mat-header-cell *matHeaderCellDef>Exit</th>
+                <td mat-cell *matCellDef="let t">{{ t.exit_date | dateOnly }}</td>
+              </ng-container>
+
+              <!-- Symbol -->
+              <ng-container matColumnDef="symbol">
+                <th mat-header-cell *matHeaderCellDef>Symbol</th>
+                <td mat-cell *matCellDef="let t"><span class="symbol-badge">{{ t.symbol }}</span></td>
+              </ng-container>
+
+              <!-- Entry Price -->
+              <ng-container matColumnDef="entry_price">
+                <th mat-header-cell *matHeaderCellDef>Entry $</th>
+                <td mat-cell *matCellDef="let t" class="num-cell">{{ formatPrice(t.entry_price) }}</td>
+              </ng-container>
+
+              <!-- Exit Price -->
+              <ng-container matColumnDef="exit_price">
+                <th mat-header-cell *matHeaderCellDef>Exit $</th>
+                <td mat-cell *matCellDef="let t" class="num-cell">{{ formatPrice(t.exit_price) }}</td>
+              </ng-container>
+
+              <!-- Shares -->
+              <ng-container matColumnDef="shares">
+                <th mat-header-cell *matHeaderCellDef>Qty</th>
+                <td mat-cell *matCellDef="let t" class="num-cell">{{ t.shares | number:'1.0-4' }}</td>
+              </ng-container>
+
+              <!-- Return % -->
+              <ng-container matColumnDef="return_pct">
+                <th mat-header-cell *matHeaderCellDef>Return</th>
+                <td mat-cell *matCellDef="let t" [class]="tradeReturnColor(t)" class="num-cell">
+                  {{ t.return_pct > 0 ? '+' : '' }}{{ t.return_pct | number:'1.2-2' }}%
+                </td>
+              </ng-container>
+
+              <!-- Net P&L -->
+              <ng-container matColumnDef="net_pnl">
+                <th mat-header-cell *matHeaderCellDef>Net P&amp;L</th>
+                <td mat-cell *matCellDef="let t" [class]="tradeReturnColor(t)" class="num-cell">
+                  {{ t.net_pnl > 0 ? '+' : '' }}{{ t.net_pnl | currency:'USD':'symbol':'1.0-0' }}
+                </td>
+              </ng-container>
+
+              <!-- Cumulative P&L -->
+              <ng-container matColumnDef="cumulative_pnl">
+                <th mat-header-cell *matHeaderCellDef>Cumul. P&amp;L</th>
+                <td mat-cell *matCellDef="let t" class="num-cell"
+                    [class.pnl-pos]="t.cumulative_pnl >= 0"
+                    [class.pnl-neg]="t.cumulative_pnl < 0">
+                  {{ t.cumulative_pnl | currency:'USD':'symbol':'1.0-0' }}
+                </td>
+              </ng-container>
+
+              <!-- Outcome -->
+              <ng-container matColumnDef="outcome">
+                <th mat-header-cell *matHeaderCellDef>W/L</th>
+                <td mat-cell *matCellDef="let t">
+                  <span class="outcome-pip" [class.win-pip]="t.outcome === 'win'" [class.loss-pip]="t.outcome === 'loss'">
+                    <span class="visually-hidden">{{ t.outcome === 'win' ? 'Win' : 'Loss' }}</span>
+                    <span aria-hidden="true">{{ t.outcome === 'win' ? 'W' : 'L' }}</span>
+                  </span>
+                </td>
+              </ng-container>
+
+              <tr mat-header-row *matHeaderRowDef="TRADE_COLUMNS; sticky: true"></tr>
+              <tr mat-row *matRowDef="let row; columns: TRADE_COLUMNS;" [class]="row.outcome === 'win' ? 'win-row' : 'loss-row'"></tr>
+            </table>
+          </div>
+
+          <!-- Paginator -->
+          <mat-paginator
+            [length]="tradeCount()"
+            [pageSize]="PAGE_SIZE"
+            [pageIndex]="pageIndex"
+            [pageSizeOptions]="[20]"
+            (page)="onPageChange($event)"
+            hidePageSize
+            class="trade-paginator"
+          ></mat-paginator>
+
+        </mat-expansion-panel>
+      }
+
+      <!-- Strategy Details panel -->
+      <mat-expansion-panel>
+        <mat-expansion-panel-header>
+          <mat-panel-title>
+            <mat-icon class="panel-icon" aria-hidden="true">psychology</mat-icon>
+            Strategy Details
+          </mat-panel-title>
+          <mat-panel-description>Signal, rules, and ideation rationale</mat-panel-description>
+        </mat-expansion-panel-header>
+
+        <div class="detail-section">
+          <strong>Hypothesis</strong>
+          <p>{{ record.strategy.hypothesis }}</p>
+        </div>
+        <div class="detail-section">
+          <strong>Signal</strong>
+          <p>{{ record.strategy.signal_definition }}</p>
+        </div>
+        <div class="detail-section">
+          <strong>Entry Rules</strong>
+          <ul>
+            @for (rule of record.strategy.entry_rules; track $index) {
+              <li><pre class="rule-json">{{ rule | json }}</pre></li>
+            }
+          </ul>
+        </div>
+        <div class="detail-section">
+          <strong>Exit Rules</strong>
+          <ul>
+            @for (rule of record.strategy.exit_rules; track $index) {
+              <li><pre class="rule-json">{{ rule | json }}</pre></li>
+            }
+          </ul>
+        </div>
+        @if (record.strategy.sizing) {
+          <div class="detail-section">
+            <strong>Sizing</strong>
+            <pre class="rule-json">{{ record.strategy.sizing | json }}</pre>
+          </div>
+        }
+        <div class="detail-section">
+          <strong>Ideation Rationale</strong>
+          <p class="rationale-text">{{ record.strategy_rationale }}</p>
+        </div>
+
+      </mat-expansion-panel>
+
+      <!-- Quality Gates panel -->
+      @if (record.quality_gate_results && record.quality_gate_results.length > 0) {
+        <mat-expansion-panel>
+          <mat-expansion-panel-header>
+            <mat-panel-title>
+              <mat-icon class="panel-icon" aria-hidden="true">verified</mat-icon>
+              Quality Gates
+            </mat-panel-title>
+            <mat-panel-description>
+              {{ record.quality_gate_results.length }} check(s)
+              @if (record.refinement_rounds) {
+                &middot; {{ record.refinement_rounds }} refinement round(s)
+              }
+            </mat-panel-description>
+          </mat-expansion-panel-header>
+          <div class="gate-results">
+            @for (vm of gateViewModels(); track $index) {
+              <div class="gate-result" [class]="vm.severityClass">
+                <mat-icon class="gate-icon" aria-hidden="true">{{ vm.icon }}</mat-icon>
+                <span class="gate-name">{{ vm.gate.gate_name }}</span>
+                <span class="gate-detail">
+                  {{ vm.gate.details }}
+                  @if (vm.isRemedied) {
+                    <span class="gate-remedied-label">(remedied in round {{ (vm.gate.refinement_round ?? 0) + 1 }})</span>
+                  }
+                </span>
+              </div>
+            }
+          </div>
+        </mat-expansion-panel>
+      }
+
+      <!-- Strategy Code panel -->
+      @if (record.strategy_code || record.strategy.strategy_code) {
+        <mat-expansion-panel>
+          <mat-expansion-panel-header>
+            <mat-panel-title>
+              <mat-icon class="panel-icon" aria-hidden="true">code</mat-icon>
+              Strategy Code
+            </mat-panel-title>
+            <mat-panel-description>Generated Python backtest script</mat-panel-description>
+          </mat-expansion-panel-header>
+          <pre class="strategy-code">{{ record.strategy_code || record.strategy.strategy_code }}</pre>
+        </mat-expansion-panel>
+      }
+
+    </mat-accordion>
+    </div>
+    }
+
+    <!-- Paper trading: always show existing sessions; gate Run/Re-run on publishable -->
+    @if (record.is_winning || paperSession) {
+      <mat-divider class="card-divider"></mat-divider>
+
+      <div class="paper-trading-section">
+        @if (paperSession; as session) {
+          <!-- Paper trading results (or running state) — visible even for legacy non-publishable winners -->
+          <div class="paper-trading-result">
+            <div class="paper-verdict-row">
+              @if (session.status === 'running') {
+                <div class="paper-verdict-badge verdict-running">
+                  <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                  RUNNING
+                </div>
+                <span class="paper-meta">
+                  Fetching market data and running strategy against recent prices… this can take 2–3 minutes.
+                </span>
+              } @else {
+                <div class="paper-verdict-badge"
+                     [class.verdict-ready]="session.verdict === 'ready_for_live'"
+                     [class.verdict-not-performant]="session.verdict === 'not_performant'"
+                     [class.verdict-inconclusive]="!session.verdict">
+                  <mat-icon aria-hidden="true">{{ session.verdict === 'ready_for_live' ? 'verified' : session.verdict === 'not_performant' ? 'warning' : 'help_outline' }}</mat-icon>
+                  {{ verdictLabel(session.verdict) }}
+                </div>
+                <span class="paper-meta">
+                  {{ session.trades.length }} trades &bull;
+                  {{ session.data_period_start | dateOnly }} to {{ session.data_period_end | dateOnly }}
+                </span>
+                @if (record.is_publishable) {
+                  @if (paperTradingInProgress) {
+                    <button mat-stroked-button class="rerun-paper-btn" disabled>
+                      <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                      Re-run
+                    </button>
+                  } @else {
+                    <button
+                      mat-stroked-button
+                      class="rerun-paper-btn"
+                      (click)="onRunPaperTrading()"
+                      [disabled]="paperTradingBlocked"
+                    >
+                      <mat-icon aria-hidden="true">refresh</mat-icon>
+                      Re-run
+                    </button>
+                  }
+                }
+              }
+            </div>
+
+            <!-- Comparison table -->
+            @if (session.comparison) {
+              <div
+                class="comparison-table-wrap"
+                tabindex="0"
+                role="group"
+                [attr.aria-label]="comparisonTableRegionLabel()"
+              >
+                <table class="comparison-table">
+                  <thead>
+                    <tr>
+                      <th>Metric</th>
+                      <th>Backtest</th>
+                      <th>Paper</th>
+                      <th>Aligned</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (m of comparisonMetrics(session.comparison); track m.label) {
+                      <tr>
+                        <td class="cmp-label">{{ m.label }}</td>
+                        <td class="num-cell">{{ m.backtest }}</td>
+                        <td class="num-cell">{{ m.paper }}</td>
+                        <td class="cmp-aligned">
+                          <mat-icon
+                            aria-hidden="false"
+                            [attr.aria-label]="m.aligned ? 'Aligned' : 'Not aligned'"
+                            [class.aligned-yes]="m.aligned"
+                            [class.aligned-no]="!m.aligned"
+                          >
+                            {{ m.aligned ? 'check_circle' : 'cancel' }}
+                          </mat-icon>
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
+
+            <!-- Divergence analysis (when not performant) -->
+            @if (session.divergence_analysis) {
+              <div class="divergence-analysis">
+                <mat-icon class="narrative-icon" aria-hidden="true">analytics</mat-icon>
+                <p>{{ session.divergence_analysis }}</p>
+              </div>
+            }
+
+            @if (!record.is_publishable) {
+              <div class="paper-trading-skipped paper-trading-skipped-inline">
+                <mat-icon class="paper-skip-icon" aria-hidden="true">block</mat-icon>
+                <div class="paper-skip-copy">
+                  <span class="paper-skip-title">Re-run unavailable — record is not publishable</span>
+                  @if (publishabilitySkipLabel(record); as reason) {
+                    <span class="paper-skip-reason">{{ reason }}</span>
+                  }
+                </div>
+              </div>
+            }
+          </div>
+        } @else if (record.is_publishable) {
+          <!-- No paper trading yet — show button only when publishable -->
+          @if (paperTradingInProgress) {
+            <button
+              mat-stroked-button
+              color="primary"
+              class="paper-trade-btn"
+              disabled
+            >
+              <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+              <span>Running paper trading…</span>
+            </button>
+          } @else {
+            <button
+              mat-stroked-button
+              color="primary"
+              class="paper-trade-btn"
+              (click)="onRunPaperTrading()"
+              [disabled]="paperTradingBlocked"
+            >
+              <mat-icon aria-hidden="true">candlestick_chart</mat-icon>
+              <span>Paper Trade This Strategy</span>
+            </button>
+          }
+        } @else {
+          <div class="paper-trading-skipped">
+            <mat-icon class="paper-skip-icon" aria-hidden="true">block</mat-icon>
+            <div class="paper-skip-copy">
+              <span class="paper-skip-title">Not publishable — paper trading unavailable</span>
+              @if (publishabilitySkipLabel(record); as reason) {
+                <span class="paper-skip-reason">{{ reason }}</span>
+              }
+            </div>
+          </div>
+        }
+      </div>
+    }
+
+  </mat-card-content>
+</mat-card>

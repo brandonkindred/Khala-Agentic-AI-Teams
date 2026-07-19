@@ -12,7 +12,6 @@ import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import type {
   PaperTradingSession,
-  QualityGateResult,
   RunStrategyLabRequest,
   StrategyLabRecord,
   StrategyLabRunStartResponse,
@@ -151,24 +150,6 @@ describe('StrategyLabComponent — asset categories', () => {
   it('categoriesValid is false when no category is selected', () => {
     component.selectedCategories.set([]);
     expect(component.categoriesValid).toBe(false);
-  });
-
-  it('memoizes pagedTrades and winCount per record', () => {
-    const record = {
-      lab_record_id: 'rec-1',
-      backtest: {
-        trades: [
-          { outcome: 'win', cumulative_pnl: 10 },
-          { outcome: 'loss', cumulative_pnl: 4 },
-          { outcome: 'win', cumulative_pnl: 9 },
-        ],
-      },
-    } as unknown as Parameters<typeof component.pagedTrades>[0];
-
-    const paged1 = component.pagedTrades(record);
-    expect(component.pagedTrades(record)).toBe(paged1); // stable reference (same record + page)
-    expect(component.winCount(record)).toBe(2);
-    expect(component.winCount(record)).toBe(2); // served from cache on the second call
   });
 
   it('sends the selected categories in canonical order on the run request', () => {
@@ -820,11 +801,13 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       runService.events$.next({ type: 'progress', cycle_index: 0, phase: 'backtesting', sub_phase: 'running_code' });
       fixture.detectChanges();
 
-      expect(component.isPhaseCompleted('ideating')).toBe(true);
-      expect(component.isCurrentPhase('backtesting')).toBe(true);
-      expect(component.isPhasePending('analyzing')).toBe(true);
-      const stepper: HTMLElement = fixture.nativeElement.querySelector('.phase-stepper');
-      expect(stepper).toBeTruthy();
+      // The phase-by-phase completed/current/pending logic itself is unit-tested
+      // in isolation in phase-stepper.component.spec.ts; this only proves the
+      // host wires `[currentPhase]` to the right value.
+      const currentStep: HTMLElement = fixture.nativeElement.querySelector('.phase-step.current .phase-label');
+      expect(currentStep?.textContent?.trim()).toBe('Backtest');
+      const completedSteps: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.phase-step.completed'));
+      expect(completedSteps.length).toBe(2); // Ideate, Code
     });
   });
 
@@ -1116,114 +1099,9 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
     expect(messages().at(-1)).toBe('phase_transition — foo');
   });
 
-  describe('isRemedied / gateIcon / gateSeverityClass', () => {
-    const record = { refinement_rounds: 2, quality_gate_results: [] } as unknown as StrategyLabRecord;
-
-    it('a passed gate is never remedied', () => {
-      const gate: QualityGateResult = { gate_name: 'g', passed: true, details: '', severity: 'info' };
-      expect(component.isRemedied(gate, record)).toBe(false);
-      expect(component.gateIcon(gate, record)).toBe('check_circle');
-    });
-
-    it('a standard failed gate is remedied when a later round exists', () => {
-      const gate: QualityGateResult = { gate_name: 'g', passed: false, details: '', severity: 'critical', refinement_round: 0 };
-      expect(component.isRemedied(gate, record)).toBe(true);
-      expect(component.gateIcon(gate, record)).toBe('build_circle');
-      expect(component.gateSeverityClass(gate, record)).toBe('gate-remedied');
-    });
-
-    it('a standard failed gate with no later round is not remedied', () => {
-      const gate: QualityGateResult = { gate_name: 'g', passed: false, details: '', severity: 'critical', refinement_round: 0 };
-      const noRoundsRecord = { refinement_rounds: 0, quality_gate_results: [] } as unknown as StrategyLabRecord;
-      expect(component.isRemedied(gate, noRoundsRecord)).toBe(false);
-      expect(component.gateIcon(gate, noRoundsRecord)).toBe('cancel');
-      expect(component.gateSeverityClass(gate, noRoundsRecord)).toBe('gate-critical');
-    });
-
-    it('a non-critical failed, non-remedied gate reports "warning"', () => {
-      const gate: QualityGateResult = { gate_name: 'g', passed: false, details: '', severity: 'warning', refinement_round: 0 };
-      const noRoundsRecord = { refinement_rounds: 0, quality_gate_results: [] } as unknown as StrategyLabRecord;
-      expect(component.gateIcon(gate, noRoundsRecord)).toBe('warning');
-    });
-
-    it('a pre-synthesis gate (refinement_round -1) is remedied by a later passing repair pass', () => {
-      const gate: QualityGateResult = { gate_name: 'zero_trades', passed: false, details: '', severity: 'critical', refinement_round: -1 };
-      const withRepair = {
-        refinement_rounds: 1,
-        quality_gate_results: [
-          { gate_name: 'zero_trade_repair_zero_trades', passed: true, details: '', severity: 'info', refinement_round: 0 },
-        ],
-      } as unknown as StrategyLabRecord;
-      expect(component.isRemedied(gate, withRepair)).toBe(true);
-    });
-
-    it('a pre-synthesis gate with no matching later pass is not remedied', () => {
-      const gate: QualityGateResult = { gate_name: 'zero_trades', passed: false, details: '', severity: 'critical', refinement_round: -1 };
-      const noRepair = { refinement_rounds: 0, quality_gate_results: [] } as unknown as StrategyLabRecord;
-      expect(component.isRemedied(gate, noRepair)).toBe(false);
-    });
-  });
-
-  describe('gateViewModels (precomputed per-gate template data)', () => {
-    it('maps each gate to its icon/severityClass/isRemedied, matching the underlying methods', () => {
-      const gates: QualityGateResult[] = [
-        { gate_name: 'a', passed: true, details: 'ok', severity: 'info' },
-        { gate_name: 'b', passed: false, details: 'bad', severity: 'critical', refinement_round: 0 },
-      ];
-      const record = { refinement_rounds: 2, quality_gate_results: gates } as unknown as StrategyLabRecord;
-
-      const viewModels = component.gateViewModels(record);
-
-      expect(viewModels).toEqual([
-        { gate: gates[0], icon: component.gateIcon(gates[0], record), severityClass: component.gateSeverityClass(gates[0], record), isRemedied: false },
-        { gate: gates[1], icon: component.gateIcon(gates[1], record), severityClass: component.gateSeverityClass(gates[1], record), isRemedied: true },
-      ]);
-    });
-
-    it('returns the same array reference for the same record (memoized), and independent arrays for different records', () => {
-      const record1 = { refinement_rounds: 0, quality_gate_results: [{ gate_name: 'a', passed: true, details: '', severity: 'info' }] } as unknown as StrategyLabRecord;
-      const record2 = { refinement_rounds: 0, quality_gate_results: [{ gate_name: 'b', passed: true, details: '', severity: 'info' }] } as unknown as StrategyLabRecord;
-
-      const first = component.gateViewModels(record1);
-      expect(component.gateViewModels(record1)).toBe(first);
-      expect(component.gateViewModels(record2)).not.toBe(first);
-    });
-
-    it('returns an empty array when a record has no quality_gate_results', () => {
-      const record = { refinement_rounds: 0 } as unknown as StrategyLabRecord;
-      expect(component.gateViewModels(record)).toEqual([]);
-    });
-  });
-
-  describe('comparisonMetrics (precomputed comparison-table rows)', () => {
-    const comparison = {
-      backtest_win_rate_pct: 55, paper_win_rate_pct: 52,
-      backtest_annualized_return_pct: 12, paper_annualized_return_pct: 11,
-      backtest_sharpe_ratio: 1.5, paper_sharpe_ratio: 1.4,
-      backtest_max_drawdown_pct: -5, paper_max_drawdown_pct: -6,
-      backtest_profit_factor: 1.8, paper_profit_factor: 1.7,
-      win_rate_aligned: true, return_aligned: true, sharpe_aligned: true,
-      drawdown_aligned: true, profit_factor_aligned: true, overall_aligned: true,
-    };
-
-    it('formats each metric row', () => {
-      expect(component.comparisonMetrics(comparison)).toEqual([
-        { label: 'Win Rate', backtest: '55.0%', paper: '52.0%', aligned: true },
-        { label: 'Annual Return', backtest: '12.0%', paper: '11.0%', aligned: true },
-        { label: 'Sharpe', backtest: '1.50', paper: '1.40', aligned: true },
-        { label: 'Max Drawdown', backtest: '-5.0%', paper: '-6.0%', aligned: true },
-        { label: 'Profit Factor', backtest: '1.80', paper: '1.70', aligned: true },
-      ]);
-    });
-
-    it('keeps a stable array reference across repeat calls for the same comparison object (so @for does not thrash)', () => {
-      const first = component.comparisonMetrics(comparison);
-      expect(component.comparisonMetrics(comparison)).toBe(first);
-
-      const differentObject = { ...comparison };
-      expect(component.comparisonMetrics(differentObject)).not.toBe(first);
-    });
-  });
+  // isRemedied/gateIcon/gateSeverityClass/gateViewModels/comparisonMetrics/
+  // verdictLabel/verdictColor moved to strategy-card.component.spec.ts along
+  // with the markup and methods that used them.
 
   it('loadPaperTradingResults keeps the most recent session per lab record and resumes polling', () => {
     const older = { lab_record_id: 'rec-1', session_id: 'pt-old', status: 'completed', started_at: '2026-01-01T00:00:00Z', completed_at: '2026-01-01T00:05:00Z' };
@@ -1254,14 +1132,5 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
     component.runPaperTrading(record);
 
     expect(component.error()).toBe('worker unavailable');
-  });
-
-  it('verdictLabel/verdictColor cover ready_for_live, not_performant, and inconclusive', () => {
-    expect(component.verdictLabel('ready_for_live')).toBe('READY FOR LIVE');
-    expect(component.verdictColor('ready_for_live')).toBe('winning');
-    expect(component.verdictLabel('not_performant')).toBe('NOT PERFORMANT');
-    expect(component.verdictColor('not_performant')).toBe('losing');
-    expect(component.verdictLabel(null)).toBe('INCONCLUSIVE');
-    expect(component.verdictColor(undefined)).toBe('neutral');
   });
 });

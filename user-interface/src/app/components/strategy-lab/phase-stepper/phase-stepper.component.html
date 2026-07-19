@@ -1,0 +1,18 @@
+<div class="phase-stepper">
+  @for (phase of STRATEGY_LAB_PHASES; track phase.id; let i = $index; let last = $last) {
+    <div class="phase-step"
+         [class.completed]="isPhaseCompleted(phase.id)"
+         [class.current]="isCurrentPhase(phase.id)"
+         [class.pending]="isPhasePending(phase.id)"
+         [class.has-connector]="!last"
+         [class.next-completed]="!last && isPhaseCompleted(STRATEGY_LAB_PHASES[i + 1].id)">
+      <div class="phase-node">
+        <!-- Completed/current/pending state has no text alternative yet (color-cue
+             follow-up work); aria-hidden here only matches mat-icon's own default,
+             it does not add a new gap. -->
+        <mat-icon aria-hidden="true">{{ isPhaseCompleted(phase.id) ? 'check' : phase.icon }}</mat-icon>
+      </div>
+      <span class="phase-label">{{ phase.label }}</span>
+    </div>
+  }
+</div>
