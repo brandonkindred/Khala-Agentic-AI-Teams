@@ -630,6 +630,25 @@ def test_release_agent_lock_activity_uses_configured_ttl() -> None:
     assert captured["release_args"] == ("agent-1", "job-1")
 
 
+def test_acquire_agent_lock_activity_returns_fencing_token() -> None:
+    """The activity must pass AgentLockStore.acquire's fencing token straight
+    through to its own caller, not swallow it."""
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def acquire(self, agent_id, owner):
+            return 42
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        assert activities.acquire_agent_lock_activity("job-1", "agent-1") == 42
+
+
 def test_acquire_agent_lock_activity_translates_busy_error() -> None:
     """A busy lock surfaces as a plain (retryable) RuntimeError, not
     AgentLockBusyError, so Temporal's retry policy keeps polling."""

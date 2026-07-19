@@ -246,7 +246,7 @@ def check_existing_environment_activity(agent_id: str, job_id: Optional[str] = N
 
 
 @activity.defn(name="agent_provisioning_acquire_lock")
-def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
+def acquire_agent_lock_activity(job_id: str, agent_id: str) -> int:
     """Claim exclusive ownership of ``agent_id`` for this workflow run.
 
     Preconditions:
@@ -254,6 +254,10 @@ def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
           id) and ``agent_id`` are non-empty.
     Postconditions:
         * On return, ``agent_id``'s lock record is owned by ``job_id``.
+        * Returns the fencing token ``AgentLockStore.acquire`` assigned this
+          acquisition (see its own docstring for how the value is derived),
+          so the calling workflow can carry it into resource-mutating
+          activity calls without a second store read.
         * Raises ``RuntimeError`` when a different, non-expired owner
           currently holds the lock — deliberately a plain (retryable)
           exception rather than a non-retryable one, so Temporal's retry
@@ -267,7 +271,7 @@ def acquire_agent_lock_activity(job_id: str, agent_id: str) -> None:
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("acquire-lock")
     try:
-        AgentLockStore(ttl_seconds=LOCK_TTL_S).acquire(agent_id, owner=job_id)
+        return AgentLockStore(ttl_seconds=LOCK_TTL_S).acquire(agent_id, owner=job_id)
     except AgentLockBusyError as e:
         raise RuntimeError(str(e)) from e
 
@@ -301,6 +305,7 @@ def setup_activity(
     agent_id: str,
     manifest_path: str,
     prior_setup: Optional[Dict[str, Any]] = None,
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run (or restore) the Docker/environment setup phase.
 
@@ -308,6 +313,10 @@ def setup_activity(
         * ``job_id`` / ``agent_id`` / ``manifest_path`` are non-empty.
         * When ``prior_setup`` is set, it is a serialized setup phase snapshot
           acceptable to ``restore_setup``.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id`` (from ``acquire_agent_lock_activity``).
+          Accepted but not yet read — plumbing for a future change that
+          rejects a stale token here before mutating anything.
     Postconditions:
         * Returns ``{"success": True, "environment": <dump|None>}`` reflecting
           THIS call's own outcome (including its own ``reused`` value) —
@@ -439,6 +448,7 @@ def credentials_activity(
     manifest_path: str,
     prior_credentials: Optional[Dict[str, Any]] = None,
     tool_specs: Optional[List[Dict[str, Any]]] = None,
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Generate (or restore) per-tool credentials for the agent.
 
@@ -448,6 +458,10 @@ def credentials_activity(
           acceptable to ``restore_credentials``.
         * When ``tool_specs`` is set (fresh generate path), each entry has a
           non-empty ``name`` — the same frozen snapshot used for tool fan-out.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``. Accepted but not yet read — plumbing
+          for a future change that rejects a stale token here before
+          mutating anything.
     Postconditions:
         * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
         * Job-store checkpoint never stores plaintext secrets.
@@ -554,6 +568,7 @@ def provision_tool_activity(
     tools_total: int,
     provisioner: str,
     tool_config: Optional[Dict[str, Any]] = None,
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Provision a single tool — one activity per tool so fan-out is natural.
 
@@ -563,6 +578,10 @@ def provision_tool_activity(
         * ``credentials_dump`` is a serializable ``GeneratedCredentials`` dump
           for this tool.
         * ``tools_total`` must be ``> 0``.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``. Accepted but not yet read — plumbing
+          for a future change that rejects a stale token here before
+          mutating anything.
     Postconditions:
         * Returns ``ToolProvisionResult.model_dump()`` from the provisioner
           with ``provisioner_key`` set to the registry key (needed by
@@ -832,6 +851,7 @@ def record_account_provisioning_activity(
     job_id: str,
     tool_results_dump: List[Dict[str, Any]],
     agent_id: str = "",
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Persist a successful account-provisioning checkpoint for ``/resume``.
 
@@ -839,6 +859,10 @@ def record_account_provisioning_activity(
         * ``job_id`` is non-empty.
         * ``tool_results_dump`` is the serializable per-tool result list.
         * ``agent_id`` is non-empty when environment tool recording is required.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``. Accepted but not yet read — plumbing
+          for a future change that rejects a stale token here before
+          mutating anything.
     Postconditions:
         * ``completed_phases`` includes ``account_provisioning`` and
           ``phase_results`` carries sanitized tool results (no plaintext
@@ -904,11 +928,16 @@ def compensate_activity(
     succeeded_tools: List[Dict[str, Any]],
     job_id: Optional[str] = None,
     tear_down_environment: bool = True,
+    fencing_token: Optional[int] = None,
 ) -> None:
     """Roll back a partially-provisioned agent (best effort).
 
     Preconditions:
         * ``agent_id`` identifies the agent whose tools should be rolled back.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``. Accepted but not yet read — plumbing
+          for a future change that rejects a stale token here before
+          mutating anything.
         * ``succeeded_tools`` entries are dicts with ``tool_name`` and
           ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
           The orchestrator looks provisioners up by that registry key. An
@@ -1068,7 +1097,9 @@ def mark_job_failed_activity(job_id: str, error: str) -> None:
 
 
 @activity.defn(name="agent_provisioning_deprovision")
-def deprovision_activity(agent_id: str, force: bool = False) -> Dict[str, Any]:
+def deprovision_activity(
+    agent_id: str, force: bool = False, fencing_token: Optional[int] = None
+) -> Dict[str, Any]:
     """Deprovision an agent's resources durably.
 
     Thin durable wrapper over ``ProvisioningOrchestrator.deprovision`` — which
@@ -1083,6 +1114,10 @@ def deprovision_activity(agent_id: str, force: bool = False) -> Dict[str, Any]:
           partially removed) agent.
         * Runs inside a Temporal activity worker for the Agent Provisioning
           task queue.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``. Accepted but not yet read — plumbing
+          for a future change that rejects a stale token here before
+          mutating anything.
     Postconditions:
         * Returns ``DeprovisionResponse.model_dump()`` — a JSON-serializable dict
           with ``agent_id``/``success``/``details``/``error``. Cleanup is
