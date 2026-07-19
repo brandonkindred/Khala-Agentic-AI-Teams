@@ -117,6 +117,15 @@ def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
         "investment_team.strategy_lab.agents.design.get_strands_model",
         lambda *_a, **_k: object(),
     )
+    # This suite exercises the legacy unconstrained parse path directly; force
+    # the structured-output seam off so it's deterministic regardless of
+    # ambient LLM_PROVIDER (unset defaults to "ollama", whose capability flag
+    # is True) — see design._structured_output_available. The structured path
+    # itself is covered by test_strategy_lab_design_structured_output.py.
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design._structured_output_available",
+        lambda: False,
+    )
 
 
 def _patch_refinement(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:

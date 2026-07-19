@@ -248,7 +248,12 @@ the first empty response, with no retry ladder — an explicit, catchable
 fallback signal so a caller can retry with `schema=None` (today's
 unconstrained + correction-retry path via `complete_validated`).
 
-No Strategy Lab agent is wired to use this yet — it is infrastructure only.
+`RefinementAgent`, `DesignAgent`, and `DesignReviewAgent` in Strategy Lab are wired to this capability
+(`_invoke_structured` call sites requesting `REFINEMENT_SCHEMA`, `DESIGN_SPEC_SCHEMA`, and
+`CRITIQUE_SCHEMA` respectively); see the "Ollama LLM transport" section of
+`investment_team/strategy_lab/README.md` for the per-agent degrade contract. The remaining
+spec-authoring/reviewing agents (zero-trade repair, alignment fix-proposer) are not yet wired and still
+rely on the unconstrained `json_object` + prompt-embedded-schema contract.
 
 ### Migration rule: keep pattern anchors in the **user** prompt
 
