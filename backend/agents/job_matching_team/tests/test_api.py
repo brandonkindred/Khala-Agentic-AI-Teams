@@ -390,11 +390,12 @@ def test_startup_backstop_swallows_worker_failure(monkeypatch):
     api_main._start_temporal_worker_backstop()
 
 
-def test_on_startup_runs_schema_and_worker_backstop(monkeypatch):
-    """_on_startup aggregates both hooks."""
-    calls = []
-    monkeypatch.setattr(api_main, "_register_user_profile_schema", lambda: calls.append("schema"))
-    monkeypatch.setattr(api_main, "_start_temporal_worker_backstop", lambda: calls.append("worker"))
+def test_postgres_schemas_include_user_profile() -> None:
+    """job_matching now exposes user_profile's schema too, so the team-service
+    wrapper registers user_profiles/user_profile_associations before the
+    Temporal worker starts, closing the race where a queued
+    job_matching_prepare_scan activity could read a not-yet-created table."""
+    from job_matching_team.postgres import SCHEMA as JOB_MATCHING_SCHEMA
+    from user_profile import SCHEMA as USER_PROFILE_SCHEMA
 
-    api_main._on_startup()
-    assert calls == ["schema", "worker"]
+    assert api_main.app.state.postgres_schemas == [JOB_MATCHING_SCHEMA, USER_PROFILE_SCHEMA]
