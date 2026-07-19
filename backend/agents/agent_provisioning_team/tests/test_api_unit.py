@@ -340,6 +340,67 @@ def test_drain_gate_enabled_true_for_everything_else(monkeypatch, raw: str) -> N
     assert api_main._drain_gate_enabled() is True
 
 
+def test_provision_held_while_pre_patch_open_then_proceeds_once_drained() -> None:
+    """A request for the same agent_id is refused while a pre-patch execution is
+    open and proceeds once the visibility query reports none remain."""
+    fake_starter = MagicMock()
+    agent_id = "ag-transition"
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
+        patch.object(
+            api_main,
+            "find_open_pre_patch_executions",
+            return_value=[_fake_pre_patch_execution(agent_id)],
+        ),
+    ):
+        held = client.post("/provision", json={"agent_id": agent_id})
+
+    assert held.status_code == 409
+    mock_create_job.assert_not_called()
+    fake_starter.assert_not_called()
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
+        patch.object(api_main, "find_open_pre_patch_executions", return_value=[]),
+    ):
+        proceeded = client.post("/provision", json={"agent_id": agent_id})
+
+    assert proceeded.status_code == 200
+    mock_create_job.assert_called_once()
+    fake_starter.assert_called_once()
+
+
+def test_deprovision_held_while_pre_patch_open_then_proceeds_once_drained() -> None:
+    """Same held-then-proceeds transition, exercised against the deprovision path."""
+    fake_runner = MagicMock()
+    agent_id = "ag-deprovision-transition"
+
+    with (
+        patch.object(api_main, "_require_deprovision_runner", return_value=fake_runner),
+        patch.object(
+            api_main,
+            "find_open_pre_patch_executions",
+            return_value=[_fake_pre_patch_execution(agent_id)],
+        ),
+    ):
+        held = client.delete(f"/environments/{agent_id}")
+
+    assert held.status_code == 409
+    fake_runner.assert_not_called()
+
+    with (
+        patch.object(api_main, "_require_deprovision_runner", return_value=fake_runner),
+        patch.object(api_main, "find_open_pre_patch_executions", return_value=[]),
+    ):
+        proceeded = client.delete(f"/environments/{agent_id}")
+
+    assert proceeded.status_code == 200
+    fake_runner.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # /provision/status/{job_id}
 # ---------------------------------------------------------------------------

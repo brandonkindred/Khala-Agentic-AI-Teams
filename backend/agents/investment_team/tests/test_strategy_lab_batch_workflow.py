@@ -20,6 +20,8 @@ import asyncio
 from typing import Any, Dict, List
 from unittest import mock
 
+import pytest
+
 from investment_team.strategy_lab.temporal import workflows as wf
 
 
@@ -121,6 +123,7 @@ def _default_activity_handlers(**overrides: Any) -> Dict[str, Any]:
             "primary_tracker_state": {"merged": [w["cycle_index"] for w in a[0]["wave_results"]]}
         },
         "is_run_cancelled_activity": lambda a: False,
+        "external_terminal_status_activity": lambda a: None,
         "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
     }
     handlers.update(overrides)
@@ -267,25 +270,53 @@ def test_cancellation_between_waves_stops_and_marks_cancelled():
             "run-1-c3": _child_record("3"),
         },
         activity_handlers=_default_activity_handlers(
-            is_run_cancelled_activity=lambda a: True,  # cancelled after the first wave
+            # Cancelled after the first wave — the status-returning activity
+            # yields the true external status verbatim.
+            external_terminal_status_activity=lambda a: "cancelled",
             persist_run_state_activity=lambda a: persisted.append(a[1]),
         ),
     )
     # 4 cycles, max_parallel=2 → wave [0,1] runs, cancel check trips, wave [2,3] never starts.
     result = _run(_batch_input(batch_size=4, max_parallel=2), harness)
     assert result["status"] == "cancelled"
-    # Wave 2's children never started after the cancel check returned True.
+    # Wave 2's children never started after the cancel check returned non-None.
     assert harness.child_starts == ["run-1-c0", "run-1-c1"]
-    # The cancel check runs *between* waves: after wave 1's merge + run-state
-    # persist, not before them.
+    # The external-stop check runs *between* waves: after wave 1's merge +
+    # run-state persist, not before them.
     calls = harness.activity_calls
-    first_cancel = calls.index("is_run_cancelled_activity")
-    assert "merge_wave_results_activity" in calls[:first_cancel]
-    assert "persist_run_state_activity" in calls[:first_cancel]
-    # No further wave was launched, so only one cancel check happened.
-    assert calls.count("is_run_cancelled_activity") == 1
+    first_check = calls.index("external_terminal_status_activity")
+    assert "merge_wave_results_activity" in calls[:first_check]
+    assert "persist_run_state_activity" in calls[:first_check]
+    # No further wave was launched, so only one external-stop check happened.
+    assert calls.count("external_terminal_status_activity") == 1
     # Terminal status persisted.
     assert any(s.get("status") == "cancelled" for s in persisted)
+
+
+@pytest.mark.parametrize("external_status", ["interrupted", "failed"])
+def test_external_interrupt_or_failure_not_mislabeled_cancelled(external_status: str):
+    """Regression: an external stop marked 'interrupted'/'failed' (e.g. a
+    service-wide reconciliation) must be persisted as that TRUE status in
+    Temporal mode, never forced to 'cancelled' — matching thread mode."""
+    persisted: List[Dict[str, Any]] = []
+    harness = _Harness(
+        child_results={
+            "run-1-c0": _child_record("0"),
+            "run-1-c1": _child_record("1"),
+            "run-1-c2": _child_record("2"),
+            "run-1-c3": _child_record("3"),
+        },
+        activity_handlers=_default_activity_handlers(
+            external_terminal_status_activity=lambda a: external_status,
+            persist_run_state_activity=lambda a: persisted.append(a[1]),
+        ),
+    )
+    result = _run(_batch_input(batch_size=4, max_parallel=2), harness)
+    # The true external status survives — not overwritten to 'cancelled'.
+    assert result["status"] == external_status
+    assert harness.child_starts == ["run-1-c0", "run-1-c1"]
+    assert any(s.get("status") == external_status for s in persisted)
+    assert not any(s.get("status") == "cancelled" for s in persisted)
 
 
 def test_contiguous_prefix():

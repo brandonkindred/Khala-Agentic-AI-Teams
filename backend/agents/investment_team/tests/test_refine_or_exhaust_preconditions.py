@@ -10,7 +10,10 @@ from __future__ import annotations
 import pytest
 
 from investment_team.models import StrategySpec
-from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.orchestrator import (
+    RefinementStallTracker,
+    StrategyLabOrchestrator,
+)
 from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate, SignalExitRule
 
 
@@ -50,6 +53,7 @@ def _valid_kwargs() -> dict:
         round_num=0,
         default_change_label="refined",
         emit=lambda *a, **k: None,
+        stall_tracker=RefinementStallTracker(),
     )
 
 
