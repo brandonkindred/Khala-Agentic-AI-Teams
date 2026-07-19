@@ -1125,10 +1125,22 @@ def deprovision_activity(
           was set. The activity does not raise on partial-cleanup failure (the
           response carries the error), so Temporal does not retry a run that was
           intentionally reported as a soft failure.
+        * Heartbeats (and checks ``activity.is_cancelled()``) between each
+          per-tool teardown call via a checkpoint passed into the orchestrator.
+          If cancellation is observed, ``DeprovisionCancelledError`` propagates
+          out of this activity uncaught rather than a soft-failure response —
+          consuming that signal to gate the workflow is a follow-up change.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("deprovision")
-    response = ProvisioningOrchestrator().deprovision(agent_id, force=force)
+
+    def _cancellation_checkpoint() -> bool:
+        activity.heartbeat("deprovision")
+        return activity.is_cancelled()
+
+    response = ProvisioningOrchestrator().deprovision(
+        agent_id, force=force, cancellation_checkpoint=_cancellation_checkpoint
+    )
     return response.model_dump()

@@ -796,6 +796,64 @@ def test_deprovision_force_returns_success(tmp_path: Path) -> None:
     assert resp.success is True
 
 
+def test_deprovision_stops_at_checkpoint_during_tool_loop(tmp_path: Path) -> None:
+    from agent_provisioning_team.models import DeprovisionCancelledError
+
+    fake_pg = MagicMock()
+    fake_pg.deprovision.return_value = DeprovisionResult(tool_name="pg", success=True)
+    fake_docker = MagicMock()
+    fake_docker.deprovision.return_value = DeprovisionResult(tool_name="docker", success=True)
+
+    cred_store = MagicMock()
+    env_store = MagicMock()
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=env_store,
+        tool_agents={"postgres_provisioner": fake_pg, "docker_provisioner": fake_docker},
+    )
+
+    with pytest.raises(DeprovisionCancelledError):
+        orch.deprovision("a1", cancellation_checkpoint=lambda: True)
+
+    fake_pg.deprovision.assert_not_called()
+    fake_docker.deprovision.assert_not_called()
+    cred_store.delete_credentials.assert_not_called()
+    env_store.remove.assert_not_called()
+
+
+def test_deprovision_stops_at_checkpoint_before_explicit_docker_call(tmp_path: Path) -> None:
+    from agent_provisioning_team.models import DeprovisionCancelledError
+
+    fake_docker = MagicMock()
+    fake_docker.deprovision.return_value = DeprovisionResult(tool_name="docker", success=True)
+
+    cred_store = MagicMock()
+    env_store = MagicMock()
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=env_store,
+        tool_agents={"docker_provisioner": fake_docker},
+    )
+
+    # Cancel on the 2nd checkpoint: the loop's single provisioner call passes
+    # (checkpoint #1), cancellation fires before the explicit docker call.
+    calls = {"n": 0}
+
+    def checkpoint() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    with pytest.raises(DeprovisionCancelledError) as exc_info:
+        orch.deprovision("a1", cancellation_checkpoint=checkpoint)
+
+    fake_docker.deprovision.assert_called_once_with("a1")
+    cred_store.delete_credentials.assert_not_called()
+    env_store.remove.assert_not_called()
+    assert exc_info.value.completed["tools"] == {"docker_provisioner": True}
+
+
 def test_get_agent_status_missing(tmp_path: Path) -> None:
     orch = ProvisioningOrchestrator(
         environment_store=EnvironmentStore(storage_dir=tmp_path / "envs")

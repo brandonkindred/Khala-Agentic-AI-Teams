@@ -8,13 +8,13 @@ Temporal server is needed — we stub at the ``temporalio``/dispatch boundary.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from agent_provisioning_team.models import DeprovisionResponse
+from agent_provisioning_team.models import DeprovisionCancelledError, DeprovisionResponse
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def test_deprovision_activity_calls_orchestrator() -> None:
     ):
         payload = activities.deprovision_activity("a", force=True)
 
-    fake_orch.deprovision.assert_called_once_with("a", force=True)
+    fake_orch.deprovision.assert_called_once_with("a", force=True, cancellation_checkpoint=ANY)
     assert payload["agent_id"] == "a"
     assert payload["success"] is True
     assert payload["details"] == {"tools": {"pg": True}}
@@ -68,6 +68,40 @@ def test_deprovision_activity_rejects_blank_agent() -> None:
     with patch("temporalio.activity.heartbeat"):
         with pytest.raises(AssertionError):
             activities.deprovision_activity("")
+
+
+def test_deprovision_activity_checkpoint_heartbeats_and_checks_cancellation() -> None:
+    """The checkpoint passed into the orchestrator heartbeats and polls
+    ``activity.is_cancelled()``; when it signals cancellation, the resulting
+    ``DeprovisionCancelledError`` propagates out of the activity uncaught
+    rather than being swallowed into a soft-failure response."""
+    from agent_provisioning_team.temporal import activities
+
+    captured_checkpoint = {}
+
+    def fake_deprovision(agent_id, force=False, cancellation_checkpoint=None):
+        captured_checkpoint["fn"] = cancellation_checkpoint
+        raise DeprovisionCancelledError(agent_id, {"tools": {}})
+
+    fake_orch = MagicMock()
+    fake_orch.deprovision.side_effect = fake_deprovision
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch("temporalio.activity.heartbeat") as fake_heartbeat,
+        patch("temporalio.activity.is_cancelled", return_value=True) as fake_is_cancelled,
+    ):
+        with pytest.raises(DeprovisionCancelledError):
+            activities.deprovision_activity("a")
+
+        # Exercise the captured checkpoint directly to confirm it heartbeats
+        # and defers to activity.is_cancelled() for the cancellation signal.
+        assert captured_checkpoint["fn"]() is True
+        assert fake_heartbeat.call_count >= 2
+        fake_is_cancelled.assert_called()
 
 
 # ---------------------------------------------------------------------------

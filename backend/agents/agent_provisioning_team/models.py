@@ -292,3 +292,19 @@ class DeprovisionResponse(BaseModel):
     success: bool
     details: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
+
+
+class DeprovisionCancelledError(Exception):
+    """Raised when a cancellation checkpoint fires mid-``deprovision``.
+
+    Signals that ``ProvisioningOrchestrator.deprovision`` stopped before
+    completing its per-tool teardown sequence, so the caller (a Temporal
+    activity wrapper) can distinguish an interrupted run from a normal
+    completed one by exception type rather than by inspecting a response
+    payload.
+    """
+
+    def __init__(self, agent_id: str, completed: Dict[str, Any]) -> None:
+        self.agent_id = agent_id
+        self.completed = completed
+        super().__init__(f"Deprovision for {agent_id} cancelled mid-teardown")
