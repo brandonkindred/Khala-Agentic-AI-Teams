@@ -223,6 +223,12 @@ class _AnomalyRecoveryOutcome:
     # path, which leaves ``trades`` unchanged so the round's existing verdict
     # still applies and must not be overwritten.
     ran_on_non_conforming_code: Optional[bool] = None
+    # True iff ``exhausted`` was caused by the refinement-loop stall guard
+    # (``RefinementStallTracker``) rather than genuine round-cap exhaustion.
+    # Only the generic-refinement path (``_refine_or_exhaust``) can set this;
+    # a committed zero-trade repair always returns ``exhausted=False`` and
+    # this field's default (``False``) applies.
+    stalled: bool = False
 
 
 @dataclass(frozen=True)
@@ -411,6 +417,65 @@ class _DriftCollector:
                 timestamp=_now_iso(),
             )
         )
+
+
+@dataclass
+class RefinementStallTracker:
+    """Rolling-window ``(hash(code), hash(failure_details))`` signature
+    tracker for the code-refinement loop (``_run_synthesis_loop``).
+
+    Mirrors ``agents.design_review.CritiqueLedger.is_stalled`` in shape and
+    intent — round-over-round non-progress detection — but is not built on
+    ``CritiqueLedger`` (no open-issue-id set exists here; refinement
+    failures are free-text gate/exec/anomaly details, not structured
+    critique issues) and deliberately not built on
+    ``quality_gates.convergence_tracker.ConvergenceTracker`` (that tracker
+    compares whole-``StrategySpec`` Jaccard signatures *across separate
+    ``run_cycle`` invocations* to steer the next cycle's ideation prompt;
+    it has no within-loop round history and no notion of "this round's
+    code plus this round's failure text"). This class is the documented
+    lightweight analogue #1569 asks for: a small, purpose-built,
+    ``CritiqueLedger``-shaped tracker scoped to one
+    ``_run_synthesis_loop`` invocation.
+
+    Unlike ``CritiqueLedger.is_stalled`` there is no "empty signature never
+    counts as stalled" carve-out: ``record`` is only ever called on a
+    failing round (the loop only reaches ``_refine_or_exhaust`` on
+    failure), so there is no analogous "converged" empty state to guard.
+    """
+
+    _history: List[Tuple[str, str]] = field(default_factory=list)
+
+    def record(self, code_hash: str, failure_hash: str) -> None:
+        """Append this round's signature to the rolling history.
+
+        Preconditions:
+          Called at most once per refinement round, before that round's
+          ``is_stalled`` check.
+        Postconditions:
+          ``rounds_recorded`` increments by exactly 1.
+        """
+        self._history.append((code_hash, failure_hash))
+
+    def is_stalled(self, n: int) -> bool:
+        """True when the last ``n`` recorded signatures are all identical.
+
+        Preconditions:
+          ``n`` is the consecutive-round stall threshold (sub-1 floored).
+        Postconditions:
+          Returns True only when at least ``n`` rounds have been recorded
+          and the last ``n`` ``(code_hash, failure_hash)`` pairs are equal.
+        """
+        n = max(n, 1)
+        if len(self._history) < n:
+            return False
+        window = self._history[-n:]
+        first = window[0]
+        return all(sig == first for sig in window)
+
+    @property
+    def rounds_recorded(self) -> int:
+        return len(self._history)
 
 
 def _now_iso() -> str:
@@ -725,6 +790,13 @@ class _SynthesisLoopOutcome:
     # conformance but fails execution before collecting new trades leaves this
     # reflecting the earlier demoted round whose backtest still stands.
     ran_on_non_conforming_code: bool = False
+    # True iff ``max_rounds_exhausted`` was caused by the refinement-loop
+    # stall guard (``RefinementStallTracker``) detecting an unchanged
+    # ``(code, failure_details)`` signature for consecutive rounds, rather
+    # than the loop genuinely running out of rounds. Lets ``_assemble_record``
+    # report ``status="failed: refinement_stalled"`` distinctly from
+    # ``"failed: max_refinement_rounds"``.
+    refinement_stalled: bool = False
 
 
 @dataclass
@@ -770,6 +842,11 @@ class _SynthesisEvaluateResult:
     exec_result: StrategyRunResult
     ran_on_non_conforming_code: Optional[bool]
     runtime_lookahead_violation: bool
+    # True iff ``action="exhausted"`` was caused by the refinement-loop
+    # stall guard rather than genuine round-cap exhaustion. Carried from
+    # ``_AnomalyRecoveryOutcome.stalled`` on the anomaly-recovery path;
+    # ``False`` on the direct "success" return (no recovery ran).
+    stalled: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────
