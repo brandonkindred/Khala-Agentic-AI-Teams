@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import random
+from datetime import date, timedelta
 from typing import Dict, List
 
-from investment_team.market_data_service import OHLCVBar
+from investment_team.market_data_service import OHLCVBar, compute_adv_from_bars
 from investment_team.models import TradeRecord
+from investment_team.strategy_lab.quality_gates.realism import liquidity_realism
 from investment_team.strategy_lab.quality_gates.realism.liquidity_realism import (
     GATE,
     LiquidityRealismGate,
+    _build_adv_series,
 )
 
 
@@ -335,3 +339,207 @@ def test_adv_as_of_trade_excludes_imputed_bars_consistently() -> None:
         for i in range(1, 21)
     ]
     assert _adv_as_of_trade(full, "2024-04-01", lookback=20) == 100_000_000.0
+
+
+# ---------------------------------------------------------------------------
+# Precomputed ADV series — regression and performance guards
+# ---------------------------------------------------------------------------
+
+
+def _random_bars(
+    rng: random.Random, *, num_days: int, start: str, imputed_rate: float = 0.0
+) -> List[OHLCVBar]:
+    """Deterministic (seeded) chronological daily bars for regression/perf
+    fixtures. ``imputed_rate`` fraction of days are synthesized as imputed
+    (zero-volume, forward-filled) bars to exercise the imputed-skip path."""
+    start_date = date.fromisoformat(start)
+    bars: List[OHLCVBar] = []
+    last_close = 100.0
+    for i in range(num_days):
+        bar_date = (start_date + timedelta(days=i)).isoformat()
+        if rng.random() < imputed_rate:
+            bars.append(
+                OHLCVBar(
+                    date=bar_date,
+                    open=last_close,
+                    high=last_close,
+                    low=last_close,
+                    close=last_close,
+                    volume=0.0,
+                    is_imputed=True,
+                )
+            )
+            continue
+        last_close = round(rng.uniform(50.0, 500.0), 2)
+        bars.append(_bar(bar_date, close=last_close, volume=rng.uniform(1_000.0, 5_000_000.0)))
+    return bars
+
+
+def _reference_adv_as_of_trade(bars, entry_date, *, lookback):
+    """Verbatim copy of the pre-refactor ``_adv_as_of_trade`` body — kept
+    independent of production code (not imported) so the regression test
+    below cannot pass merely because both sides call the same helper.
+    Calling ``compute_adv_from_bars`` here is intentional and not
+    circular: the refactor under test only changes *how/when* ADV is
+    resolved per trade, not the ADV formula itself (covered independently
+    in test_market_data_service.py).
+    """
+    if not bars or lookback <= 0 or not entry_date:
+        return None
+    cutoff = entry_date[:10]
+    prior_bars = [b for b in bars if b.date[:10] < cutoff]
+    return compute_adv_from_bars(prior_bars, lookback=lookback)
+
+
+def test_adv_series_matches_reference_algorithm_and_verdict_is_unchanged(monkeypatch):
+    """Regression guard: the precomputed-series + binary-search lookup must
+    resolve to the exact same ADV as the pre-refactor per-trade filter-and-
+    scan algorithm, and the gate's overall verdict must be byte-identical,
+    across a multi-year, multi-symbol, multi-hundred-trade fixture that
+    mixes in imputed bars and trades too early in the history to have a
+    full lookback window.
+    """
+    rng = random.Random(1800)
+    lookback = 20
+    symbols = ["AAA", "BBB", "CCC"]
+    market: Dict[str, List[OHLCVBar]] = {
+        symbol: _random_bars(rng, num_days=500, start="2022-01-03", imputed_rate=0.05)
+        for symbol in symbols
+    }
+
+    trades: List[TradeRecord] = []
+    for i in range(300):
+        symbol = rng.choice(symbols)
+        entry_bar = rng.choice(market[symbol])
+        trades.append(
+            _trade(
+                trade_num=i + 1,
+                position_value=rng.uniform(1_000.0, 500_000.0),
+                net_pnl=rng.uniform(-5_000.0, 5_000.0),
+                symbol=symbol,
+                entry_date=entry_bar.date,
+            )
+        )
+
+    # Layer 1: per-ADV-value comparison against the independent oracle.
+    series_by_symbol = {
+        symbol: _build_adv_series(bars, lookback=lookback) for symbol, bars in market.items()
+    }
+    for trade in trades:
+        expected = _reference_adv_as_of_trade(
+            market[trade.symbol], trade.entry_date, lookback=lookback
+        )
+        actual = series_by_symbol[trade.symbol].lookup(trade.entry_date)
+        assert actual == expected, (
+            f"ADV mismatch for {trade.symbol}@{trade.entry_date}: "
+            f"reference={expected!r} new={actual!r}"
+        )
+
+    # Layer 2: downstream-verdict comparison. Run the gate with the fast
+    # (production) path, then again with _build_adv_series swapped for a
+    # reference-oracle-backed stand-in, and assert the QualityGateResults
+    # are identical (barring the wall-clock evaluated_at timestamp).
+    gate = LiquidityRealismGate(adv_lookback=lookback)
+    fast_results = gate.check(trades, market)
+
+    class _ReferenceSeries:
+        def __init__(self, bars, lookback):
+            self._bars = bars
+            self._lookback = lookback
+
+        def lookup(self, entry_date):
+            return _reference_adv_as_of_trade(self._bars, entry_date, lookback=self._lookback)
+
+    monkeypatch.setattr(
+        liquidity_realism,
+        "_build_adv_series",
+        lambda bars, *, lookback: _ReferenceSeries(bars, lookback),
+    )
+    reference_results = gate.check(trades, market)
+
+    fast_dump = [r.model_dump(exclude={"evaluated_at"}) for r in fast_results]
+    reference_dump = [r.model_dump(exclude={"evaluated_at"}) for r in reference_results]
+    assert fast_dump == reference_dump
+
+
+def test_compute_adv_from_bars_call_count_independent_of_trade_count(monkeypatch):
+    """Characterization test: the number of calls to compute_adv_from_bars
+    must depend only on the bar history (each symbol's series is built
+    once), not on how many trades reference that symbol. This is the
+    behavioral proof of the O(bars + trades*log bars) shape, replacing the
+    old O(trades*bars) per-trade rebuild.
+    """
+    rng = random.Random(42)
+    symbols = ["AAA", "BBB", "CCC"]
+    market = {
+        symbol: _random_bars(rng, num_days=300, start="2023-01-02", imputed_rate=0.0)
+        for symbol in symbols
+    }
+    total_bars = sum(len(bars) for bars in market.values())
+
+    real_compute = liquidity_realism.compute_adv_from_bars
+    call_count = {"n": 0}
+
+    def _counting(*args, **kwargs):
+        call_count["n"] += 1
+        return real_compute(*args, **kwargs)
+
+    monkeypatch.setattr(liquidity_realism, "compute_adv_from_bars", _counting)
+
+    def _ledger(n: int) -> List[TradeRecord]:
+        trades = []
+        for i in range(n):
+            symbol = symbols[i % len(symbols)]
+            bar = market[symbol][20 + i % (len(market[symbol]) - 20)]
+            trades.append(
+                _trade(
+                    trade_num=i + 1,
+                    position_value=10_000.0,
+                    net_pnl=100.0,
+                    symbol=symbol,
+                    entry_date=bar.date,
+                )
+            )
+        return trades
+
+    gate = LiquidityRealismGate()
+
+    gate.check(_ledger(50), market)
+    calls_for_50 = call_count["n"]
+
+    call_count["n"] = 0
+    gate.check(_ledger(500), market)
+    calls_for_500 = call_count["n"]
+
+    assert calls_for_50 == calls_for_500
+    assert 0 < calls_for_50 <= total_bars
+
+
+def test_build_adv_series_called_once_per_distinct_symbol(monkeypatch):
+    """The per-symbol ADV series must be built exactly once regardless of
+    how many trades reference that symbol — the mechanism behind the
+    O(bars) (not O(trades*bars)) guarantee above."""
+    market = _market_data_with_adv("QQQ", daily_dollar_volume=1_000_000.0)
+    real_build = liquidity_realism._build_adv_series
+    call_count = {"n": 0}
+
+    def _counting(*args, **kwargs):
+        call_count["n"] += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(liquidity_realism, "_build_adv_series", _counting)
+
+    gate = LiquidityRealismGate()
+    trades = [_trade(trade_num=i + 1, position_value=5_000.0, net_pnl=10.0) for i in range(50)]
+    gate.check(trades, market)
+
+    assert call_count["n"] == 1
+
+
+def test_build_adv_series_and_lookup_handle_degenerate_inputs():
+    assert _build_adv_series(None, lookback=20).lookup("2024-01-01") is None
+    assert _build_adv_series([], lookback=20).lookup("2024-01-01") is None
+    bars = [_bar("2024-01-01", close=100.0, volume=1_000.0)]
+    assert _build_adv_series(bars, lookback=0).lookup("2024-02-01") is None
+    series = _build_adv_series(bars, lookback=1)
+    assert series.lookup("") is None
