@@ -893,6 +893,27 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       });
       expect(component.error()).toBe('Run was marked interrupted externally.');
     });
+
+    it('keeps the terminal error banner visible through the run-finish results refresh', () => {
+      // Regression: finishRun() flips running() false on the same transition a
+      // terminal 'error' arrives, firing refreshResultsOnRunFinish ->
+      // loadResults(), whose first act is error.set(null). The failure banner
+      // must survive that refresh, not flash and vanish, so sighted users
+      // retain a visible reason the run stopped.
+      runService.runStatus.set(baseRunStatus);
+      runService.running.set(true);
+      fixture.detectChanges(); // effect records wasRunning = true
+
+      runService.events$.next({ type: 'error', detail: 'Sandbox crashed' });
+      apiSpy.getStrategyLabResults.mockClear();
+      runService.running.set(false);
+      fixture.detectChanges(); // effect fires: loadResults() clears error, then it is re-asserted
+
+      // loadResults() genuinely ran on this transition (so error WAS cleared)…
+      expect(apiSpy.getStrategyLabResults).toHaveBeenCalled();
+      // …yet the terminal banner is still shown.
+      expect(component.error()).toBe('Sandbox crashed');
+    });
   });
 
   describe('cancelled', () => {

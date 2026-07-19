@@ -549,7 +549,16 @@ def test_deep_failure_skips_post_wave_tracker_merge(
 
     ordering_lock = threading.Lock()
     call_order = {"n": 0}
-    first_cycle_returned = threading.Event()
+    # Set by _capture_publish the instant the succeeding sibling's cycle_complete
+    # is published. Gating the deep failure on THIS (not merely on the sibling's
+    # run_cycle returning) is what makes the test deterministic: cycle_complete
+    # is emitted by the main as_completed loop only after it has already
+    # appended the sibling to wave_results, so the sibling is guaranteed present
+    # at the guard. Gating on run_cycle's return instead would let the
+    # deep-failing sibling's future complete first in ~4% of runs, tripping the
+    # `if run_failed: break` short-circuit that skips the sibling entirely —
+    # leaving wave_results empty regardless of the guard and passing vacuously.
+    sibling_cycle_complete = threading.Event()
 
     class _RaisingMergeTracker(_NoopTracker):
         """Primary tracker whose merge_from always raises, so any post-wave
@@ -570,25 +579,25 @@ def test_deep_failure_skips_post_wave_tracker_merge(
             on_phase: Any = None,
             exclude_asset_classes: Any = None,
         ) -> StrategyLabRecord:
-            # Deterministically assign roles under a lock so the two concurrent
-            # cycles can't race: the first to enter succeeds and releases the
-            # second, which only then hits the deep-failure path — guaranteeing
-            # the succeeding sibling is collected (and cycle_complete published)
-            # before run_failed is set.
+            # Assign roles under a lock so the two concurrent cycles can't race:
+            # the first to enter succeeds; the second blocks until the first has
+            # been collected (its cycle_complete published) and only then hits
+            # the deep-failure path — guaranteeing the succeeding sibling is in
+            # wave_results when run_failed is set and the guard runs.
             with ordering_lock:
                 call_order["n"] += 1
                 me = call_order["n"]
             if me == 1:
-                record = _make_record(me, config)
-                first_cycle_returned.set()
-                return record
-            first_cycle_returned.wait(timeout=5)
+                return _make_record(me, config)
+            assert sibling_cycle_complete.wait(timeout=5), "sibling cycle_complete was never published"
             raise HTTPException(status_code=500, detail="downstream provider unavailable")
 
     published: List[Dict[str, Any]] = []
 
     def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
         published.append({**event, "type": event_type})
+        if event_type == "cycle_complete":
+            sibling_cycle_complete.set()
 
     from investment_team.api import job_event_bus as _job_event_bus
 

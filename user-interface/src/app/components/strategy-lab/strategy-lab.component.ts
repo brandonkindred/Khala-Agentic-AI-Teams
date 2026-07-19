@@ -442,7 +442,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * Postconditions: on every `running()` true→false transition, `loadResults()`
    *   runs exactly once and `runOutcomeAnnouncement` holds a non-null value
    *   (either one `handleStreamEvent()` already set, or this fallback's
-   *   `describeRunStatus()` derivation) by the time the effect returns.
+   *   `describeRunStatus()` derivation) by the time the effect returns. A
+   *   terminal failure/interrupt/connection-lost message set on `error` by
+   *   `handleStreamEvent()` survives the `loadResults()` refresh (which clears
+   *   `error` before re-fetching), so the sighted banner is durable rather than
+   *   flashing and vanishing on the same transition.
    */
   private readonly refreshResultsOnRunFinish = effect(() => {
     const isRunning = this.runService.running();
@@ -450,7 +454,18 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       this.runOutcomeAnnouncement.update(
         (current) => current ?? this.describeRunStatus(this.runService.lastTerminalStatus()),
       );
+      // A terminal 'error'/reclaim event set this just before finishRun() flipped
+      // running() false and scheduled this effect; loadResults() below clears
+      // `error` synchronously before its async fetch, so capture and re-assert
+      // the terminal message afterward. Without this the failure/interrupt
+      // banner would be wiped on the very transition that produced it, leaving
+      // sighted users no visible reason the run stopped. (A cancellation uses
+      // `completionWarning`, which loadResults() never clears, so it is
+      // unaffected.) If the reload itself errors, its own handler's message
+      // wins — the run is over either way.
+      const terminalError = this.error();
       this.loadResults();
+      if (terminalError) this.error.set(terminalError);
     }
     this.wasRunning = isRunning;
   });
