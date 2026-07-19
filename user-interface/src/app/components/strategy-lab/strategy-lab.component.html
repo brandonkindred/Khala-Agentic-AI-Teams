@@ -216,7 +216,7 @@
           <div class="metrics-preview">
             @if (runStatus.current_cycle.metrics.annualized_return_pct !== undefined) {
               <div class="metric-chip" [class]="returnColor(runStatus.current_cycle.metrics.annualized_return_pct!)">
-                <span class="metric-value">{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
+                <span class="metric-value"><span class="visually-hidden">{{ returnColorLabel(runStatus.current_cycle.metrics.annualized_return_pct!) }}: </span>{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
                 <span class="metric-label">Return pa</span>
               </div>
             }
@@ -385,7 +385,7 @@
 
               <div class="metric">
                 <span class="metric-value" [class]="returnColor(record.backtest.result.annualized_return_pct)">
-                  {{ record.backtest.result.annualized_return_pct > 0 ? '+' : '' }}{{ record.backtest.result.annualized_return_pct | number:'1.1-1' }}%
+                  <span class="visually-hidden">{{ returnColorLabel(record.backtest.result.annualized_return_pct) }}: </span>{{ record.backtest.result.annualized_return_pct > 0 ? '+' : '' }}{{ record.backtest.result.annualized_return_pct | number:'1.1-1' }}%
                 </span>
                 <span class="metric-label">Annual Return</span>
               </div>
@@ -598,7 +598,8 @@
                         <th mat-header-cell *matHeaderCellDef>W/L</th>
                         <td mat-cell *matCellDef="let t">
                           <span class="outcome-pip" [class.win-pip]="t.outcome === 'win'" [class.loss-pip]="t.outcome === 'loss'">
-                            {{ t.outcome === 'win' ? 'W' : 'L' }}
+                            <span class="visually-hidden">{{ t.outcome === 'win' ? 'Win' : 'Loss' }}</span>
+                            <span aria-hidden="true">{{ t.outcome === 'win' ? 'W' : 'L' }}</span>
                           </span>
                         </td>
                       </ng-container>
@@ -793,11 +794,9 @@
                                 <td class="num-cell">{{ m.backtest }}</td>
                                 <td class="num-cell">{{ m.paper }}</td>
                                 <td class="cmp-aligned">
-                                  <!-- Sole content of this cell, no text alternative yet (color-cue
-                                       follow-up work); aria-hidden here only matches mat-icon's own
-                                       default, it does not add a new gap. -->
                                   <mat-icon
-                                    aria-hidden="true"
+                                    aria-hidden="false"
+                                    [attr.aria-label]="m.aligned ? 'Aligned' : 'Not aligned'"
                                     [class.aligned-yes]="m.aligned"
                                     [class.aligned-no]="!m.aligned"
                                   >
