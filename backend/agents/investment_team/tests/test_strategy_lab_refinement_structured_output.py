@@ -168,7 +168,10 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
 
     assert captured["agent_key"] == "strategy_refinement"
     assert captured["phase"] == "refinement_structured"
-    assert captured["charge"] is False
+    # RefinementAgent now charges the per-cycle LLM budget (#1569) — the
+    # orchestrator's ``_refine`` re-raises ``DesignBudgetExhausted`` instead
+    # of swallowing it, so charging here is safe.
+    assert captured["charge"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -248,7 +248,7 @@ class RefinementAgent:
             agent_key="strategy_refinement",
             phase="refinement_structured",
             parse=extract_json_object,
-            charge=False,
+            charge=True,
             logger=logger,
         )
 
@@ -323,7 +323,7 @@ class RefinementAgent:
                     agent_key="strategy_refinement",
                     phase="refinement",
                     parse=extract_json_object,
-                    charge=False,
+                    charge=True,
                     logger=logger,
                 )
             except ValueError as exc:
