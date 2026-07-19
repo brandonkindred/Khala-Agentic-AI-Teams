@@ -14,7 +14,6 @@ provision/resume/restart; keep activity order and compensation aligned with
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
@@ -46,6 +45,17 @@ TOOL_HEARTBEAT_TIMEOUT = timedelta(minutes=2)
 # *while the activity is still outstanding*.
 DEPROVISION_CANCEL_GRACE = timedelta(minutes=2)
 DEPROVISION_SOFT_TIMEOUT = PHASE_TIMEOUT - DEPROVISION_CANCEL_GRACE
+
+# Detects a deprovision_activity worker that stops responding entirely (crash,
+# thread-pool starvation, etc.) via Temporal's own heartbeat-timeout mechanism,
+# instead of only discovering it once the far larger PHASE_TIMEOUT/
+# DEPROVISION_SOFT_TIMEOUT budget is exhausted. Matches TOOL_HEARTBEAT_TIMEOUT's
+# existing value/precedent (provision_tool_activity, below) for the identical
+# shape of risk: deprovision_activity's cancellation checkpoint only heartbeats
+# *between* per-provisioner teardown calls, so any single call slower than this
+# timeout is misread as a stalled worker and retried (DEFAULT_RETRY_POLICY) —
+# the same accepted tradeoff provision_tool_activity already makes.
+DEPROVISION_HEARTBEAT_TIMEOUT = timedelta(minutes=2)
 
 DEFAULT_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
@@ -1011,7 +1021,13 @@ class AgentDeprovisioningWorkflow:
           cancellation checkpoints ``deprovision_activity`` heartbeats between
           — before the ``finally`` below releases the lock, so release is
           never reached while that activity's worker thread may still be
-          mutating this ``agent_id``'s resources.
+          mutating this ``agent_id``'s resources. ``DEPROVISION_HEARTBEAT_TIMEOUT``
+          bounds how long a genuinely unresponsive (crashed) worker can go
+          undetected; a second, explicit ``DEPROVISION_CANCEL_GRACE`` wait
+          bounds how long the workflow waits for that worker to acknowledge a
+          requested cancellation before giving up and releasing the lock
+          anyway — so no combination of a slow, erroring, or dead worker can
+          leave the lock held indefinitely.
     """
 
     @workflow.run
@@ -1030,8 +1046,9 @@ class AgentDeprovisioningWorkflow:
               sequence exactly.
             * Raises ``TimeoutError`` if ``deprovision_activity`` is still
               running past ``DEPROVISION_SOFT_TIMEOUT`` — only after its
-              cancellation has been requested and acknowledged (see
-              ``_await_deprovision``).
+              cancellation has been requested and either acknowledged, or
+              given up on past ``DEPROVISION_CANCEL_GRACE`` because the
+              worker is presumed unresponsive (see ``_await_deprovision``).
         """
         assert agent_id, "agent_id must be non-empty"
         # Deprovision workflow ids are randomized per-call (repeated/concurrent
@@ -1062,6 +1079,7 @@ class AgentDeprovisioningWorkflow:
                 args=[agent_id, force, fencing_token],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=PHASE_TIMEOUT,
+                heartbeat_timeout=DEPROVISION_HEARTBEAT_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
             return await self._await_deprovision(agent_id, handle)
@@ -1098,12 +1116,26 @@ class AgentDeprovisioningWorkflow:
               exception unchanged — the caller's ``finally`` runs immediately
               after, exactly as before this change.
             * Past ``DEPROVISION_SOFT_TIMEOUT``, requests ``handle``'s
-              cancellation and awaits it to completion (suppressing whatever it
-              resolves with — success, ``DeprovisionCancelledError``, or any
-              other terminal outcome all count as "confirmed stopped") before
-              raising ``TimeoutError`` — so the caller's ``finally`` only runs
-              once ``deprovision_activity`` has actually stopped, never merely
-              because this soft deadline elapsed.
+              cancellation and races it against a second, explicit
+              ``DEPROVISION_CANCEL_GRACE`` timer rather than waiting on it
+              unboundedly:
+                - If ``handle`` resolves within that grace window — success,
+                  ``DeprovisionCancelledError``, an SDK-level cancellation, or
+                  any other activity error — the specific outcome is logged
+                  distinctly (see ``_log_cancel_outcome``) and treated as
+                  "confirmed stopped": safe for the caller's ``finally`` to
+                  release the lock.
+                - If ``handle`` is still unresolved once the grace window
+                  itself elapses (e.g. a dead worker that never even
+                  acknowledges cancellation), that is logged as an error and
+                  the workflow gives up waiting and proceeds anyway, rather
+                  than hang ``run()`` indefinitely — ``DEPROVISION_HEARTBEAT_TIMEOUT``
+                  already gives Temporal's own liveness detection this whole
+                  window to independently fail the activity.
+            * Always raises ``TimeoutError`` once past ``DEPROVISION_SOFT_TIMEOUT``,
+              with an outcome-specific suffix — so the caller's ``finally``
+              always runs, and never while ``deprovision_activity`` might
+              still be mutating this ``agent_id``'s resources.
         """
         timer = asyncio.ensure_future(workflow.sleep(DEPROVISION_SOFT_TIMEOUT))
         done, _pending = await asyncio.wait([handle, timer], return_when=asyncio.FIRST_COMPLETED)
@@ -1112,10 +1144,95 @@ class AgentDeprovisioningWorkflow:
             return handle.result()
 
         handle.cancel()
-        with suppress(BaseException):
-            await handle
+        ack_timer = asyncio.ensure_future(workflow.sleep(DEPROVISION_CANCEL_GRACE))
+        ack_done, _ack_pending = await asyncio.wait(
+            [handle, ack_timer], return_when=asyncio.FIRST_COMPLETED
+        )
+        if handle in ack_done:
+            ack_timer.cancel()
+            outcome = self._log_cancel_outcome(agent_id, handle)
+        else:
+            outcome = (
+                "cancellation not acknowledged within DEPROVISION_CANCEL_GRACE "
+                f"({DEPROVISION_CANCEL_GRACE}); worker presumed unresponsive"
+            )
+            workflow.logger.error(
+                "deprovision_activity for agent_id=%s did not acknowledge its "
+                "requested cancellation within DEPROVISION_CANCEL_GRACE (%s); "
+                "releasing agent_id=%s's lock anyway because the worker is "
+                "presumed unable to make further progress",
+                agent_id,
+                DEPROVISION_CANCEL_GRACE,
+                agent_id,
+            )
+
         raise TimeoutError(
             f"deprovision_activity for agent_id={agent_id} exceeded "
-            f"DEPROVISION_SOFT_TIMEOUT ({DEPROVISION_SOFT_TIMEOUT}); cancellation "
-            "requested and acknowledged before lock release"
+            f"DEPROVISION_SOFT_TIMEOUT ({DEPROVISION_SOFT_TIMEOUT}); {outcome}"
         )
+
+    def _log_cancel_outcome(
+        self, agent_id: str, handle: "workflow.ActivityHandle[dict[str, Any]]"
+    ) -> str:
+        """Log how ``deprovision_activity`` resolved after acknowledging cancellation.
+
+        Preconditions:
+            * ``handle`` is already done (a member of the caller's ``ack_done`` set).
+        Postconditions:
+            * Logs exactly one of four distinct outcomes — never silently
+              swallowed — and returns a short tag folded into the caller's
+              ``TimeoutError`` message. All four are "confirmed stopped" and
+              equally safe for the caller's ``finally`` to release the lock
+              over; only the log level/message differs:
+                - ``DeprovisionCancelledError`` (matched by exception type
+                  name so this also matches a Temporal-wrapped
+                  ``ApplicationError`` in production) — warning.
+                - an SDK-level ``asyncio.CancelledError`` — warning.
+                - any other activity error surfacing during/after
+                  cancellation — error.
+                - no exception at all (the activity completed successfully
+                  despite the cancellation request, e.g. its last checkpoint
+                  passed just before cancellation was observed) — warning.
+        """
+        try:
+            handle.result()
+        except asyncio.CancelledError as exc:
+            workflow.logger.warning(
+                "deprovision_activity for agent_id=%s acknowledged its requested "
+                "cancellation (SDK-level) after DEPROVISION_SOFT_TIMEOUT: %s",
+                agent_id,
+                exc,
+            )
+            return "cancellation acknowledged"
+        except BaseException as exc:  # noqa: BLE001 - classified below; every branch is still a confirmed stop
+            exc_type = type(exc).__name__
+            if (
+                exc_type == "DeprovisionCancelledError"
+                or getattr(exc, "type", None) == "DeprovisionCancelledError"
+            ):
+                workflow.logger.warning(
+                    "deprovision_activity for agent_id=%s acknowledged its requested "
+                    "cancellation (DeprovisionCancelledError, mid-teardown) after "
+                    "DEPROVISION_SOFT_TIMEOUT: %s",
+                    agent_id,
+                    exc,
+                )
+                return "cancellation acknowledged (DeprovisionCancelledError)"
+            workflow.logger.error(
+                "deprovision_activity for agent_id=%s errored during/after its "
+                "requested cancellation (treated as a confirmed stop; releasing "
+                "agent_id=%s's lock): %s",
+                agent_id,
+                agent_id,
+                exc,
+            )
+            return f"activity errored during/after cancellation ({exc_type}): {exc}"
+        else:
+            workflow.logger.warning(
+                "deprovision_activity for agent_id=%s completed successfully "
+                "despite a requested cancellation (its last checkpoint likely "
+                "passed just before cancellation was observed); treating as a "
+                "normal confirmed stop",
+                agent_id,
+            )
+            return "activity completed successfully despite requested cancellation"
