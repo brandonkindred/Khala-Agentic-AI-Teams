@@ -1,5 +1,4 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
 import { NEVER, Subject, of, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
@@ -10,6 +9,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { NotificationService } from '../../core/notification.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
+import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
 import type {
   PaperTradingSession,
   RunStrategyLabRequest,
@@ -18,49 +18,6 @@ import type {
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
 } from '../../models';
-
-/**
- * A `StrategyLabRunService` test double: real signals (so components read
- * them exactly as they would the live service) with `vi.fn()` action
- * methods that apply the same minimal state changes the real service would,
- * so callers observing `running()`/`runStatus()` etc. after calling
- * `startRun()` and friends see realistic results without needing a fake SSE
- * stream or fake timers.
- */
-function createRunServiceStub() {
-  const runStatus = signal<StrategyLabRunStatus | null>(null);
-  const running = signal(false);
-  const activeRunId = signal<string | null>(null);
-  const paperTradingSessions = signal<Record<string, PaperTradingSession>>({});
-  const paperTradingLabRecordId = signal<string | null>(null);
-  const events$ = new Subject<StrategyLabStreamEvent>();
-  const errors$ = new Subject<string>();
-  return {
-    runStatus,
-    running,
-    activeRunId,
-    paperTradingSessions,
-    paperTradingLabRecordId,
-    events$,
-    errors$,
-    checkForActiveRun: vi.fn(),
-    startRun: vi.fn((runId: string, status: StrategyLabRunStatus) => {
-      activeRunId.set(runId);
-      runStatus.set(status);
-      running.set(true);
-    }),
-    clearPaperTradingSessions: vi.fn(() => paperTradingSessions.set({})),
-    hydratePaperTradingSessions: vi.fn((sessions: Record<string, PaperTradingSession>) =>
-      paperTradingSessions.set(sessions),
-    ),
-    trackPaperTradingSession: vi.fn((labRecordId: string, session: PaperTradingSession) => {
-      paperTradingSessions.update((s) => ({ ...s, [labRecordId]: session }));
-      paperTradingLabRecordId.set(labRecordId);
-    }),
-  };
-}
-
-type RunServiceStub = ReturnType<typeof createRunServiceStub>;
 
 /**
  * Focused coverage for the asset-category selection feature. The component is
@@ -827,7 +784,13 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
   });
 
   describe('batch_warning', () => {
+    it('does not set a warning when runStatus is unset (guarded no-op)', () => {
+      runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: 'signal_brief_failed' });
+      expect(component.completionWarning()).toBeNull();
+    });
+
     it('shows the specific message for a signal-brief failure', () => {
+      runService.runStatus.set(baseRunStatus);
       runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: 'signal_brief_failed' });
       expect(component.completionWarning()).toBe(
         'Signal brief unavailable for a batch; strategies continued without it.',
@@ -835,11 +798,13 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
     });
 
     it('shows the reason text for any other non-empty reason', () => {
+      runService.runStatus.set(baseRunStatus);
       runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: 'disk_full' });
       expect(component.completionWarning()).toBe('disk_full');
     });
 
     it('falls back to a generic message for an empty reason', () => {
+      runService.runStatus.set(baseRunStatus);
       runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: '' });
       expect(component.completionWarning()).toBe('A non-fatal warning occurred during a batch.');
     });
@@ -872,6 +837,15 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       });
       expect(component.completionWarning()).toBeNull();
     });
+
+    it('sets no completion warning for a skip-only, zero-error finish (the sighted banner stays scoped to genuine errors)', () => {
+      runService.events$.next({
+        type: 'complete', message: 'done', status: 'completed',
+        completed_count: 3, skipped_count: 2, errored_count: 0, errored_details: [],
+        completed_batches: 1, total_batches: 1,
+      });
+      expect(component.completionWarning()).toBeNull();
+    });
   });
 
   describe('error', () => {
@@ -880,9 +854,90 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       expect(component.error()).toBe('Sandbox crashed');
     });
 
-    it('falls back to a generic message when detail is empty (the shared-infra reclaim shape)', () => {
+    it('falls back to a connection-lost message, not "Run failed", for the shared-infra reclaim shape', () => {
+      // Regression: a subscription-reclaim event (only .error, never
+      // .detail — a connection-level event, not necessarily a job failure)
+      // used to fall through to the generic "Run failed" default, wrongly
+      // announcing a definite failure for what may just be a reconnectable
+      // connection loss.
       runService.events$.next({ type: 'error', error: 'subscription reclaimed' });
-      expect(component.error()).toBe('Run failed');
+      expect(component.error()).toBe('Strategy Lab lost track of the run — status unavailable.');
+    });
+
+    it('shows the external-stop detail in the error banner for an interrupted run', () => {
+      // An externally-interrupted run is published as an 'error' with a
+      // terminal_status; the visible banner still shows the detail text (the
+      // interrupted-vs-failed distinction is exercised in the announcement's
+      // a11y spec).
+      runService.events$.next({
+        type: 'error',
+        detail: 'Run was marked interrupted externally.',
+        terminal_status: 'interrupted',
+      });
+      expect(component.error()).toBe('Run was marked interrupted externally.');
+    });
+
+    it('keeps the terminal error banner visible through the run-finish results refresh', () => {
+      // Regression: finishRun() flips running() false on the same transition a
+      // terminal 'error' arrives, firing refreshResultsOnRunFinish ->
+      // loadResults(), whose first act is error.set(null). The failure banner
+      // must survive that refresh, not flash and vanish, so sighted users
+      // retain a visible reason the run stopped.
+      runService.runStatus.set(baseRunStatus);
+      runService.running.set(true);
+      fixture.detectChanges(); // effect records wasRunning = true
+
+      runService.events$.next({ type: 'error', detail: 'Sandbox crashed' });
+      apiSpy.getStrategyLabResults.mockClear();
+      runService.running.set(false);
+      fixture.detectChanges(); // effect fires: loadResults() clears error, then it is re-asserted
+
+      // loadResults() genuinely ran on this transition (so error WAS cleared)…
+      expect(apiSpy.getStrategyLabResults).toHaveBeenCalled();
+      // …yet the terminal banner is still shown.
+      expect(component.error()).toBe('Sandbox crashed');
+    });
+
+    it('does NOT resurrect an unrelated ambient error after a cleanly-completed run', () => {
+      // Regression: the run-finish refresh must re-assert only a terminal RUN
+      // error (terminalErrorBanner), never whatever error() happens to hold. A
+      // mid-run ambient error (e.g. an errors$ paper-trading poll failure) that
+      // is still showing when the run completes cleanly must be cleared by the
+      // refresh, not pinned onto the successful run.
+      runService.runStatus.set(baseRunStatus);
+      runService.running.set(true);
+      fixture.detectChanges(); // effect records wasRunning = true
+
+      // An unrelated ambient error surfaces mid-run (the errors$ subscription).
+      runService.errors$.next('Paper trading polling failed.');
+      expect(component.error()).toBe('Paper trading polling failed.');
+
+      // The strategy run then completes cleanly — no 'error' event.
+      runService.events$.next({
+        type: 'complete', message: 'done', status: 'completed',
+        completed_count: 5, skipped_count: 0, errored_count: 0, errored_details: [],
+        completed_batches: 1, total_batches: 1,
+      });
+      runService.running.set(false);
+      fixture.detectChanges(); // effect fires: loadResults() clears; nothing re-asserts
+
+      expect(component.error()).toBeNull();
+    });
+  });
+
+  describe('cancelled', () => {
+    it('surfaces a cancellation in the non-error warning banner, not the red error banner', () => {
+      // A deliberate user cancellation is a notice, not an error — it must not
+      // set the red error banner now that it has its own event type.
+      runService.events$.next({ type: 'cancelled', detail: 'Run cancelled by user' });
+      expect(component.completionWarning()).toBe('Run cancelled by user');
+      expect(component.error()).toBeNull();
+    });
+
+    it('falls back to a default cancellation notice when detail is empty', () => {
+      runService.events$.next({ type: 'cancelled', detail: '' });
+      expect(component.completionWarning()).toBe('Run cancelled by user.');
+      expect(component.error()).toBeNull();
     });
   });
 

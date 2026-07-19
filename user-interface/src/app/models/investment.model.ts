@@ -861,6 +861,16 @@ export interface StrategyLabRunStatus {
   /** Non-fatal per-cycle failures — run kept going but user should see the count. */
   errored_cycles?: number;
   errored_details?: StrategyLabErroredDetail[];
+  /**
+   * Uncapped count of `errored_details` entries tagged
+   * `reason: 'tracker_merge_failed'` (main.py's `tracker_merge_error_count`
+   * on `StrategyLabRunStatusResponse`). Unlike `errored_details` itself
+   * (capped at 50 entries server-side), this never evicts, so it stays the
+   * authoritative source for reconciling a cycle double-counted by a
+   * post-completion tracker-merge failure even once older matching entries
+   * have aged out of `errored_details`.
+   */
+  tracker_merge_error_count?: number;
   /** `| null`: see `StrategyLabCycleProgress`'s own field doc for why. */
   current_cycle?: StrategyLabCycleProgress | null;
   completed_record_ids: string[];
@@ -913,9 +923,9 @@ export interface InvestmentJobsListResponse {
  * (`_run_state_to_response(...).model_dump(mode="json")` backs both). Every
  * Optional[...] field on StrategyLabRunStatusResponse was audited against
  * its Python default: completed_cycles/skipped_cycles/errored_cycles/
- * batch_size/batch_count/completed_batches all default to a real 0/1,
- * never None, so they're correctly typed as-is. `current_cycle`/`status`/
- * `phase`/nested `strategy`/`metrics` needed widening to admit a real
+ * tracker_merge_error_count/batch_size/batch_count/completed_batches all
+ * default to a real 0/1, never None, so they're correctly typed as-is.
+ * `current_cycle`/`status`/`phase`/nested `strategy`/`metrics` needed widening to admit a real
  * `null` current_cycle, `'interrupted'` status, and an open-ended phase
  * vocabulary — applied on `StrategyLabRunStatus`/`StrategyLabCycleProgress`
  * themselves (not locally here) since the REST poll endpoint shares this
@@ -978,8 +988,15 @@ export interface StrategyLabProgressEvent {
 export interface StrategyLabCycleCompleteEvent { type: 'cycle_complete'; cycle_index: number; record_id: string; completed_cycles: number; batch_index: number; }
 /** `reason` is an ordinary backend string, not a closed enum (only "no_market_data" occurs today). */
 export interface StrategyLabCycleSkippedEvent  { type: 'cycle_skipped'; cycle_index: number; reason: string; batch_index: number; }
-/** `reason` is an ordinary backend string (an exception class name, or "tracker_merge_failed"), not a closed enum. */
-export interface StrategyLabCycleErroredEvent  { type: 'cycle_errored'; cycle_index: number; batch_index: number; reason: string; error: string; }
+/**
+ * `reason` is an ordinary backend string: an exception class name for a cycle's
+ * own failure, or the fixed marker `"tracker_merge_failed"` for a
+ * post-completion tracker-merge failure. `exception_type` is carried ONLY on the
+ * tracker-merge variant (the raising class, e.g. `"ValueError"`), so a
+ * live-streamed detail can be shaped identically to the persisted/polled one —
+ * for a regular failure the class name is already in `reason`.
+ */
+export interface StrategyLabCycleErroredEvent  { type: 'cycle_errored'; cycle_index: number; batch_index: number; reason: string; error: string; exception_type?: string; }
 
 export interface StrategyLabBatchStartEvent    { type: 'batch_start'; batch_index: number; total_batches: number; batch_size: number; completed_batches: number; }
 export interface StrategyLabBatchCompleteEvent { type: 'batch_complete'; batch_index: number; total_batches: number; completed_batches: number; }
@@ -998,17 +1015,36 @@ export interface StrategyLabCompleteEvent {
   total_batches: number;
 }
 
-export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; }
-export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; }
+export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; terminal_status?: 'failed' | 'interrupted'; }
+export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; terminal_status?: undefined; }
 /**
- * Two mutually-exclusive wire shapes: three strategy-lab call sites always
- * send `detail`; one shared-infra "subscription reclaimed" call site always
- * sends `error` instead. Each branch declares the other field as optional
- * `undefined` (rather than omitting it) so handleStreamEvent()'s existing
- * `event['detail'] as string` read still type-checks uniformly across the
- * union as `string | undefined`, without needing body changes here.
+ * Two mutually-exclusive wire shapes: two strategy-lab call sites always
+ * send `detail` (both genuine failure paths — user cancellation is its own
+ * `StrategyLabCancelledEvent`, not an `error`); one shared-infra
+ * "subscription reclaimed" call site always sends `error` instead. Each
+ * branch declares the other field as optional `undefined` (rather than
+ * omitting it) so handleStreamEvent()'s existing `event['detail'] as string`
+ * read still type-checks uniformly across the union as `string | undefined`,
+ * without needing body changes here.
+ *
+ * `terminal_status` is carried ONLY by the external-stop `detail` publisher
+ * (main.py's between-wave "marked externally" branch), which fires for both
+ * `'failed'` and `'interrupted'`. Consumers use it to distinguish the two
+ * precisely; when it is absent (every genuine in-run failure, and the reclaim
+ * shape) they default to `'failed'`. Declared `?: undefined` on the reclaim
+ * branch so it reads uniformly across the union like `detail`/`error` above.
  */
 export type StrategyLabErrorEvent = StrategyLabErrorDetailEvent | StrategyLabErrorReclaimEvent;
+
+/**
+ * Terminal event for a user-initiated cancellation — a distinct `type`
+ * rather than a flag bolted onto `error`, mirroring the blogging team's own
+ * cancelled-job SSE event (`backend/agents/blogging/api/background.py`'s
+ * `_publish_terminal_event(job_id, "cancelled", ...)`), the established
+ * pattern for this exact distinction elsewhere in the codebase. main.py's
+ * one cancellation call site is the sole publisher of this type.
+ */
+export interface StrategyLabCancelledEvent { type: 'cancelled'; detail: string; }
 
 /**
  * Sole terminal frame — always exactly `{ type: 'done' }`. The investment-api
@@ -1030,6 +1066,7 @@ export type StrategyLabStreamEvent =
   | StrategyLabBatchWarningEvent
   | StrategyLabCompleteEvent
   | StrategyLabErrorEvent
+  | StrategyLabCancelledEvent
   | StrategyLabDoneEvent;
 
 // ---------------------------------------------------------------------------

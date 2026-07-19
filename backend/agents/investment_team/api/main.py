@@ -342,6 +342,14 @@ class StrategyLabRunStatusResponse(BaseModel):
     # to the UI so users can see that something went wrong during generation.
     errored_cycles: int = 0
     errored_details: List[Dict[str, Any]] = Field(default_factory=list)
+    # Uncapped count of cycle_errored events tagged reason="tracker_merge_failed"
+    # (a cycle that already published cycle_complete, then separately
+    # cycle_errored for the same cycle_index when its post-completion
+    # convergence-tracker merge failed). Unlike errored_details (capped at
+    # _ERRORED_DETAILS_MAX), this counter never evicts, so a client
+    # reconciling a double-counted cycle_index can always recover the exact
+    # count instead of approximating it from a possibly-truncated array.
+    tracker_merge_error_count: int = 0
     current_cycle: Optional[StrategyLabCycleProgress] = None
     completed_record_ids: List[str] = Field(default_factory=list)
     error: Optional[str] = None
@@ -371,7 +379,20 @@ class StrategyLabConfigResponse(BaseModel):
 
 
 def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusResponse:
-    """Convert an _active_runs entry to a Pydantic response."""
+    """Convert an ``_active_runs`` entry to a Pydantic response.
+
+    Preconditions:
+        ``state`` is an ``_active_runs`` entry (or a persisted job dict of the
+        same shape); ``state["run_id"]`` is present. Every other field is read
+        with a default, so a partially-populated resume/snapshot dict is safe.
+    Postconditions:
+        Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
+        field, defaulting each absent numeric/list field to its response default
+        (``0``/empty) — including ``tracker_merge_error_count`` (``0`` when
+        absent) — and mapping a present ``current_cycle`` dict to a
+        ``StrategyLabCycleProgress`` (``None`` when absent). Pure: ``state`` is
+        not mutated.
+    """
     cc = state.get("current_cycle")
     return StrategyLabRunStatusResponse(
         run_id=state["run_id"],
@@ -382,6 +403,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         skipped_cycles=state.get("skipped_cycles", 0),
         errored_cycles=state.get("errored_cycles", 0),
         errored_details=state.get("errored_details", []),
+        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
         current_cycle=StrategyLabCycleProgress(**cc) if cc else None,
         completed_record_ids=state.get("completed_record_ids", []),
         error=state.get("error"),
@@ -1644,6 +1666,33 @@ def _compute_signal_brief_snapshot(
 _STRATEGY_LAB_CANCEL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
 
 
+def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
+    """Return the run's persisted job-store status if it's an external stop signal.
+
+    Preconditions:
+        ``run_id`` is the strategy-lab run identifier.
+    Postconditions:
+        Returns the persisted job's exact ``status`` string ("cancelled",
+        "failed", or "interrupted") when it is one of
+        ``_STRATEGY_LAB_CANCEL_STATUSES``; ``None`` on any read error or a
+        non-terminal/absent status (never raises). Callers that need to
+        distinguish a genuine user cancellation from another external stop
+        (e.g. a service-wide "mark all interrupted" reconciliation, or an
+        externally-recorded failure) must branch on the returned value
+        rather than treating every non-``None`` result as "cancelled".
+    """
+    try:
+        client = _get_lab_run_job_client()
+        persisted = client.get_job(run_id)
+        if persisted:
+            status = persisted.get("status", "")
+            if status in _STRATEGY_LAB_CANCEL_STATUSES:
+                return status
+    except Exception:
+        logger.debug("Failed to fetch external terminal status for run %s", run_id, exc_info=True)
+    return None
+
+
 def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
     """Return True if the run's job-store status is terminal (external cancel).
 
@@ -1656,16 +1705,12 @@ def _is_strategy_lab_run_cancelled(run_id: str) -> bool:
     Postconditions:
         Returns True when the persisted job's ``status`` is one of
         ``cancelled``/``failed``/``interrupted``; False on any read error or a
-        non-terminal/absent status (never raises).
+        non-terminal/absent status (never raises). Callers that need to know
+        WHICH of those three statuses triggered this (to avoid mislabeling
+        one as another) should call ``_strategy_lab_external_terminal_status``
+        directly instead.
     """
-    try:
-        client = _get_lab_run_job_client()
-        persisted = client.get_job(run_id)
-        if persisted:
-            return persisted.get("status", "") in _STRATEGY_LAB_CANCEL_STATUSES
-    except Exception:
-        pass
-    return False
+    return _strategy_lab_external_terminal_status(run_id) is not None
 
 
 def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = False) -> None:
@@ -1772,6 +1817,7 @@ def _build_run_state(
     skipped_cycles: int = 0,
     errored_cycles: int = 0,
     errored_details: Optional[List[Any]] = None,
+    tracker_merge_error_count: int = 0,
     completed_record_ids: Optional[List[Any]] = None,
     completed_batches: int = 0,
 ) -> Dict[str, Any]:
@@ -1799,6 +1845,7 @@ def _build_run_state(
         "skipped_cycles": skipped_cycles,
         "errored_cycles": errored_cycles,
         "errored_details": errored_details if errored_details is not None else [],
+        "tracker_merge_error_count": tracker_merge_error_count,
         "current_cycle": None,
         "completed_record_ids": (completed_record_ids if completed_record_ids is not None else []),
         "error": None,
@@ -2065,6 +2112,36 @@ def _strategy_lab_worker(
     ``request.max_parallel`` cycles in parallel via a ThreadPoolExecutor.
     Between batches the signal-intelligence brief is regenerated so each new
     batch's strategies are informed by every prior batch's persisted records.
+
+    Preconditions:
+        - ``run_id`` already has an entry in ``_active_runs`` (seeded by the
+          run/resume/restart route before dispatch) whose
+          ``completed_record_ids``/``errored_cycles``/``errored_details``/
+          ``skipped_cycles``/``tracker_merge_error_count`` reflect any prior
+          progress to carry forward (``0``/empty for a fresh run);
+          ``start_cycle_offset`` is the 0-based global cycle index to resume
+          from (``0`` for a fresh run).
+    Postconditions:
+        - ``_active_runs[run_id]`` is continuously updated via ``_update_run``
+          and mirrored to persistent storage as each cycle/batch completes.
+          ``errored_cycles``/``errored_details`` grow by one entry per failed
+          cycle (the latter capped at ``_ERRORED_DETAILS_MAX``);
+          ``skipped_cycles`` grows by one per cycle skipped for unavailable
+          market data; ``tracker_merge_error_count`` grows by one per
+          post-completion tracker-merge failure specifically, uncapped, so it
+          can always be subtracted from ``errored_cycles`` to recover an
+          exact double-count correction regardless of ``errored_details``'s
+          cap. On completion, ``status`` becomes ``"completed"`` or
+          ``"completed_with_errors"`` and a terminal ``complete`` SSE event
+          publishes; on a genuine user cancellation, ``status`` becomes
+          ``"cancelled"`` and a terminal ``cancelled`` SSE event publishes;
+          on an unhandled exception OR any other external stop (the run's
+          job-service status independently becoming ``"failed"`` or
+          ``"interrupted"``, e.g. a service-wide reconciliation), ``status``
+          becomes that same true value (never forced to ``"cancelled"``) and
+          a terminal ``error`` event publishes. Exactly one terminal SSE
+          event type (``complete``/``cancelled``/``error``) is published per
+          call.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -2145,11 +2222,18 @@ def _strategy_lab_worker(
             errored_details: List[Dict[str, Any]] = list(
                 _run_state_snapshot.get("errored_details") or []
             )
+            # Carry forward on resume (same reasoning as errored/errored_details).
+            tracker_merge_errors: int = int(_run_state_snapshot.get("tracker_merge_error_count") or 0)
         completed_indices: set[int] = set(range(start_cycle_offset))
         completed_batches = start_batch_idx
         primary_tracker = orchestrator.convergence_tracker
         run_failed = False
         run_cancelled = False
+        # The specific external status ("cancelled"/"failed"/"interrupted")
+        # that triggered run_cancelled, so the terminal publish below can
+        # preserve it instead of assuming every external stop was a genuine
+        # user cancellation. Set alongside run_cancelled; None until then.
+        external_terminal_status: Optional[str] = None
         # Bound memory for errored_details — enough for operators to diagnose
         # without letting a pathological run balloon the state dict.
         _ERRORED_DETAILS_MAX = 50
@@ -2256,7 +2340,17 @@ def _strategy_lab_worker(
                         )
                         wave_futures[future] = cn
 
-                    # Collect results from this wave.
+                    # Collect results from this wave. Every future is drained
+                    # even after a deep failure sets run_failed: a sibling that
+                    # COMPLETED persisted its own record inside the cycle thread,
+                    # so skipping its future here would leave the record orphaned
+                    # (never counted in completed_record_ids/contiguous_cycles),
+                    # and a resume of the failed run — "failed" is resumable —
+                    # would re-run and duplicate that cycle. Draining also lets
+                    # each cycle's own handler clear current_cycle, so the
+                    # terminal state never keeps a stale in-progress cycle. The
+                    # run's single terminal 'error' event is instead deduplicated
+                    # at the deep-failure site below (guarded on run_failed).
                     wave_results: List[tuple[int, StrategyLabRecord]] = []
                     for future in as_completed(wave_futures):
                         cn = wave_futures[future]
@@ -2305,19 +2399,27 @@ def _strategy_lab_worker(
                                         "batch_index": batch_num,
                                     },
                                 )
-                            else:  # pragma: no cover — non-502 HTTPException from a cycle is a deep failure path tested via integration
+                            else:  # non-502 HTTPException from a cycle is a deep failure
                                 logger.exception(
                                     "Strategy lab cycle %d/%d failed", cn, total_cycles
                                 )
-                                _update_run(
-                                    {
-                                        "status": "failed",
-                                        "error": f"Cycle {cn} failed: {exc}",
-                                        "current_cycle": None,
-                                    }
-                                )
-                                _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
-                                run_failed = True
+                                # Only the FIRST deep failure in a wave publishes the
+                                # run's single terminal 'error' event. Concurrent
+                                # siblings that also deep-fail are logged above but must
+                                # not each publish a terminal event (as_completed yields
+                                # them one at a time to this single consumer, so the
+                                # run_failed check is race-free); the loop keeps draining
+                                # regardless so completed siblings are still counted.
+                                if not run_failed:
+                                    _update_run(
+                                        {
+                                            "status": "failed",
+                                            "error": f"Cycle {cn} failed: {exc}",
+                                            "current_cycle": None,
+                                        }
+                                    )
+                                    _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
+                                    run_failed = True
                         except Exception as exc:
                             logger.exception("Strategy lab cycle %d/%d errored", cn, total_cycles)
                             errored += 1
@@ -2347,6 +2449,16 @@ def _strategy_lab_worker(
                                 },
                             )
 
+                # A deep failure in this wave already published the run's one
+                # terminal 'error' event (run_failed). There is nothing left to
+                # merge, and — critically — no merge failure here must publish a
+                # second, post-terminal cycle_errored event or bump counters
+                # after the run has already ended. Drop the wave's results so the
+                # merge loop below is a no-op. (The primary tracker's final state
+                # is irrelevant once the run fails: no further waves run.)
+                if run_failed:
+                    wave_results = []
+
                 # Merge wave results into the primary convergence tracker in
                 # deterministic cycle-index order so that stall/diversity
                 # directives are reproducible across runs with identical inputs.
@@ -2372,6 +2484,7 @@ def _strategy_lab_worker(
                                 total_cycles,
                             )
                             errored += 1
+                            tracker_merge_errors += 1
                             if len(errored_details) < _ERRORED_DETAILS_MAX:
                                 errored_details.append(
                                     {
@@ -2386,6 +2499,7 @@ def _strategy_lab_worker(
                                 {
                                     "errored_cycles": errored,
                                     "errored_details": errored_details,
+                                    "tracker_merge_error_count": tracker_merge_errors,
                                 }
                             )
                             _publish(
@@ -2394,17 +2508,25 @@ def _strategy_lab_worker(
                                     "cycle_index": _idx + 1,
                                     "batch_index": batch_num,
                                     "reason": "tracker_merge_failed",
+                                    # Carried so a live-streamed tracker-merge detail is
+                                    # shaped identically to the persisted/polled one
+                                    # (which stores both keys above): the marker under
+                                    # `reason`, the raising class under `exception_type`.
+                                    "exception_type": type(exc).__name__,
                                     "error": str(exc),
                                 },
                             )
 
                 # Check for external cancellation between waves
-                if not run_failed and _is_strategy_lab_run_cancelled(run_id):
-                    logger.info(
-                        "Strategy lab run %s cancelled externally — stopping after wave",
-                        run_id,
-                    )
-                    run_cancelled = True
+                if not run_failed:
+                    external_terminal_status = _strategy_lab_external_terminal_status(run_id)
+                    if external_terminal_status is not None:
+                        logger.info(
+                            "Strategy lab run %s stopped externally (status=%s) — stopping after wave",
+                            run_id,
+                            external_terminal_status,
+                        )
+                        run_cancelled = True
 
             if run_failed or run_cancelled:
                 break
@@ -2424,8 +2546,36 @@ def _strategy_lab_worker(
             return
 
         if run_cancelled:
-            _update_run({"status": "cancelled", "current_cycle": None, "current_batch": None})
-            _publish("error", {"detail": "Run cancelled by user"})
+            # _STRATEGY_LAB_CANCEL_STATUSES covers "cancelled", "failed", and
+            # "interrupted": an external process (a service-wide "mark all
+            # interrupted" reconciliation, or an independent failure-detection
+            # mechanism) can mark a still-running job with any of them while this
+            # worker's thread is still alive. Persist the TRUE external status —
+            # never force "cancelled" — so an interrupt sweep isn't mislabeled a
+            # deliberate user cancellation in the persisted record. The terminal
+            # reset is identical regardless of which status it was; only the
+            # published event differs.
+            status = external_terminal_status or "failed"
+            _update_run({"status": status, "current_cycle": None, "current_batch": None})
+            if status == "cancelled":
+                # A distinct terminal event type — not folded into "error" — so
+                # SSE consumers never have to infer intent from `detail`'s free
+                # text. Mirrors the blogging team's own cancelled-job publish
+                # (agents/blogging/api/background.py: `_publish_terminal_event(
+                # job_id, "cancelled", ...)`), the established pattern for this
+                # exact distinction elsewhere in the codebase.
+                _publish("cancelled", {"detail": "Run cancelled by user"})
+            else:
+                # Carry the true terminal status on the event so live SSE
+                # consumers can announce "interrupted" vs "failed" precisely,
+                # instead of inferring it from `detail`'s free text (which the
+                # poll-fallback path gets right via the persisted status, but
+                # the live 'error' branch otherwise cannot). Absent on genuine
+                # failures elsewhere, where consumers default to "failed".
+                _publish(
+                    "error",
+                    {"detail": f"Run was marked {status} externally.", "terminal_status": status},
+                )
             return
 
         msg = (
@@ -2645,7 +2795,20 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
     description="Resume from the last completed cycle. Skips cycles that already produced records.",
 )
 def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
-    """Resume a strategy lab run at the cycle it was interrupted."""
+    """Resume a strategy lab run at the cycle it was interrupted.
+
+    Preconditions:
+        ``run_id`` identifies a run whose persisted status is in
+        ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/agent_crash);
+        otherwise a 404 (unknown run) or 400 (not resumable) is raised.
+    Postconditions:
+        Re-seeds ``_active_runs[run_id]`` carrying forward all prior progress —
+        ``completed_record_ids``/``errored_cycles``/``errored_details``/
+        ``skipped_cycles``/``tracker_merge_error_count`` — and dispatches the
+        worker from the first not-yet-contiguously-completed cycle, so no
+        already-persisted cycle is re-run (and thus never duplicated). Returns
+        the run's start response with its total cycle count.
+    """
     state = _get_run_state(run_id)
     try:
         validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
@@ -2680,6 +2843,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         skipped_cycles=state.get("skipped_cycles", 0),
         errored_cycles=state.get("errored_cycles", 0),
         errored_details=state.get("errored_details", []),
+        tracker_merge_error_count=state.get("tracker_merge_error_count", 0),
         completed_record_ids=state.get("completed_record_ids", []),
         completed_batches=completed_batches,
     )
@@ -2882,7 +3046,7 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
     description=(
         "Server-Sent Events stream for real-time progress. Emits 'snapshot' on connect, "
         "'progress' at each phase, 'cycle_complete'/'cycle_skipped' per cycle, "
-        "and a terminal 'complete' or 'error' event."
+        "and a terminal 'complete', 'error', or 'cancelled' event."
     ),
 )
 async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
@@ -2922,7 +3086,7 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
             unsubscribe=unsubscribe,
             job_id=run_id,
             snapshot=_snapshot_event,
-            terminal_types=("complete", "error"),
+            terminal_types=("complete", "error", "cancelled"),
         ),
         media_type="text/event-stream",
     )

@@ -1,6 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
-import { of, NEVER, Subject } from 'rxjs';
+import { of, NEVER } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
@@ -11,10 +10,9 @@ import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabComponent } from './strategy-lab.component';
+import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
 import type {
   StrategyLabRecord,
-  StrategyLabRunStatus,
-  StrategyLabStreamEvent,
   StrategySpec,
   TradeRecord,
   PaperTradingSession,
@@ -22,30 +20,6 @@ import type {
   QualityGateResult,
 } from '../../models';
 import { expectNoAxeViolations } from '../../testing/a11y';
-
-/**
- * A `StrategyLabRunService` test double: real signals so components read
- * them exactly as they would the live service; tests drive state directly
- * via `.set()`. See `strategy-lab.component.spec.ts` for the same pattern.
- */
-function createRunServiceStub() {
-  return {
-    runStatus: signal<StrategyLabRunStatus | null>(null),
-    running: signal(false),
-    activeRunId: signal<string | null>(null),
-    paperTradingSessions: signal<Record<string, PaperTradingSession>>({}),
-    paperTradingLabRecordId: signal<string | null>(null),
-    events$: new Subject<StrategyLabStreamEvent>(),
-    errors$: new Subject<string>(),
-    checkForActiveRun: vi.fn(),
-    startRun: vi.fn(),
-    clearPaperTradingSessions: vi.fn(),
-    hydratePaperTradingSessions: vi.fn(),
-    trackPaperTradingSession: vi.fn(),
-  };
-}
-
-type RunServiceStub = ReturnType<typeof createRunServiceStub>;
 
 /** The `StrategyLabRunService` stub a fixture's component was constructed with — see `createRunServiceStub`. */
 function stubOf(fixture: ComponentFixture<StrategyLabComponent>): RunServiceStub {
@@ -488,6 +462,941 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
   }, 15000);
 });
 
+describe('StrategyLabComponent a11y — run announcement live region', () => {
+  async function createFixture() {
+    const apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(NEVER),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    const integrationsSpy = {
+      getTradingViewConfig: vi.fn().mockReturnValue(
+        of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+      ),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        { provide: IntegrationsApiService, useValue: integrationsSpy },
+      ],
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
+
+    const fixture = TestBed.createComponent(StrategyLabComponent);
+    fixture.detectChanges(); // triggers ngOnInit
+    return fixture;
+  }
+
+  /** Reads the always-present SR-only status region, asserting its fixed attributes. */
+  function liveRegionText(fixture: ComponentFixture<StrategyLabComponent>): string {
+    const region: HTMLElement | null = fixture.nativeElement.querySelector('p.visually-hidden[role="status"]');
+    expect(region).toBeTruthy();
+    expect(region!.getAttribute('aria-live')).toBe('polite');
+    return region!.textContent?.trim() ?? '';
+  }
+
+  it('is present and empty while idle', async () => {
+    const fixture = await createFixture();
+    expect(liveRegionText(fixture)).toBe('');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces the monotonic strategy position as a run proceeds', async () => {
+    // The live region reports coarse batch/strategy position only — not the
+    // per-cycle phase, which churns under the default parallel execution.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 1, phase: 'backtesting' },
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('derives the strategy number from attempted cycles, not the churning current_cycle.cycle_index', async () => {
+    // Under parallel waves the backend rewrites the single shared current_cycle
+    // from whichever sibling last emitted progress, so cycle_index oscillates.
+    // Here cycle_index is 3 while only one cycle has actually been attempted
+    // (completed_cycles 1) — the announcement must report the MONOTONIC
+    // attempted position (2), never the churning cycle_index (3).
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1'],
+      current_cycle: { cycle_index: 3, phase: 'ideating' },
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces a coarse position (no per-cycle phase) even when a cycle is actively in a phase', async () => {
+    // The per-cycle phase is deliberately NOT spoken — under parallel waves
+    // there is no single "current phase", so a coarse monotonic position is the
+    // stable, non-churning signal. The visible phase-stepper still shows phases.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 1, phase: 'design_review' },
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces the coarse position between cycles (no current_cycle yet)', async () => {
+    // With no current_cycle (a sibling just finished mid-wave), the announcement
+    // is the same coarse monotonic position — no special "between cycles" text.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1'],
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces "Finishing up" instead of an impossible position once the last cycle completes', async () => {
+    // Regression: after the final cycle_complete, completed_cycles already
+    // equals total_cycles (with no current_cycle), so naively reporting
+    // "completed_cycles + 1 of total_cycles" would announce an impossible
+    // "Strategy 6 of 5" for the brief window before the terminal `complete`
+    // event lands.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 5,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3', 'rec-4', 'rec-5'],
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('does not repeat a skipped strategy\'s number as "next" between cycles', async () => {
+    // Regression: completed_cycles alone excludes skipped/errored cycles.
+    // Cycle 1 completed and cycle 2 was skipped — completed_cycles is only
+    // 1, so "completed_cycles + 1" would announce "Strategy 2", repeating
+    // the cycle that was just skipped instead of the genuinely next one.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 1,
+      completed_record_ids: ['rec-1'],
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('the sighted "Strategy N of M" text agrees with the aria-live text for the same skipped-cycle state', async () => {
+    // Regression: the sighted progress-title/run-button text used to read
+    // `completed_cycles + 1` directly, disagreeing with the aria-live
+    // region's corrected number for the exact scenario above — sighted and
+    // screen-reader users were told contradictory strategy numbers for the
+    // same run. Both now derive from the same currentStrategyNumber().
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 1,
+      completed_record_ids: ['rec-1'],
+    });
+    fixture.detectChanges();
+
+    const sightedText: string = fixture.nativeElement.querySelector('.progress-title').textContent;
+    expect(sightedText).toContain('Strategy 3 of 5');
+    expect(liveRegionText(fixture)).toContain('Strategy 3 of 5');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('the sighted "Batch N of M" text agrees with the aria-live text once the last batch has completed', async () => {
+    // Regression: the sighted text had no clamp and could render the
+    // impossible "Batch 4 of 3" in the window after the last batch_complete
+    // but before the terminal complete event — the aria-live region already
+    // clamped this. Both now derive from the same currentBatchNumber().
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 15,
+      completed_cycles: 15,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      batch_count: 3,
+      completed_batches: 3,
+      current_batch: null,
+    });
+    fixture.detectChanges();
+
+    const sightedText: string = fixture.nativeElement.querySelector('.progress-title').textContent;
+    expect(sightedText).toContain('Batch 3 of 3');
+    expect(sightedText).not.toContain('Batch 4 of 3');
+    expect(liveRegionText(fixture)).toBe('Batch 3 of 3 — Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('does not double-count a cycle that completed but then hit a tracker-merge failure', async () => {
+    // Regression: main.py's wave loop can publish cycle_complete for a
+    // cycle, then separately publish cycle_errored for that same
+    // cycle_index if the post-completion convergence-tracker merge step
+    // throws (tagged reason: 'tracker_merge_failed' in errored_details, and
+    // counted in the uncapped tracker_merge_error_count). Naively summing
+    // completed_cycles + skipped_cycles + errored_cycles would count that
+    // one cycle twice.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      errored_cycles: 1,
+      errored_details: [
+        { cycle_index: 2, error: 'merge boom', reason: 'tracker_merge_failed' },
+      ],
+      tracker_merge_error_count: 1,
+      completed_record_ids: ['rec-1', 'rec-2'],
+    });
+    fixture.detectChanges();
+
+    // Without the correction this would read "Strategy 4 of 5" (2 + 0 + 1 + 1).
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('corrects a tracker-merge double-count exactly via the uncapped counter, even once errored_details has evicted the matching entries', async () => {
+    // Regression: errored_details is capped at 50 entries server-side and
+    // the frontend reducer additionally re-caps it to the 50 MOST RECENT
+    // entries. For a 70-cycle run where 10 early cycles each hit a
+    // post-completion tracker-merge failure and 50 later, unrelated cycles
+    // also errored, errored_details holds only those 50 later (non-tracker)
+    // entries — every tracker-merge entry has evicted. A correction derived
+    // by filtering errored_details would read 0 double-counts and wrongly
+    // compute attemptedCycles as 10 + 0 + 60 - 0 = 70 (equal to
+    // total_cycles, prematurely announcing "Finishing up" 10 cycles early).
+    // tracker_merge_error_count is backend-sourced and uncapped, so the
+    // correction (10 + 0 + 60 - 10 = 60) stays exact regardless of what's
+    // still visible in errored_details.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 70,
+      completed_cycles: 10,
+      skipped_cycles: 0,
+      errored_cycles: 60,
+      errored_details: Array.from({ length: 50 }, (_, i) => ({
+        cycle_index: i + 11,
+        error: 'boom',
+        reason: 'ValueError',
+      })),
+      tracker_merge_error_count: 10,
+      completed_record_ids: Array.from({ length: 10 }, (_, i) => `rec-${i + 1}`),
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy 61 of 70.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces "Finishing up" when the last attempted cycle was errored rather than completed', async () => {
+    // Regression: for a 3-cycle run where the last cycle errored (not
+    // completed), completed_cycles stays at 2 and never reaches
+    // total_cycles on its own, so the "Finishing up" terminal gap would
+    // never trigger — the live region would announce a "Strategy 3 of 3 —
+    // Run in progress" that never resolves until the terminal event.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 3,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      errored_cycles: 1,
+      completed_record_ids: ['rec-1', 'rec-2'],
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('clamps the announced batch number instead of announcing an impossible batch position', async () => {
+    // Regression: after the last batch's batch_complete, current_batch is
+    // null and completed_batches already equals batch_count — the same
+    // terminal gap as the strategy-count fix above, one level up.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 15,
+      completed_cycles: 15,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      batch_count: 3,
+      completed_batches: 3,
+      current_batch: null,
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Batch 3 of 3 — Finishing up.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('includes batch position for multi-batch runs', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      batch_count: 3,
+      current_batch: 2,
+      current_cycle: { cycle_index: 1, phase: 'ideating' },
+    });
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Batch 2 of 3 — Strategy 1 of 5.');
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces the terminal outcome once a run completes, replacing the progress text', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
+
+    stubOf(fixture).events$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 5,
+      skipped_count: 0,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    // Mirrors the real StrategyLabRunService.finishRun(), called right after
+    // emitting the terminal event — the component must have already derived
+    // the outcome from the event itself, not from runStatus (now cleared).
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.running()).toBe(false);
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a clean completion even after an earlier non-fatal batch_warning, not "finished with errors"', async () => {
+    // Regression: a mid-run batch_warning (e.g. a signal-brief failure) sets
+    // the completionWarning banner, which stays populated for the rest of
+    // the run since nothing clears it. The terminal announcement must be
+    // driven by the 'complete' event's own status/errored_count — not by
+    // whether that unrelated warning banner happens to be non-null — or a
+    // fully clean run would misreport as "finished with errors".
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({ type: 'batch_warning', batch_index: 0, reason: 'signal_brief_failed' });
+    fixture.detectChanges();
+    expect(fixture.componentInstance.completionWarning()).toBeTruthy();
+
+    stubOf(fixture).events$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 5,
+      skipped_count: 0,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a qualified terminal outcome when the run finishes with errored cycles', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed_with_errors',
+      completed_count: 3,
+      skipped_count: 0,
+      errored_count: 2,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with errors.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a qualified terminal outcome, not a plain "complete", when the run finishes with only skipped cycles', async () => {
+    // Regression: a run that skips cycles (e.g. unavailable market data —
+    // a real, non-error outcome) but errors on none used to be announced as
+    // an unqualified "Strategy Lab run complete.", even though the sighted
+    // UI shows a live "N skipped" badge throughout the run — screen-reader
+    // users got systematically less information about the same outcome.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 3,
+      skipped_count: 2,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with some strategies skipped.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a qualified outcome from lastTerminalStatus.skipped_cycles when no complete/error event ever reaches the component', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'completed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 2,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with some strategies skipped.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces run failure as the terminal outcome', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({ type: 'error', detail: 'Sandbox crashed' });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a cancellation, not a failure, for a distinct "cancelled" terminal event', async () => {
+    // Regression: user cancellations are published as their own 'cancelled'
+    // terminal event type (not folded into 'error'), mirroring the blogging
+    // team's own cancelled-job SSE event — a deliberate stop, not a failure,
+    // and never inferred from `detail`'s free text.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({ type: 'cancelled', detail: 'Run cancelled by user' });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run cancelled.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces an interrupt, not a failure, when an external-stop error carries terminal_status "interrupted"', async () => {
+    // Regression: an externally-interrupted run is published as an 'error'
+    // event carrying terminal_status: 'interrupted'. The live announcement
+    // must say "interrupted" (matching the visible banner and the poll
+    // fallback's describeRunStatus wording), not the generic "failed".
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'error',
+      detail: 'Run was marked interrupted externally.',
+      terminal_status: 'interrupted',
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run interrupted.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a failure, not a cancellation, when a genuine error message happens to mention "cancel"', async () => {
+    // Regression: before cancellation had its own distinct event type, it
+    // was detected via a /cancel/i regex on `detail`'s free text — a genuine
+    // failure whose exception message happened to mention "cancel" (e.g. an
+    // internal CancelledError surfacing during a real error) was
+    // misannounced as a deliberate stop. A type-based discriminator makes
+    // this structurally impossible: a real 'error' event can never be
+    // misread as 'cancelled' regardless of its text.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'error',
+      detail: 'Cycle 3 failed: CancelledError()',
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a neutral "lost track" outcome, not a definite failure, for a shared-infra subscription-reclaim event', async () => {
+    // Regression: the shared-infra "subscription reclaimed" wire shape
+    // (StrategyLabErrorReclaimEvent — only .error, never .detail, e.g. an
+    // eviction under load) used to fall through to the generic "Run failed"
+    // default, confidently announcing a failure the run may not have had.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({ type: 'error', error: 'stream closed: the server reclaimed this subscription' });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab lost track of the run — status unavailable.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces the outcome from lastTerminalStatus when no complete/error event ever reaches the component', async () => {
+    // Regression: StrategyLabRunService.finishRun() clears running/runStatus
+    // together whenever a run ends without an explicit complete/error stream
+    // event reaching this component (SSE degrades to polling and polling
+    // itself later observes a terminal status; or a reconnect's terminal
+    // `snapshot` is followed straight by `done`). Neither path calls
+    // handleStreamEvent()'s complete/error branches, so runOutcomeAnnouncement
+    // would otherwise stay null and the live region would silently go blank
+    // right as the run ends — the one moment a screen-reader user most needs
+    // to hear something.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2'],
+    });
+    fixture.detectChanges();
+
+    // Mirrors StrategyLabRunService.finishRun(): captures the last known
+    // status into lastTerminalStatus, then nulls running/runStatus — with no
+    // events$ emission of any kind.
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'failed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 2,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2'],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run failed.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a qualified outcome from lastTerminalStatus.errored_cycles when no complete/error event ever reaches the component', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'completed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 3,
+      skipped_cycles: 0,
+      errored_cycles: 2,
+      completed_record_ids: ['rec-1', 'rec-2', 'rec-3'],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run finished with errors.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('prefers the explicit "complete" event outcome over lastTerminalStatus when both are present', async () => {
+    // The explicit-event branch always wins: it has richer per-event data
+    // (errored_count/skipped_count) than a generic status field can carry.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'complete',
+      message: 'done',
+      status: 'completed',
+      completed_count: 5,
+      skipped_count: 0,
+      errored_count: 0,
+      errored_details: [],
+      completed_batches: 1,
+      total_batches: 1,
+    });
+    // Even if the service's lastTerminalStatus disagrees (e.g. a stale value
+    // from bookkeeping order), the already-derived explicit outcome must win.
+    stubOf(fixture).lastTerminalStatus.set({
+      run_id: 'run-1',
+      status: 'failed',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run complete.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('announces a neutral "lost track" outcome, not success, when lastTerminalStatus is null', async () => {
+    // Regression: StrategyLabRunService.fallbackToPolling()'s own error
+    // handler (SSE dropped, then polling itself also failed) explicitly
+    // nulls runStatus before finishRun() captures it, so lastTerminalStatus
+    // reads null here specifically to mean "the run's fate is genuinely
+    // unknown" — describeRunStatus() must not fall through to its generic
+    // "Strategy Lab run complete." for this null, which would falsely
+    // announce success for what is actually a lost connection.
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1'],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).lastTerminalStatus.set(null);
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab lost track of the run — status unavailable.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('activity-log stays keyboard-focusable and its entries stay exposed to assistive tech, while a run is active', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 1, phase: 'backtesting' },
+    });
+    fixture.componentInstance.activityLog.set([
+      { time: '10:00:00', status: 'active', message: 'Executing strategy backtest...' },
+    ]);
+    fixture.detectChanges();
+
+    // The scrollable wrapper keeps its WCAG 2.4.7 focusable-region treatment
+    // (sighted keyboard users can still Tab in and scroll it), and a
+    // screen-reader user who navigates in hears the same per-line detail
+    // sighted users see — the live region above only ever carries a concise
+    // summary and never duplicates this on-demand detail.
+    const log: HTMLElement = fixture.nativeElement.querySelector('.activity-log');
+    expect(log).toBeTruthy();
+    expect(log.getAttribute('tabindex')).toBe('0');
+    expect(log.getAttribute('role')).toBe('group');
+    expect(log.getAttribute('aria-label')).toBe('Strategy run activity log, scrollable');
+    expect(log.hasAttribute('aria-hidden')).toBe(false);
+
+    const entries: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.log-entry'));
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(entry.hasAttribute('aria-hidden')).toBe(false);
+      expect(entry.textContent).toContain('Executing strategy backtest...');
+    }
+
+    // Same pre-existing gaps as before (run-btn spinner, phase progress-bar/
+    // spinners lack accessible names; the running run-btn nests a focusable
+    // spinner) — unrelated to the activity-log visibility under test here.
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'aria-progressbar-name': { enabled: false },
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+});
+
 /**
  * Source-level guard: every `<mat-icon>` in the template must be explicit
  * about `aria-hidden`, one way or the other — either `aria-hidden="true"`
@@ -695,7 +1604,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
       completed_cycles: 0,
       skipped_cycles: 0,
       completed_record_ids: [],
-      current_cycle: { cycle_index: 0, phase: 'backtesting' },
+      current_cycle: { cycle_index: 1, phase: 'backtesting' },
     });
     fixture.componentInstance.activityLog.set([
       { time: '10:00:00', status: 'done', message: 'Market data loaded.' },

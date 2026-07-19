@@ -5,6 +5,19 @@
   [attr.aria-label]="showTitle ? null : 'Strategy Lab'"
 >
 
+  <!-- SR-only live region: announces run progress (batch/strategy position +
+       current phase) as a run proceeds, and the terminal outcome once it
+       ends, so a screen-reader user gets the same progress signal sighted
+       users get from the activity log and phase stepper below. Rendered
+       unconditionally (always in the DOM) and empty until a run exists — a
+       live region inserted already-populated is commonly NOT announced,
+       which would drop the first update. aria-live only speaks on text
+       change, so a steady state isn't re-announced. This is a concise
+       summary, not a line-by-line echo of the activity log below (which
+       stays in the accessibility tree for on-demand navigation — see its
+       own comment) — so nothing here is double-announced. -->
+  <p class="visually-hidden" role="status" aria-live="polite">{{ runAnnouncement() }}</p>
+
   <!-- Header row -->
   <div class="lab-header">
     @if (showTitle) {
@@ -74,7 +87,7 @@
         }
         <span>
           @if (running() && runService.runStatus(); as runStatus) {
-            Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
+            Strategy {{ currentStrategyNumber() }} of {{ runStatus.total_cycles }}
           } @else if (running()) {
             Starting…
           } @else {
@@ -158,10 +171,10 @@
         <mat-icon class="pulse-icon" aria-hidden="true">hub</mat-icon>
         <span class="progress-title">
           @if (runStatus.batch_count && runStatus.batch_count > 1) {
-            Batch {{ runStatus.current_batch ?? (runStatus.completed_batches ?? 0) + 1 }}
+            Batch {{ currentBatchNumber() }}
             of {{ runStatus.batch_count }} —
           }
-          Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
+          Strategy {{ currentStrategyNumber() }} of {{ runStatus.total_cycles }}
         </span>
         @if (runStatus.skipped_cycles) {
           <span class="skipped-badge">{{ runStatus.skipped_cycles }} skipped</span>
@@ -223,7 +236,17 @@
           </div>
         }
 
-        <!-- Activity log -->
+        <!-- Activity log: stays keyboard-focusable/scrollable (WCAG 2.1.1/
+             2.4.7) and its entries stay in the accessibility tree, so a
+             screen-reader user who navigates in gets the same per-line
+             detail (validation failures, refinement messages, ...) sighted
+             users see — the live region above only ever carries a concise
+             summary and was never meant to replace this. That's on-demand
+             detail (the user chooses to navigate in), not a duplicate
+             announcement (the live region's updates are the only thing
+             spoken automatically), so exposing it doesn't reintroduce the
+             double-announcement this component's live region exists to
+             avoid. -->
         @if (activityLog().length > 0) {
           <div class="activity-log" #logContainer tabindex="0" role="group" aria-label="Strategy run activity log, scrollable">
             @for (entry of activityLog(); track $index) {

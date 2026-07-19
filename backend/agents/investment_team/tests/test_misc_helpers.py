@@ -1257,7 +1257,9 @@ def test_get_strands_model_ollama_routes_through_llm_service(
 
     result = model_factory.get_strands_model()
 
-    assert recorder.calls == [{"agent_key": "strategy_ideation", "response_format": "json"}]
+    assert recorder.calls == [
+        {"agent_key": "strategy_ideation", "response_format": "json", "temperature": 0.0}
+    ]
     assert result == ("LLM_SERVICE_MODEL", "strategy_ideation", "json")
 
 
@@ -1271,7 +1273,9 @@ def test_get_strands_model_forwards_response_format_text(
 
     model_factory.get_strands_model("strategy_code_synthesis", response_format="text")
 
-    assert recorder.calls == [{"agent_key": "strategy_code_synthesis", "response_format": "text"}]
+    assert recorder.calls == [
+        {"agent_key": "strategy_code_synthesis", "response_format": "text", "temperature": 0.0}
+    ]
 
 
 def test_get_strands_model_rejects_invalid_response_format(
@@ -1368,6 +1372,7 @@ def test_get_strands_model_explicit_timeout_forwarded_to_adapter_client(
     call = recorder.calls[0]
     assert call["agent_key"] == "strategy_design"
     assert call["response_format"] == "json"
+    assert call["temperature"] == 0.6
     client = call["client"]
     assert client.timeout == 45.0
     assert client.model == "llama3"
@@ -1382,7 +1387,9 @@ def test_get_strands_model_no_explicit_timeout_omits_client(
 
     model_factory.get_strands_model("strategy_design")
 
-    assert recorder.calls == [{"agent_key": "strategy_design", "response_format": "json"}]
+    assert recorder.calls == [
+        {"agent_key": "strategy_design", "response_format": "json", "temperature": 0.6}
+    ]
 
 
 def test_get_strands_model_bedrock_carries_no_additional_args(

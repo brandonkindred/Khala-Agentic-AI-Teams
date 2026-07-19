@@ -50,6 +50,7 @@ describe('reduce (strategy-lab-run.reducer)', () => {
           total_batches: 2,
         },
         { type: 'error', detail: 'Run failed' },
+        { type: 'cancelled', detail: 'Run cancelled by user' },
         { type: 'done' },
       ];
       for (const event of events) {
@@ -167,6 +168,20 @@ describe('reduce (strategy-lab-run.reducer)', () => {
 
       expect(() => reduce(frozen, event)).not.toThrow();
       expect(frozen.completed_cycles).toBe(baseState.completed_cycles);
+    });
+
+    it('folds tracker_merge_error_count from the event, falling back to the prior value when omitted', () => {
+      const withCount = reduce(baseState, {
+        type: 'snapshot',
+        ...baseState,
+        tracker_merge_error_count: 4,
+        error: null,
+      });
+      expect(withCount?.tracker_merge_error_count).toBe(4);
+
+      const state: StrategyLabRunStatus = { ...baseState, tracker_merge_error_count: 4 };
+      const withoutCount = reduce(state, { type: 'snapshot', ...baseState, error: null });
+      expect(withoutCount?.tracker_merge_error_count).toBe(4);
     });
   });
 
@@ -329,6 +344,10 @@ describe('reduce (strategy-lab-run.reducer)', () => {
       const result = reduce(state, event);
 
       expect(result?.errored_cycles).toBe(1);
+      // A regular (non-tracker-merge) cycle failure stores the exception class
+      // under `exception_type`, matching the backend's own persisted
+      // errored_details shape for that case (main.py's cycle except-handler),
+      // so a live-streamed detail and a polled/snapshot one are identical.
       expect(result?.errored_details).toEqual([
         { cycle_index: 3, batch_index: 1, error: 'division by zero', exception_type: 'ValueError' },
       ]);
@@ -356,6 +375,92 @@ describe('reduce (strategy-lab-run.reducer)', () => {
         exception_type: 'ValueError',
       });
       expect(result?.errored_details?.[0]).toEqual({ cycle_index: 1, error: 'err-1' });
+    });
+
+    it('stores the tracker_merge_failed marker under `reason` (not exception_type), matching the backend', () => {
+      // The two cycle_errored sources use different keys on purpose, mirroring
+      // the backend's own persisted errored_details: a regular failure's class
+      // name under `exception_type`, the tracker-merge marker under `reason`
+      // (which the live region's double-count detection keys off). A live
+      // tracker-merge detail must therefore carry `reason`, never route the
+      // marker into `exception_type`.
+      const event: StrategyLabStreamEvent = {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        error: 'merge boom',
+      };
+
+      const result = reduce(baseState, event);
+
+      expect(result?.errored_details?.[0].reason).toBe('tracker_merge_failed');
+      expect(result?.errored_details?.[0].exception_type).toBeUndefined();
+    });
+
+    it('folds the tracker-merge event\'s exception_type through so the live detail matches the persisted one', () => {
+      // The backend's tracker-merge cycle_errored event carries BOTH the marker
+      // (reason) and the raising class (exception_type); its persisted
+      // errored_details entry stores both too. The reducer folds both so a
+      // live-streamed detail is shaped identically to a polled/snapshot one.
+      const event: StrategyLabStreamEvent = {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        exception_type: 'ValueError',
+        error: 'merge boom',
+      };
+
+      const result = reduce(baseState, event);
+
+      expect(result?.errored_details?.[0]).toEqual({
+        cycle_index: 2,
+        batch_index: 0,
+        error: 'merge boom',
+        reason: 'tracker_merge_failed',
+        exception_type: 'ValueError',
+      });
+    });
+
+    it('increments tracker_merge_error_count only for a tracker_merge_failed reason', () => {
+      const trackerMerge = reduce(baseState, {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        error: 'merge boom',
+      });
+      expect(trackerMerge?.tracker_merge_error_count).toBe(1);
+
+      const ordinary = reduce(baseState, {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'ValueError',
+        error: 'boom',
+      });
+      expect(ordinary?.tracker_merge_error_count).toBe(0);
+    });
+
+    it('keeps incrementing tracker_merge_error_count past errored_details eviction', () => {
+      const state: StrategyLabRunStatus = {
+        ...baseState,
+        errored_details: Array.from({ length: 50 }, (_, i) => ({ cycle_index: i, error: 'x' })),
+        tracker_merge_error_count: 9,
+      };
+      const result = reduce(state, {
+        type: 'cycle_errored',
+        cycle_index: 51,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        error: 'merge boom',
+      });
+
+      // errored_details is capped at 50 (an old entry evicts), but
+      // tracker_merge_error_count is never capped.
+      expect(result?.errored_details).toHaveLength(50);
+      expect(result?.tracker_merge_error_count).toBe(10);
     });
   });
 
@@ -394,27 +499,94 @@ describe('reduce (strategy-lab-run.reducer)', () => {
   });
 
   describe('no-op event types (no StrategyLabRunStatus field to update)', () => {
-    it('returns the exact same state reference for batch_warning, complete, error, and done', () => {
+    it('returns the exact same state reference for batch_warning and done', () => {
       const events: StrategyLabStreamEvent[] = [
         { type: 'batch_warning', batch_index: 1, reason: 'signal_brief_failed' },
-        {
-          type: 'complete',
-          message: 'done',
-          status: 'completed',
-          completed_count: 10,
-          skipped_count: 0,
-          errored_count: 0,
-          errored_details: [],
-          completed_batches: 2,
-          total_batches: 2,
-        },
-        { type: 'error', detail: 'Run failed' },
-        { type: 'error', error: 'subscription reclaimed' },
         { type: 'done' },
       ];
       for (const event of events) {
         expect(reduce(baseState, event)).toBe(baseState);
       }
+    });
+  });
+
+  describe('complete', () => {
+    it('folds the event status into state, leaving every other field unchanged', () => {
+      // Regression: a run whose SSE connection stays open its whole
+      // lifetime never sees a 'snapshot' event (the only other case that
+      // updates `status`), so without this fold `status` would stay at its
+      // initial 'running' value straight through to whatever captures it
+      // afterward (e.g. StrategyLabRunService.finishRun()'s
+      // lastTerminalStatus), misreporting an errored run as still running.
+      const event: StrategyLabStreamEvent = {
+        type: 'complete',
+        message: 'done',
+        status: 'completed_with_errors',
+        completed_count: 10,
+        skipped_count: 0,
+        errored_count: 2,
+        errored_details: [],
+        completed_batches: 2,
+        total_batches: 2,
+      };
+
+      const result = reduce(baseState, event);
+
+      expect(result).not.toBe(baseState);
+      expect(result).toEqual({ ...baseState, status: 'completed_with_errors' });
+    });
+  });
+
+  describe('error', () => {
+    it('folds a safe "failed" status into state when no terminal_status is carried, leaving every other field unchanged', () => {
+      // A terminal 'error' event without terminal_status carries no structured
+      // outcome field (only free-text detail/error), so 'failed' is a safe
+      // default that can never misreport as success — same regression rationale
+      // as 'complete' above. A genuine user cancellation is never routed
+      // through 'error' (it's its own 'cancelled' event type — see below), so
+      // 'failed' is always correct here. The component's own detail-based
+      // classification (failed/connection-lost) for the live announcement reads
+      // the event directly, outside this reducer.
+      const events: StrategyLabStreamEvent[] = [
+        { type: 'error', detail: 'Run failed' },
+        { type: 'error', error: 'subscription reclaimed' },
+      ];
+
+      for (const event of events) {
+        const result = reduce(baseState, event);
+        expect(result).not.toBe(baseState);
+        expect(result).toEqual({ ...baseState, status: 'failed' });
+      }
+    });
+
+    it('folds the carried terminal_status so an externally-interrupted run is not mislabeled "failed"', () => {
+      // The backend's external-stop 'error' publish carries the true terminal
+      // status ('failed' or 'interrupted'); fold it verbatim rather than
+      // flattening both to 'failed'.
+      const interrupted = reduce(baseState, {
+        type: 'error',
+        detail: 'Run was marked interrupted externally.',
+        terminal_status: 'interrupted',
+      });
+      expect(interrupted).toEqual({ ...baseState, status: 'interrupted' });
+
+      const failed = reduce(baseState, {
+        type: 'error',
+        detail: 'Run was marked failed externally.',
+        terminal_status: 'failed',
+      });
+      expect(failed).toEqual({ ...baseState, status: 'failed' });
+    });
+  });
+
+  describe('cancelled', () => {
+    it('folds a "cancelled" status into state, leaving every other field unchanged', () => {
+      const event: StrategyLabStreamEvent = { type: 'cancelled', detail: 'Run cancelled by user' };
+
+      const result = reduce(baseState, event);
+
+      expect(result).not.toBe(baseState);
+      expect(result).toEqual({ ...baseState, status: 'cancelled' });
     });
   });
 });
