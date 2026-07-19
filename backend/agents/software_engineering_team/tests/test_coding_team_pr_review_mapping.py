@@ -8,20 +8,22 @@ from typing import Optional
 import pytest
 
 from software_engineering_team.coding_team.github_source.client import Issue
-from software_engineering_team.coding_team.github_source.pr_review_mapping import (
+from software_engineering_team.coding_team.github_source.issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
-    build_review_body,
-    choose_event,
     duplicate_check_max_open_issues,
     find_matching_open_issue,
+    group_similar_findings,
+    proposal_from_findings,
+)
+from software_engineering_team.coding_team.github_source.pr_review_mapping import (
+    build_review_body,
+    choose_event,
     format_comment_body,
     format_issue_comment,
-    group_similar_findings,
     inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
-    proposal_from_findings,
     render_annotated_hunks,
     split_review_comments,
 )

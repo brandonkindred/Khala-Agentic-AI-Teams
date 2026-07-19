@@ -22,9 +22,7 @@ from software_engineering_team.coding_team.api.models import (
     ReviewPrRequest,
 )
 from software_engineering_team.coding_team.api.state import (
-    _BISECT_CONTINUATION_BODY,
     _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
-    _HTTP_UNPROCESSABLE,
 )
 from software_engineering_team.coding_team.github_source import (
     GitHubAPIError,
@@ -45,6 +43,10 @@ from software_engineering_team.coding_team.github_source import (
     render_annotated_hunks,
     scrub_token_from_text,
     split_review_comments,
+)
+from software_engineering_team.coding_team.github_source.review_submit import (
+    _post_file_comments,
+    _submit_review,
 )
 from software_engineering_team.coding_team.job_store import (
     heartbeat_job,
@@ -723,57 +725,6 @@ def _run_reviewer(
     return output
 
 
-def _post_file_comments(
-    client: Any,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    head_sha: str,
-    entries: List[Dict[str, Any]],
-) -> tuple[int, List[Dict[str, Any]]]:
-    """Post file-level review comments, demoting only 422-rejected anchors to standalone.
-
-    File-level comments (mapped + re-anchored leftovers) and any bisected-out line
-    comments (demoted, keeping the file anchor) each go on the dedicated
-    review-comments endpoint.
-
-    Preconditions:
-        - ``entries`` are comment dicts that may carry ``path``/``body``.
-    Postconditions:
-        - Returns ``(file_comment_count, standalone)``: the count posted as
-          file-level comments, and the entries that must fall back to standalone
-          timeline comments (no path, or a 422 bad-anchor rejection). Any non-422
-          ``GitHubAPIError`` propagates so the job fails loudly.
-    """
-    file_comment_count = 0
-    standalone: List[Dict[str, Any]] = []
-    for comment in entries:
-        path = comment.get("path")
-        if path:
-            try:
-                client.create_review_comment(
-                    owner=owner,
-                    repo=repo,
-                    number=pr_number,
-                    commit_id=head_sha,
-                    path=path,
-                    body=scrub_token_from_text(comment.get("body", "")),
-                    subject_type="file",
-                )
-                file_comment_count += 1
-                continue
-            except GitHubAPIError as e:
-                # Only a 422 (bad anchor) is worth demoting to a standalone
-                # comment; any other status (permission, rate-limit, transport,
-                # server) is a real failure that must propagate so the job fails
-                # loudly instead of silently degrading.
-                if e.status != _HTTP_UNPROCESSABLE:
-                    raise
-                # Last resort: fall through to standalone posting (rare).
-        standalone.append(comment)
-    return file_comment_count, standalone
-
-
 def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int) -> List[Any]:
     """Best-effort fetch of every comment already on the PR, for de-duplicating findings.
 
@@ -1231,221 +1182,6 @@ def _react_to_pr(client: _main.GitHubClient, owner: str, repo: str, pr_number: i
         logger.warning("Could not add +1 reaction to PR #%s", pr_number, exc_info=True)
 
 
-def _try_review(
-    client: _main.GitHubClient,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    head_sha: str,
-    body: str,
-    event: str,
-    comments: List[Dict[str, Any]],
-) -> bool:
-    """Submit one PR review, returning False on a recoverable 422 and re-raising otherwise.
-
-    Only a 422 (validation — a bad diff line, or REQUEST_CHANGES on the bot's own
-    PR) is recoverable by dropping the event/comments; any other status
-    (permission, rate-limit, transport, server) is a real failure re-raised so the
-    caller fails loudly instead of silently degrading.
-
-    Preconditions:
-        - ``comments`` are already token-scrubbed review-comment dicts.
-    Postconditions:
-        - Returns True when GitHub accepted the review; False (after logging) on a
-          422. Raises ``GitHubAPIError`` for any non-422 status.
-    """
-    try:
-        client.create_pull_request_review(
-            owner=owner,
-            repo=repo,
-            number=pr_number,
-            commit_id=head_sha,
-            body=body,
-            event=event,
-            comments=comments,
-        )
-        return True
-    except GitHubAPIError as e:
-        if e.status != _HTTP_UNPROCESSABLE:
-            raise
-        logger.warning(
-            "PR review submit failed (event=%s, comments=%d): %s", event, len(comments), e
-        )
-        return False
-
-
-def _post_summary_only(
-    client: _main.GitHubClient,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    head_sha: str,
-    body: str,
-    events: List[str],
-) -> List[Dict[str, Any]]:
-    """Post the summary body alone across candidate events; raise if all attempts fail.
-
-    Used when a review carries no line-anchored findings. Unlike the inline-comment
-    path, EVERY ``GitHubAPIError`` is tolerated per event (not just 422): the caller
-    decides whether a total failure is fatal (a zero-finding review whose only
-    output is this summary) or a best-effort courtesy (file-level findings still
-    posted separately).
-
-    Preconditions:
-        - ``events`` is a non-empty ordered list of candidate review events.
-    Postconditions:
-        - Returns ``[]`` as soon as one event succeeds; raises the last
-          ``GitHubAPIError`` when every event failed.
-    """
-    last_exc: Optional[GitHubAPIError] = None
-    for ev in events:
-        try:
-            client.create_pull_request_review(
-                owner=owner,
-                repo=repo,
-                number=pr_number,
-                commit_id=head_sha,
-                body=body,
-                event=ev,
-                comments=[],
-            )
-            return []
-        except GitHubAPIError as e:
-            logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
-            last_exc = e
-    assert last_exc is not None
-    raise last_exc
-
-
-def _submit_review(
-    client: _main.GitHubClient,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    head_sha: str,
-    body: str,
-    event: str,
-    comments: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Submit the line-anchored review, bisecting out any off-diff comment.
-
-    GitHub rejects the whole review (422) if it requests changes on the bot's own
-    PR, or if any single inline comment lands off the diff. So: try the chosen
-    event with all comments; on failure retry as COMMENT keeping them (handles the
-    self-PR case without losing inline feedback). If the full batch still 422s, a
-    stray bad line is poisoning it — post the summary on its own so it is not lost,
-    then bisect the comments so only the genuinely-bad lines are dropped while the
-    rest stay anchored in (smaller) COMMENT reviews. Only a 422 is treated as a
-    bad line; any other status (permission, rate-limit, transport, server) is a
-    real failure and is re-raised rather than silently degraded.
-
-    Preconditions:
-        - Every entry in ``comments`` is line-anchored (carries ``line``);
-          file-level comments are posted by the caller on the dedicated endpoint.
-    Postconditions:
-        - Every comment GitHub accepts is submitted inline (in one review on the
-          happy path, or across bisected COMMENT reviews when a bad line forced a
-          split). The review body and every comment body are token-scrubbed before
-          submission (LLM output may echo a secret from the reviewed code). Returns
-          the original comments GitHub rejected with a 422 even when submitted alone
-          (``[]`` when all were posted); the caller demotes those to file-level
-          comments. Raises ``GitHubAPIError`` for any non-422 status so the job
-          fails loudly instead of masking a real API failure.
-        - When ``comments`` is empty this only posts the summary body; it returns
-          ``[]`` on success and raises ``GitHubAPIError`` if every attempt fails,
-          so the caller can fail a zero-finding review whose only output was the
-          (un-postable) summary instead of reporting a hollow success.
-    """
-    # Scrub before anything leaves for GitHub: the body (LLM summary) and each
-    # inline-comment body (LLM description/suggestion) can echo a token from the
-    # reviewed code, just like the standalone comments _safe_comment scrubs. Pair
-    # each scrubbed comment with its original so the dropped set returned to the
-    # caller keeps the original identity (with its ``line``).
-    body = scrub_token_from_text(body)
-    pairs = [({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments]
-
-    events = [event] if event == "COMMENT" else [event, "COMMENT"]
-
-    if not pairs:
-        # No line-anchored findings: this call only posts the summary body. If it
-        # succeeds, nothing was dropped. If every attempt fails, raise so the
-        # caller can decide: when file-level findings still post on the dedicated
-        # endpoint the summary is a best-effort courtesy and its failure is
-        # tolerated, but a zero-finding review whose only output is this summary
-        # must surface as failed rather than report a hollow success.
-        return _post_summary_only(client, owner, repo, pr_number, head_sha, body, events)
-
-    # Happy path: one review carrying the summary body + every inline comment.
-    # REQUEST_CHANGES degrades to COMMENT for the bot's own PR without losing the
-    # comments. Only a 422 is recoverable (retry as COMMENT, then bisect below);
-    # _try_review re-raises any other status so the job fails loudly.
-    scrubbed = [p[0] for p in pairs]
-    for ev in events:
-        if _try_review(client, owner, repo, pr_number, head_sha, body, ev, scrubbed):
-            return []
-
-    # The full batch was rejected by a bad line. Post the summary on its own so it
-    # is not lost, then bisect the comments to drop only the offending ones.
-    try:
-        client.create_pull_request_review(
-            owner=owner,
-            repo=repo,
-            number=pr_number,
-            commit_id=head_sha,
-            body=body,
-            event="COMMENT",
-            comments=[],
-        )
-    except GitHubAPIError as e:
-        # Best effort — the bisected comments below still carry the findings.
-        logger.warning("PR review summary-only submit failed: %s", e)
-
-    return _bisect_submit(client, owner, repo, pr_number, head_sha, pairs)
-
-
-def _bisect_submit(
-    client: _main.GitHubClient,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    head_sha: str,
-    pairs: List[tuple[Dict[str, Any], Dict[str, Any]]],
-) -> List[Dict[str, Any]]:
-    """Post line-anchored comments as COMMENT reviews, bisecting on a 422.
-
-    Used only after the full-batch review failed and the summary was posted
-    separately, so each sub-review carries a continuation body rather than
-    repeating the summary.
-
-    Preconditions:
-        - ``pairs`` is a non-empty list of ``(scrubbed_comment, original_comment)``
-          tuples; both bodies are already token-scrubbed.
-    Postconditions:
-        - Submits one or more COMMENT reviews; every comment GitHub accepts is
-          posted inline. Returns the original comments GitHub still rejects when a
-          single comment is submitted on its own (``[]`` when all were posted).
-    """
-    # Only a 422 means a bad diff line worth bisecting out; _try_review re-raises
-    # any other status rather than mistaking it for one stray off-diff comment.
-    if _try_review(
-        client,
-        owner,
-        repo,
-        pr_number,
-        head_sha,
-        _BISECT_CONTINUATION_BODY,
-        "COMMENT",
-        [p[0] for p in pairs],
-    ):
-        return []
-    if len(pairs) <= 1:
-        return [p[1] for p in pairs]
-    mid = len(pairs) // 2
-    return _bisect_submit(client, owner, repo, pr_number, head_sha, pairs[:mid]) + _bisect_submit(
-        client, owner, repo, pr_number, head_sha, pairs[mid:]
-    )
-
-
 # ---------------------------------------------------------------------------
 # Pre/post hooks for the GitHub flow (no orchestrator changes)
 # ---------------------------------------------------------------------------
@@ -1468,26 +1204,3 @@ def _safe_comment(
     except GitHubAPIError as e:
         logger.warning("Failed to comment on issue #%s: %s", number, e)
         return False
-
-
-def _format_questions_comment(questions: List[Dict[str, Any]], job_id: str) -> str:
-    """Render escalated open questions as a single GitHub issue comment.
-
-    Postconditions:
-        - Returns markdown listing each question (with context and selectable option ids when
-          present) and how to answer it, so a human can unblock the paused job.
-    """
-    lines = [
-        f"⏸️ Coding team job `{job_id}` is **paused for a decision** and will not proceed until "
-        f"these are answered. Submit answers to `POST /run/{job_id}/answers`:",
-        "",
-    ]
-    for i, q in enumerate(questions or [], 1):
-        lines.append(f"{i}. **{q.get('question_text', '')}**  _(id: `{q.get('id', '')}`)_")
-        if q.get("context"):
-            lines.append(f"   - _Why:_ {q['context']}")
-        opts = q.get("options") or []
-        if opts:
-            opt_str = ", ".join(f"`{o.get('id')}` ({o.get('label')})" for o in opts)
-            lines.append(f"   - Options: {opt_str} (or `other` with free text)")
-    return "\n".join(lines)

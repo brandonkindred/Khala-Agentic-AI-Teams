@@ -116,9 +116,7 @@ from software_engineering_team.coding_team.api.pr_review import (  # noqa: F401
     _REVIEW_GUARD_HEARTBEAT_STALE_S,
     _REVIEW_HEARTBEAT_INTERVAL_S,
     ReviewCode,
-    _bisect_submit,
     _build_review_code,
-    _format_questions_comment,
     _infer_review_language,
     _pr_review_admission,
     _review_author,
@@ -129,7 +127,6 @@ from software_engineering_team.coding_team.api.pr_review import (  # noqa: F401
     _running_sibling_on_checkout,
     _safe_comment,
     _start_pr_review_thread,
-    _submit_review,
 )
 from software_engineering_team.coding_team.api.pr_review_issues import (  # noqa: F401
     MultipleIssueCreationErrors,
@@ -178,6 +175,11 @@ from software_engineering_team.coding_team.github_source import (  # noqa: F401
     split_review_comments,
 )
 from software_engineering_team.coding_team.github_source.client import _is_safe_ref  # noqa: F401
+from software_engineering_team.coding_team.github_source.review_submit import (  # noqa: F401
+    _bisect_submit,
+    _submit_review,
+)
+from software_engineering_team.coding_team.hitl import _format_questions_comment  # noqa: F401
 from software_engineering_team.coding_team.job_store import (  # noqa: F401
     DEFAULT_CACHE_DIR,
     RESUME_CLAIM_TTL_S,

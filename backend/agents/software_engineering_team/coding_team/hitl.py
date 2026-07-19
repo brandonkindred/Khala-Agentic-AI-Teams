@@ -464,6 +464,29 @@ def resolved_decision_lines(records: Any) -> List[str]:
     return lines
 
 
+def _format_questions_comment(questions: List[Dict[str, Any]], job_id: str) -> str:
+    """Render escalated open questions as a single GitHub issue comment.
+
+    Postconditions:
+        - Returns markdown listing each question (with context and selectable option ids when
+          present) and how to answer it, so a human can unblock the paused job.
+    """
+    lines = [
+        f"⏸️ Coding team job `{job_id}` is **paused for a decision** and will not proceed until "
+        f"these are answered. Submit answers to `POST /run/{job_id}/answers`:",
+        "",
+    ]
+    for i, q in enumerate(questions or [], 1):
+        lines.append(f"{i}. **{q.get('question_text', '')}**  _(id: `{q.get('id', '')}`)_")
+        if q.get("context"):
+            lines.append(f"   - _Why:_ {q['context']}")
+        opts = q.get("options") or []
+        if opts:
+            opt_str = ", ".join(f"`{o.get('id')}` ({o.get('label')})" for o in opts)
+            lines.append(f"   - Options: {opt_str} (or `other` with free text)")
+    return "\n".join(lines)
+
+
 def is_terminal(job_data: Dict[str, Any]) -> bool:
     """True when a job will not resume on its own (terminal status or cancellation requested)."""
     if not job_data:
