@@ -398,6 +398,31 @@ describe('reduce (strategy-lab-run.reducer)', () => {
       expect(result?.errored_details?.[0].exception_type).toBeUndefined();
     });
 
+    it('folds the tracker-merge event\'s exception_type through so the live detail matches the persisted one', () => {
+      // The backend's tracker-merge cycle_errored event carries BOTH the marker
+      // (reason) and the raising class (exception_type); its persisted
+      // errored_details entry stores both too. The reducer folds both so a
+      // live-streamed detail is shaped identically to a polled/snapshot one.
+      const event: StrategyLabStreamEvent = {
+        type: 'cycle_errored',
+        cycle_index: 2,
+        batch_index: 0,
+        reason: 'tracker_merge_failed',
+        exception_type: 'ValueError',
+        error: 'merge boom',
+      };
+
+      const result = reduce(baseState, event);
+
+      expect(result?.errored_details?.[0]).toEqual({
+        cycle_index: 2,
+        batch_index: 0,
+        error: 'merge boom',
+        reason: 'tracker_merge_failed',
+        exception_type: 'ValueError',
+      });
+    });
+
     it('increments tracker_merge_error_count only for a tracker_merge_failed reason', () => {
       const trackerMerge = reduce(baseState, {
         type: 'cycle_errored',

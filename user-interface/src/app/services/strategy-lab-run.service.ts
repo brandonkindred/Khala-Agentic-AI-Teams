@@ -127,7 +127,9 @@ export class StrategyLabRunService implements OnDestroy {
    *
    * Preconditions: `runId` is the id `initialStatus` itself describes.
    * Postconditions: `running()` is true, `runStatus()`/`activeRunId()`
-   *   reflect the given values, and the run's SSE stream is connected.
+   *   reflect the given values, `lastTerminalStatus()` is reset to null (so a
+   *   prior run's captured outcome can't leak into this one), and the run's SSE
+   *   stream is connected.
    */
   startRun(runId: string, initialStatus: StrategyLabRunStatus): void {
     this._lastTerminalStatus.set(null);
@@ -146,6 +148,17 @@ export class StrategyLabRunService implements OnDestroy {
     });
   }
 
+  /**
+   * Fold one SSE event into `runStatus` and re-emit it on `events$` for the
+   * component's own side effects; finish the run on a terminal event.
+   *
+   * Preconditions: called only as the SSE subscription's `next` handler.
+   * Postconditions: `runStatus()` is the reducer's fold of the prior status and
+   *   `event`; the event is forwarded on `events$` synchronously; and on a
+   *   terminal event (`complete`/`error`/`cancelled`) `finishRun()` runs
+   *   afterward (so `lastTerminalStatus` captures the just-folded status and the
+   *   SSE/poll subscription is torn down).
+   */
   private handleStreamEvent(event: StrategyLabStreamEvent): void {
     this._runStatus.set(reduceStrategyLabRun(this._runStatus(), event));
     this._events.next(event);

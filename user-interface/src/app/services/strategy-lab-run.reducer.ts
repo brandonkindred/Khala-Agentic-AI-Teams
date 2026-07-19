@@ -117,13 +117,17 @@ export function reduce(
       // except-handler entry), while the tracker-merge marker goes under
       // `reason` (matching main.py's merge-failure entry, which the live
       // region's double-count correction keys off). Mixing the two keys by
-      // source is exactly the drift this split avoids.
+      // source is exactly the drift this split avoids. The tracker-merge event
+      // additionally carries the raising class under `exception_type`, which the
+      // persisted entry also stores — fold it through so the two are identical.
       const isTrackerMerge = event.reason === 'tracker_merge_failed';
       const detail: StrategyLabErroredDetail = {
         cycle_index: event.cycle_index,
         batch_index: event.batch_index,
         error: event.error,
-        ...(isTrackerMerge ? { reason: event.reason } : { exception_type: event.reason }),
+        ...(isTrackerMerge
+          ? { reason: event.reason, ...(event.exception_type ? { exception_type: event.exception_type } : {}) }
+          : { exception_type: event.reason }),
       };
       return {
         ...state,

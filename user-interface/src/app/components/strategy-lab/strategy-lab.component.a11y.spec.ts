@@ -514,7 +514,9 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
-  it('announces strategy position and the current phase as a run proceeds', async () => {
+  it('announces the monotonic strategy position as a run proceeds', async () => {
+    // The live region reports coarse batch/strategy position only — not the
+    // per-cycle phase, which churns under the default parallel execution.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -525,26 +527,23 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_cycles: 0,
       skipped_cycles: 0,
       completed_record_ids: [],
-      // The backend's cycle_index is 1-based (cn = i + 1 in main.py's wave
-      // loop) — 1 is the first strategy, not 0.
       current_cycle: { cycle_index: 1, phase: 'backtesting' },
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Backtest phase.');
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
 
-  it('derives the strategy number from the active cycle_index, not completed_cycles, once they diverge', async () => {
-    // Regression: completed_cycles only counts successful completions —
-    // after a skipped/errored cycle (or with multi-worker waves), it can
-    // lag behind the cycle actually emitting progress. cycle_index (the
-    // backend's 1-based cn) identifies that cycle directly. Here cycle 1
-    // was skipped and cycle 2 completed, so completed_cycles is 1 while
-    // cycle 3 (cycle_index 3) is the one now active.
+  it('derives the strategy number from attempted cycles, not the churning current_cycle.cycle_index', async () => {
+    // Under parallel waves the backend rewrites the single shared current_cycle
+    // from whichever sibling last emitted progress, so cycle_index oscillates.
+    // Here cycle_index is 3 while only one cycle has actually been attempted
+    // (completed_cycles 1) — the announcement must report the MONOTONIC
+    // attempted position (2), never the churning cycle_index (3).
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -553,24 +552,23 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       started_at: '2024-06-01T00:00:00Z',
       total_cycles: 5,
       completed_cycles: 1,
-      skipped_cycles: 1,
+      skipped_cycles: 0,
       completed_record_ids: ['rec-1'],
       current_cycle: { cycle_index: 3, phase: 'ideating' },
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Ideate phase.');
+    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
 
-  it('announces a humanized raw phase name for phases outside STRATEGY_LAB_PHASES instead of the between-cycles text', async () => {
-    // Regression: real backend progress events include phases beyond the 4
-    // known ids (design_review, aligning, telemetry-related, ...). Work is
-    // actively progressing then, so falling back to the between-cycles
-    // "Run in progress" text would lose the phase detail unnecessarily.
+  it('announces a coarse position (no per-cycle phase) even when a cycle is actively in a phase', async () => {
+    // The per-cycle phase is deliberately NOT spoken — under parallel waves
+    // there is no single "current phase", so a coarse monotonic position is the
+    // stable, non-churning signal. The visible phase-stepper still shows phases.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -585,19 +583,16 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Design review phase.');
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
     });
   }, 15000);
 
-  it('announces "Run in progress" between cycles (no current_cycle yet)', async () => {
-    // Waves run up to max_parallel (default 3) cycles concurrently, and the
-    // backend clears the shared current_cycle as soon as any one sibling
-    // finishes — even while the rest of the wave is still active. Nothing
-    // in the wire data says whether siblings remain running, so this state
-    // must not claim genuine idleness ("Preparing next strategy").
+  it('announces the coarse position between cycles (no current_cycle yet)', async () => {
+    // With no current_cycle (a sibling just finished mid-wave), the announcement
+    // is the same coarse monotonic position — no special "between cycles" text.
     const fixture = await createFixture();
     stubOf(fixture).running.set(true);
     stubOf(fixture).runStatus.set({
@@ -611,11 +606,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5 — Run in progress.');
-    // Same pre-existing gaps as the other in-progress-section tests above
-    // (run-btn spinner, phase progress-bar/spinner lack accessible names;
-    // the running run-btn nests a focusable spinner) — unrelated to the
-    // live-region text under test here.
+    expect(liveRegionText(fixture)).toBe('Strategy 2 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -666,7 +657,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Run in progress.');
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -759,7 +750,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     fixture.detectChanges();
 
     // Without the correction this would read "Strategy 4 of 5" (2 + 0 + 1 + 1).
-    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5 — Run in progress.');
+    expect(liveRegionText(fixture)).toBe('Strategy 3 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -799,7 +790,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Strategy 61 of 70 — Run in progress.');
+    expect(liveRegionText(fixture)).toBe('Strategy 61 of 70.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -877,7 +868,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     });
     fixture.detectChanges();
 
-    expect(liveRegionText(fixture)).toBe('Batch 2 of 3 — Strategy 1 of 5 — Ideate phase.');
+    expect(liveRegionText(fixture)).toBe('Batch 2 of 3 — Strategy 1 of 5.');
     await expectNoAxeViolations(fixture.nativeElement, {
       'aria-progressbar-name': { enabled: false },
       'nested-interactive': { enabled: false },
@@ -897,7 +888,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       completed_record_ids: [],
     });
     fixture.detectChanges();
-    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5 — Run in progress.');
+    expect(liveRegionText(fixture)).toBe('Strategy 1 of 5.');
 
     stubOf(fixture).events$.next({
       type: 'complete',

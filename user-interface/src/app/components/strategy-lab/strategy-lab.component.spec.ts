@@ -914,6 +914,32 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       // …yet the terminal banner is still shown.
       expect(component.error()).toBe('Sandbox crashed');
     });
+
+    it('does NOT resurrect an unrelated ambient error after a cleanly-completed run', () => {
+      // Regression: the run-finish refresh must re-assert only a terminal RUN
+      // error (terminalErrorBanner), never whatever error() happens to hold. A
+      // mid-run ambient error (e.g. an errors$ paper-trading poll failure) that
+      // is still showing when the run completes cleanly must be cleared by the
+      // refresh, not pinned onto the successful run.
+      runService.runStatus.set(baseRunStatus);
+      runService.running.set(true);
+      fixture.detectChanges(); // effect records wasRunning = true
+
+      // An unrelated ambient error surfaces mid-run (the errors$ subscription).
+      runService.errors$.next('Paper trading polling failed.');
+      expect(component.error()).toBe('Paper trading polling failed.');
+
+      // The strategy run then completes cleanly — no 'error' event.
+      runService.events$.next({
+        type: 'complete', message: 'done', status: 'completed',
+        completed_count: 5, skipped_count: 0, errored_count: 0, errored_details: [],
+        completed_batches: 1, total_batches: 1,
+      });
+      runService.running.set(false);
+      fixture.detectChanges(); // effect fires: loadResults() clears; nothing re-asserts
+
+      expect(component.error()).toBeNull();
+    });
   });
 
   describe('cancelled', () => {

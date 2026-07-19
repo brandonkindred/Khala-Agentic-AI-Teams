@@ -988,8 +988,15 @@ export interface StrategyLabProgressEvent {
 export interface StrategyLabCycleCompleteEvent { type: 'cycle_complete'; cycle_index: number; record_id: string; completed_cycles: number; batch_index: number; }
 /** `reason` is an ordinary backend string, not a closed enum (only "no_market_data" occurs today). */
 export interface StrategyLabCycleSkippedEvent  { type: 'cycle_skipped'; cycle_index: number; reason: string; batch_index: number; }
-/** `reason` is an ordinary backend string (an exception class name, or "tracker_merge_failed"), not a closed enum. */
-export interface StrategyLabCycleErroredEvent  { type: 'cycle_errored'; cycle_index: number; batch_index: number; reason: string; error: string; }
+/**
+ * `reason` is an ordinary backend string: an exception class name for a cycle's
+ * own failure, or the fixed marker `"tracker_merge_failed"` for a
+ * post-completion tracker-merge failure. `exception_type` is carried ONLY on the
+ * tracker-merge variant (the raising class, e.g. `"ValueError"`), so a
+ * live-streamed detail can be shaped identically to the persisted/polled one —
+ * for a regular failure the class name is already in `reason`.
+ */
+export interface StrategyLabCycleErroredEvent  { type: 'cycle_errored'; cycle_index: number; batch_index: number; reason: string; error: string; exception_type?: string; }
 
 export interface StrategyLabBatchStartEvent    { type: 'batch_start'; batch_index: number; total_batches: number; batch_size: number; completed_batches: number; }
 export interface StrategyLabBatchCompleteEvent { type: 'batch_complete'; batch_index: number; total_batches: number; completed_batches: number; }

@@ -9,7 +9,7 @@ brief must be regenerated once per batch (not once per run).
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 from fastapi import HTTPException
@@ -418,6 +418,64 @@ class _NoopTracker:
         pass
 
 
+def _install_publish_captor(
+    monkeypatch: pytest.MonkeyPatch,
+    on_event: Optional[Callable[[Optional[str]], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Patch the job event bus to capture every published SSE event.
+
+    Preconditions:
+        ``monkeypatch`` is the active fixture; ``on_event`` (optional) is invoked
+        with each event's ``event_type`` after capture — e.g. to release a
+        threading gate on a specific type.
+    Postconditions:
+        ``investment_team.api.job_event_bus.publish`` is patched to append
+        ``{**event, "type": event_type}`` to the returned list (empty at call
+        time); returns that list. Never raises.
+    """
+    published: List[Dict[str, Any]] = []
+
+    def _capture(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
+        published.append({**event, "type": event_type})
+        if on_event is not None:
+            on_event(event_type)
+
+    from investment_team.api import job_event_bus as _job_event_bus
+
+    monkeypatch.setattr(_job_event_bus, "publish", _capture)
+    return published
+
+
+def _make_succeeding_orchestrator() -> type:
+    """Return a fresh ``StrategyLabOrchestrator`` stub whose ``run_cycle`` always
+    succeeds, producing a new record per call.
+
+    Preconditions: none.
+    Postconditions: returns a NEW class each call (its class-level ``_counter``
+        starts at 0), so tests never share cycle-count state; each instance's
+        ``convergence_tracker`` is a fresh ``_NoopTracker``.
+    """
+
+    class _SucceedingOrchestrator:
+        _counter = 0
+
+        def __init__(self, convergence_tracker: Any = None) -> None:
+            self.convergence_tracker = _NoopTracker()
+
+        def run_cycle(
+            self,
+            prior_records: List[StrategyLabRecord],
+            config: BacktestConfig,
+            signal_brief: Any = None,
+            on_phase: Any = None,
+            exclude_asset_classes: Any = None,
+        ) -> StrategyLabRecord:
+            type(self)._counter += 1
+            return _make_record(type(self)._counter, config)
+
+    return _SucceedingOrchestrator
+
+
 def test_unexpected_cycle_exception_does_not_halt_run(
     empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -481,11 +539,11 @@ def test_unexpected_cycle_exception_does_not_halt_run(
 def test_concurrent_deep_failures_in_one_wave_publish_only_one_terminal_error(
     empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression: as_completed() yields a wave's futures one at a time, so a
-    non-502 HTTPException (a "deep failure") from a second concurrent cycle in
-    the same wave used to be processed and published before the first
-    failure's run_failed=True could stop the loop — publishing two terminal
-    'error' events for one run instead of one."""
+    """Regression: two concurrent cycles in one wave both deep-fail (non-502
+    HTTPException). as_completed() yields the wave's futures one at a time to
+    this single consumer, so only the FIRST deep failure publishes the run's
+    terminal 'error' event (guarded on run_failed); the second is logged but
+    must not publish a second terminal event."""
 
     class _AllCyclesFailOrchestrator:
         def __init__(self, convergence_tracker: Any = None) -> None:
@@ -501,14 +559,7 @@ def test_concurrent_deep_failures_in_one_wave_publish_only_one_terminal_error(
         ) -> StrategyLabRecord:
             raise HTTPException(status_code=500, detail="downstream provider unavailable")
 
-    published: List[Dict[str, Any]] = []
-
-    def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
-        published.append({**event, "type": event_type})
-
-    from investment_team.api import job_event_bus as _job_event_bus
-
-    monkeypatch.setattr(_job_event_bus, "publish", _capture_publish)
+    published = _install_publish_captor(monkeypatch)
     monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _AllCyclesFailOrchestrator)
     monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
     monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
@@ -536,28 +587,26 @@ def test_concurrent_deep_failures_in_one_wave_publish_only_one_terminal_error(
 def test_deep_failure_skips_post_wave_tracker_merge(
     empty_lab_state: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression: once a deep (non-502) cycle failure fires the run's single
-    terminal 'error' event, the post-wave tracker-merge loop must be skipped.
+    """Regression covering three guarantees for a wave where one cycle succeeds
+    and a sibling deep-fails (non-502 HTTPException):
 
-    A sibling that completed first (its ``cycle_complete`` already published)
-    must not then be re-reported as a merge error: without the guard, the merge
-    loop would run ``primary_tracker.merge_from`` for that sibling, and if it
-    raised, publish a second, post-terminal ``cycle_errored`` (reason
-    ``tracker_merge_failed``) and bump counters after the run already ended.
+    1. The post-wave tracker-merge loop is skipped once run_failed is set, so a
+       merge failure can't publish a second, post-terminal ``cycle_errored``
+       (reason ``tracker_merge_failed``) after the run's one terminal 'error'.
+    2. The succeeding sibling is STILL counted (its record in
+       ``completed_record_ids``) — the loop drains every future rather than
+       breaking, so a resume of the failed run never re-runs and duplicates it.
+    3. The terminal state carries no stale ``current_cycle`` (each drained
+       cycle's handler clears it).
     """
     import threading
 
     ordering_lock = threading.Lock()
     call_order = {"n": 0}
     # Set by _capture_publish the instant the succeeding sibling's cycle_complete
-    # is published. Gating the deep failure on THIS (not merely on the sibling's
-    # run_cycle returning) is what makes the test deterministic: cycle_complete
-    # is emitted by the main as_completed loop only after it has already
-    # appended the sibling to wave_results, so the sibling is guaranteed present
-    # at the guard. Gating on run_cycle's return instead would let the
-    # deep-failing sibling's future complete first in ~4% of runs, tripping the
-    # `if run_failed: break` short-circuit that skips the sibling entirely —
-    # leaving wave_results empty regardless of the guard and passing vacuously.
+    # is published, so the deep-failing sibling only raises AFTER the succeeding
+    # one has been collected into wave_results — making the merge-skip assertion
+    # deterministic (the sibling is guaranteed present at the guard).
     sibling_cycle_complete = threading.Event()
 
     class _RaisingMergeTracker(_NoopTracker):
@@ -592,16 +641,10 @@ def test_deep_failure_skips_post_wave_tracker_merge(
             assert sibling_cycle_complete.wait(timeout=5), "sibling cycle_complete was never published"
             raise HTTPException(status_code=500, detail="downstream provider unavailable")
 
-    published: List[Dict[str, Any]] = []
-
-    def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
-        published.append({**event, "type": event_type})
-        if event_type == "cycle_complete":
-            sibling_cycle_complete.set()
-
-    from investment_team.api import job_event_bus as _job_event_bus
-
-    monkeypatch.setattr(_job_event_bus, "publish", _capture_publish)
+    published = _install_publish_captor(
+        monkeypatch,
+        on_event=lambda et: sibling_cycle_complete.set() if et == "cycle_complete" else None,
+    )
     monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _OneSucceedsOneDeepFailsOrchestrator)
     monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
     monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
@@ -622,7 +665,7 @@ def test_deep_failure_skips_post_wave_tracker_merge(
     state = lab_main._active_runs[run_id]
     assert state["status"] == "failed"
 
-    # Exactly one terminal 'error' event, and NO post-terminal tracker-merge
+    # (1) Exactly one terminal 'error' event, and NO post-terminal tracker-merge
     # cycle_errored — the merge loop was skipped once run_failed was set.
     assert len([e for e in published if e["type"] == "error"]) == 1
     tracker_merge_events = [
@@ -630,6 +673,17 @@ def test_deep_failure_skips_post_wave_tracker_merge(
     ]
     assert not tracker_merge_events, f"tracker merge published after terminal failure: {tracker_merge_events}"
     assert state.get("tracker_merge_error_count", 0) == 0
+
+    # (2) The succeeding sibling is still counted despite the sibling's deep
+    # failure — the loop drained its future rather than abandoning it, so a
+    # resume would not re-run (and duplicate) it.
+    assert len(state["completed_record_ids"]) == 1
+    assert state["completed_cycles"] == 1
+    cycle_complete_events = [e for e in published if e["type"] == "cycle_complete"]
+    assert len(cycle_complete_events) == 1
+
+    # (3) The terminal 'failed' state carries no stale in-progress cycle.
+    assert state["current_cycle"] is None
 
 
 def test_merge_from_failure_does_not_halt_run(
@@ -698,31 +752,9 @@ def test_cancelled_run_publishes_distinct_cancelled_event(
     cancelled-job publish, so SSE consumers can tell a deliberate stop apart
     from a genuine failure by `type` alone."""
 
-    class _Orch:
-        _counter = 0
+    _Orch = _make_succeeding_orchestrator()
 
-        def __init__(self, convergence_tracker: Any = None) -> None:
-            self.convergence_tracker = _NoopTracker()
-
-        def run_cycle(
-            self,
-            prior_records: List[StrategyLabRecord],
-            config: BacktestConfig,
-            signal_brief: Any = None,
-            on_phase: Any = None,
-            exclude_asset_classes: Any = None,
-        ) -> StrategyLabRecord:
-            type(self)._counter += 1
-            return _make_record(type(self)._counter, config)
-
-    published: List[Dict[str, Any]] = []
-
-    def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
-        published.append({**event, "type": event_type})
-
-    from investment_team.api import job_event_bus as _job_event_bus
-
-    monkeypatch.setattr(_job_event_bus, "publish", _capture_publish)
+    published = _install_publish_captor(monkeypatch)
     monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _Orch)
     monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
     monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)
@@ -761,31 +793,9 @@ def test_externally_interrupted_or_failed_run_is_not_mislabeled_cancelled(
     a "Run cancelled by user" detail regardless of the true external cause —
     mislabeling both the live SSE event and the persisted record."""
 
-    class _Orch:
-        _counter = 0
+    _Orch = _make_succeeding_orchestrator()
 
-        def __init__(self, convergence_tracker: Any = None) -> None:
-            self.convergence_tracker = _NoopTracker()
-
-        def run_cycle(
-            self,
-            prior_records: List[StrategyLabRecord],
-            config: BacktestConfig,
-            signal_brief: Any = None,
-            on_phase: Any = None,
-            exclude_asset_classes: Any = None,
-        ) -> StrategyLabRecord:
-            type(self)._counter += 1
-            return _make_record(type(self)._counter, config)
-
-    published: List[Dict[str, Any]] = []
-
-    def _capture_publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
-        published.append({**event, "type": event_type})
-
-    from investment_team.api import job_event_bus as _job_event_bus
-
-    monkeypatch.setattr(_job_event_bus, "publish", _capture_publish)
+    published = _install_publish_captor(monkeypatch)
     monkeypatch.setattr(lab_main, "StrategyLabOrchestrator", _Orch)
     monkeypatch.setattr(lab_main, "ConvergenceTracker", _NoopTracker)
     monkeypatch.setattr(lab_main, "_strategy_lab_signal_expert_enabled", lambda: False)

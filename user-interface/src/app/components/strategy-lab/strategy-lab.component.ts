@@ -121,22 +121,6 @@ function categoryLabel(value: string): string {
 }
 
 /**
- * Readable label for a raw backend phase id not in STRATEGY_LAB_PHASES
- * (e.g. 'design_review' → 'Design review'). Used only as a live-region
- * fallback for phases this component has no friendly label for.
- *
- * Preconditions: `phase` is any string (an open-ended backend phase id;
- *   never validated against a known set — see STRATEGY_LAB_PHASES' own doc).
- * Postconditions: returns `phase` with underscores replaced by spaces and
- *   its first character capitalized (not per-word title-casing); '' in, ''
- *   out.
- */
-function humanizePhase(phase: string): string {
-  const spaced = phase.replace(/_/g, ' ');
-  return spaced.length ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : spaced;
-}
-
-/**
  * Shared text for both places the run's fate is genuinely unknown (not a
  * known failure/cancellation/completion) — `describeRunStatus()`'s
  * null-status branch and `handleStreamEvent()`'s SSE-reclaim branch — so the
@@ -413,6 +397,19 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    */
   private readonly runOutcomeAnnouncement = signal<string | null>(null);
 
+  /**
+   * The red error-banner message a terminal 'error' stream event set for THIS
+   * run (the failure/interrupt detail, or the connection-lost message), or null
+   * if the run has not ended in an error. `refreshResultsOnRunFinish` re-asserts
+   * exactly this after `loadResults()` clears `error`, so ONLY a genuine
+   * terminal run error survives the run-finish refresh — an unrelated ambient
+   * error still showing (e.g. an `errors$` paper-trading poll failure) is left
+   * to be cleared, not resurrected onto a cleanly-completed run. A plain field
+   * (not a signal) so reading it in the effect adds no reactive dependency.
+   * Reset to null when a new run starts.
+   */
+  private terminalErrorBanner: string | null = null;
+
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
   /** Pending auto-scroll timer id, cleared on destroy. */
@@ -443,10 +440,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   runs exactly once and `runOutcomeAnnouncement` holds a non-null value
    *   (either one `handleStreamEvent()` already set, or this fallback's
    *   `describeRunStatus()` derivation) by the time the effect returns. A
-   *   terminal failure/interrupt/connection-lost message set on `error` by
-   *   `handleStreamEvent()` survives the `loadResults()` refresh (which clears
-   *   `error` before re-fetching), so the sighted banner is durable rather than
-   *   flashing and vanishing on the same transition.
+   *   terminal failure/interrupt/connection-lost message (captured in
+   *   `terminalErrorBanner`) survives the `loadResults()` refresh — which
+   *   clears `error` before re-fetching — so the sighted banner is durable
+   *   rather than flashing and vanishing; an unrelated ambient error is NOT
+   *   preserved.
    */
   private readonly refreshResultsOnRunFinish = effect(() => {
     const isRunning = this.runService.running();
@@ -454,16 +452,17 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       this.runOutcomeAnnouncement.update(
         (current) => current ?? this.describeRunStatus(this.runService.lastTerminalStatus()),
       );
-      // A terminal 'error'/reclaim event set this just before finishRun() flipped
-      // running() false and scheduled this effect; loadResults() below clears
-      // `error` synchronously before its async fetch, so capture and re-assert
-      // the terminal message afterward. Without this the failure/interrupt
-      // banner would be wiped on the very transition that produced it, leaving
-      // sighted users no visible reason the run stopped. (A cancellation uses
-      // `completionWarning`, which loadResults() never clears, so it is
-      // unaffected.) If the reload itself errors, its own handler's message
-      // wins — the run is over either way.
-      const terminalError = this.error();
+      // loadResults() clears `error` synchronously before its async fetch, so a
+      // terminal 'error'/reclaim message set by handleStreamEvent() would be
+      // wiped on the very transition that produced it — leaving sighted users no
+      // visible reason the run stopped. Re-assert it afterward. Crucially this
+      // re-asserts only `terminalErrorBanner` (set solely by a terminal run
+      // error), NOT whatever `error()` happens to hold: an unrelated ambient
+      // error still showing (e.g. an errors$ paper-trading poll failure) is left
+      // cleared, not resurrected onto a cleanly-completed run. (A cancellation
+      // uses `completionWarning`, which loadResults() never clears.) If the
+      // reload itself errors, its own handler's message wins — the run is over.
+      const terminalError = this.terminalErrorBanner;
       this.loadResults();
       if (terminalError) this.error.set(terminalError);
     }
@@ -471,23 +470,26 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * Best-effort terminal-outcome sentence derived from a run-status snapshot,
-   * used only as `refreshResultsOnRunFinish`'s fallback when neither the
-   * `complete` nor `error` branch of `handleStreamEvent()` already set
-   * `runOutcomeAnnouncement` from richer, event-native data.
+   * The single source of terminal-outcome sentences for the aria-live region.
+   * Both `handleStreamEvent()`'s terminal branches (fed a minimal object built
+   * from the terminal event's own fields) and `refreshResultsOnRunFinish`'s
+   * fallback (fed `runService.lastTerminalStatus()`) route through here, so the
+   * live-SSE announcement and the poll-fallback announcement can never word the
+   * same outcome differently.
    *
-   * Preconditions: `status` is `null` only to mean "the run's fate is
-   *   genuinely unknown" (`StrategyLabRunService` clears `runStatus` before
-   *   capturing it into `lastTerminalStatus` specifically when its polling
-   *   fallback itself errors) — never "no run happened", since this is only
-   *   called after `wasRunning` was true.
+   * Preconditions: `status` is `null` ONLY to mean "the run's fate is genuinely
+   *   unknown" (`StrategyLabRunService` clears `runStatus` before capturing it
+   *   into `lastTerminalStatus` specifically when its polling fallback itself
+   *   errors) — never "no run happened"; callers only invoke this at run end.
    * Postconditions: returns a sentence reflecting `status.status`/
-   *   `errored_cycles`/`skipped_cycles` when `status` is non-null; a distinct
-   *   connection-lost sentence when `status` is null — never the generic
-   *   "complete" sentence for an outcome that isn't actually known. Always
-   *   non-empty.
+   *   `errored_cycles`/`skipped_cycles` when `status` is non-null (errors
+   *   outrank skips outrank a clean finish); a distinct connection-lost
+   *   sentence when `status` is null — never the generic "complete" sentence
+   *   for an outcome that isn't actually known. Pure; always non-empty.
    */
-  private describeRunStatus(status: StrategyLabRunStatus | null): string {
+  private describeRunStatus(
+    status: { status?: string; errored_cycles?: number; skipped_cycles?: number } | null,
+  ): string {
     if (!status) return CONNECTION_LOST_MESSAGE;
     if (status.status === 'failed') return 'Strategy Lab run failed.';
     if (status.status === 'cancelled') return 'Strategy Lab run cancelled.';
@@ -645,35 +647,29 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
 
     if (event.type === 'complete') {
-      // Terminal-outcome text for the aria-live status region — derived here
-      // (not from `error`/`completionWarning`, both shared ambient fields
-      // that a prior mid-run `batch_warning` could already have populated)
-      // while the event's own errored_count/skipped_count/status are still
-      // on hand. Errors take priority over skips (skipped_count alone is a
-      // non-fatal, non-error outcome per the backend's own status
-      // classification — see `describeRunStatus`), but either qualifies the
-      // plain "complete" text: skips are surfaced live via the in-progress
-      // skipped-badge, but that badge disappears once `running()` goes
-      // false, so this terminal announcement is a screen-reader user's only
-      // remaining signal that not every requested strategy was produced.
+      // completionWarning is the sighted dismissible banner — kept scoped to
+      // genuine errors only (its long-standing condition): a skip-only
+      // completion already has a dedicated in-progress skipped-badge, so a
+      // banner re-announcing it at the end would be new behavior. The aria-live
+      // sentence, by contrast, covers skips too — the badge disappears once
+      // `running()` goes false, so this terminal announcement is a
+      // screen-reader user's only remaining signal that not every requested
+      // strategy was produced.
       const hasErrors = event.errored_count > 0 || event.status === 'completed_with_errors';
       const hasSkips = event.skipped_count > 0;
-      // completionWarning is the sighted dismissible banner — kept scoped to
-      // genuine errors only (its long-standing condition), unlike
-      // runOutcomeAnnouncement below: a skip-only completion already has a
-      // dedicated in-progress skipped-badge, so a banner re-announcing it
-      // again at the end would be new behavior this fix doesn't intend to add.
       if (hasErrors) {
         const parts: string[] = [`${event.errored_count} cycle(s) errored`];
         if (hasSkips) parts.push(`${event.skipped_count} cycle(s) skipped`);
         this.completionWarning.set(`Run finished with ${parts.join(' and ')}. See details below.`);
       }
+      // Route through describeRunStatus (fed the event's own counts) so the
+      // live-SSE sentence can never drift from the poll-fallback one.
       this.runOutcomeAnnouncement.set(
-        hasErrors
-          ? 'Strategy Lab run finished with errors.'
-          : hasSkips
-            ? 'Strategy Lab run finished with some strategies skipped.'
-            : 'Strategy Lab run complete.',
+        this.describeRunStatus({
+          status: event.status,
+          errored_cycles: event.errored_count,
+          skipped_cycles: event.skipped_count,
+        }),
       );
     }
 
@@ -684,22 +680,18 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         // `.detail` — a connection-level event (e.g. eviction under load),
         // not necessarily a job failure, so it gets its own message rather
         // than confidently announcing a failure the run may not have had.
-        this.error.set(CONNECTION_LOST_MESSAGE);
+        this.setTerminalError(CONNECTION_LOST_MESSAGE);
         this.runOutcomeAnnouncement.set(CONNECTION_LOST_MESSAGE);
       } else {
         // A genuine user cancellation is never routed through 'error' — it's
         // its own 'cancelled' event type (branch below) — so every 'error'
         // event reaching here is a real failure or an external stop. The
         // backend marks an external stop 'failed' or 'interrupted' and carries
-        // that on `terminal_status`; announce the two distinctly (matching
-        // `describeRunStatus`'s wording) so an externally-interrupted run
-        // isn't spoken as "failed" while the visible banner says "interrupted".
-        const detail = event.detail || 'Run failed';
-        this.error.set(detail);
+        // that on `terminal_status`; describeRunStatus announces the two
+        // distinctly so an externally-interrupted run isn't spoken as "failed".
+        this.setTerminalError(event.detail || 'Run failed');
         this.runOutcomeAnnouncement.set(
-          event.terminal_status === 'interrupted'
-            ? 'Strategy Lab run interrupted.'
-            : 'Strategy Lab run failed.',
+          this.describeRunStatus({ status: event.terminal_status ?? 'failed' }),
         );
       }
     }
@@ -710,8 +702,22 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // now that cancellation has its own event type. The aria-live region
       // announces the outcome regardless.
       this.completionWarning.set(event.detail || 'Run cancelled by user.');
-      this.runOutcomeAnnouncement.set('Strategy Lab run cancelled.');
+      this.runOutcomeAnnouncement.set(this.describeRunStatus({ status: 'cancelled' }));
     }
+  }
+
+  /**
+   * Set the red error banner for a terminal run error AND record it in
+   * `terminalErrorBanner` so `refreshResultsOnRunFinish` re-asserts it across
+   * the run-finish `loadResults()` clear.
+   *
+   * Preconditions: called only from `handleStreamEvent()`'s terminal 'error'
+   *   branches (a real failure/interrupt, or a connection-lost reclaim).
+   * Postconditions: `error()` and `terminalErrorBanner` both hold `message`.
+   */
+  private setTerminalError(message: string): void {
+    this.error.set(message);
+    this.terminalErrorBanner = message;
   }
 
   // ---------------------------------------------------------------------------
@@ -749,7 +755,9 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   without calling the API).
    * Postconditions: clamps batch size/count into range and reflects them back to
    *   the form; `running()` reads true (via `startingRun`) and `error`/
-   *   `completionWarning` clear; POSTs a `RunStrategyLabRequest`.
+   *   `completionWarning`/`runOutcomeAnnouncement`/`terminalErrorBanner` all
+   *   reset so no prior run's outcome leaks into this one; POSTs a
+   *   `RunStrategyLabRequest`.
    *   `allowed_asset_classes` is sent in canonical (`categoryOptions`) order
    *   only when the selection is a strict subset — when every category is
    *   selected the field is omitted, matching the backend's "no constraint"
@@ -790,6 +798,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.error.set(null);
     this.completionWarning.set(null);
     this.runOutcomeAnnouncement.set(null);
+    this.terminalErrorBanner = null;
     this.api
       .runStrategyLab({
         batch_size: batchSize,
@@ -994,19 +1003,24 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * M" text and `runAnnouncement`'s aria-live equivalent so the two can
    * never disagree for the same `runStatus`.
    *
+   * Deliberately derived from the MONOTONIC attempted-cycle count, never from
+   * `current_cycle.cycle_index`: the default run executes up to `max_parallel`
+   * cycles concurrently (3), and the backend rewrites the single shared
+   * `current_cycle` from whichever sibling most recently emitted progress, so
+   * `cycle_index` oscillates (3→1→2) as siblings interleave. `cycleProgress`
+   * only ever increases, so this never moves backwards. (For a sequential
+   * run — max_parallel 1 — `completed + 1` equals the active `cycle_index`, so
+   * nothing is lost there.)
+   *
    * Preconditions: none.
-   * Postconditions: returns `1` when idle (no run tracked); the backend's
-   *   1-based `current_cycle.cycle_index` when a cycle is actively
-   *   progressing; otherwise `attemptedCycles + 1` clamped to
-   *   `total_cycles`, so this never reports an impossible position (e.g.
-   *   "Strategy 6 of 5") even while a run is between cycles or finishing up.
+   * Postconditions: returns `1` when idle (no run tracked); otherwise
+   *   `attemptedCycles + 1` clamped to `total_cycles`, so it is monotonic and
+   *   never reports an impossible position (e.g. "Strategy 6 of 5").
    */
   readonly currentStrategyNumber = computed(() => {
     const status = this.runService.runStatus();
     if (!status) return 1;
-    if (status.current_cycle) return status.current_cycle.cycle_index;
-    const attemptedCycles = this.cycleProgress(status);
-    return Math.min(attemptedCycles + 1, status.total_cycles);
+    return Math.min(this.cycleProgress(status) + 1, status.total_cycles);
   });
 
   /**
@@ -1031,19 +1045,26 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   /**
    * Concise text for the always-present aria-live status region: batch and
-   * strategy position plus the current phase label while a run proceeds, the
-   * terminal outcome just after a run ends, or '' when idle. Deliberately
-   * excludes per-log-line detail — `activityLog` stays out of the live
-   * region so screen-reader users get a summary, not a blow-by-blow feed.
-   * A `computed()` (not a plain method) so it only recomputes when one of
-   * its signal dependencies (`running`, `runService.runStatus`,
-   * `runOutcomeAnnouncement`) actually changes, rather than on every
-   * OnPush change-detection pass that touches this view.
+   * strategy position while a run proceeds, the terminal outcome just after a
+   * run ends, or '' when idle.
+   *
+   * Reports only MONOTONIC coarse progress (batch + `currentStrategyNumber`),
+   * deliberately NOT the per-cycle phase. The default run executes up to
+   * `max_parallel` (3) cycles concurrently, each moving through phases
+   * independently, so there is no single "current phase" to speak — announcing
+   * one sibling's phase would both churn (a fresh polite announcement on nearly
+   * every interleaved progress event) and mislead (it describes one of several
+   * active cycles). Per-phase detail remains visible in the on-screen phase
+   * stepper; the live region gives screen-reader users a stable progress
+   * summary instead of a blow-by-blow feed. `activityLog` likewise stays out of
+   * the live region. A `computed()` so it only recomputes when `running`,
+   * `runService.runStatus`, or `runOutcomeAnnouncement` change.
    *
    * Preconditions: none.
    * Postconditions: returns a non-empty sentence while `running` is true and
-   *   `runStatus` is populated, or immediately after a run ends (until the
-   *   next run starts clears it); returns '' otherwise.
+   *   `runStatus` is populated (updating roughly once per completed cycle, never
+   *   moving backwards), or immediately after a run ends (until the next run
+   *   starts clears it); returns '' otherwise.
    */
   readonly runAnnouncement = computed(() => {
     const status = this.runService.runStatus();
@@ -1052,35 +1073,14 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       if (status.batch_count && status.batch_count > 1) {
         segments.push(`Batch ${this.currentBatchNumber()} of ${status.batch_count}`);
       }
-      const attemptedCycles = this.cycleProgress(status);
-      // Once the last cycle's cycle_complete/skipped/errored lands,
-      // attemptedCycles already equals total_cycles — briefly, before the
-      // terminal `complete` event arrives, there is no "next" strategy to
-      // report. Reporting one here would announce an impossible position
-      // (e.g. "Strategy 6 of 5").
-      if (!status.current_cycle && attemptedCycles >= status.total_cycles) {
+      // Once every cycle has been attempted (cycleProgress === total_cycles),
+      // there is no "next" strategy to report — say "Finishing up" rather than
+      // an impossible position — for the brief window before the terminal
+      // `complete` event arrives.
+      if (this.cycleProgress(status) >= status.total_cycles) {
         segments.push('Finishing up');
-      } else if (status.current_cycle) {
-        segments.push(`Strategy ${this.currentStrategyNumber()} of ${status.total_cycles}`);
-        const phaseLabel = STRATEGY_LAB_PHASES.find((p) => p.id === status.current_cycle?.phase)?.label;
-        // Real backend phases (design_review, aligning, telemetry, ...) go
-        // beyond STRATEGY_LAB_PHASES' 4 known ids. current_cycle is
-        // populated here, so fall back to the raw phase name rather than
-        // the "no current_cycle" branch's text below — this cycle has a
-        // known phase to report, unlike that genuinely-uncertain gap.
-        segments.push(phaseLabel ? `${phaseLabel} phase` : `${humanizePhase(status.current_cycle.phase)} phase`);
       } else {
-        // Waves run up to max_parallel cycles concurrently (default 3, per
-        // main.py's RunStrategyLabRequest), and the backend clears the
-        // shared current_cycle on each individual cycle_complete as soon as
-        // any one sibling finishes — even while the rest of the wave is
-        // still actively running. Neither the run status nor any stream
-        // event exposes how many siblings remain active, so "no
-        // current_cycle" cannot be read as "genuinely idle": say something
-        // true in both cases rather than claiming idleness that likely
-        // isn't real.
         segments.push(`Strategy ${this.currentStrategyNumber()} of ${status.total_cycles}`);
-        segments.push('Run in progress');
       }
       return segments.join(' — ') + '.';
     }

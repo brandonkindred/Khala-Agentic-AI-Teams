@@ -247,6 +247,7 @@ def test_batch_run_touches_no_restricted_callable():
         "finalize_cycle_record_activity": lambda a: {"record": {"lab_record_id": "fin-0"}},
         "merge_wave_results_activity": lambda a: {"primary_tracker_state": {"ok": True}},
         "is_run_cancelled_activity": lambda a: False,
+        "external_terminal_status_activity": lambda a: None,
     }
     batch_input = {
         "run_id": "run-1",
