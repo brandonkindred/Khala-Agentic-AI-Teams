@@ -801,7 +801,13 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
   });
 
   describe('batch_warning', () => {
+    it('does not set a warning when runStatus is unset (guarded no-op)', () => {
+      runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: 'signal_brief_failed' });
+      expect(component.completionWarning()).toBeNull();
+    });
+
     it('shows the specific message for a signal-brief failure', () => {
+      runService.runStatus.set(baseRunStatus);
       runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: 'signal_brief_failed' });
       expect(component.completionWarning()).toBe(
         'Signal brief unavailable for a batch; strategies continued without it.',
@@ -809,11 +815,13 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
     });
 
     it('shows the reason text for any other non-empty reason', () => {
+      runService.runStatus.set(baseRunStatus);
       runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: 'disk_full' });
       expect(component.completionWarning()).toBe('disk_full');
     });
 
     it('falls back to a generic message for an empty reason', () => {
+      runService.runStatus.set(baseRunStatus);
       runService.events$.next({ type: 'batch_warning', batch_index: 1, reason: '' });
       expect(component.completionWarning()).toBe('A non-fatal warning occurred during a batch.');
     });

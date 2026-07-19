@@ -597,9 +597,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       this.loadResults();
     }
 
-    if (event.type === 'batch_warning') {
+    if (event.type === 'batch_warning' && this.runService.runStatus()) {
       // Non-fatal pre-batch issue (e.g. signal-brief failure). Surface as a
-      // gentle warning; the run is still progressing.
+      // gentle warning; the run is still progressing. Guarded like the
+      // 'progress'/'cycle_complete' branches above so a stale event for a
+      // run that has already ended can't resurrect the warning banner.
       this.completionWarning.set(
         event.reason === 'signal_brief_failed'
           ? 'Signal brief unavailable for a batch; strategies continued without it.'

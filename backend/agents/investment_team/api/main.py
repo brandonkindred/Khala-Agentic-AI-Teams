@@ -1676,7 +1676,7 @@ def _strategy_lab_external_terminal_status(run_id: str) -> Optional[str]:
             if status in _STRATEGY_LAB_CANCEL_STATUSES:
                 return status
     except Exception:
-        pass
+        logger.debug("Failed to fetch external terminal status for run %s", run_id, exc_info=True)
     return None
 
 
