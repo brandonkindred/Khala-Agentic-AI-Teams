@@ -7,6 +7,7 @@ control flow (skip / resume, fan-out, failure → compensation, etc.).
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,6 +58,25 @@ class _ExecActivityStub:
             return resp
         return None
 
+    def start_activity(self, activity_fn, *args, **kwargs):
+        """``workflow.start_activity`` counterpart: same recording/response
+        lookup as ``__call__``, but returns a real ``asyncio.Task`` (a stand-in
+        ActivityHandle) instead of awaiting inline — needed by
+        ``AgentDeprovisioningWorkflow``, which races its deprovision handle
+        against a soft-timeout timer via ``asyncio.wait()``."""
+        name = getattr(activity_fn, "__name__", str(activity_fn))
+        self.calls.append({"name": name, "args": kwargs.get("args"), "kwargs": kwargs})
+        resp = self.responses.get(name)
+
+        async def _coro():
+            if isinstance(resp, BaseException):
+                raise resp
+            if callable(resp):
+                return resp(self.calls[-1])
+            return resp
+
+        return asyncio.ensure_future(_coro())
+
 
 def _build_manifest_yaml(tmp_path):
     f = tmp_path / "m.yaml"
@@ -84,6 +104,17 @@ _TOOL_SPECS = [
 
 def _call(stub: _ExecActivityStub, name: str) -> dict:
     return next(c for c in stub.calls if c["name"] == name)
+
+
+async def _never_completing_sleep(_delta):
+    """Stand-in for ``workflow.sleep`` that never resolves on its own.
+
+    Keeps ``AgentDeprovisioningWorkflow._await_deprovision``'s handle-vs-timer
+    race resolving on the activity handle in tests that aren't exercising the
+    soft-timeout path — this timer task is simply cancelled, never awaited to
+    completion, once the handle wins.
+    """
+    await asyncio.Future()
 
 
 @pytest.mark.asyncio
@@ -1451,6 +1482,8 @@ async def test_deprovisioning_workflow_calls_deprovision_activity() -> None:
 
     with (
         patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=stub.start_activity),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
     ):
         result = await wf.AgentDeprovisioningWorkflow().run("agent-1", True)
@@ -1496,6 +1529,8 @@ async def test_deprovisioning_workflow_threads_fencing_token_into_deprovision_ac
 
     with (
         patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=stub.start_activity),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
     ):
         await wf.AgentDeprovisioningWorkflow().run("agent-1", True)
@@ -1527,6 +1562,8 @@ async def test_deprovisioning_workflow_unpatched_replay_skips_lock_activities(mo
 
     with (
         patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=stub.start_activity),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
     ):
         result = await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
@@ -1548,6 +1585,8 @@ async def test_deprovisioning_workflow_releases_lock_when_deprovision_fails() ->
 
     with (
         patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=stub.start_activity),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
     ):
         with pytest.raises(RuntimeError, match="deprovision boom"):
@@ -1579,6 +1618,8 @@ async def test_deprovisioning_workflow_original_error_survives_a_failed_release(
 
     with (
         patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=stub.start_activity),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
         patch.object(wf.workflow, "logger", new=MagicMock()),
     ):
@@ -1587,6 +1628,54 @@ async def test_deprovisioning_workflow_original_error_survives_a_failed_release(
 
     fn_names = [c["name"] for c in stub.calls]
     assert fn_names[-1] == "release_agent_lock_activity"
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_cancels_and_awaits_before_release_on_soft_timeout() -> None:
+    """Past DEPROVISION_SOFT_TIMEOUT, run() must request deprovision_activity's
+    cancellation and await its acknowledgement BEFORE release_agent_lock_activity
+    runs — lock release is gated on a confirmed stop, never merely on the soft
+    deadline elapsing."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    cancel_acknowledged = asyncio.Event()
+
+    def fake_start_activity(activity_fn, *args, **kwargs):
+        async def _hangs_until_cancelled():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancel_acknowledged.set()
+                raise
+
+        return asyncio.ensure_future(_hangs_until_cancelled())
+
+    async def fake_execute_activity(activity_fn, *args, **kwargs):
+        name = getattr(activity_fn, "__name__", str(activity_fn))
+        if name == "release_agent_lock_activity":
+            assert cancel_acknowledged.is_set(), (
+                "release_agent_lock_activity ran before deprovision_activity's "
+                "cancellation was acknowledged"
+            )
+        return None
+
+    async def immediate_sleep(_delta):
+        return None
+
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-timeout")
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=fake_execute_activity),
+        patch.object(wf.workflow, "start_activity", new=fake_start_activity),
+        patch.object(wf.workflow, "sleep", new=immediate_sleep),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+    ):
+        with pytest.raises(TimeoutError, match="DEPROVISION_SOFT_TIMEOUT"):
+            await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    assert cancel_acknowledged.is_set()
 
 
 @pytest.mark.asyncio
