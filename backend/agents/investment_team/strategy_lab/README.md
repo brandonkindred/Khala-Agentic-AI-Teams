@@ -302,9 +302,13 @@ validation (e.g. a bar-field literal wrapped incorrectly). That DSL-validation c
 (`_build_correction_prompt`) stays in place regardless of structured-output availability — only the
 *unparseable-JSON* resend is eliminated on the structured happy path. `DesignAgent._self_review` (the
 internal audit call sharing `CRITIQUE_SCHEMA` semantics with `DesignReviewAgent`) is wired
-independently, since it does not share `_invoke_and_parse` with the generate/revise path. The remaining
-spec-authoring/reviewing agents (zero-trade repair, alignment fix-proposer) are unchanged and still rely
-solely on the prompt-embedded-schema + `json_object` contract described above.
+independently, since it does not share `_invoke_and_parse` with the generate/revise path — but it does
+share the structured-decoding plumbing: both it and `DesignReviewAgent.run` route through
+`design_review._invoke_structured_critique(agent_key, system_prompt, user_prompt, phase, charge)`, so
+the `complete_json(schema=CRITIQUE_SCHEMA)` call and starvation handling is written once rather than
+duplicated per caller. The remaining spec-authoring/reviewing agents (zero-trade repair, alignment
+fix-proposer) are unchanged and still rely solely on the prompt-embedded-schema + `json_object` contract
+described above.
 
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
 Per-cycle hard cap on the total number of LLM calls the design phase may make within a single
