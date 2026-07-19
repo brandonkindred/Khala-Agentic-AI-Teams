@@ -117,6 +117,30 @@ async def _never_completing_sleep(_delta):
     await asyncio.Future()
 
 
+def _sleep_sequence(*behaviors):
+    """``workflow.sleep`` stand-in returning a distinct behavior per call, by
+    call order (the last behavior repeats for any further calls).
+
+    ``_await_deprovision`` makes up to two ``workflow.sleep`` calls (the
+    soft-timeout timer, then — only past that timeout — the post-cancel
+    ack-grace timer). A behavior of ``None`` resolves immediately; ``"hang"``
+    never resolves on its own. This lets a test deterministically control
+    which of the two timers "wins" each race against the activity handle,
+    without depending on asyncio scheduling-order nuance between two
+    same-tick-resolving futures.
+    """
+    calls = {"n": 0}
+
+    async def _sleep(_delta):
+        idx = min(calls["n"], len(behaviors) - 1)
+        calls["n"] += 1
+        if behaviors[idx] == "hang":
+            await asyncio.Future()
+        return None
+
+    return _sleep
+
+
 @pytest.mark.asyncio
 async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
     """Happy path runs setup → credentials → per-tool provision → audit → docs → deliver."""
@@ -1671,11 +1695,218 @@ async def test_deprovisioning_workflow_cancels_and_awaits_before_release_on_soft
         patch.object(wf.workflow, "start_activity", new=fake_start_activity),
         patch.object(wf.workflow, "sleep", new=immediate_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
+        patch.object(wf.workflow, "logger", new=MagicMock()),
     ):
         with pytest.raises(TimeoutError, match="DEPROVISION_SOFT_TIMEOUT"):
             await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
 
     assert cancel_acknowledged.is_set()
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_sets_heartbeat_timeout_on_deprovision_activity() -> None:
+    """deprovision_activity is started with a heartbeat_timeout, so a worker
+    that stops responding entirely (crash, thread-pool starvation) is
+    detected via Temporal's own liveness mechanism rather than only once the
+    much larger PHASE_TIMEOUT/DEPROVISION_SOFT_TIMEOUT budget is exhausted."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub(
+        {
+            "deprovision_activity": {
+                "agent_id": "agent-1",
+                "success": True,
+                "details": {},
+                "error": None,
+            },
+        }
+    )
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-hb")
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=stub.start_activity),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+    ):
+        await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    assert (
+        _call(stub, "deprovision_activity")["kwargs"]["heartbeat_timeout"]
+        == wf.DEPROVISION_HEARTBEAT_TIMEOUT
+    )
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_logs_deprovision_cancelled_error_and_releases_lock() -> None:
+    """Past DEPROVISION_SOFT_TIMEOUT, an activity that acknowledges cancellation
+    by raising DeprovisionCancelledError is a confirmed stop: the lock is
+    still released, and the outcome is logged as a warning distinct from a
+    generic activity error."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.models import DeprovisionCancelledError
+    from agent_provisioning_team.temporal import workflows as wf
+
+    def fake_start_activity(activity_fn, *args, **kwargs):
+        async def _cancels_into_deprovision_cancelled_error():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                raise DeprovisionCancelledError("agent-1", {"tools": {}}) from None
+
+        return asyncio.ensure_future(_cancels_into_deprovision_cancelled_error())
+
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-dce")
+    stub = _ExecActivityStub({})
+    logger = MagicMock()
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=fake_start_activity),
+        patch.object(wf.workflow, "sleep", new=_sleep_sequence(None, "hang")),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+        patch.object(wf.workflow, "logger", new=logger),
+    ):
+        with pytest.raises(TimeoutError, match="DEPROVISION_SOFT_TIMEOUT"):
+            await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert fn_names == ["acquire_agent_lock_activity", "release_agent_lock_activity"]
+    warning_messages = [call.args[0] % call.args[1:] for call in logger.warning.call_args_list]
+    assert any("DeprovisionCancelledError" in msg for msg in warning_messages)
+    logger.error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_logs_other_activity_error_and_releases_lock() -> None:
+    """An activity error unrelated to cancellation, surfacing during/after a
+    requested cancellation, is still a confirmed stop: the lock is released,
+    and the outcome is logged at error level — distinct from the
+    warning-level clean-cancellation-ack cases."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    def fake_start_activity(activity_fn, *args, **kwargs):
+        async def _errors_after_cancel():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                raise RuntimeError("worker mid-teardown crash") from None
+
+        return asyncio.ensure_future(_errors_after_cancel())
+
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-err")
+    stub = _ExecActivityStub({})
+    logger = MagicMock()
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=fake_start_activity),
+        patch.object(wf.workflow, "sleep", new=_sleep_sequence(None, "hang")),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+        patch.object(wf.workflow, "logger", new=logger),
+    ):
+        with pytest.raises(TimeoutError, match="DEPROVISION_SOFT_TIMEOUT"):
+            await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert fn_names == ["acquire_agent_lock_activity", "release_agent_lock_activity"]
+    error_messages = [call.args[0] % call.args[1:] for call in logger.error.call_args_list]
+    assert any("errored during/after" in msg for msg in error_messages)
+    logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_logs_success_despite_requested_cancellation() -> None:
+    """If deprovision_activity's last cooperative checkpoint passes just
+    before cancellation is observed, it can complete successfully despite the
+    cancellation request. That is still a confirmed stop — the lock is
+    released and a distinct warning is logged, not silently treated as if
+    nothing unusual happened."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    def fake_start_activity(activity_fn, *args, **kwargs):
+        async def _completes_despite_cancel_request():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                return {"agent_id": "agent-1", "success": True, "details": {}, "error": None}
+
+        return asyncio.ensure_future(_completes_despite_cancel_request())
+
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-late-success")
+    stub = _ExecActivityStub({})
+    logger = MagicMock()
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=fake_start_activity),
+        patch.object(wf.workflow, "sleep", new=_sleep_sequence(None, "hang")),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+        patch.object(wf.workflow, "logger", new=logger),
+    ):
+        with pytest.raises(TimeoutError, match="DEPROVISION_SOFT_TIMEOUT"):
+            await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    fn_names = [c["name"] for c in stub.calls]
+    assert fn_names == ["acquire_agent_lock_activity", "release_agent_lock_activity"]
+    warning_messages = [call.args[0] % call.args[1:] for call in logger.warning.call_args_list]
+    assert any("completed successfully despite" in msg for msg in warning_messages)
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_gives_up_and_releases_lock_when_cancel_ack_never_arrives() -> (
+    None
+):
+    """A deprovision_activity worker that never acknowledges its requested
+    cancellation (e.g. it crashed) must not hang run() forever: past
+    DEPROVISION_CANCEL_GRACE the workflow gives up waiting, logs the worker
+    as presumed unresponsive, and still releases the agent_id lock — no code
+    path may exit run() leaving the lock held indefinitely."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    def fake_start_activity(activity_fn, *args, **kwargs):
+        async def _never_acknowledges_cancellation():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                pass  # swallow the first cancellation — simulates an ack that
+                # never arrives within the test's own DEPROVISION_CANCEL_GRACE
+                # window (below). Still cancellable on a second .cancel() (via
+                # the un-guarded await below) so pytest-asyncio's own event
+                # loop teardown can still reap this task after the test body
+                # returns, rather than hanging forever on a truly unkillable one.
+            await asyncio.Future()
+
+        return asyncio.ensure_future(_never_acknowledges_cancellation())
+
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-deaf")
+    stub = _ExecActivityStub({})
+    logger = MagicMock()
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "start_activity", new=fake_start_activity),
+        patch.object(wf.workflow, "sleep", new=_sleep_sequence(None, None)),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+        patch.object(wf.workflow, "logger", new=logger),
+    ):
+        with pytest.raises(TimeoutError, match="DEPROVISION_SOFT_TIMEOUT") as exc_info:
+            await wf.AgentDeprovisioningWorkflow().run("agent-1", False)
+
+    assert "not acknowledged" in str(exc_info.value)
+    fn_names = [c["name"] for c in stub.calls]
+    assert fn_names == ["acquire_agent_lock_activity", "release_agent_lock_activity"]
+    error_messages = [call.args[0] % call.args[1:] for call in logger.error.call_args_list]
+    assert any("did not acknowledge" in msg for msg in error_messages)
 
 
 @pytest.mark.asyncio
