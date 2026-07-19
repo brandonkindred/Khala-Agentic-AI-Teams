@@ -19,6 +19,7 @@ import os
 from typing import Any, Optional
 
 from llm_service.config import resolve_base_url, resolve_model, resolve_provider, resolve_timeout
+from shared_env_config import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,12 @@ logger = logging.getLogger(__name__)
 # non-positive / non-finite value. Mirrors the platform default so the resolver's
 # "positive, finite float" postcondition holds unconditionally.
 _DEFAULT_TRANSPORT_TIMEOUT = 900.0
+
+# Per-agent-key sampling temperature defaults. Only ``strategy_design`` — whose
+# prompts explicitly push for novel, diverse output — samples above zero; every
+# other key (critically ``strategy_ideation``, which drives the deterministic
+# refinement/alignment/zero-trade-repair/analysis agents) must stay greedy.
+_DEFAULT_TEMPERATURES = {"strategy_design": 0.6}
 
 
 def _resolve_strands_timeout(agent_key: str) -> float:
@@ -81,6 +88,34 @@ def _resolve_strands_timeout(agent_key: str) -> float:
         _DEFAULT_TRANSPORT_TIMEOUT,
     )
     return _DEFAULT_TRANSPORT_TIMEOUT
+
+
+def _resolve_temperature(agent_key: str) -> float:
+    """Resolve the sampling temperature for the strands client.
+
+    Precedence: ``STRATEGY_LAB_LLM_TEMPERATURE_<AGENT_KEY>`` (per-key override)
+    beats ``STRATEGY_LAB_LLM_TEMPERATURE`` (global override) beats
+    ``_DEFAULT_TEMPERATURES.get(agent_key, 0.0)`` (per-key default; every key
+    other than ``strategy_design`` defaults to ``0.0``).
+
+    Preconditions: ``agent_key`` is a non-empty model key.
+    Postconditions: returns a float clamped to ``[0.0, 2.0]``, unconditionally
+    (garbage, non-finite, or out-of-range env values fall back to the next
+    level in the precedence chain via :func:`shared_env_config.env_float`'s own
+    clamping — this function never raises on a bad environment value).
+    """
+    global_default = env_float(
+        "STRATEGY_LAB_LLM_TEMPERATURE",
+        _DEFAULT_TEMPERATURES.get(agent_key, 0.0),
+        floor=0.0,
+        ceiling=2.0,
+    )
+    return env_float(
+        f"STRATEGY_LAB_LLM_TEMPERATURE_{agent_key.upper()}",
+        global_default,
+        floor=0.0,
+        ceiling=2.0,
+    )
 
 
 def _accepts_kwarg(target: Any, name: str) -> bool:
@@ -149,6 +184,7 @@ def get_strands_model(
     *,
     timeout: Optional[float] = None,
     response_format: str = "json",
+    temperature: Optional[float] = None,
 ):
     """Return a Strands ``Model`` instance for the given agent key.
 
@@ -188,6 +224,15 @@ def get_strands_model(
     ``_resolve_strands_timeout`` on the Bedrock path. The Strategy Lab LLM
     envelope's wall-clock guard (``STRATEGY_LAB_LLM_TIMEOUT``) bounds every call
     on top of whichever transport timeout applies.
+
+    ``temperature``, when omitted, is resolved per ``agent_key`` via
+    :func:`_resolve_temperature` — ``0.6`` for ``strategy_design`` (the only key
+    whose prompts ask for sampling diversity) and ``0.0`` for every other key,
+    overridable via ``STRATEGY_LAB_LLM_TEMPERATURE[_<AGENT_KEY>]``. It is
+    forwarded on the Ollama path unconditionally and on the Bedrock path only if
+    the installed ``BedrockModel`` declares an explicit ``temperature``
+    parameter (probed via ``_accepts_kwarg``, mirroring the ``boto_client_config``
+    guard).
 
     The JSON-shape contract on the Ollama path is enforced by the ``json_object``
     wire mode plus pydantic validation downstream (and, for the refinement agent,
@@ -233,12 +278,24 @@ def get_strands_model(
     if response_format not in ("json", "text"):
         raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
 
+    resolved_temperature = (
+        temperature if temperature is not None else _resolve_temperature(agent_key)
+    )
+
     if provider == "bedrock":
         from strands.models import BedrockModel
 
         resolved_timeout = timeout if timeout is not None else _resolve_strands_timeout(agent_key)
-        logger.info("Strands model: Bedrock model_id=%s timeout=%.0fs", model_id, resolved_timeout)
-        return _construct_bedrock_with_timeout(BedrockModel, resolved_timeout, model_id=model_id)
+        logger.info(
+            "Strands model: Bedrock model_id=%s timeout=%.0fs temperature=%.2f",
+            model_id,
+            resolved_timeout,
+            resolved_temperature,
+        )
+        bedrock_kwargs = {"model_id": model_id}
+        if _accepts_kwarg(BedrockModel, "temperature"):
+            bedrock_kwargs["temperature"] = resolved_temperature
+        return _construct_bedrock_with_timeout(BedrockModel, resolved_timeout, **bedrock_kwargs)
 
     if provider == "dummy":
         raise ValueError(
@@ -283,13 +340,14 @@ def get_strands_model(
 
     logger.info(
         "Strategy Lab LLM routed through llm_service: agent_key=%s model=%s host=%s "
-        "cloud=%s response_format=%s explicit_timeout=%s",
+        "cloud=%s response_format=%s explicit_timeout=%s temperature=%.2f",
         agent_key,
         model_id,
         host,
         bool(api_key),
         response_format,
         timeout if timeout is not None else "-",
+        resolved_temperature,
     )
 
     # When the caller pins an explicit transport timeout, honour it: build a
@@ -302,7 +360,12 @@ def get_strands_model(
 
         explicit_client = OllamaLLMClient(model=model_id, base_url=base_url, timeout=float(timeout))
         return _llm_service_strands_model(
-            agent_key=agent_key, response_format=response_format, client=explicit_client
+            agent_key=agent_key,
+            response_format=response_format,
+            client=explicit_client,
+            temperature=resolved_temperature,
         )
 
-    return _llm_service_strands_model(agent_key=agent_key, response_format=response_format)
+    return _llm_service_strands_model(
+        agent_key=agent_key, response_format=response_format, temperature=resolved_temperature
+    )
