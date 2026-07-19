@@ -234,6 +234,28 @@ def test_resume_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, api
     assert "resumed from cycle" in body["message"]
 
 
+def test_resume_strategy_lab_run_carries_forward_tracker_merge_error_count(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """Regression: resume must not silently reset tracker_merge_error_count to 0
+    while errored_cycles/errored_details (which include the same tracker-merge
+    entries) carry forward — that would reintroduce the double-count bug the
+    counter exists to fix, but only for resumed runs."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-h"] = _resumable_state(
+        "run-h",
+        errored_cycles=3,
+        errored_details=[{"cycle_index": 1, "error": "merge boom", "reason": "tracker_merge_failed"}],
+        tracker_merge_error_count=3,
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _StubLabClient())
+    resp = api_client.post("/strategy-lab/runs/run-h/resume")
+    assert resp.status_code == 200
+    assert api_main._active_runs["run-h"]["tracker_merge_error_count"] == 3
+    assert api_main._active_runs["run-h"]["errored_cycles"] == 3
+
+
 def test_restart_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 

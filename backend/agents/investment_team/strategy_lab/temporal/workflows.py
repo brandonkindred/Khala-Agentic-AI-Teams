@@ -353,11 +353,13 @@ class StrategyLabBatchWorkflow:
             every cycle so each child need not re-resolve it.
     Postconditions:
         Returns ``{"run_id", "status", "completed_record_ids", "errored_cycles",
-        "convergence_tracker_state"}``. ``status`` is ``cancelled`` when an
-        external cancellation was observed between waves, else ``completed`` /
-        ``completed_with_errors`` (the latter when ≥1 cycle errored). Every
-        completed cycle's record is finalized (paper-traded + persisted) via
-        ``finalize_cycle_record_activity`` before the batch returns.
+        "convergence_tracker_state"}``. ``status`` is the exact external stop
+        status (``cancelled``/``failed``/``interrupted``) when one was observed
+        between waves — never forced to ``cancelled`` for an interrupt/failure —
+        else ``completed`` / ``completed_with_errors`` (the latter when ≥1 cycle
+        errored). Every completed cycle's record is finalized (paper-traded +
+        persisted) via ``finalize_cycle_record_activity`` before the batch
+        returns.
     Invariants:
         Each wave merges its settled cycles into the batch-level tracker in
         cycle-index order (via ``merge_wave_results_activity``), so directives are
@@ -389,7 +391,12 @@ class StrategyLabBatchWorkflow:
         completed_record_ids: List[str] = []
         completed_indices: set[int] = set(range(start_cycle_offset))
         errored = 0
-        cancelled = False
+        # The exact persisted external stop status ("cancelled"/"failed"/
+        # "interrupted") observed between waves, or None if the run finished on
+        # its own. Persisted verbatim as the terminal status so an external
+        # interrupt/failure is never mislabeled a user cancellation (matching
+        # thread mode's _strategy_lab_worker).
+        external_terminal_status: Optional[str] = None
 
         # Resume: derive the starting batch + within-batch index from the flat offset.
         start_batch_idx, start_within_batch = divmod(start_cycle_offset, batch_size)
@@ -495,16 +502,22 @@ class StrategyLabBatchWorkflow:
                     },
                 )
 
-                # Cancellation is checked only between waves, mirroring thread mode.
-                if await _exec(act.is_run_cancelled_activity, params=run_id):
-                    cancelled = True
+                # External stop is checked only between waves, mirroring thread
+                # mode. Capture the TRUE status (cancelled/failed/interrupted),
+                # not just a boolean, so it is persisted as-is below.
+                external_terminal_status = await _exec(
+                    act.external_terminal_status_activity, params=run_id
+                )
+                if external_terminal_status is not None:
                     break
 
-            if cancelled:
+            if external_terminal_status is not None:
                 break
             await self._persist_state(run_id, {"completed_batches": batch_idx + 1})
 
-        status = "cancelled" if cancelled else ("completed_with_errors" if errored else "completed")
+        status = external_terminal_status or (
+            "completed_with_errors" if errored else "completed"
+        )
         await self._persist_state(run_id, {"status": status})
         return {
             "run_id": run_id,

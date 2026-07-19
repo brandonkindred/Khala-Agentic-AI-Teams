@@ -1115,7 +1115,7 @@ def test_merge_wave_results_activity_maps_unexpected_error():
 
 
 def test_activities_list_contains_every_activity():
-    assert len(act.ACTIVITIES) == 27
+    assert len(act.ACTIVITIES) == 28
     assert act.design_generate_activity in act.ACTIVITIES
     assert act.persist_record_activity in act.ACTIVITIES
     assert act.resolve_readiness_prices_activity in act.ACTIVITIES
@@ -1128,5 +1128,6 @@ def test_activities_list_contains_every_activity():
     # Batch-level activities (Stage 4).
     assert act.compute_signal_brief_activity in act.ACTIVITIES
     assert act.is_run_cancelled_activity in act.ACTIVITIES
+    assert act.external_terminal_status_activity in act.ACTIVITIES
     assert act.finalize_cycle_record_activity in act.ACTIVITIES
     assert act.merge_wave_results_activity in act.ACTIVITIES
