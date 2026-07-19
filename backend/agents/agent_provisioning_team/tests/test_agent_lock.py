@@ -225,6 +225,54 @@ def test_delete_record_is_noop_when_already_gone(tmp_path: Path) -> None:
     store._delete_record("never-acquired")  # must not raise
 
 
+def test_check_fencing_token_accepts_current_token(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    token = store.acquire("agent-1", owner="job-1")
+    store.check_fencing_token("agent-1", token)  # must not raise
+
+
+def test_check_fencing_token_accepts_higher_token(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.acquire("agent-1", owner="job-1")
+    store.check_fencing_token("agent-1", 999)  # must not raise
+
+
+def test_check_fencing_token_rejects_lower_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+
+    store = _store(tmp_path, ttl_seconds=100)
+    store.acquire("agent-1", owner="job-1", now=1000.0)  # token 1
+    store.acquire("agent-1", owner="job-2", now=1200.0)  # reclaimed -> token 2
+
+    with pytest.raises(StaleFencingTokenError) as exc_info:
+        store.check_fencing_token("agent-1", 1)
+
+    assert exc_info.value.agent_id == "agent-1"
+    assert exc_info.value.token == 1
+    assert exc_info.value.current_token == 2
+
+
+def test_check_fencing_token_is_noop_when_no_record_exists(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.check_fencing_token("never-acquired", 1)  # must not raise
+
+
+def test_check_fencing_token_fails_closed_on_corrupted_record(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.agent_lock import AgentLockError
+
+    store = _store(tmp_path)
+    store._record_path("agent-1").write_text("not valid json {{{", encoding="utf-8")
+
+    with pytest.raises(AgentLockError):
+        store.check_fencing_token("agent-1", 1)
+
+
+def test_check_fencing_token_rejects_unsafe_agent_id(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(ValueError):
+        store.check_fencing_token("../../etc/passwd", 1)
+
+
 def test_concurrent_acquire_exactly_one_wins(tmp_path: Path) -> None:
     """N threads racing acquire() on the same agent_id: exactly one succeeds,
     the rest observe AgentLockBusyError. This is the guarantee that makes

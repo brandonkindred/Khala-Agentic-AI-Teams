@@ -218,8 +218,11 @@ async def test_workflow_threads_fencing_token_into_resource_mutating_activities(
     """The fencing token acquire_agent_lock_activity returns must be carried,
     unchanged, as the trailing argument of every resource-mutating activity
     call this run makes — setup, credentials, each per-tool provision call,
-    and the account-provisioning checkpoint. Pure plumbing: no rejection
-    logic exists yet, so this only checks the value arrives at each site."""
+    and the account-provisioning checkpoint. This test uses an
+    _ExecActivityStub that never runs the real activities.py functions, so
+    it only checks the value arrives at each call site as an argument —
+    actual stale-token rejection is exercised directly against each
+    activity in test_temporal_unit.py/test_deprovision_temporal.py."""
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -262,7 +265,9 @@ async def test_workflow_threads_fencing_token_into_resource_mutating_activities(
 @pytest.mark.asyncio
 async def test_workflow_threads_fencing_token_into_compensation(tmp_path) -> None:
     """A tool failure's compensate_activity call must also carry the same
-    fencing token this run's own lock acquisition returned."""
+    fencing token this run's own lock acquisition returned. Plumbing only
+    (see test_workflow_threads_fencing_token_into_resource_mutating_activities);
+    rejection itself is covered at the activity level."""
     from agent_provisioning_team.temporal import workflows as wf
 
     manifest_path = _build_manifest_yaml(tmp_path)
@@ -296,6 +301,16 @@ async def test_workflow_threads_fencing_token_into_compensation(tmp_path) -> Non
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     assert _call(stub, "compensate_activity")["args"][-1] == 3
+
+
+def test_retry_policies_treat_stale_fencing_token_as_non_retryable() -> None:
+    """A stale-token rejection is permanent — retrying it would just hit the
+    same rejection again — so both retry policies used for resource-mutating
+    activities must list it as non-retryable."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    assert "StaleFencingTokenError" in wf.DEFAULT_RETRY_POLICY.non_retryable_error_types
+    assert "StaleFencingTokenError" in wf.TOOL_RETRY_POLICY.non_retryable_error_types
 
 
 @pytest.mark.asyncio
