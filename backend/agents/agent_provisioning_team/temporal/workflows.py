@@ -98,7 +98,10 @@ TOOL_RETRY_POLICY = RetryPolicy(
 # identical rationale for an additive mid-sequence step.
 # TODO: Remove these gates (and always lock unconditionally) once no
 # pre-lock AgentProvisioningWorkflow/AgentDeprovisioningWorkflow histories
-# remain open (confirm via the Temporal UI), then deprecate each marker with
+# remain open — confirm via ``find_open_pre_patch_executions``
+# (shared/visibility_query.py) or the Temporal UI, per the drain-verification
+# runbook in agent_provisioning_team/README.md ("Runbook: verifying the lock
+# rollout has drained") — then deprecate each marker with
 # ``workflow.deprecate_patch(...)`` for one release before deleting it.
 _PROVISIONING_LOCK_PATCH = "agent-provisioning-lock"
 _DEPROVISIONING_LOCK_PATCH = "agent-deprovisioning-lock"
