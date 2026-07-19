@@ -1305,6 +1305,26 @@ def is_run_cancelled_activity(run_id: str) -> bool:
     return _is_strategy_lab_run_cancelled(run_id)
 
 
+@activity.defn(name="strategy_lab_external_terminal_status")
+def external_terminal_status_activity(run_id: str) -> Optional[str]:
+    """Return the run's persisted external stop status, or None if not stopped.
+
+    Preconditions:
+        ``run_id`` is the strategy-lab run identifier.
+    Postconditions:
+        Returns ``investment_team.api.main._strategy_lab_external_terminal_status``'s
+        result verbatim — the exact persisted status string (``cancelled``,
+        ``failed``, or ``interrupted``) when the job was externally marked
+        terminal, else ``None``. That helper never raises, so this activity never
+        raises either. Callers persist the returned status directly so an
+        external interrupt/failure is not mislabeled a user cancellation (thread
+        mode's ``_strategy_lab_worker`` makes the same distinction).
+    """
+    from investment_team.api.main import _strategy_lab_external_terminal_status
+
+    return _strategy_lab_external_terminal_status(run_id)
+
+
 @activity.defn(name="strategy_lab_finalize_cycle_record")
 def finalize_cycle_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """Run the post-``run_cycle`` finalization (signal brief + paper-trade + persist).
@@ -1408,6 +1428,7 @@ ACTIVITIES = [
     resolve_workflow_config_activity,
     compute_signal_brief_activity,
     is_run_cancelled_activity,
+    external_terminal_status_activity,
     finalize_cycle_record_activity,
     merge_wave_results_activity,
 ]
@@ -1417,6 +1438,7 @@ __all__ = [
     "compute_signal_brief_activity",
     "finalize_cycle_record_activity",
     "is_run_cancelled_activity",
+    "external_terminal_status_activity",
     "merge_wave_results_activity",
     "alignment_near_miss_activity",
     "alignment_propose_fix_activity",

@@ -798,6 +798,89 @@ def test_propose_code_fix_raises_on_unparseable_response(monkeypatch) -> None:
     assert exc_info.value.__cause__ is not None
 
 
+def test_propose_code_fix_propagates_budget_exhaustion(monkeypatch) -> None:
+    """``propose_code_fix`` now charges the active per-cycle LLM budget
+    (#1569). When the budget is already spent, ``DesignBudgetExhausted`` must
+    propagate — NOT be re-wrapped into ``AlignmentAuditError`` by the method's
+    own ``except Exception`` fallback, which would make a budget trip
+    indistinguishable from an ordinary parse failure and let the orchestrator
+    silently fail closed past a cost kill switch."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+    from investment_team.strategy_lab.agents._llm_budget import (
+        DesignBudgetExhausted,
+        LLMCallBudget,
+        use_budget,
+    )
+
+    class _StubStrandsAgent:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __call__(self, _prompt: str) -> str:  # pragma: no cover - must not be reached
+            raise AssertionError("the LLM must not be called once the budget is exhausted")
+
+    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+
+    agent = alignment_module.TradeAlignmentAgent()
+    spent_budget = LLMCallBudget(1)
+    spent_budget.charge()  # pre-exhaust: the agent's own charge must trip it
+
+    with use_budget(spent_budget):
+        with pytest.raises(DesignBudgetExhausted):
+            agent.propose_code_fix(
+                spec=_spec(),
+                code="code-v0",
+                findings=[
+                    AlignmentFinding(
+                        trade_num=1,
+                        check_name="entry_signal",
+                        passed=False,
+                        severity="critical",
+                    )
+                ],
+                prior_attempts=None,
+            )
+
+
+def test_adjudicate_near_miss_propagates_budget_exhaustion(monkeypatch) -> None:
+    """``adjudicate_near_miss`` also charges the active budget (#1569); a
+    trip must propagate as ``DesignBudgetExhausted``, not be converted into
+    ``AlignmentAuditError`` (the caller's fail-closed contract for genuine
+    parse/transport failures is a different thing from a cost kill switch)."""
+    from investment_team.strategy_lab.agents import alignment as alignment_module
+    from investment_team.strategy_lab.agents._llm_budget import (
+        DesignBudgetExhausted,
+        LLMCallBudget,
+        use_budget,
+    )
+
+    class _StubStrandsAgent:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __call__(self, _prompt: str) -> str:  # pragma: no cover - must not be reached
+            raise AssertionError("the LLM must not be called once the budget is exhausted")
+
+    monkeypatch.setattr(alignment_module, "Agent", _StubStrandsAgent)
+    monkeypatch.setattr(alignment_module, "get_strands_model", lambda *_a, **_k: None)
+
+    agent = alignment_module.TradeAlignmentAgent()
+    spent_budget = LLMCallBudget(1)
+    spent_budget.charge()
+
+    with use_budget(spent_budget):
+        with pytest.raises(DesignBudgetExhausted):
+            agent.adjudicate_near_miss(
+                rule_id="r1",
+                predicate_repr="x > 1",
+                computed_value=1.01,
+                threshold=1.0,
+                symbol="AAPL",
+                entry_date="2024-01-01",
+            )
+
+
 def test_agent_key_is_strategy_alignment_not_ideation(monkeypatch) -> None:
     """Regression guard: both call sites must identify themselves as
     ``strategy_alignment`` (not the mislabeled ``strategy_ideation`` copied

@@ -39,6 +39,7 @@ from ..models import (
 )
 from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
+from .agents._llm_budget import DesignBudgetExhausted
 from .agents.zero_trade_repair import ZeroTradeRepairReport
 from .exceptions import OrchestratorContractError
 from .quality_gates.models import QualityGateResult
@@ -348,6 +349,8 @@ class ZeroTradeRepairer:
                 coverage_report=ctx.coverage_report,
                 prior_attempts=ctx.zero_trade_attempts,
             )
+        except DesignBudgetExhausted:
+            raise
         except Exception as exc:
             logger.exception("Zero-trade repair agent raised; falling through to refinement")
             return self._reject(

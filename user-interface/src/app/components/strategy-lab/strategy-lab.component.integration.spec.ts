@@ -239,13 +239,12 @@ describe('StrategyLabComponent — end-to-end OnPush migration regression', () =
 
     expect(el().querySelector('.in-progress-section')).toBeNull();
     expect(fixture.componentInstance.running()).toBe(false);
-    // Pre-existing (main, before this migration) quirk, not a regression:
-    // the 'error' branch sets `error` from the event, but finishing the run
-    // synchronously triggers refreshResultsOnRunFinish -> loadResults(),
-    // which unconditionally clears `error` at its own start — so the event's
-    // message never actually reaches the banner once results reload
-    // succeeds. Asserted here so a future fix is a deliberate change, not an
-    // accidental one this suite silently masks.
-    expect(fixture.componentInstance.error()).toBeNull();
+    // The terminal 'error' message durably reaches the banner. Finishing the
+    // run synchronously triggers refreshResultsOnRunFinish -> loadResults(),
+    // which clears `error` at its own start; the effect captures the terminal
+    // message beforehand and re-asserts it after, so the banner survives the
+    // reload instead of flashing and vanishing (which had left sighted users
+    // no visible reason the run stopped).
+    expect(fixture.componentInstance.error()).toBe('Sandbox crashed unrecoverably');
   });
 });

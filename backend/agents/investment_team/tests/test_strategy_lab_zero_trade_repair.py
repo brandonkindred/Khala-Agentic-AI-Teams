@@ -37,7 +37,10 @@ from investment_team.strategy_lab.agents.zero_trade_repair import (
     ZeroTradeRepairReport,
 )
 from investment_team.strategy_lab.exceptions import SpecImplementabilityError
-from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.orchestrator import (
+    RefinementStallTracker,
+    StrategyLabOrchestrator,
+)
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -1195,6 +1198,7 @@ def _drive_anomaly_recovery(orch: StrategyLabOrchestrator):
         refinement_attempts=[],
         zero_trade_attempts=[],
         round_num=0,
+        stall_tracker=RefinementStallTracker(),
         emit=lambda *a, **k: None,
     )
 
@@ -1264,7 +1268,7 @@ def test_generic_refine_leaves_flag_unset() -> None:
     generic-refine path leaves the flag None so the caller keeps the round's
     existing verdict (trades are unchanged)."""
     orch = StrategyLabOrchestrator()
-    orch._refine_or_exhaust = lambda **kw: (kw["spec"], kw["code"], False)
+    orch._refine_or_exhaust = lambda **kw: (kw["spec"], kw["code"], False, False)
     conformance_calls: List[int] = []
     orch.predicate_conformance_gate.check = lambda code, spec, **kw: (
         conformance_calls.append(1) or []
@@ -1284,6 +1288,7 @@ def test_generic_refine_leaves_flag_unset() -> None:
         refinement_attempts=[],
         zero_trade_attempts=[],
         round_num=0,
+        stall_tracker=RefinementStallTracker(),
         emit=lambda *a, **k: None,
     )
     assert recovery.ran_on_non_conforming_code is None
@@ -1312,6 +1317,7 @@ def test_handle_critical_anomalies_rejects_empty_critical_anomalies() -> None:
             refinement_attempts=[],
             zero_trade_attempts=[],
             round_num=0,
+            stall_tracker=RefinementStallTracker(),
             emit=lambda *a, **k: None,
         )
 
@@ -1337,6 +1343,7 @@ def test_handle_critical_anomalies_rejects_invalid_market_data(bad_market_data) 
             refinement_attempts=[],
             zero_trade_attempts=[],
             round_num=0,
+            stall_tracker=RefinementStallTracker(),
             emit=lambda *a, **k: None,
         )
 
@@ -1416,6 +1423,7 @@ def test_entry_with_no_exit_routes_to_redesign() -> None:
             refinement_attempts=[],
             zero_trade_attempts=[],
             round_num=0,
+            stall_tracker=RefinementStallTracker(),
             emit=lambda phase, data: events.append((phase, data)),
         )
 
@@ -1456,11 +1464,61 @@ def test_other_zero_trade_category_still_uses_code_repair() -> None:
         refinement_attempts=[],
         zero_trade_attempts=[],
         round_num=0,
+        stall_tracker=RefinementStallTracker(),
         emit=lambda *a, **k: None,
     )
 
     assert spy.calls == 1, "code-only repair must run for NO_ORDERS_EMITTED"
     assert recovery.exhausted is False
+
+
+def test_handle_critical_anomalies_propagates_budget_exhaustion_from_ztr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``zero_trade_repairer.try_repair`` trips ``DesignBudgetExhausted``
+    (#1569 — the LLM-backed repair path now charges the active budget),
+    ``_handle_critical_anomalies`` attaches the in-progress spec/code to the
+    exception and re-raises rather than letting a bare/broader handler
+    swallow it."""
+    from investment_team.strategy_lab.agents._llm_budget import (
+        DesignBudgetExhausted,
+        LLMCallBudget,
+        charge_active_budget,
+        use_budget,
+    )
+
+    class _BudgetTrippingRepairer:
+        def try_repair(self, **_kwargs: Any) -> _ZeroTradeRepairOutcome:
+            charge_active_budget()
+            raise AssertionError("must not be reached — charge_active_budget should have raised")
+
+    orch = StrategyLabOrchestrator()
+    orch.zero_trade_repairer = _BudgetTrippingRepairer()  # type: ignore[assignment]
+
+    spent_budget = LLMCallBudget(1)
+    spent_budget.charge()  # pre-exhaust: the repairer's own charge must trip it
+
+    with use_budget(spent_budget):
+        with pytest.raises(DesignBudgetExhausted) as exc_info:
+            orch._handle_critical_anomalies(
+                spec=_spec(),
+                code="# original code\n",
+                trades=[],
+                metrics=_metrics_for(),
+                exec_result=_zero_trade_exec_result(),
+                market_data=_market_data(),
+                config=_config(),
+                critical_anomalies=[_critical_anomaly()],
+                all_gate_results=[],
+                refinement_attempts=[],
+                zero_trade_attempts=[],
+                round_num=0,
+                stall_tracker=RefinementStallTracker(),
+                emit=lambda *a, **k: None,
+            )
+
+    assert exc_info.value.latest_spec.strategy_id == _spec().strategy_id
+    assert exc_info.value.latest_code == "# original code\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1516,3 +1574,31 @@ def test_embedded_schema_matches_format_constraint() -> None:
     from whatever is validated elsewhere."""
     assert json.loads(_ZERO_TRADE_REPAIR_SCHEMA_JSON) == ZERO_TRADE_REPAIR_SCHEMA
     assert ZERO_TRADE_REPAIR_SCHEMA["required"] == ["root_cause_category"]
+
+
+def test_run_propagates_budget_exhaustion_not_fallback_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ZeroTradeRepairAgent.run`` now charges the active per-cycle LLM
+    budget (#1569). When the budget is already spent, ``DesignBudgetExhausted``
+    must propagate to the caller, NOT be swallowed into the agent's own
+    fallback-report ``except Exception`` branch (which would silently mask a
+    budget trip as an ordinary parse failure)."""
+    from investment_team.strategy_lab.agents._llm_budget import (
+        DesignBudgetExhausted,
+        LLMCallBudget,
+        use_budget,
+    )
+
+    _patch_zero_trade_repair(monkeypatch, '{"root_cause_category": "NO_ORDERS_EMITTED"}')
+
+    spent_budget = LLMCallBudget(1)
+    spent_budget.charge()  # pre-exhaust: the agent's own charge must trip it
+
+    with use_budget(spent_budget):
+        with pytest.raises(DesignBudgetExhausted):
+            ZeroTradeRepairAgent().run(
+                spec=_spec(),
+                code="# original",
+                diagnostics=BacktestExecutionDiagnostics(zero_trade_category="NO_ORDERS_EMITTED"),
+            )

@@ -32,6 +32,7 @@ unchanged for the synthesis-loop tests.
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pytest
@@ -340,6 +341,29 @@ def noop_refine(code: str) -> Callable[..., Tuple[Dict[str, Any], str]]:
     return _run
 
 
+def varying_code_refine(code: str) -> Callable[..., Tuple[Dict[str, Any], str]]:
+    """Build a stub ``RefinementAgent.run`` that returns cosmetically distinct
+    code on every call (an incrementing trailing comment).
+
+    Unlike ``noop_refine``, each returned code string hashes differently, so
+    ``_cached_run_strategy_code``'s ``BacktestCache`` (keyed on
+    ``hash_code(code)``) treats every round as a fresh execution instead of
+    replaying the first round's cached ``StrategyRunResult`` forever. Use
+    this — not ``noop_refine`` — when a test needs the synthesis loop to
+    reach genuine round-cap exhaustion via the EXECUTE phase specifically:
+    under ``noop_refine`` the code never changes, so after round 0 every
+    subsequent execution is a cache hit with byte-identical
+    ``failure_details``, which the refinement-loop stall guard correctly
+    treats as a stall rather than letting the loop churn to the round cap.
+    """
+    counter = itertools.count()
+
+    def _run(**_kwargs) -> Tuple[Dict[str, Any], str]:
+        return {"changes_made": "no-op"}, f"{code}\n# refinement round {next(counter)}\n"
+
+    return _run
+
+
 def failing_sandbox(
     *, error_type: str = "runtime_error", stderr: str = "forced failure for test"
 ) -> Callable[..., Any]:
@@ -348,6 +372,13 @@ def failing_sandbox(
     Use via
     ``monkeypatch.setattr(orchestrator_module, "run_strategy_code", failing_sandbox())``
     when the test wants the synthesis loop to exhaust on the execute path.
+
+    Pair with ``varying_code_refine`` (not ``noop_refine``) when the test
+    needs the loop to reach genuine round-cap exhaustion: under
+    ``noop_refine`` the code never changes, so ``_cached_run_strategy_code``'s
+    ``BacktestCache`` returns the first round's cached, byte-identical
+    ``StrategyRunResult`` forever — which the refinement-loop stall guard
+    correctly treats as a stall rather than round-cap exhaustion.
     """
     from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 

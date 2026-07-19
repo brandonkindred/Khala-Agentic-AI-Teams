@@ -31,12 +31,22 @@ export class StrategyLabRunService implements OnDestroy {
   private readonly _paperTradingSessions = signal<Record<string, PaperTradingSession>>({});
   /** lab_record_id of the paper-trade session a caller-initiated trackPaperTradingSession() is following, or null. */
   private readonly _paperTradingLabRecordId = signal<string | null>(null);
+  /**
+   * `runStatus`'s value at the instant `finishRun()` clears it — the only way
+   * to learn how a run ended when that happens without an explicit
+   * `complete`/`error` stream event to carry the outcome (SSE degrades to
+   * polling and polling itself observes the terminal status; or a
+   * reconnect's terminal `snapshot` is followed straight by `done`, closing
+   * the stream with no distinct terminal event of its own).
+   */
+  private readonly _lastTerminalStatus = signal<StrategyLabRunStatus | null>(null);
 
   readonly runStatus = this._runStatus.asReadonly();
   readonly running = this._running.asReadonly();
   readonly activeRunId = this._activeRunId.asReadonly();
   readonly paperTradingSessions = this._paperTradingSessions.asReadonly();
   readonly paperTradingLabRecordId = this._paperTradingLabRecordId.asReadonly();
+  readonly lastTerminalStatus = this._lastTerminalStatus.asReadonly();
 
   /** Every raw SSE event, for side effects the run-status shape doesn't carry (e.g. reload results on `cycle_complete`). */
   private readonly _events = new Subject<StrategyLabStreamEvent>();
@@ -117,9 +127,12 @@ export class StrategyLabRunService implements OnDestroy {
    *
    * Preconditions: `runId` is the id `initialStatus` itself describes.
    * Postconditions: `running()` is true, `runStatus()`/`activeRunId()`
-   *   reflect the given values, and the run's SSE stream is connected.
+   *   reflect the given values, `lastTerminalStatus()` is reset to null (so a
+   *   prior run's captured outcome can't leak into this one), and the run's SSE
+   *   stream is connected.
    */
   startRun(runId: string, initialStatus: StrategyLabRunStatus): void {
+    this._lastTerminalStatus.set(null);
     this._activeRunId.set(runId);
     this._runStatus.set(initialStatus);
     this._running.set(true);
@@ -135,15 +148,38 @@ export class StrategyLabRunService implements OnDestroy {
     });
   }
 
+  /**
+   * Fold one SSE event into `runStatus` and re-emit it on `events$` for the
+   * component's own side effects; finish the run on a terminal event.
+   *
+   * Preconditions: called only as the SSE subscription's `next` handler.
+   * Postconditions: `runStatus()` is the reducer's fold of the prior status and
+   *   `event`; the event is forwarded on `events$` synchronously; and on a
+   *   terminal event (`complete`/`error`/`cancelled`) `finishRun()` runs
+   *   afterward (so `lastTerminalStatus` captures the just-folded status and the
+   *   SSE/poll subscription is torn down).
+   */
   private handleStreamEvent(event: StrategyLabStreamEvent): void {
     this._runStatus.set(reduceStrategyLabRun(this._runStatus(), event));
     this._events.next(event);
-    if (event.type === 'complete' || event.type === 'error') {
+    if (event.type === 'complete' || event.type === 'error' || event.type === 'cancelled') {
       this.finishRun();
     }
   }
 
+  /**
+   * Preconditions: called only from `connectToStream()`'s `complete`
+   *   callback, `handleStreamEvent()`'s terminal-event branch, or
+   *   `fallbackToPolling()`'s terminal/error branches — never directly by a
+   *   component.
+   * Postconditions: `lastTerminalStatus()` captures `runStatus()`'s value at
+   *   the instant this runs (before it's cleared), so callers see the true
+   *   terminal outcome even when no explicit `complete`/`error` event
+   *   reaches them. `running()` is false, `activeRunId()`/`runStatus()` are
+   *   null, and any live SSE/poll subscription is unsubscribed.
+   */
   private finishRun(): void {
+    this._lastTerminalStatus.set(this._runStatus());
     this._running.set(false);
     this._activeRunId.set(null);
     this._runStatus.set(null);
@@ -153,6 +189,17 @@ export class StrategyLabRunService implements OnDestroy {
     this.pollSub = null;
   }
 
+  /**
+   * Preconditions: `runId` identifies the run whose SSE stream just errored
+   *   (called only from `connectToStream()`'s `error` callback).
+   * Postconditions: begins polling `getRunStatus(runId)` every 5s until a
+   *   non-`'running'` status arrives, at which point `finishRun()` runs.
+   *   `runStatus()` is updated on every successful poll. If polling itself
+   *   errors, `runStatus()` is cleared to null first so `finishRun()`
+   *   captures a null `lastTerminalStatus` (a genuinely unknown outcome)
+   *   rather than a stale `'running'` status a caller could mistake for a
+   *   real terminal outcome.
+   */
   private fallbackToPolling(runId: string): void {
     this.pollSub?.unsubscribe();
     this.pollSub = timer(0, 5000)
@@ -168,7 +215,13 @@ export class StrategyLabRunService implements OnDestroy {
           }
         },
         error: () => {
-          // Polling also failed — stop tracking.
+          // Polling itself failed — the run's fate is genuinely unknown, not
+          // "still running" (the last value takeWhile let through before this
+          // error). Clear runStatus before finishRun() captures it into
+          // lastTerminalStatus, so that signal reads null here rather than a
+          // stale 'running' status a caller could mistake for a real
+          // terminal outcome (e.g. announcing success for a lost connection).
+          this._runStatus.set(null);
           this.finishRun();
         },
       });
