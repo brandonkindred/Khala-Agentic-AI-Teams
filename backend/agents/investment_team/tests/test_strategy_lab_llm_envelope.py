@@ -540,6 +540,9 @@ def test_design_invoke_charges_once_despite_transport_retry(
     monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", "2")
     stub = _Stub(httpx.ConnectError("flaky"), '{"asset_class": "stocks", "rationale": "r"}')
     charges = {"n": 0}
+    # Exercise the legacy unconstrained loop directly (this test calls
+    # `_invoke_and_parse` without going through the structured pre-flight).
+    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: False)
     monkeypatch.setattr(design_mod, "Agent", _fake_agent_class(stub))
     monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: None)
     monkeypatch.setattr(design_mod, "validate_structured_rules", lambda _parsed: None)
