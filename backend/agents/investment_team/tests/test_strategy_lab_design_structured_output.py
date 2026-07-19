@@ -216,6 +216,30 @@ def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.Monk
     assert len(stub_client.calls) == 1
 
 
+def test_structured_success_logs_outcome_succeeded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The design happy path emits an INFO ``outcome=succeeded`` marker so the
+    resend-free path is observable in production logs."""
+    stub_client = _StubClient(_good_design_payload())
+    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
+    monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
+
+    logger_name = "investment_team.strategy_lab.agents.design"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        DesignAgent().run(prior_records=[])
+
+    succeeded = [
+        r
+        for r in caplog.records
+        if "outcome=succeeded" in r.message and "phase=design_generate_structured" in r.message
+    ]
+    assert len(succeeded) == 1
+    assert "agent=strategy_design" in succeeded[0].message
+
+
 def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     stub_client = _StubClient(_good_design_payload())
     monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
@@ -459,10 +483,13 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
 # ---------------------------------------------------------------------------
 
 
-def test_self_review_uses_structured_path_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_self_review_uses_structured_path_when_available(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """Both the design-generate call and the self-review critique call use
     structured decoding, with zero ``strands.Agent`` construction — proving
-    ``_self_review`` needed its own wiring rather than falling out for free."""
+    ``_self_review`` needed its own wiring rather than falling out for free.
+    Each independently emits its own ``outcome=succeeded`` marker."""
     client = _SchemaRoutedClient(
         _good_design_payload(),
         {"ready": True, "rationale": "looks fine", "issues": []},
@@ -480,12 +507,26 @@ def test_self_review_uses_structured_path_when_available(monkeypatch: pytest.Mon
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
 
-    parsed, _ = DesignAgent().run(prior_records=[])
+    logger_name = "investment_team.strategy_lab.agents.design"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        parsed, _ = DesignAgent().run(prior_records=[])
 
     assert parsed["asset_class"] == "stocks"
     assert len(client.calls) == 2
     assert client.calls[0]["schema"] is DESIGN_SPEC_SCHEMA
     assert client.calls[1]["schema"] is CRITIQUE_SCHEMA
+
+    phases = {
+        "design_generate_structured": 0,
+        "design_self_review_structured": 0,
+    }
+    for record in caplog.records:
+        if "outcome=succeeded" not in record.message:
+            continue
+        for phase in phases:
+            if f"phase={phase}" in record.message:
+                phases[phase] += 1
+    assert phases == {"design_generate_structured": 1, "design_self_review_structured": 1}
 
 
 def test_self_review_schema_forced_starvation_degrades_to_legacy_agent(

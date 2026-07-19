@@ -6,10 +6,23 @@ brace-counting extractor and validated with pydantic. The Ollama transport
 routes through the ``llm_service`` client in ``json_object`` wire mode (see
 ``model_factory.get_strands_model``), which forces a JSON object on the wire but
 not a specific shape; the shape contract is enforced by pydantic validation
-downstream. The earlier strands-native decoder-level ``format=<json-schema>``
-constraint was retired because (paired with thinking-enabled models on long
-code-emitting turns) it could starve the content channel and yield an empty,
-brace-less response.
+downstream. This ``json_object`` + pydantic path is the sole contract for the
+zero-trade-repair and alignment agents, and the graceful-degradation fallback
+for every agent when provider-enforced decoding is unavailable.
+
+``RefinementAgent``, ``DesignAgent``, and ``DesignReviewAgent`` additionally
+request provider-enforced, decoder-level schema-conformant decoding for their
+respective schemas (``REFINEMENT_SCHEMA``, ``DESIGN_SPEC_SCHEMA``,
+``CRITIQUE_SCHEMA``) via ``LLMClient.complete_json(schema=...)`` whenever
+``llm_service.provider_supports_structured_output(...)`` is True (Ollama only
+today), which removes the happy-path parse-correction resend on these
+token-heavy calls. This is capability-gated per call site and degrades to the
+``json_object`` + pydantic path above on the ``schema_forced`` starvation
+signal — the same failure that retired the *unconditional* decoder-level
+``format=<json-schema>`` constraint, which (paired with thinking-enabled models
+on long code-emitting turns) could starve the content channel and yield an
+empty, brace-less response. See ``strategy_lab/README.md`` (§ *Ollama LLM
+transport*) for the full behavior and telemetry narrative.
 
 These constants remain the canonical machine-readable definition of each
 agent's wire shape: the refinement agent embeds ``REFINEMENT_SCHEMA`` verbatim

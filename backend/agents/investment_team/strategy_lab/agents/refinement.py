@@ -295,9 +295,10 @@ class RefinementAgent:
         re-prompt must be read as "reissue the whole object correctly", not
         "continue from what you emitted".
         """
-        if _structured_output_available():
+        structured_attempted = _structured_output_available()
+        if structured_attempted:
             try:
-                return self._invoke_structured(system_prompt, user_prompt, failure_phase)
+                result = self._invoke_structured(system_prompt, user_prompt, failure_phase)
             except StrategyLabLLMError as exc:
                 cause = exc.cause
                 if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
@@ -307,6 +308,14 @@ class RefinementAgent:
                     "failure_phase=%s; degrading to unconstrained parse-retry loop.",
                     failure_phase,
                 )
+            else:
+                logger.info(
+                    "strategy_lab structured_output outcome=succeeded "
+                    "agent=strategy_refinement phase=refinement_structured "
+                    "failure_phase=%s",
+                    failure_phase,
+                )
+                return result
 
         retries = parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES")
         prompt = user_prompt
@@ -329,10 +338,11 @@ class RefinementAgent:
             except ValueError as exc:
                 logger.warning(
                     "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
-                    "for failure_phase=%s: %s",
+                    "for failure_phase=%s (structured_attempted=%s): %s",
                     attempt + 1,
                     retries + 1,
                     failure_phase,
+                    structured_attempted,
                     exc,
                 )
                 if attempt >= retries:

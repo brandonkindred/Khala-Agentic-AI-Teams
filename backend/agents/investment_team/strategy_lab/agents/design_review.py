@@ -612,6 +612,11 @@ class DesignReviewAgent:
                         "degrading to the legacy single-shot call."
                     )
                     parsed = _invoke_legacy()
+                else:
+                    logger.info(
+                        "strategy_lab structured_output outcome=succeeded "
+                        "agent=strategy_design_review phase=design_review_structured",
+                    )
             else:
                 parsed = _invoke_legacy()
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
