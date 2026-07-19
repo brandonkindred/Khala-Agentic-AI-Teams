@@ -86,6 +86,30 @@ class AgentLockBusyError(AgentLockError):
         super().__init__(f"agent {agent_id!r} is currently locked by owner {holder!r}")
 
 
+class StaleFencingTokenError(AgentLockError):
+    """Raised by :meth:`AgentLockStore.check_fencing_token` when a caller's
+    token has been superseded by a later acquisition for the same agent.
+
+    A resumed-but-stale workflow presenting a fencing token lower than the
+    highest one already recorded for ``agent_id`` proves a different owner
+    has since reclaimed the lease — this error is the caller's signal to
+    abandon its mutation rather than apply it.
+
+    Attributes:
+        agent_id: The agent whose fencing token was checked.
+        token: The presented (stale) token.
+        current_token: The highest token currently recorded for ``agent_id``.
+    """
+
+    def __init__(self, agent_id: str, token: int, current_token: int) -> None:
+        self.agent_id = agent_id
+        self.token = token
+        self.current_token = current_token
+        super().__init__(
+            f"stale fencing token {token} for agent {agent_id!r}: current token is {current_token}"
+        )
+
+
 class AgentLockStore:
     """JSON-backed, cross-process ownership record keyed by ``agent_id``.
 
@@ -297,3 +321,39 @@ class AgentLockStore:
         if record is None or self._is_expired(record, now):
             return None
         return record.get("owner")
+
+    def check_fencing_token(self, agent_id: str, token: int) -> None:
+        """Reject a fencing token superseded by a later acquisition.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+            * ``token`` is the caller's own fencing token from a prior
+              :meth:`acquire` call.
+        Postconditions:
+            * A no-op when no record exists for ``agent_id`` — nothing to
+              compare against, mirroring :meth:`get_owner`'s "absent means
+              safe" contract.
+            * A no-op when ``token`` is greater than or equal to the
+              record's persisted ``fencing_token``.
+            * Raises :class:`StaleFencingTokenError` when ``token`` is
+              strictly less than the record's persisted ``fencing_token``:
+              proof a different, later owner has since reclaimed
+              ``agent_id``'s lease (:meth:`acquire` only increments the
+              token for a *different* owner — a same-owner renewal leaves
+              it unchanged), so the caller's own lease is stale.
+            * Lock-free read (mirrors :meth:`get_owner`): does not consider
+              TTL expiry, only the persisted ``fencing_token`` high-water
+              mark — a lease merely past its TTL but not yet reclaimed by
+              anyone else still has the caller's own token as the highest
+              recorded value, so it is correctly treated as current here.
+            * Raises :class:`AgentLockError` when a record exists but
+              cannot be read (same fail-closed contract as
+              :meth:`acquire`/:meth:`release`/:meth:`get_owner`).
+        """
+        assert agent_id, "agent_id must be non-empty"
+        record = self._read_record(agent_id)
+        if record is None:
+            return
+        current_token = record.get("fencing_token")
+        if isinstance(current_token, (int, float)) and token < current_token:
+            raise StaleFencingTokenError(agent_id, token, int(current_token))

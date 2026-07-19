@@ -52,6 +52,7 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=30),
     maximum_interval=timedelta(minutes=2),
     backoff_coefficient=2.0,
+    non_retryable_error_types=["StaleFencingTokenError"],
 )
 
 # Bounds how long a workflow keeps retrying a busy per-agent_id lock
@@ -71,7 +72,7 @@ TOOL_RETRY_POLICY = RetryPolicy(
     initial_interval=timedelta(seconds=15),
     maximum_interval=timedelta(minutes=2),
     backoff_coefficient=2.0,
-    non_retryable_error_types=["ValueError"],
+    non_retryable_error_types=["ValueError", "StaleFencingTokenError"],
 )
 
 # Replay-compatibility gates for the per-agent_id ownership lock
