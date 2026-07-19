@@ -39,6 +39,7 @@ success/failure paths always release explicitly and never depend on it.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -51,6 +52,8 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX platform
     fcntl = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LOCK_TTL_SECONDS = 7200
 
@@ -356,4 +359,11 @@ class AgentLockStore:
             return
         current_token = record.get("fencing_token")
         if isinstance(current_token, (int, float)) and token < current_token:
-            raise StaleFencingTokenError(agent_id, token, int(current_token))
+            current_token = int(current_token)
+            logger.error(
+                "Stale fencing token rejected for agent_id=%s: presented token=%s, current token=%s",
+                agent_id,
+                token,
+                current_token,
+            )
+            raise StaleFencingTokenError(agent_id, token, current_token)

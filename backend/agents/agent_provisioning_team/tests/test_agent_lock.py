@@ -252,6 +252,40 @@ def test_check_fencing_token_rejects_lower_token(tmp_path: Path) -> None:
     assert exc_info.value.current_token == 2
 
 
+def test_check_fencing_token_rejection_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stale-token rejection must be diagnosable from logs alone: the log
+    record identifies agent_id, the presented token, and the current token."""
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+
+    store = _store(tmp_path, ttl_seconds=100)
+    store.acquire("agent-1", owner="job-1", now=1000.0)  # token 1
+    store.acquire("agent-1", owner="job-2", now=1200.0)  # reclaimed -> token 2
+
+    with caplog.at_level("ERROR", logger="agent_provisioning_team.shared.agent_lock"):
+        with pytest.raises(StaleFencingTokenError):
+            store.check_fencing_token("agent-1", 1)
+
+    [record] = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert "agent-1" in record.getMessage()
+    assert "1" in record.getMessage()  # presented token
+    assert "2" in record.getMessage()  # current token
+
+
+def test_check_fencing_token_accept_paths_do_not_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the rejection path logs -- an accepted token must stay silent."""
+    store = _store(tmp_path)
+    token = store.acquire("agent-1", owner="job-1")
+
+    with caplog.at_level("ERROR", logger="agent_provisioning_team.shared.agent_lock"):
+        store.check_fencing_token("agent-1", token)
+
+    assert caplog.records == []
+
+
 def test_check_fencing_token_is_noop_when_no_record_exists(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.check_fencing_token("never-acquired", 1)  # must not raise

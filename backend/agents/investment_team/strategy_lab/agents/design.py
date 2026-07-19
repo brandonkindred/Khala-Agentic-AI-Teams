@@ -49,8 +49,13 @@ from ._parse_helpers import (
     parse_retry_budget,
     validate_structured_rules,
 )
-from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
-from .design_review import _coerce_critique, _sizing_owned_by_gate, format_prior_critiques
+from ._response_schemas import DESIGN_SPEC_SCHEMA
+from .design_review import (
+    _coerce_critique,
+    _invoke_structured_critique,
+    _sizing_owned_by_gate,
+    format_prior_critiques,
+)
 from .model_factory import get_strands_model
 
 if TYPE_CHECKING:
@@ -688,88 +693,6 @@ class DesignAgent:
         # type-checker sees a definite return.
         return strategy_dict, rationale  # pragma: no cover
 
-    def _invoke_self_review_structured(self, user_prompt: str) -> Dict[str, Any]:
-        """Request provider-enforced schema-conformant decoding for one self-review call.
-
-        Same shape as :meth:`_invoke_structured`, but for the self-review
-        critique (``CRITIQUE_SCHEMA``) rather than the design spec
-        (``DESIGN_SPEC_SCHEMA``).
-
-        Preconditions: ``_structured_output_available()`` is True (checked
-        by the caller, :meth:`_invoke_self_review`); ``user_prompt`` is
-        non-empty.
-        Postconditions: returns the parsed JSON dict on success. Raises
-        :class:`~..exceptions.StrategyLabLLMError` on any transport/parse
-        failure — including a ``schema_forced`` starvation signal the
-        caller inspects to decide whether to degrade.
-        """
-        client = get_strands_model("strategy_design").client
-
-        def _call(prompt: str) -> str:
-            result = client.complete_json(
-                prompt,
-                objective="strategy design self-review (structured)",
-                system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
-                schema=CRITIQUE_SCHEMA,
-            )
-            return json.dumps(result)
-
-        return run_structured_agent(
-            _call,
-            user_prompt,
-            agent_key="strategy_design",
-            phase="design_self_review_structured",
-            parse=extract_json_object,
-            charge=True,
-            logger=logger,
-        )
-
-    def _invoke_self_review(self, user_prompt: str) -> Dict[str, Any]:
-        """Get the self-review's parsed JSON verdict, preferring structured decoding.
-
-        Preconditions: ``user_prompt`` is the fully-rendered self-review
-        audit prompt.
-        Postconditions: returns the parsed JSON dict. Raises on any
-        failure — the caller (:meth:`_self_review`) is itself best-effort
-        and lets any exception propagate to :meth:`_with_self_review`'s
-        catch-all, so this method deliberately does no fail-closed
-        handling of its own.
-
-        Mirrors :meth:`_invoke_and_parse`'s structured-first shape: a
-        single schema-constrained call is attempted first when the
-        capability is available; any failure OTHER than ``schema_forced``
-        starvation propagates immediately; capability absence or
-        ``schema_forced`` starvation falls through to the unconstrained
-        single call below (today's exact behavior — self-review has no
-        parse-retry loop of its own).
-        """
-        if _structured_output_available():
-            try:
-                return self._invoke_self_review_structured(user_prompt)
-            except StrategyLabLLMError as exc:
-                cause = exc.cause
-                if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
-                    raise
-                logger.warning(
-                    "structured design self-review decode starved (schema_forced); "
-                    "degrading to unconstrained call."
-                )
-
-        agent = Agent(
-            model=get_strands_model("strategy_design"),
-            system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
-            tools=[],
-        )
-        return run_structured_agent(
-            agent,
-            user_prompt,
-            agent_key="strategy_design",
-            phase="design_self_review",
-            parse=extract_json_object,
-            charge=True,
-            logger=logger,
-        )
-
     def _self_review(self, strategy_dict: Dict[str, Any]) -> "SpecCritique":
         """Audit ``strategy_dict`` for prose↔predicate + risk-math contradictions.
 
@@ -786,7 +709,43 @@ class DesignAgent:
             "verdict, no markdown.\n\n"
             f"```json\n{spec_json}\n```\n"
         )
-        parsed = self._invoke_self_review(user_prompt)
+
+        def _invoke_legacy() -> Dict[str, Any]:
+            agent = Agent(
+                model=get_strands_model("strategy_design"),
+                system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
+                tools=[],
+            )
+            return run_structured_agent(
+                agent,
+                user_prompt,
+                agent_key="strategy_design",
+                phase="design_self_review",
+                parse=extract_json_object,
+                charge=True,
+                logger=logger,
+            )
+
+        if _structured_output_available():
+            try:
+                parsed = _invoke_structured_critique(
+                    agent_key="strategy_design",
+                    system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    phase="design_self_review_structured",
+                    charge=True,
+                )
+            except StrategyLabLLMError as exc:
+                cause = exc.cause
+                if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
+                    raise
+                logger.warning(
+                    "structured design self-review decode starved (schema_forced); "
+                    "degrading to the legacy single-shot call."
+                )
+                parsed = _invoke_legacy()
+        else:
+            parsed = _invoke_legacy()
         # Self-review tolerates advisory warnings on an otherwise-ready
         # verdict: the self-review LLM routinely flags minor notes as
         # warnings while still satisfied with the spec. Only a *critical*
