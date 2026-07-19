@@ -7,10 +7,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from strands import Agent
+
 from llm_service import provider_supports_structured_output
 from llm_service.config import resolve_provider
 from llm_service.interface import LLMSemanticExhaustionError
-from strands import Agent
 
 from ...models import BacktestResult, StrategySpec
 from ..exceptions import StrategyLabLLMError
