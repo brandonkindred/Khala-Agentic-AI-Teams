@@ -9,6 +9,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from .models import (
+    DeprovisionCancelledError,
     DeprovisionResponse,
     Phase,
     ProvisioningResult,
@@ -601,6 +602,7 @@ class ProvisioningOrchestrator:
         self,
         agent_id: str,
         force: bool = False,
+        cancellation_checkpoint: Optional[Callable[[], bool]] = None,
     ) -> DeprovisionResponse:
         """
         Deprovision an agent: remove all resources and access.
@@ -608,9 +610,20 @@ class ProvisioningOrchestrator:
         Args:
             agent_id: Agent to deprovision
             force: Force removal even if errors occur
+            cancellation_checkpoint: Optional callable polled before each
+                per-tool teardown call (each provisioner in the loop, plus the
+                explicit Docker teardown call below). When it returns ``True``,
+                deprovision stops before issuing that call and raises
+                ``DeprovisionCancelledError`` instead of returning — the caller
+                (a Temporal activity wrapper) uses this to distinguish an
+                interrupted run from one that completed the full sequence.
 
         Returns:
             DeprovisionResponse with results
+
+        Raises:
+            DeprovisionCancelledError: ``cancellation_checkpoint`` signalled
+                cancellation before all per-tool teardown calls completed.
         """
         results: Dict[str, Any] = {}
         errors: List[str] = []
@@ -618,6 +631,7 @@ class ProvisioningOrchestrator:
         tool_results = deprovision_tools(
             agent_id=agent_id,
             provisioners=self.tool_agents,
+            checkpoint=cancellation_checkpoint,
         )
         results["tools"] = tool_results
 
@@ -627,6 +641,8 @@ class ProvisioningOrchestrator:
 
         docker = self.tool_agents.get("docker_provisioner")
         if docker:
+            if cancellation_checkpoint is not None and cancellation_checkpoint():
+                raise DeprovisionCancelledError(agent_id, results)
             docker_result = docker.deprovision(agent_id)
             results["docker"] = docker_result.success
             if not docker_result.success and docker_result.error:
