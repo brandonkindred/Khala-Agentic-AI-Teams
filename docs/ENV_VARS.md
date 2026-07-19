@@ -460,6 +460,22 @@ are treated as "no cutoff configured" (fail safe: every open execution of
 either workflow type is reported, never silently none) rather than falling
 back to a default timestamp.
 
+### AGENT_PROVISIONING_DRAIN_GATE_ENABLED
+Enables (default) or disables the rollout drain gate enforced by
+`api/main.py`'s `POST /provision` and `DELETE /environments/{agent_id}`
+handlers: before starting a new workflow for an `agent_id`, each calls
+`find_open_pre_patch_executions(agent_id=...)` and refuses the request
+(`409`, with a `Retry-After` header) when an open pre-lock-patch execution for
+that `agent_id` is still running, rather than letting the new request race it.
+Set to `0`/`false`/`no`/`off` (case-insensitive) to disable the gate entirely;
+any other value, or leaving it unset, keeps it enabled. Once no workflow
+history predates the lock patch, this gate — and the
+`AGENT_PROVISIONING_LOCK_PATCH_CUTOFF_AT` cutoff it depends on — can be
+retired along with the `workflow.patched(...)` markers themselves. If the
+visibility query itself cannot be answered (Temporal client not ready, or the
+query times out), the gate fails open — logged as a warning — rather than
+blocking all provisioning/deprovisioning traffic on a visibility-RPC hiccup.
+
 ## Agentic Team Provisioning
 
 WAIT-state reliability for Agent Studio pipeline test runs

@@ -7,11 +7,13 @@ Provides REST API for provisioning, status tracking, and deprovisioning.
 import concurrent.futures
 import contextlib
 import logging
+import os
 import uuid
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Union
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 from temporalio.exceptions import TemporalError, WorkflowAlreadyStartedError
 
@@ -55,6 +57,7 @@ from ..shared.job_store import (
     reset_job as store_reset_job,
 )
 from ..shared.path_safety import safe_path_component
+from ..shared.visibility_query import find_open_pre_patch_executions
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,93 @@ init_otel(service_name="agent-provisioning-team", team_key="agent_provisioning")
 
 
 _TEMPORAL_REQUIRED_MESSAGE = "Temporal is required for agent provisioning (set TEMPORAL_ADDRESS)"
+
+# Env var gating the rollout drain gate below. Defaults to enabled: an
+# unset/unrecognized value must never silently turn the gate off. Documented
+# in docs/ENV_VARS.md alongside the cutoff var.
+DRAIN_GATE_ENABLED_ENV_VAR = "AGENT_PROVISIONING_DRAIN_GATE_ENABLED"
+_DRAIN_GATE_DISABLE_VALUES = frozenset({"0", "false", "no", "off"})
+
+# How long a rejected caller should wait before retrying, surfaced via the
+# response's Retry-After header. Not tied to any workflow timeout — this is
+# just a reasonable client-side backoff hint.
+_DRAIN_GATE_RETRY_AFTER_S = 30
+
+# The visibility query's own client-ready wait: on a request path (unlike the
+# gate's originating rollout runbook use case) this must fail fast rather than
+# block the caller for the library default's full ready-wait ceiling.
+_DRAIN_GATE_CLIENT_READY_TIMEOUT_S = 2.0
+
+
+def _drain_gate_enabled() -> bool:
+    """Whether the pre-patch drain gate should run before a new request.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns ``False`` only when ``DRAIN_GATE_ENABLED_ENV_VAR`` is set to
+          one of ``_DRAIN_GATE_DISABLE_VALUES`` (case-insensitive).
+        * Returns ``True`` otherwise, including when the var is unset —
+          fail-safe default is "gate on", matching this rollout's goal of not
+          silently reopening the race it exists to close.
+    """
+    return (
+        os.environ.get(DRAIN_GATE_ENABLED_ENV_VAR, "").strip().lower()
+        not in _DRAIN_GATE_DISABLE_VALUES
+    )
+
+
+def _reject_if_pre_patch_open(agent_id: str) -> Optional[JSONResponse]:
+    """Refuse a new provisioning/deprovisioning request racing an open pre-patch execution.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * Returns ``None`` when the gate is disabled, the visibility query
+          could not be answered (Temporal client not ready / query timeout —
+          logged and treated as fail-open so a visibility-RPC hiccup never
+          blocks all provisioning/deprovisioning traffic), or no open
+          pre-patch execution exists for ``agent_id``: the caller should
+          proceed.
+        * Returns a ``JSONResponse(status_code=409, headers={"Retry-After": ...})``
+          when at least one open pre-patch execution exists for ``agent_id``:
+          the caller must return this response as-is instead of proceeding.
+    """
+    assert agent_id, "agent_id must be non-empty"
+    if not _drain_gate_enabled():
+        return None
+    try:
+        blocking = find_open_pre_patch_executions(
+            agent_id=agent_id, client_ready_timeout_s=_DRAIN_GATE_CLIENT_READY_TIMEOUT_S
+        )
+    except (RuntimeError, concurrent.futures.TimeoutError) as exc:
+        logger.warning(
+            "Drain-gate visibility check failed for agent_id=%s; proceeding without it (%s)",
+            agent_id,
+            exc,
+        )
+        return None
+    if not blocking:
+        return None
+    logger.warning(
+        "Refusing request for agent_id=%s: %d open pre-lock-patch execution(s) still running (%s)",
+        agent_id,
+        len(blocking),
+        [b.workflow_id for b in blocking],
+    )
+    return JSONResponse(
+        status_code=409,
+        headers={"Retry-After": str(_DRAIN_GATE_RETRY_AFTER_S)},
+        content={
+            "detail": (
+                f"Cannot start a new request for agent_id={agent_id!r}: "
+                f"{len(blocking)} pre-lock-patch workflow execution(s) for this agent are "
+                "still open. Retry once they have drained."
+            ),
+            "agent_id": agent_id,
+            "open_pre_patch_executions": len(blocking),
+        },
+    )
 
 
 def _require_safe_agent_id(agent_id: str) -> str:
@@ -384,7 +474,7 @@ def _list_agents(status: Optional[str] = None) -> List[Dict[str, Any]]:
     description="Start an asynchronous provisioning job for a new agent. "
     "Returns a job_id to poll for status.",
 )
-def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
+def start_provisioning(request: ProvisionRequest) -> Union[ProvisionJobResponse, JSONResponse]:
     """Start a new provisioning job.
 
     Preconditions:
@@ -397,8 +487,15 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
           response still includes ``job_id`` so the client can poll status.
         * On other Temporal dispatch failures: the job is marked failed and
           HTTP 503 is raised.
+        * If an open pre-lock-patch execution still exists for
+          ``request.agent_id``, no job-store row is created and a
+          ``JSONResponse(status_code=409)`` is returned instead.
     """
     starter = _require_provision_starter()
+
+    drain_gate_rejection = _reject_if_pre_patch_open(request.agent_id)
+    if drain_gate_rejection is not None:
+        return drain_gate_rejection
 
     job_id = str(uuid.uuid4())
     create_job(
@@ -634,7 +731,7 @@ def restart_provision_job(job_id: str) -> ProvisionJobResponse:
 def deprovision_agent(
     agent_id: str,
     force: bool = Query(False, description="Force removal even if errors occur"),
-) -> DeprovisionResponse:
+) -> Union[DeprovisionResponse, JSONResponse]:
     """Deprovision an agent and remove all resources.
 
     Runs as a durable ``AgentDeprovisioningWorkflow`` (execute-and-wait, so
@@ -650,9 +747,17 @@ def deprovision_agent(
         * Once execute-and-wait has begun, workflow/application failures and
           client-wait timeouts (``TimeoutError``) are returned as
           ``DeprovisionResponse(success=False, ...)`` (not 500).
+        * If an open pre-lock-patch execution still exists for ``agent_id``,
+          the workflow is never started and a
+          ``JSONResponse(status_code=409)`` is returned instead.
     """
     _require_safe_agent_id(agent_id)
     runner = _require_deprovision_runner()
+
+    drain_gate_rejection = _reject_if_pre_patch_open(agent_id)
+    if drain_gate_rejection is not None:
+        return drain_gate_rejection
+
     try:
         return DeprovisionResponse.model_validate(runner(agent_id, force))
     except ValidationError:
