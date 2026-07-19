@@ -4060,6 +4060,10 @@ class StrategyLabOrchestrator:
         # (alignment re-checks, determinism re-checks, audit re-backtests)
         # short-circuits to the stored ``StrategyRunResult``.
         self._backtest_cache = BacktestCache()
+        # Fresh, attempt-scoped benchmark-bars memo — same rationale as
+        # ``_backtest_cache`` above, so a re-entry never reuses a benchmark
+        # fetch across attempts.
+        self._benchmark_bars_cache = {}
 
         all_gate_results: List[QualityGateResult] = (
             cumulative_gate_results if cumulative_gate_results is not None else []
@@ -5427,6 +5431,48 @@ class StrategyLabOrchestrator:
             logger.exception("Regime evaluation failed for %s", spec.strategy_id)
             return []
 
+    def _cached_fetch_benchmark_bars(
+        self,
+        *,
+        symbols: List[str],
+        asset_class: str,
+        start_date: str,
+        end_date: str,
+        as_of: Optional[str],
+    ) -> Dict[str, List[OHLCVBar]]:
+        """Fetch benchmark bars through an attempt-scoped memo cache.
+
+        Preconditions:
+            ``symbols`` is a non-empty list of benchmark tickers; ``self``
+            may or may not have been through ``_run_design_attempt`` yet —
+            the cache is created lazily so a call made directly (e.g. from a
+            test, outside ``_run_design_attempt``) still works with a
+            degenerate one-entry cache.
+
+        Postconditions:
+            Returns the ``fetch_multi_symbol_range`` result for
+            ``(symbols, asset_class, start_date, end_date, as_of)``. The
+            first call for a given key delegates to
+            ``self.market_data_service.fetch_multi_symbol_range`` with
+            byte-identical arguments and stores the result; subsequent calls
+            with the same key return the stored result without refetching.
+            A raised exception is not cached — the next call with the same
+            key retries the fetch.
+        """
+        cache = getattr(self, "_benchmark_bars_cache", None)
+        if cache is None:
+            cache = self._benchmark_bars_cache = {}
+        key = (tuple(symbols), asset_class, start_date, end_date, as_of)
+        if key not in cache:
+            cache[key] = self.market_data_service.fetch_multi_symbol_range(
+                symbols=symbols,
+                asset_class=asset_class,
+                start_date=start_date,
+                end_date=end_date,
+                as_of=as_of,
+            )
+        return cache[key]
+
     def _build_benchmark_equity(
         self,
         spec: StrategySpec,
@@ -5439,7 +5485,10 @@ class StrategyLabOrchestrator:
         :func:`build_60_40_equity`; any other value falls back to the
         asset-class default benchmark from :func:`benchmark_for_strategy`.
         Both paths normalize closes into an equity series scaled by
-        ``config.initial_capital``.
+        ``config.initial_capital``. The underlying fetch is memoized via
+        ``_cached_fetch_benchmark_bars`` so repeated calls within the same
+        design attempt (e.g. multiple regime/walk-forward evaluations) issue
+        at most one network fetch per distinct ``(symbols, window, as_of)``.
         """
         composition = (config.benchmark_composition or "").strip().lower()
         # Issue #376 — pin benchmark fetches to the same ``as_of`` as the
@@ -5448,7 +5497,7 @@ class StrategyLabOrchestrator:
         as_of = (getattr(spec, "audit", None) and spec.audit.data_snapshot_id) or None
         if composition == "60_40":
             try:
-                blend = self.market_data_service.fetch_multi_symbol_range(
+                blend = self._cached_fetch_benchmark_bars(
                     symbols=["SPY", "AGG"],
                     asset_class="stocks",
                     start_date=config.start_date,
@@ -5473,7 +5522,7 @@ class StrategyLabOrchestrator:
         # Single-symbol fallback
         bench_symbol = benchmark_for_strategy(spec)
         try:
-            single = self.market_data_service.fetch_multi_symbol_range(
+            single = self._cached_fetch_benchmark_bars(
                 symbols=[bench_symbol],
                 asset_class=spec.asset_class,
                 start_date=config.start_date,
