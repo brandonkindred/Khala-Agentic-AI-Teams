@@ -250,10 +250,14 @@ def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
 
     Locking this at source level catches the alignment-loop and walk-
     forward-fallback paths that are not directly exercised by the
-    existing isolated drivers. Four call sites are expected: main loop +
-    alignment loop + walk-forward fallback live on the orchestrator
-    (``self.anomaly_detector.check``); the zero-trade-repair recheck
-    lives in :mod:`zero_trade_repair` (``orch.anomaly_detector.check``).
+    existing isolated drivers. Three call sites are expected: the main
+    loop and alignment loop now share a single physical call site inside
+    ``_check_anomalies_cached`` (the signature-guarded wrapper both route
+    through, mirroring the reachability-probe guard — see
+    ``test_strategy_lab_anomaly_cache.py``); walk-forward fallback stays
+    direct on the orchestrator (``self.anomaly_detector.check``); the
+    zero-trade-repair recheck lives in :mod:`zero_trade_repair`
+    (``orch.anomaly_detector.check``).
     """
     from investment_team.strategy_lab import zero_trade_repair as zt_repair_mod
 
@@ -269,10 +273,11 @@ def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
         root_names=frozenset({"orch"}),
     )
     sites = orch_sites + zt_sites
-    assert len(sites) == 4, (
-        "expected exactly 4 anomaly_detector.check sites (main loop, alignment "
-        "loop, walk-forward-fallback, zero-trade-repair recheck); if a new "
-        f"call site is intentional, bump this assertion. Found: {sites}"
+    assert len(sites) == 3, (
+        "expected exactly 3 anomaly_detector.check sites (main loop + "
+        "alignment loop sharing _check_anomalies_cached's call site, "
+        "walk-forward-fallback, zero-trade-repair recheck); if a new call "
+        f"site is intentional, bump this assertion. Found: {sites}"
     )
     missing = [s for s in sites if "coverage_report" not in s["kwargs"]]
     assert not missing, (
