@@ -93,6 +93,15 @@ def test_keyed_client_wraps_failover_and_is_llmclient(seed_ollama):
     assert c.model == "m"  # delegated through the failover wrapper to the active client
 
 
+def test_attributing_client_supports_structured_output_passthrough(seed_ollama):
+    """supports_structured_output has no explicit wrapper method — it must reach the
+    inner client via the same __getattr__ delegation as get_max_context_tokens above."""
+    seed_ollama(model="m")
+    c = get_client("backend")
+    assert c.supports_structured_output() == c._inner.supports_structured_output()
+    assert c.supports_structured_output() is True  # Ollama
+
+
 def test_get_client_none_is_unwrapped_failover(seed_ollama):
     seed_ollama(model="default-model")
     c = get_client(None)

@@ -61,39 +61,68 @@
           [headingLevel]="3"
         />
       } @else {
-        <div class="cr-repos-list">
-          @for (repo of repos; track repo.full_name; let i = $index) {
-            <button
-              class="cr-repo-row"
-              type="button"
-              [class.cr-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
-              [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
-              [attr.aria-controls]="'repo-pulls-' + i"
-              (click)="toggleRepo(repo)"
-            >
-              <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
-              <span class="cr-repo-row__name" [matTooltip]="repo.description">{{ repo.full_name }}</span>
-              @if (repo.archived) {
-                <span class="cr-chip">archived</span>
-              }
-              <mat-icon class="cr-repo-row__arrow" aria-hidden="true">
-                {{ selectedRepo?.full_name === repo.full_name ? 'expand_less' : 'chevron_right' }}
-              </mat-icon>
-            </button>
+        <mat-form-field appearance="outline" class="cr-search-field cr-repo-search">
+          <mat-label>Search repositories</mat-label>
+          <mat-icon matPrefix>search</mat-icon>
+          <input
+            matInput
+            type="search"
+            [ngModel]="repoFilter"
+            (ngModelChange)="onRepoFilterChange($event)"
+            placeholder="Name or description…"
+          />
+        </mat-form-field>
+        <p class="visually-hidden" role="status" aria-live="polite">{{ repoCountAnnouncement }}</p>
 
-            @if (selectedRepo?.full_name === repo.full_name) {
-              <div class="cr-repo-pulls" [id]="'repo-pulls-' + i">
-                @if (pullError) {
-                  <app-inline-banner variant="error" [message]="pullError" />
+        @if (filteredRepos; as fr) {
+          @if (fr.length === 0) {
+            <app-empty-state
+              icon="search_off"
+              title="No repositories match"
+              description="Try a different search."
+              [headingLevel]="3"
+            />
+          } @else {
+          <div class="cr-repos-list">
+            @for (repo of fr; track repo.full_name; let i = $index) {
+              <button
+                class="cr-repo-row"
+                type="button"
+                [class.cr-repo-row--expanded]="selectedRepo?.full_name === repo.full_name"
+                [attr.aria-expanded]="selectedRepo?.full_name === repo.full_name"
+                [attr.aria-controls]="'repo-pulls-' + i"
+                (click)="toggleRepo(repo)"
+              >
+                <mat-icon aria-hidden="true">{{ repo.private ? 'lock' : 'public' }}</mat-icon>
+                <span class="cr-repo-row__main">
+                  <span class="cr-repo-row__name">{{ repo.full_name }}</span>
+                  @if (repo.description) {
+                    <span class="cr-repo-row__description" [matTooltip]="repo.description">{{ repo.description }}</span>
+                  }
+                </span>
+                @if (repo.archived) {
+                  <span class="cr-chip">archived</span>
                 }
-                @if (loadingPulls) {
-                  <app-loading-spinner [diameter]="20" message="Loading pull requests…" />
-                }
-                <ng-container [ngTemplateOutlet]="pullsPanel"></ng-container>
-              </div>
+                <mat-icon class="cr-repo-row__arrow" aria-hidden="true">
+                  {{ selectedRepo?.full_name === repo.full_name ? 'expand_less' : 'chevron_right' }}
+                </mat-icon>
+              </button>
+
+              @if (selectedRepo?.full_name === repo.full_name) {
+                <div class="cr-repo-pulls" [id]="'repo-pulls-' + i">
+                  @if (pullError) {
+                    <app-inline-banner variant="error" [message]="pullError" />
+                  }
+                  @if (loadingPulls) {
+                    <app-loading-spinner [diameter]="20" message="Loading pull requests…" />
+                  }
+                  <ng-container [ngTemplateOutlet]="pullsPanel"></ng-container>
+                </div>
+              }
             }
+          </div>
           }
-        </div>
+        }
       }
     }
 
@@ -103,65 +132,101 @@
       @if (pulls.length === 0) {
         <app-empty-state icon="check_circle_outline" title="No open pull requests" [headingLevel]="3" />
       } @else {
-        <div class="cr-pulls-list">
-          @for (pull of pagedPulls; track pull.number) {
-            <div class="cr-pull" [class.cr-pull--expanded]="expandedPrNumber === pull.number">
-              <button
-                class="cr-pull-row"
-                type="button"
-                (click)="togglePull(pull)"
-                [attr.aria-expanded]="expandedPrNumber === pull.number"
-              >
-                <span class="cr-pull-row__number">#{{ pull.number }}</span>
-                <span class="cr-pull-row__title">{{ pull.title }}</span>
-                @if (pull.draft) {
-                  <span class="cr-chip cr-chip--draft">draft</span>
-                }
-
-                <!-- Live status badge from the PR's latest review run -->
-                @if (reviewRuns.badgeLabel(pull.number); as label) {
-                  <span class="cr-row-badge cr-job-status {{ reviewRuns.badgeClass(pull.number) }}">
-                    @if (reviewRuns.isLatestRunning(pull.number)) {
-                      <mat-spinner diameter="14" aria-hidden="true"></mat-spinner>
-                    }
-                    {{ label }}
-                  </span>
-                }
-
-                <span class="cr-pull-row__labels">
-                  @for (label of pull.labels; track label) {
-                    <span class="cr-label-chip">{{ label }}</span>
-                  }
-                </span>
-                <mat-icon class="cr-pull-row__arrow" aria-hidden="true">
-                  {{ expandedPrNumber === pull.number ? 'expand_less' : 'chevron_right' }}
-                </mat-icon>
-              </button>
-
-              @if (expandedPrNumber === pull.number) {
-                <app-pr-review-detail
-                  [pull]="pull"
-                  [reviews]="reviewRuns.reviewsFor(pull.number)"
-                  [starting]="reviewRuns.isStarting(pull.number)"
-                  [reviewError]="reviewRuns.reviewErrorFor(pull.number)"
-                  [creatingIssues]="reviewRuns.creatingIssues"
-                  [createIssueErrors]="reviewRuns.createIssueErrors"
-                  (startReviewRequested)="reviewRuns.startReview($event)"
-                  (createIssuesRequested)="reviewRuns.createIssuesFor($event.record, $event.ids)"
-                />
-              }
-            </div>
-          }
+        <div class="cr-pulls-toolbar">
+          <mat-form-field appearance="outline" class="cr-search-field">
+            <mat-label>Search pull requests</mat-label>
+            <mat-icon matPrefix>search</mat-icon>
+            <input
+              matInput
+              type="search"
+              [ngModel]="pullFilter"
+              (ngModelChange)="onPullFilterChange($event)"
+              placeholder="Number or title…"
+            />
+          </mat-form-field>
+          <mat-slide-toggle [ngModel]="hideDrafts" (ngModelChange)="onHideDraftsChange($event)" color="primary">
+            Hide drafts
+          </mat-slide-toggle>
         </div>
-        @if (pulls.length > PAGE_SIZE_OPTIONS[0]) {
-          <mat-paginator
-            class="cr-pulls-paginator"
-            [length]="pulls.length"
-            [pageSize]="pageSize"
-            [pageIndex]="pageIndex"
-            [pageSizeOptions]="PAGE_SIZE_OPTIONS"
-            (page)="onPageChange($event)"
-          ></mat-paginator>
+        <p class="visually-hidden" role="status" aria-live="polite">{{ pullCountAnnouncement }}</p>
+
+        @if (filteredPulls; as fp) {
+          @if (fp.length === 0) {
+            <app-empty-state
+              icon="search_off"
+              title="No pull requests match"
+              [description]="noPullMatchDescription"
+              [headingLevel]="3"
+            />
+          } @else {
+          <div class="cr-pulls-list">
+            @for (pull of pagedPulls; track pull.number) {
+              <div class="cr-pull" [class.cr-pull--expanded]="expandedPrNumber === pull.number">
+                <button
+                  class="cr-pull-row"
+                  type="button"
+                  (click)="togglePull(pull)"
+                  [attr.aria-expanded]="expandedPrNumber === pull.number"
+                >
+                  <span class="cr-pull-row__number">#{{ pull.number }}</span>
+                  <span class="cr-pull-row__title">{{ pull.title }}</span>
+                  @if (pull.draft) {
+                    <span class="cr-chip cr-chip--draft">draft</span>
+                  }
+
+                  <!-- Live status badge from the PR's latest review run -->
+                  @if (reviewRuns.badgeLabel(pull.number); as label) {
+                    @if (friendlyBadgeLabel(label); as friendly) {
+                      <span
+                        class="cr-row-badge cr-job-status {{ reviewRuns.badgeClass(pull.number) }}"
+                        [attr.aria-label]="friendly"
+                      >
+                        @if (reviewRuns.isLatestRunning(pull.number)) {
+                          <mat-spinner diameter="14" aria-hidden="true"></mat-spinner>
+                        } @else {
+                          <mat-icon aria-hidden="true" class="cr-row-badge__icon">{{ badgeIcon(label) }}</mat-icon>
+                        }
+                        {{ friendly }}
+                      </span>
+                    }
+                  }
+
+                  <span class="cr-pull-row__labels">
+                    @for (label of pull.labels; track label) {
+                      <span class="cr-label-chip">{{ label }}</span>
+                    }
+                  </span>
+                  <mat-icon class="cr-pull-row__arrow" aria-hidden="true">
+                    {{ expandedPrNumber === pull.number ? 'expand_less' : 'chevron_right' }}
+                  </mat-icon>
+                </button>
+
+                @if (expandedPrNumber === pull.number) {
+                  <app-pr-review-detail
+                    [pull]="pull"
+                    [reviews]="reviewRuns.reviewsFor(pull.number)"
+                    [starting]="reviewRuns.isStarting(pull.number)"
+                    [reviewError]="reviewRuns.reviewErrorFor(pull.number)"
+                    [creatingIssues]="reviewRuns.creatingIssues"
+                    [createIssueErrors]="reviewRuns.createIssueErrors"
+                    (startReviewRequested)="reviewRuns.startReview($event)"
+                    (createIssuesRequested)="reviewRuns.createIssuesFor($event.record, $event.ids)"
+                  />
+                }
+              </div>
+            }
+          </div>
+          }
+          @if (fp.length > PAGE_SIZE_OPTIONS[0]) {
+            <mat-paginator
+              class="cr-pulls-paginator"
+              [length]="fp.length"
+              [pageSize]="pageSize"
+              [pageIndex]="pageIndex"
+              [pageSizeOptions]="PAGE_SIZE_OPTIONS"
+              (page)="onPageChange($event)"
+            ></mat-paginator>
+          }
         }
       }
     }

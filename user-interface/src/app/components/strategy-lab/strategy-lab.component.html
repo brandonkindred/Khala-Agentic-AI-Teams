@@ -1,4 +1,9 @@
-<div class="strategy-lab">
+<div
+  class="strategy-lab"
+  role="region"
+  [attr.aria-labelledby]="showTitle ? 'strategy-lab-heading' : null"
+  [attr.aria-label]="showTitle ? null : 'Strategy Lab'"
+>
 
   <!-- SR-only live region: announces run progress (batch/strategy position +
        current phase) as a run proceeds, and the terminal outcome once it
@@ -15,13 +20,15 @@
 
   <!-- Header row -->
   <div class="lab-header">
-    <div class="lab-title">
-      <mat-icon aria-hidden="true">science</mat-icon>
-      <div>
-        <h2>Strategy Lab</h2>
-        <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
+    @if (showTitle) {
+      <div class="lab-title">
+        <mat-icon aria-hidden="true">science</mat-icon>
+        <div>
+          <h2 id="strategy-lab-heading">Strategy Lab</h2>
+          <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
+        </div>
       </div>
-    </div>
+    }
     <div class="lab-header-actions">
       @if (totalCount() > 0) {
         <button
@@ -360,9 +367,15 @@
               <mat-icon aria-hidden="true">{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
             <div class="strategy-card-header-text">
-              <mat-card-title>
-                {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
-              </mat-card-title>
+              @if (showTitle) {
+                <h3 mat-card-title>
+                  {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+                </h3>
+              } @else {
+                <h2 mat-card-title>
+                  {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+                </h2>
+              }
               <mat-card-subtitle>
                 {{ record.created_at | date:'MMM d, y, h:mm a' }} &bull; {{ record.strategy.strategy_id }}
               </mat-card-subtitle>
@@ -513,11 +526,11 @@
                       <span class="ls-label">Net P&amp;L</span>
                     </div>
                     <div class="ledger-stat">
-                      <span class="ls-value">{{ record.backtest.config.start_date | slice:0:10 }}</span>
+                      <span class="ls-value">{{ record.backtest.config.start_date | dateOnly }}</span>
                       <span class="ls-label">Start</span>
                     </div>
                     <div class="ledger-stat">
-                      <span class="ls-value">{{ record.backtest.config.end_date | slice:0:10 }}</span>
+                      <span class="ls-value">{{ record.backtest.config.end_date | dateOnly }}</span>
                       <span class="ls-label">End</span>
                     </div>
                     <div class="ledger-stat">
@@ -544,13 +557,13 @@
                       <!-- Entry Date -->
                       <ng-container matColumnDef="entry_date">
                         <th mat-header-cell *matHeaderCellDef>Entry</th>
-                        <td mat-cell *matCellDef="let t">{{ t.entry_date | slice:0:10 }}</td>
+                        <td mat-cell *matCellDef="let t">{{ t.entry_date | dateOnly }}</td>
                       </ng-container>
 
                       <!-- Exit Date -->
                       <ng-container matColumnDef="exit_date">
                         <th mat-header-cell *matHeaderCellDef>Exit</th>
-                        <td mat-cell *matCellDef="let t">{{ t.exit_date | slice:0:10 }}</td>
+                        <td mat-cell *matCellDef="let t">{{ t.exit_date | dateOnly }}</td>
                       </ng-container>
 
                       <!-- Symbol -->
@@ -756,7 +769,7 @@
                         </div>
                         <span class="paper-meta">
                           {{ session.trades.length }} trades &bull;
-                          {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
+                          {{ session.data_period_start | dateOnly }} to {{ session.data_period_end | dateOnly }}
                         </span>
                         @if (record.is_publishable) {
                           @if (paperTradingLabRecordId() === record.lab_record_id) {

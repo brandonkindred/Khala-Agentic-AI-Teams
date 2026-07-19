@@ -11,6 +11,8 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
+from pydantic import BaseModel
+
 # ---------------------------------------------------------------------------
 # Exceptions (unified for all teams)
 # ---------------------------------------------------------------------------
@@ -96,6 +98,19 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
           attempt with non-whitespace content succeeds and never contributes
           to this error, so the field distinguishes "model emitted whitespace"
           from "model emitted nothing at all".
+        - ``schema_forced`` is True iff this receipt was raised because a
+          provider-enforced schema-constrained decoding attempt
+          (``complete_json(..., schema=...)`` on a client whose
+          ``supports_structured_output()`` is True) starved the content
+          channel. On this path there is no thinking-downgrade ladder at all
+          — ``retry_thinking_level`` is therefore always ``None`` here, the
+          SAME value it takes when no ladder ever ran for an unrelated reason
+          (thinking was already off). Callers that treat
+          ``retry_thinking_level is None`` as "safe to retry the same input"
+          (e.g. ``code_review_agent/mapping.py``) MUST also check
+          ``schema_forced`` before drawing that conclusion: a schema-forced
+          exhaustion is expected to reproduce on an identical schema-forced
+          retry, unlike a genuine one-off stochastic empty.
     """
 
     failure_class = "semantic_exhaustion"
@@ -110,6 +125,7 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
         content_bytes_seen: bool = False,
         payload_fingerprint: str = "",
         finish_reason: str = "",
+        schema_forced: bool = False,
         cause: Optional[Exception] = None,
     ):
         super().__init__(message, cause=cause)
@@ -119,6 +135,7 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
         self.content_bytes_seen = content_bytes_seen
         self.payload_fingerprint = payload_fingerprint
         self.finish_reason = finish_reason
+        self.schema_forced = schema_forced
 
 
 class LLMPermanentError(LLMError):
@@ -233,6 +250,7 @@ class LLMClient(ABC):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
+        schema: "Optional[dict | type[BaseModel]]" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -251,9 +269,38 @@ class LLMClient(ABC):
         resolves to the platform default — the model's max registered thinking
         level when known; ``False`` disables; a string selects a specific level.
 
+        ``schema`` (optional): a JSON Schema ``dict`` or a ``pydantic.BaseModel``
+        subclass. When given AND ``self.supports_structured_output()`` is True,
+        the implementation MAY request provider-enforced schema-conformant
+        decoding on the wire instead of the loose ``json_object`` mode it uses
+        by default. Passing ``schema`` to a client whose
+        ``supports_structured_output()`` is False is NOT an error — it is
+        silently ignored (the shape contract remains prompt-text-only,
+        enforced downstream by pydantic, exactly as when ``schema`` is
+        omitted). Mutually exclusive with ``tools`` on clients that honor it
+        (see ``OllamaLLMClient``).
+
         Preconditions: ``objective`` is a non-empty string.
         """
         ...
+
+    def supports_structured_output(self) -> bool:
+        """Whether this client can request provider-enforced (decoder-level)
+        schema-conformant JSON on the wire, as distinct from the loose
+        ``json_object`` wire mode ``complete_json`` uses by default.
+
+        This is a capability FLAG, not a promise about any particular call's
+        outcome — a client that returns True may still raise
+        ``LLMSemanticExhaustionError(schema_forced=True)`` for a given prompt
+        (see ``OllamaLLMClient._complete_json_impl``).
+
+        Preconditions: none.
+        Postconditions: synchronous, makes no network call, never raises.
+            Returns ``False`` by default (every client that has not opted
+            in). Override in a client whose wire protocol supports
+            decoder-level schema constraints.
+        """
+        return False
 
     def complete(
         self,

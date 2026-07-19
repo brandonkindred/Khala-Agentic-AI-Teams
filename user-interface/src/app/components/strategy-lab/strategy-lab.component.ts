@@ -3,6 +3,7 @@ import {
   Component,
   DestroyRef,
   ElementRef,
+  Input,
   OnDestroy,
   OnInit,
   ViewChild,
@@ -39,10 +40,22 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { NotificationService } from '../../core/notification.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
+import { formatPct, formatRatio } from '../../shared/number-format';
+import { DateOnlyPipe } from '../../shared/date-only.pipe';
 import {
   ConfirmDialogComponent,
   type ConfirmDialogData,
 } from '../../shared/confirm-dialog/confirm-dialog.component';
+import {
+  ASSET_CLASS_ICONS,
+  returnColor,
+  getAssetClassIcon,
+  verdictLabel,
+  verdictColor,
+  gateIcon as pureGateIcon,
+  gateSeverityClass as pureGateSeverityClass,
+} from './strategy-lab.formatters';
 import type {
   PaperTradingSession,
   PaperTradingComparison,
@@ -94,15 +107,6 @@ const STRATEGY_LAB_PHASES: PhaseDefinition[] = [
 
 /** Ordered phase IDs for determining completed/pending state. */
 const PHASE_ORDER = STRATEGY_LAB_PHASES.map(p => p.id);
-
-const ASSET_CLASS_ICONS: Record<string, string> = {
-  stocks: 'show_chart',
-  crypto: 'currency_bitcoin',
-  forex: 'currency_exchange',
-  commodities: 'oil_barrel',
-  futures: 'schedule',
-  options: 'tune',
-};
 
 interface AssetCategoryOption {
   value: string;
@@ -156,7 +160,7 @@ function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
  * paint / on a config failure. Keep this list in sync with the backend's
  * `PROMPT_ASSET_CLASSES`; `options` is omitted because it is never a valid
  * ideation target. Module-level constants in this file use SCREAMING_SNAKE_CASE
- * (see STRATEGY_LAB_PHASES, ASSET_CLASS_ICONS).
+ * (see STRATEGY_LAB_PHASES; ASSET_CLASS_ICONS lives in `./strategy-lab.formatters`).
  */
 const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOptions([
   'stocks',
@@ -177,6 +181,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
     DatePipe,
     CurrencyPipe,
     JsonPipe,
+    DateOnlyPipe,
     FormsModule,
     MatCardModule,
     MatButtonModule,
@@ -200,6 +205,15 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   styleUrl: './strategy-lab.component.scss',
 })
 export class StrategyLabComponent implements OnInit, OnDestroy {
+  /**
+   * Whether to render the component's own "Strategy Lab" `<h2>` heading.
+   * Defaults to `true` (the dashboard-tab context, where this heading is the
+   * only heading anchor). The standalone route wrapper — which already
+   * renders its own `<h1>Strategy Lab</h1>` — sets this to `false` so the
+   * title isn't duplicated.
+   */
+  @Input() showTitle = true;
+
   private readonly api = inject(InvestmentApiService);
   private readonly integrations = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
@@ -685,7 +699,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         this.loading.set(false);
       },
       error: (err) => {
-        this.error.set(err?.error?.detail || err?.message || 'Failed to load results.');
+        this.error.set(extractErrorDetail(err, 'Failed to load results.'));
         this.loading.set(false);
       },
     });
@@ -769,7 +783,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         this.startingRun.set(false);
-        this.error.set(err?.error?.detail || err?.message || 'Strategy run failed.');
+        this.error.set(extractErrorDetail(err, 'Strategy run failed.'));
       },
     });
   }
@@ -804,11 +818,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
   }
 
-  returnColor(annualized: number): string {
-    if (annualized > 8) return 'winning';
-    if (annualized >= 0) return 'neutral';
-    return 'losing';
-  }
+  readonly returnColor = returnColor;
 
   // ---------------------------------------------------------------------------
   // Phase stepper state
@@ -831,9 +841,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId);
   }
 
-  getAssetClassIcon(assetClass: string): string {
-    return ASSET_CLASS_ICONS[assetClass?.toLowerCase()] ?? 'trending_up';
-  }
+  readonly getAssetClassIcon = getAssetClassIcon;
 
   // ---------------------------------------------------------------------------
   // Activity log
@@ -1156,14 +1164,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   gateIcon(gate: QualityGateResult, record: StrategyLabRecord): string {
-    if (gate.passed) return 'check_circle';
-    if (this.isRemedied(gate, record)) return 'build_circle';
-    return gate.severity === 'critical' ? 'cancel' : 'warning';
+    return pureGateIcon(gate, this.isRemedied(gate, record));
   }
 
   gateSeverityClass(gate: QualityGateResult, record: StrategyLabRecord): string {
-    if (this.isRemedied(gate, record)) return 'gate-remedied';
-    return 'gate-' + gate.severity;
+    return pureGateSeverityClass(gate, this.isRemedied(gate, record));
   }
 
   // record.quality_gate_results is replaced wholesale (a new array/objects)
@@ -1180,12 +1185,15 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   gateViewModels(record: StrategyLabRecord): GateViewModel[] {
     const cached = this._gateViewModelsCache.get(record);
     if (cached) return cached;
-    const viewModels = (record.quality_gate_results ?? []).map((gate) => ({
-      gate,
-      icon: this.gateIcon(gate, record),
-      severityClass: this.gateSeverityClass(gate, record),
-      isRemedied: this.isRemedied(gate, record),
-    }));
+    const viewModels = (record.quality_gate_results ?? []).map((gate) => {
+      const isRemedied = this.isRemedied(gate, record);
+      return {
+        gate,
+        icon: pureGateIcon(gate, isRemedied),
+        severityClass: pureGateSeverityClass(gate, isRemedied),
+        isRemedied,
+      };
+    });
     this._gateViewModelsCache.set(record, viewModels);
     return viewModels;
   }
@@ -1243,7 +1251,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
             },
             error: (err) => {
               this.deletingLabRecordId.set(null);
-              this.error.set(err?.error?.detail || err?.message || 'Failed to delete strategy.');
+              this.error.set(extractErrorDetail(err, 'Failed to delete strategy.'));
             },
           });
       });
@@ -1274,7 +1282,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
             },
             error: (err) => {
               this.clearingAll.set(false);
-              this.error.set(err?.error?.detail || err?.message || 'Failed to clear strategy lab data.');
+              this.error.set(extractErrorDetail(err, 'Failed to clear strategy lab data.'));
             },
           });
       });
@@ -1334,7 +1342,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         this.startingPaperTrade.set(null);
-        this.error.set(err?.error?.detail || err?.message || 'Paper trading failed.');
+        this.error.set(extractErrorDetail(err, 'Paper trading failed.'));
       },
     });
   }
@@ -1360,17 +1368,9 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return this.runService.paperTradingSessions()[record.lab_record_id] ?? null;
   }
 
-  verdictLabel(verdict: string | undefined | null): string {
-    if (verdict === 'ready_for_live') return 'READY FOR LIVE';
-    if (verdict === 'not_performant') return 'NOT PERFORMANT';
-    return 'INCONCLUSIVE';
-  }
+  readonly verdictLabel = verdictLabel;
 
-  verdictColor(verdict: string | undefined | null): string {
-    if (verdict === 'ready_for_live') return 'winning';
-    if (verdict === 'not_performant') return 'losing';
-    return 'neutral';
-  }
+  readonly verdictColor = verdictColor;
 
   // Keyed by the PaperTradingComparison object itself: a poll tick replaces
   // the whole PaperTradingSession (and its nested `comparison`) with a fresh
@@ -1383,11 +1383,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     const cached = this._comparisonMetricsCache.get(c);
     if (cached) return cached;
     const rows: ComparisonRow[] = [
-      { label: 'Win Rate', backtest: c.backtest_win_rate_pct.toFixed(1) + '%', paper: c.paper_win_rate_pct.toFixed(1) + '%', aligned: c.win_rate_aligned },
-      { label: 'Annual Return', backtest: c.backtest_annualized_return_pct.toFixed(1) + '%', paper: c.paper_annualized_return_pct.toFixed(1) + '%', aligned: c.return_aligned },
-      { label: 'Sharpe', backtest: c.backtest_sharpe_ratio.toFixed(2), paper: c.paper_sharpe_ratio.toFixed(2), aligned: c.sharpe_aligned },
-      { label: 'Max Drawdown', backtest: c.backtest_max_drawdown_pct.toFixed(1) + '%', paper: c.paper_max_drawdown_pct.toFixed(1) + '%', aligned: c.drawdown_aligned },
-      { label: 'Profit Factor', backtest: c.backtest_profit_factor.toFixed(2), paper: c.paper_profit_factor.toFixed(2), aligned: c.profit_factor_aligned },
+      { label: 'Win Rate', backtest: formatPct(c.backtest_win_rate_pct), paper: formatPct(c.paper_win_rate_pct), aligned: c.win_rate_aligned },
+      { label: 'Annual Return', backtest: formatPct(c.backtest_annualized_return_pct), paper: formatPct(c.paper_annualized_return_pct), aligned: c.return_aligned },
+      { label: 'Sharpe', backtest: formatRatio(c.backtest_sharpe_ratio), paper: formatRatio(c.paper_sharpe_ratio), aligned: c.sharpe_aligned },
+      { label: 'Max Drawdown', backtest: formatPct(c.backtest_max_drawdown_pct), paper: formatPct(c.paper_max_drawdown_pct), aligned: c.drawdown_aligned },
+      { label: 'Profit Factor', backtest: formatRatio(c.backtest_profit_factor), paper: formatRatio(c.paper_profit_factor), aligned: c.profit_factor_aligned },
     ];
     this._comparisonMetricsCache.set(c, rows);
     return rows;

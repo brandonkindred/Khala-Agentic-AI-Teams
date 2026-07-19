@@ -568,36 +568,6 @@ services:
       timeout: 5s
       retries: 5
 
-  nutrition-service:
-    build:
-      context: ../backend
-      dockerfile: team_service/Dockerfile
-      args: { TEAM_PORT: "8101" }
-    image: khala-nutrition-service
-    container_name: khala-nutrition-service
-    depends_on:
-      postgres: { condition: service_healthy }
-      temporal: { condition: service_started }
-      job-service: { condition: service_healthy }
-    environment:
-      <<: *team-env-base
-      TEAM_MODULE: nutrition_meal_planning_team.api.main
-      TEAM_NAME: nutrition_meal_planning_team
-      TEAM_PORT: "8101"
-      TEAM_TEMPORAL_WORKER_MODULE: nutrition_meal_planning_team.temporal.worker
-      TEAM_TEMPORAL_WORKER_FUNC: start_nutrition_temporal_worker_thread
-    volumes: *team-volumes
-    extra_hosts: *team-extra-hosts
-    ports: ["8101:8101"]
-    networks:
-      stack: { ipv4_address: 172.28.0.19, aliases: [nutrition-service] }
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
   planning-service:
     build:
       context: ../backend
@@ -861,7 +831,6 @@ services:
       a11y-service: { condition: service_healthy }
       ai-systems-service: { condition: service_healthy }
       investment-service: { condition: service_healthy }
-      nutrition-service: { condition: service_healthy }
       planning-service: { condition: service_healthy }
       sales-service: { condition: service_healthy }
       road-trip-service: { condition: service_healthy }
@@ -925,7 +894,6 @@ services:
       ACCESSIBILITY_AUDIT_SERVICE_URL: http://a11y-service:8098
       AI_SYSTEMS_SERVICE_URL: http://ai-systems-service:8099
       INVESTMENT_SERVICE_URL: http://investment-service:8100
-      NUTRITION_MEAL_PLANNING_SERVICE_URL: http://nutrition-service:8101
       PLANNING_SERVICE_URL: http://planning-service:8102
       # coding_team is an in-package SE sub-team, served by se-service itself
       # (mounted unprefixed onto the SE app); /api/coding-team/* keeps resolving
@@ -953,7 +921,6 @@ services:
       - "a11y-service:172.28.0.16"
       - "ai-systems-service:172.28.0.17"
       - "investment-service:172.28.0.18"
-      - "nutrition-service:172.28.0.19"
       - "planning-service:172.28.0.20"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"
@@ -1030,7 +997,6 @@ services:
       - "a11y-service:172.28.0.16"
       - "ai-systems-service:172.28.0.17"
       - "investment-service:172.28.0.18"
-      - "nutrition-service:172.28.0.19"
       - "planning-service:172.28.0.20"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"

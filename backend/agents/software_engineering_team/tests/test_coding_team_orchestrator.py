@@ -17,7 +17,6 @@ import pytest
 
 from software_engineering_team.coding_team import orchestrator as orch_mod
 from software_engineering_team.coding_team import progress_config as progress_mod
-from software_engineering_team.coding_team import repo_context as repo_ctx
 from software_engineering_team.coding_team.models import (
     CodingTeamPlanInput,
     StackSpec,
@@ -42,6 +41,26 @@ GIT_UTILS = "shared_git.git_utils"
 
 
 # --------------------------------------------------------------------------- stubs
+
+
+class _DefaultGroomTaskMixin:
+    """Ungroomed-default ``run_groom_task`` for Tech-Lead stubs that don't care about grooming.
+
+    Mirrors the real ``run_groom_task``'s own default/fallback shape, so mixing this in changes no
+    existing assertion for a stub that doesn't otherwise override it.
+    """
+
+    def run_groom_task(
+        self, task_id, task_title, task_description, task_dependencies, plan_context
+    ):
+        return {
+            "acceptance_criteria": [],
+            "out_of_scope": "",
+            "description_enriched": task_description,
+            "priority": "medium",
+            "subtasks": [],
+            "task_dependencies": task_dependencies,
+        }
 
 
 class StubTechLead:
@@ -103,7 +122,7 @@ class StubWorker:
         self.stack_spec = StackSpec(name=agent_id, tools_services=[])
         self.implement_calls: List[Task] = []
 
-    def run_implement(self, task: Task, path, repo_context: str = "") -> Dict[str, Any]:
+    def run_implement(self, task: Task, path) -> Dict[str, Any]:
         self.implement_calls.append(task)
         return {
             "status": "in_review",
@@ -743,7 +762,7 @@ def test_persistent_implement_failure_fails_task(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
 
     class FailingWorker(StubWorker):
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.implement_calls.append(task)
             return {
                 "status": "failed",
@@ -907,7 +926,7 @@ def test_branch_diff_bad_branch_returns_empty(tmp_path):
 
 
 def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -964,7 +983,7 @@ def test_terminal_status_write_survives_slow_pending_graph_persist(tmp_path, mon
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1029,7 +1048,7 @@ def test_failed_background_persist_write_is_retried_at_round_boundary(tmp_path, 
     job-service write that carries a task_graph_snapshot and asserts the retried write
     still lands with the correct (merged) state."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1108,7 +1127,7 @@ def test_status_write_survives_concurrent_worker_graph_mutation(tmp_path, monkey
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1211,7 +1230,7 @@ def test_background_graph_write_after_pause_carries_pause_phase_not_stale_coding
     import threading
     import time
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -1303,7 +1322,7 @@ def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_pat
     actually confirmed on the wire, even though the rest of the failed call's fields (e.g. HITL
     pending-question metadata on a real pause) never landed either."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2158,100 +2177,6 @@ def test_in_review_task_is_not_reimplemented(tmp_path):
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
 
 
-# ----------------------------------------------------- repo context visibility / refresh
-
-
-def test_read_repo_context_includes_markdown(tmp_path):
-    """Markdown docs must be visible in repo context so a docs task does not see an 'empty' repo."""
-    (tmp_path / "spec.md").write_text("# Spec\nThe plan lives here.")
-    ctx = repo_ctx._read_repo_context(tmp_path)
-    assert "spec.md" in ctx
-    assert "The plan lives here." in ctx
-
-
-def test_read_repo_context_is_not_truncated(tmp_path):
-    """The briefing renders each included file in full and never drops a file to fit a size budget.
-
-    Guards against reintroducing the old per-file 500-char slice and the 4000-char total budget:
-    the engineer's repo context is an LLM input and is never truncated. The 80-file scan ceiling is
-    a deliberate cap, not truncation, so this stays within it.
-    """
-    # A single file well past the old 500-char per-file slice — its tail must survive.
-    big_tail = "TAIL_MARKER_" + ("Z" * 4000)
-    (tmp_path / "big.py").write_text("# header\n" + big_tail)
-
-    # Several files whose combined size blows past the old 4000-char budget; a late file (by sorted
-    # order) must still appear rather than being dropped once the budget filled.
-    for i in range(10):
-        (tmp_path / f"mod_{i:02d}.py").write_text(f"VALUE_{i:02d} = " + "'" + ("x" * 1000) + "'\n")
-
-    ctx = repo_ctx._read_repo_context(tmp_path)
-
-    assert big_tail in ctx  # full file contents, not a 500-char prefix
-    assert len(ctx) > 4000  # no total-size budget cut the briefing short
-    assert "mod_09.py" in ctx  # the last file survived; no file dropped to fit a budget
-    assert "VALUE_09" in ctx
-
-
-def test_read_repo_context_prunes_excluded_dirs(tmp_path):
-    """Files under excluded dirs (node_modules/.git) must not be walked or included,
-    and must not consume the 80-file budget ahead of real source files."""
-    (tmp_path / "real.py").write_text("REAL_SOURCE = 1")
-    nm = tmp_path / "node_modules" / "pkg"
-    nm.mkdir(parents=True)
-    (nm / "index.py").write_text("VENDORED = 1")
-    git = tmp_path / ".git"
-    git.mkdir()
-    (git / "config.py").write_text("GIT_INTERNAL = 1")
-
-    ctx = repo_ctx._read_repo_context(tmp_path)
-
-    assert "real.py" in ctx
-    assert "REAL_SOURCE" in ctx
-    assert "VENDORED" not in ctx
-    assert "GIT_INTERNAL" not in ctx
-
-
-def test_read_repo_context_skips_special_files_without_hanging(tmp_path):
-    """A FIFO/special file with a code suffix must be skipped via is_file(), not read
-    — read_text() on a FIFO blocks forever (a hang the try/except cannot catch)."""
-    import os
-
-    if not hasattr(os, "mkfifo"):
-        pytest.skip("mkfifo not available on this platform")
-    (tmp_path / "real.py").write_text("REAL = 1")
-    os.mkfifo(str(tmp_path / "pipe.py"))  # code-suffixed special file
-
-    # If the is_file() guard regressed, this call would block forever on the FIFO.
-    ctx = repo_ctx._read_repo_context(tmp_path)
-
-    assert "REAL = 1" in ctx
-    assert "pipe.py" not in ctx
-
-
-def test_repo_context_refreshed_between_rounds(tmp_path, monkeypatch):
-    """The swarm re-reads repo context each round so files written in earlier rounds become visible
-    to later implementations (instead of being recreated)."""
-    _patch_git(monkeypatch)
-    seen: List[str] = []
-
-    class ContextWorker(StubWorker):
-        def run_implement(self, task, path, repo_context=""):
-            seen.append(repo_context)
-            (Path(path) / "notes.md").write_text("notes round content")
-            return super().run_implement(task, path, repo_context=repo_context)
-
-    worker = ContextWorker("a1")
-    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
-    graph.add_task("t1", title="T1")
-    graph.add_task("t2", title="T2", dependencies=["t1"])
-
-    swarm.run(max_rounds=20)
-
-    # notes.md (written while implementing t1) is picked up by a later round's context refresh.
-    assert any("notes.md" in ctx for ctx in seen)
-
-
 # ----------------------------------------------------- resume from snapshot (no re-planning)
 
 
@@ -2323,7 +2248,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     """The fresh (non-resume) path persists the stacks so a later retry can resume without
     re-planning."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2368,7 +2293,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
 def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     """Malformed Tech Lead task output without an id becomes a stable fallback task."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2411,6 +2336,251 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     assert task.status == TaskStatus.MERGED
 
 
+# ----------------------------------------------------- task grooming (run_groom_task wiring)
+
+
+def test_task_creation_grooms_every_task_after_planning(tmp_path, monkeypatch):
+    """Every planned task is groomed (via run_groom_task) strictly after planning and strictly
+    before the swarm is built, and the groomed acceptance_criteria/priority land on the graph's
+    tasks while the planner's own dependencies (not grooming's) are kept."""
+    call_order: List[str] = []
+
+    class GroomingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            call_order.append("plan")
+            return {
+                "tasks": [
+                    {"id": "t1", "title": "T1", "description": "d1", "dependencies": []},
+                    {"id": "t2", "title": "T2", "description": "d2", "dependencies": ["t1"]},
+                ],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            call_order.append(f"groom:{task_id}")
+            return {
+                "acceptance_criteria": [f"AC for {task_id}"],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "high",
+                "subtasks": [],
+                # Grooming's own dependency opinion must be ignored — the planner's wins.
+                "task_dependencies": [],
+            }
+
+    captured: Dict[str, Any] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            captured["graph"] = k["graph"]
+            call_order.append("swarm_built")
+
+        def run(self, **kw):
+            pass
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", GroomingTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert call_order[0] == "plan"
+    assert set(call_order[1:3]) == {"groom:t1", "groom:t2"}  # parallel -> order unspecified
+    assert call_order[3] == "swarm_built"  # grooming finished before the swarm was built
+
+    graph = captured["graph"]
+    assert graph.get_task("t1").acceptance_criteria == ["AC for t1"]
+    assert graph.get_task("t1").priority == "high"
+    assert graph.get_task("t2").acceptance_criteria == ["AC for t2"]
+    assert graph.get_task("t2").dependencies == ["t1"]  # planner's deps preserved, not grooming's
+
+
+def test_task_creation_grooming_failure_falls_back_for_that_task_only(tmp_path, monkeypatch):
+    """One task's run_groom_task raising must not abort the round (parallel_map is fast-fail by
+    default) -- that task falls back to ungroomed defaults while its sibling grooms normally."""
+
+    class PartiallyFailingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [
+                    {"id": "t1", "title": "T1", "description": "d1", "dependencies": []},
+                    {"id": "t2", "title": "T2", "description": "d2", "dependencies": []},
+                ],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            if task_id == "t2":
+                raise RuntimeError("boom")
+            return {
+                "acceptance_criteria": ["AC"],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "high",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
+            }
+
+    captured: Dict[str, Any] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            captured["graph"] = k["graph"]
+
+        def run(self, **kw):
+            pass
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", PartiallyFailingTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    graph = captured["graph"]
+    assert graph.get_task("t1").acceptance_criteria == ["AC"]  # groomed normally
+    assert graph.get_task("t2").acceptance_criteria == []  # fell back to ungroomed defaults
+    assert graph.get_task("t2").description == "d2"  # ungroomed description preserved
+
+
+def test_groomed_acceptance_criteria_reaches_code_review(tmp_path, monkeypatch):
+    """A task's grooming output (acceptance_criteria), once populated on the graph by the
+    orchestrator's task-creation wiring, flows through to the Tech Lead's code review call --
+    CODE_REVIEW_USER surfaces acceptance_criteria as though it were always populated, so it must
+    actually be populated by the time a task reaches review."""
+    _patch_git(monkeypatch)
+
+    class GroomingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1", "description": "d1", "dependencies": []}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            return {
+                "acceptance_criteria": ["Must handle empty input", "Must return 200"],
+                "out_of_scope": "auth",
+                "description_enriched": task_description,
+                "priority": "medium",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
+            }
+
+    captured: Dict[str, Any] = {}
+
+    class CapturingSwarm:
+        def __init__(self, *a, **k):
+            captured["graph"] = k["graph"]
+
+        def run(self, **kw):
+            pass  # only the task-creation wiring is under test here
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", GroomingTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", CapturingSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    graph = captured["graph"]
+    assert graph.get_task("t1").acceptance_criteria == [
+        "Must handle empty input",
+        "Must return 200",
+    ]
+
+    # Drive the real review path against this groomed task and assert the acceptance criteria the
+    # new wiring populated is exactly what reaches run_code_review.
+    class RecordingTechLead(StubTechLead):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.acceptance_criteria_calls: List[List[str]] = []
+
+        def run_code_review(self, task_title, task_description, acceptance_criteria, **kw):
+            self.acceptance_criteria_calls.append(list(acceptance_criteria))
+            return super().run_code_review(task_title, task_description, acceptance_criteria, **kw)
+
+    tech_lead = RecordingTechLead(approved=True)
+    worker = StubWorker("backend")
+    swarm = CodingTeamSwarm(
+        tech_lead=tech_lead,
+        workers=[worker],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["backend"],
+        llm_getter=lambda key: None,
+    )
+    graph.assign_task_to_agent("t1", "backend")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert tech_lead.acceptance_criteria_calls == [["Must handle empty input", "Must return 200"]]
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+
+
+def test_sanitized_subtasks_drops_entries_without_id():
+    """A groomed subtask missing 'id' would blow up Subtask/Task construction -- filtered out."""
+    raw = [
+        {"id": "s1", "title": "Sub 1"},
+        {"title": "no id, dropped"},
+        "not a dict",
+        None,
+    ]
+    assert orch_mod._sanitized_subtasks(raw) == [{"id": "s1", "title": "Sub 1"}]
+    assert orch_mod._sanitized_subtasks(None) == []
+    assert orch_mod._sanitized_subtasks([]) == []
+
+
 # ----------------------------------------------------- task graph helpers (direct)
 
 
@@ -2449,7 +2619,7 @@ def test_reset_in_flight_demotes_only_nonterminal():
 
 
 def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2500,7 +2670,7 @@ def test_in_progress_implementation_is_bounded(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
 
     class NeverReadyWorker(StubWorker):
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.implement_calls.append(task)
             return {
                 "status": "in_progress",  # model set ready_for_review=false
@@ -2833,7 +3003,7 @@ def test_changing_diff_keeps_revising_without_escalation(tmp_path, monkeypatch):
 def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, monkeypatch):
     """A job whose only terminal tasks are already-done resolutions reports already_complete."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -2882,7 +3052,7 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
     still-pending (TO_DO) task is a normal completion, not an 'already complete, recommend closing'
     no-op — the swarm can exit at max_rounds with unfinished work and must not abandon it."""
 
-    class StubTL:
+    class StubTL(_DefaultGroomTaskMixin):
         def __init__(self, llm):
             pass
 
@@ -3291,7 +3461,7 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
     start, per-snapshot updates from the task graph, and 100 on terminal completion."""
     updates: List[Dict[str, Any]] = []
 
-    class _PlanningTechLead:
+    class _PlanningTechLead(_DefaultGroomTaskMixin):
         def run_plan_to_task_graph(self, plan_input):
             return {
                 "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
@@ -3844,6 +4014,18 @@ def test_review_concurrency_env_parsing(monkeypatch):
     assert progress_mod._review_concurrency() == 7
 
 
+def test_groom_concurrency_env_parsing(monkeypatch):
+    """CODING_TEAM_GROOM_CONCURRENCY: default when unset/garbage, floored at 1, honored otherwise."""
+    monkeypatch.delenv("CODING_TEAM_GROOM_CONCURRENCY", raising=False)
+    assert progress_mod._groom_concurrency() == progress_mod.GROOM_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_GROOM_CONCURRENCY", "not-a-number")
+    assert progress_mod._groom_concurrency() == progress_mod.GROOM_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_GROOM_CONCURRENCY", "0")
+    assert progress_mod._groom_concurrency() == 1  # floored so grooming always progresses
+    monkeypatch.setenv("CODING_TEAM_GROOM_CONCURRENCY", "7")
+    assert progress_mod._groom_concurrency() == 7
+
+
 # --------------------------------------------------- implementation-worker fan-out (worktrees)
 
 
@@ -3861,7 +4043,7 @@ def test_implementation_fanout_runs_concurrently(tmp_path, monkeypatch):
             self.agent_id = agent_id
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             # Blocks until both workers reach here; serial execution never releases it.
             barrier.wait()
             return {
@@ -3904,7 +4086,7 @@ def test_implementation_fanout_serializes_hitl_pauses(tmp_path, monkeypatch):
             self.agent_id = agent_id
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             return {
                 "status": "needs_decision",
                 "open_questions": [{"question_text": f"Q for {task.id}?"}],
@@ -3954,7 +4136,7 @@ def test_implementation_fanout_uses_distinct_worktree_paths(tmp_path):
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
             self.paths_seen: List[Any] = []
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.paths_seen.append(path)
             return {
                 "status": "in_review",
@@ -3994,7 +4176,7 @@ def test_implementation_fanout_exception_fails_only_that_task_once(tmp_path, mon
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
             self.calls = 0
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             self.calls += 1
             raise RuntimeError("implementation blew up")
 
@@ -4003,7 +4185,7 @@ def test_implementation_fanout_exception_fails_only_that_task_once(tmp_path, mon
             self.agent_id = agent_id
             self.stack_spec = StackSpec(name=agent_id, tools_services=[])
 
-        def run_implement(self, task, path, repo_context=""):
+        def run_implement(self, task, path):
             return {
                 "status": "in_review",
                 "feature_branch": f"feature/{task.id}",
@@ -4159,146 +4341,6 @@ def test_run_checks_cancellation_before_preparing_worktrees(tmp_path):
     assert updates[-1]["status"] == "cancelled"
     assert swarm.aborted is False  # cancellation is not the same as an abort
     assert graph.get_task("t1").status == TaskStatus.TO_DO  # never even attempted
-
-
-# ----------------------------------------------------- repo-context incremental cache
-
-
-def test_repo_context_cache_matches_read_repo_context(tmp_path):
-    """The cache renders the same briefing string as the full-read function for the same state."""
-    (tmp_path / "a.py").write_text("A = 1")
-    (tmp_path / "b.md").write_text("# doc")
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == repo_ctx._read_repo_context(tmp_path)
-
-
-def test_repo_context_cache_empty_repo(tmp_path):
-    """An empty repo yields the sentinel, identical to _read_repo_context."""
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == "No files found"
-
-
-def test_repo_context_cache_reuses_unchanged_rereads_changed(tmp_path, monkeypatch):
-    """A second read re-renders only files whose (mtime, size) changed; unchanged files are reused."""
-    (tmp_path / "a.py").write_text("A = 1")
-    (tmp_path / "b.py").write_text("B = 1")
-    cache = repo_ctx._RepoContextCache()
-    first = cache.read(tmp_path)  # populates the cache (renders both)
-
-    # Instrument renders that happen AFTER the cache is warm.
-    rendered: List[str] = []
-    real_render = repo_ctx._render_context_file
-
-    def _counting_render(f, repo_path):
-        rendered.append(f.name)
-        return real_render(f, repo_path)
-
-    monkeypatch.setattr(repo_ctx, "_render_context_file", _counting_render)
-
-    second = cache.read(tmp_path)
-    assert second == first
-    assert rendered == []  # nothing changed → no file re-read
-
-    # Change one file's content (and size) → only it is re-rendered on the next read.
-    (tmp_path / "a.py").write_text("A = 222  # changed and longer")
-    third = cache.read(tmp_path)
-    assert rendered == ["a.py"]
-    assert "A = 222" in third
-    assert "B = 1" in third  # unchanged file still present, served from cache
-
-
-def test_repo_context_cache_drops_removed_files(tmp_path):
-    """A file removed between reads leaves the briefing and the internal cache."""
-    (tmp_path / "a.py").write_text("A = 1")
-    (tmp_path / "b.py").write_text("B = 1")
-    cache = repo_ctx._RepoContextCache()
-    cache.read(tmp_path)
-
-    (tmp_path / "b.py").unlink()
-    out = cache.read(tmp_path)
-
-    assert "A = 1" in out
-    assert "B = 1" not in out
-    assert all(p.name != "b.py" for p in cache._entries)
-
-
-def test_repo_context_cache_reflects_new_files(tmp_path):
-    """A file added between reads appears in the next briefing (mirrors the round-refresh contract)."""
-    (tmp_path / "a.py").write_text("A = 1")
-    cache = repo_ctx._RepoContextCache()
-    cache.read(tmp_path)
-
-    (tmp_path / "notes.md").write_text("fresh notes")
-    out = cache.read(tmp_path)
-
-    assert "notes.md" in out
-    assert "fresh notes" in out
-
-
-def test_render_context_file_returns_none_on_read_error(tmp_path, monkeypatch):
-    """A file that cannot be read renders to None (the caller then skips it)."""
-    f = tmp_path / "a.py"
-    f.write_text("A = 1")
-
-    def _boom(self, *a, **k):
-        raise OSError("unreadable")
-
-    monkeypatch.setattr(Path, "read_text", _boom)
-    assert repo_ctx._render_context_file(f, tmp_path) is None
-
-
-def test_render_context_file_logs_debug_on_read_error(tmp_path, monkeypatch, caplog):
-    """A read failure is logged at DEBUG with exc_info, not silently swallowed."""
-    f = tmp_path / "a.py"
-    f.write_text("A = 1")
-
-    def _boom(self, *a, **k):
-        raise OSError("unreadable")
-
-    monkeypatch.setattr(Path, "read_text", _boom)
-    with caplog.at_level(logging.DEBUG, logger=repo_ctx.logger.name):
-        assert repo_ctx._render_context_file(f, tmp_path) is None
-
-    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
-    assert any(str(f) in r.getMessage() for r in debug_records)
-    assert any(r.exc_info for r in debug_records)
-
-
-def test_enumerate_context_files_survives_walk_error(tmp_path, monkeypatch):
-    """An os.walk failure is best-effort: it yields no files rather than raising."""
-    monkeypatch.setattr(
-        repo_ctx.os, "walk", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope"))
-    )
-    assert repo_ctx._enumerate_context_files(tmp_path) == []
-
-
-def test_repo_context_cache_skips_unstattable_file(tmp_path, monkeypatch):
-    """A file that cannot be stat-ed between walk and read is skipped (best-effort)."""
-    monkeypatch.setattr(repo_ctx, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == "No files found"  # ghost stat raises → skipped
-    assert cache._entries == {}
-
-
-def test_repo_context_cache_logs_debug_on_stat_error(tmp_path, monkeypatch, caplog):
-    """A stat failure between walk and stat is logged at DEBUG with exc_info."""
-    monkeypatch.setattr(repo_ctx, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
-    cache = repo_ctx._RepoContextCache()
-    with caplog.at_level(logging.DEBUG, logger=repo_ctx.logger.name):
-        assert cache.read(tmp_path) == "No files found"
-
-    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
-    assert any("ghost.py" in r.getMessage() for r in debug_records)
-    assert any(r.exc_info for r in debug_records)
-
-
-def test_repo_context_cache_skips_unrenderable_file(tmp_path, monkeypatch):
-    """A file whose render fails is skipped and not cached, even when its stat succeeds."""
-    (tmp_path / "a.py").write_text("A = 1")
-    monkeypatch.setattr(repo_ctx, "_render_context_file", lambda f, root: None)
-    cache = repo_ctx._RepoContextCache()
-    assert cache.read(tmp_path) == "No files found"
-    assert cache._entries == {}
 
 
 def test_review_uses_fresh_agent_per_call_not_shared(monkeypatch):

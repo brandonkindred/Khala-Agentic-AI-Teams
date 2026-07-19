@@ -24,7 +24,6 @@ backend/agents/
 ├── investment_team/
 ├── llm_service/                       # Centralized LLM client (Ollama, dummy)
 ├── market_research_team/
-├── nutrition_meal_planning_team/
 ├── personal_assistant_team/
 ├── planning_team/
 ├── plans/                             # Planning artifacts
@@ -90,7 +89,6 @@ For team-specific setup and env vars, use each team's README.
 - `accessibility_audit_team/README.md`
 - `ai_systems_team/README.md`
 - `investment_team/README.md`
-- `nutrition_meal_planning_team/README.md`
 - `road_trip_planning_team/README.md`
 - `sales_team/README.md`
 - `startup_advisor/README.md`

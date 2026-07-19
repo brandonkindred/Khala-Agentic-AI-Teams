@@ -4,7 +4,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository. **This fil
 
 ## Project Overview
 
-**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It mounts **24 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching, user profile, product delivery, agent studio) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list is `TEAM_CONFIGS` in `backend/unified_api/config.py`.
+**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It mounts **23 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, planning, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching, user profile, product delivery, agent studio) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list is `TEAM_CONFIGS` in `backend/unified_api/config.py`.
 
 ## Repository Structure
 

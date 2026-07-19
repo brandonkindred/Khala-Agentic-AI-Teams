@@ -299,7 +299,7 @@ class AgentProvisioningWorkflow:
         )
         return True
 
-    async def _check_existing_environment(self, agent_id: str) -> bool:
+    async def _check_existing_environment(self, agent_id: str, job_id: str) -> bool:
         """Report whether ``agent_id`` already had a running environment
         before this run touched anything.
 
@@ -308,6 +308,14 @@ class AgentProvisioningWorkflow:
               ``agent_id``'s lock (called right after acquiring it, before
               setup runs, so nothing else can register an environment in the
               gap between this check and setup starting).
+            * ``job_id`` is this workflow run's own job id — passed through so
+              the activity can recognize a container THIS run's own earlier
+              attempt labeled (e.g. a resumed job reusing ``job_id``) rather
+              than one that predates this run. Adding this argument to an
+              already-scheduled call does not change the command sequence a
+              replay must match — no new ``workflow.patched(...)`` gate is
+              needed for it (unlike whether the call happens at all, which
+              ``_PRE_EXISTING_ENV_CHECK_PATCH`` below still governs).
         Postconditions:
             * Gated by its own ``_PRE_EXISTING_ENV_CHECK_PATCH`` marker — NOT
               ``_PROVISIONING_LOCK_PATCH`` (see that marker's own comment for
@@ -325,7 +333,7 @@ class AgentProvisioningWorkflow:
             return True
         return await workflow.execute_activity(
             _activities.check_existing_environment_activity,
-            args=[agent_id],
+            args=[agent_id, job_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -708,7 +716,9 @@ class AgentProvisioningWorkflow:
                     # the conservative pre_existing_environment=True default
                     # set above, which alone is enough to keep compensation
                     # disabled.
-                    pre_existing_environment = await self._check_existing_environment(agent_id)
+                    pre_existing_environment = await self._check_existing_environment(
+                        agent_id, job_id
+                    )
                 except Exception:
                     pass
                 await _renew_or_mark_lost()

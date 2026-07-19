@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
+import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -227,6 +228,141 @@ describe('CodeReviewDashboardComponent', () => {
     expect(component.pagedPulls).toEqual([]);
   });
 
+  // -------------------------------------------------------------------------
+  // PR search/filter + hide drafts (Group E3)
+  // -------------------------------------------------------------------------
+  // makePulls alternates `draft: i % 2 === 0`, so odd-numbered PRs are drafts and
+  // even-numbered PRs are not.
+
+  it('filteredPulls returns every pull by default (empty filter, hideDrafts off)', async () => {
+    await setup();
+    expect(component.filteredPulls).toEqual(component.pulls);
+  });
+
+  it('filteredPulls matches case-insensitively on title', async () => {
+    await setup();
+    component.pullFilter = 'pr 2';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+  });
+
+  it('filteredPulls matches on #<number> and the bare number', async () => {
+    await setup();
+    component.pullFilter = '#2';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+    component.pullFilter = '2';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+  });
+
+  it('hideDrafts excludes draft PRs', async () => {
+    await setup();
+    component.hideDrafts = true;
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2]);
+  });
+
+  it('combines the text filter and hideDrafts', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(5)));
+    await setup();
+    component.hideDrafts = true;
+    component.pullFilter = 'PR';
+    expect(component.filteredPulls.map((p) => p.number)).toEqual([2, 4]);
+  });
+
+  it('onPullFilterChange resets pageIndex to 0', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
+    expect(component.pageIndex).toBe(1);
+    component.onPullFilterChange('PR');
+    expect(component.pageIndex).toBe(0);
+  });
+
+  it('onHideDraftsChange resets pageIndex to 0', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
+    expect(component.pageIndex).toBe(1);
+    component.onHideDraftsChange(true);
+    expect(component.pageIndex).toBe(0);
+  });
+
+  it('pagedPulls slices filteredPulls, not the raw pulls array', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.hideDrafts = true; // 12 non-draft PRs remain: 2, 4, ..., 24
+    component.pageSize = 10;
+    component.pageIndex = 0;
+    expect(component.pagedPulls.map((p) => p.number)).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
+    component.pageIndex = 1;
+    expect(component.pagedPulls.map((p) => p.number)).toEqual([22, 24]);
+  });
+
+  it('renders "No pull requests match" when the filter excludes everything', async () => {
+    await setup();
+    component.pullFilter = 'nonexistent-xyz';
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-empty-state h3')?.textContent).toContain('No pull requests match');
+  });
+
+  it('noPullMatchDescription names only the active filter(s)', async () => {
+    await setup();
+    component.pullFilter = 'nonexistent';
+    expect(component.noPullMatchDescription).toBe('Try a different search.');
+    component.pullFilter = '';
+    component.hideDrafts = true;
+    expect(component.noPullMatchDescription).toBe('Turn off Hide drafts to see more.');
+    component.pullFilter = 'nonexistent';
+    expect(component.noPullMatchDescription).toBe('Try a different search or turn off Hide drafts.');
+  });
+
+  it('renders the tailored empty-state description when the PR filter excludes everything', async () => {
+    await setup();
+    component.pullFilter = 'nonexistent-xyz';
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-empty-state .kh-empty-message')?.textContent).toContain('Try a different search.');
+  });
+
+  it('pullCountAnnouncement is empty when the repo has no open PRs', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of([]));
+    await setup();
+    expect(component.pullCountAnnouncement).toBe('');
+  });
+
+  it('pullCountAnnouncement is singular for one result and plural otherwise, and updates as the filter changes', async () => {
+    await setup(); // default mock: makePulls(3)
+    expect(component.pullCountAnnouncement).toBe('3 pull requests shown');
+    component.pullFilter = '#2';
+    expect(component.pullCountAnnouncement).toBe('1 pull request shown');
+  });
+
+  it('renders the PR count announcement in a role="status" live region', async () => {
+    await setup();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    const texts = Array.from(el.querySelectorAll('[role="status"]')).map((r) => r.textContent?.trim());
+    expect(texts).toContain('3 pull requests shown');
+  });
+
+  it("the rendered paginator's length reflects filteredPulls.length once filtered", async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    component.hideDrafts = true; // 12 non-draft PRs remain, still above the pagination threshold
+    fixture.detectChanges();
+    const paginatorDebug = fixture.debugElement.query(By.css('mat-paginator'));
+    expect(paginatorDebug).not.toBeNull();
+    expect(paginatorDebug.componentInstance.length).toBe(12);
+  });
+
+  it('collapsing/switching repos clears pullFilter but leaves hideDrafts untouched', async () => {
+    await setup();
+    component.pullFilter = 'something';
+    component.hideDrafts = true;
+    component.toggleRepo(component.repos[0]); // collapse
+    expect(component.pullFilter).toBe('');
+    expect(component.hideDrafts).toBe(true);
+  });
+
   it('renders the PR-list error banner inside the expanded repo panel', async () => {
     integrationsSpy.getGitHubPullRequests.mockReturnValue(
       throwError(() => ({ error: { detail: 'rate limited' } })),
@@ -244,6 +380,144 @@ describe('CodeReviewDashboardComponent', () => {
     await setup();
     expect(component.pullsLoaded).toBe(true);
     expect(component['reviewRuns'].reviews.size).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Repo search/filter (Group E1)
+  // -------------------------------------------------------------------------
+
+  const GIZMOS: GitHubRepoItem = { ...REPO, full_name: 'acme/gizmos', name: 'gizmos', description: 'Gizmo tooling' };
+
+  it('filteredRepos returns every repo when repoFilter is empty', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    expect(component.filteredRepos).toEqual([REPO, GIZMOS]);
+  });
+
+  it('filteredRepos matches case-insensitively on full_name', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'GIZMOS';
+    expect(component.filteredRepos).toEqual([GIZMOS]);
+  });
+
+  it('filteredRepos matches case-insensitively on description', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'WIDGET';
+    expect(component.filteredRepos).toEqual([REPO]);
+  });
+
+  it('filteredRepos is empty when nothing matches', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'nonexistent';
+    expect(component.filteredRepos).toEqual([]);
+  });
+
+  it('typing in the repo filter narrows the rendered repo rows', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelectorAll('.cr-repo-row').length).toBe(2);
+    component.repoFilter = 'gizmos';
+    fixture.detectChanges();
+    expect(el.querySelectorAll('.cr-repo-row').length).toBe(1);
+  });
+
+  it('renders "No repositories match" (not "No repository access") when the filter empties the list', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.repoFilter = 'nonexistent';
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-empty-state h3')?.textContent).toContain('No repositories match');
+    expect(el.textContent).not.toContain('No repository access');
+  });
+
+  it('repoCountAnnouncement is empty when the token has no repository access', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([]));
+    await setup();
+    expect(component.repoCountAnnouncement).toBe('');
+  });
+
+  it('repoCountAnnouncement is singular for one result and plural otherwise, and updates as the filter changes', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    expect(component.repoCountAnnouncement).toBe('2 repositories shown');
+    component.repoFilter = 'gizmos';
+    expect(component.repoCountAnnouncement).toBe('1 repository shown');
+  });
+
+  it('renders the repo count announcement in a role="status" live region', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    const texts = Array.from(el.querySelectorAll('[role="status"]')).map((r) => r.textContent?.trim());
+    expect(texts).toContain('2 repositories shown');
+  });
+
+  it('onRepoFilterChange updates repoFilter', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.onRepoFilterChange('gizmos');
+    expect(component.repoFilter).toBe('gizmos');
+  });
+
+  it('onRepoFilterChange collapses the expanded repo when the new filter excludes it', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup(); // setup() expands repos[0] = REPO (acme/widgets)
+    expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+    component.onRepoFilterChange('gizmos'); // excludes acme/widgets
+    expect(component.selectedRepo).toBeNull();
+    expect(component.pulls.length).toBe(0);
+    expect(component.pullsLoaded).toBe(false);
+  });
+
+  it('onRepoFilterChange leaves the expanded repo untouched when it still matches', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+    component.onRepoFilterChange('widgets'); // still matches acme/widgets
+    expect(component.selectedRepo?.full_name).toBe('acme/widgets');
+    expect(component.pullsLoaded).toBe(true);
+  });
+
+  it('onRepoFilterChange is a no-op collapse when no repo is expanded', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    component.toggleRepo(component.repos[0]); // collapse
+    expect(component.selectedRepo).toBeNull();
+    component.onRepoFilterChange('nonexistent');
+    expect(component.selectedRepo).toBeNull();
+  });
+
+  it('typing a repo filter that excludes the expanded repo collapses its PR panel in the DOM', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([REPO, GIZMOS]));
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.cr-repo-pulls')).not.toBeNull();
+    component.onRepoFilterChange('gizmos');
+    fixture.detectChanges();
+    expect(el.querySelector('.cr-repo-pulls')).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Visible repo description (Group E2)
+  // -------------------------------------------------------------------------
+
+  it("renders a repo's description as visible text under its name", async () => {
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.cr-repo-row__description')?.textContent?.trim()).toBe(REPO.description);
+  });
+
+  it('renders no description element for a repo with no description', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(of([{ ...REPO, description: '' }]));
+    await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.cr-repo-row__description')).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -383,15 +657,63 @@ describe('CodeReviewDashboardComponent', () => {
     component['reviewRuns'].startReview(component.pulls[0]);
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
-    // Before the first poll the row badge shows the initial (pending) status.
-    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('pending');
+    // Before the first poll the row badge shows the initial (pending) status, as its
+    // friendly label (Group E4) rather than the raw wire value.
+    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('Starting…');
 
     vi.advanceTimersByTime(5000); // one poll tick -> completed
     fixture.detectChanges();
-    // The row badge now reflects the terminal outcome and the table row updated.
-    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('REQUEST_CHANGES');
+    // The row badge now reflects the terminal outcome (friendly text) and the table row updated.
+    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('Changes requested');
     const statusCell = el.querySelector('.cr-reviews-table tbody tr td');
     expect(statusCell?.textContent).toContain('completed');
+  });
+
+  it("exposes the badge's full friendly status via aria-label (Group E4)", async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 2, inline_comments: 1, comment_findings: 1, event: 'REQUEST_CHANGES' },
+      }),
+    );
+    const el: HTMLElement = fixture.nativeElement;
+    component['reviewRuns'].startReview(component.pulls[0]);
+    fixture.detectChanges();
+    expect(el.querySelector('.cr-row-badge')?.getAttribute('aria-label')).toBe('Starting…');
+
+    vi.advanceTimersByTime(5000); // one poll tick -> completed
+    fixture.detectChanges();
+    expect(el.querySelector('.cr-row-badge')?.getAttribute('aria-label')).toBe('Changes requested');
+  });
+
+  it('shows the spinner (not the status icon) while running, and the icon once terminal (Group E4)', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'running' })); // stays non-terminal
+    const el: HTMLElement = fixture.nativeElement;
+    component['reviewRuns'].startReview(component.pulls[0]);
+    fixture.detectChanges();
+    vi.advanceTimersByTime(5000); // one poll tick, still running
+    fixture.detectChanges();
+    let badge = el.querySelector('.cr-row-badge');
+    expect(badge?.querySelector('mat-spinner')).not.toBeNull();
+    expect(badge?.querySelector('.cr-row-badge__icon')).toBeNull();
+
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'APPROVE' },
+      }),
+    );
+    vi.advanceTimersByTime(5000); // next poll tick -> completed
+    fixture.detectChanges();
+    badge = el.querySelector('.cr-row-badge');
+    expect(badge?.querySelector('mat-spinner')).toBeNull();
+    const icon = badge?.querySelector('.cr-row-badge__icon');
+    expect(icon?.getAttribute('aria-hidden')).toBe('true');
+    expect(icon?.textContent?.trim()).toBe('check_circle');
   });
 
   it('renders the per-PR start-review error inside the expanded detail', async () => {

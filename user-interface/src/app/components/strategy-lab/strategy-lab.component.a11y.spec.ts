@@ -89,7 +89,7 @@ const RECORD: StrategyLabRecord = {
 };
 
 describe('StrategyLabComponent a11y — result card disclosure', () => {
-  async function createFixture() {
+  async function createFixture(showTitle?: boolean) {
     const apiSpy = {
       runStrategyLab: vi.fn().mockReturnValue(NEVER),
       streamRunStatus: vi.fn().mockReturnValue(NEVER),
@@ -122,6 +122,9 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
+    if (showTitle !== undefined) {
+      fixture.componentInstance.showTitle = showTitle;
+    }
     fixture.detectChanges(); // triggers ngOnInit -> loadResults() -> renders the card
     return fixture;
   }
@@ -129,6 +132,24 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
   it('has no axe violations collapsed', async () => {
     const fixture = await createFixture();
     expect(fixture.nativeElement.querySelector('.strategy-card')).toBeTruthy();
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=true (default): exposes the card title as an <h3>, nested under the component\'s own <h2>', async () => {
+    const fixture = await createFixture();
+    const title: HTMLElement = fixture.nativeElement.querySelector('.strategy-card-header-text [mat-card-title]');
+    expect(title).toBeTruthy();
+    expect(title.tagName).toBe('H3');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=false: exposes the card title as an <h2>, so it sits directly under the wrapper\'s <h1>', async () => {
+    const fixture = await createFixture(false);
+    const title: HTMLElement = fixture.nativeElement.querySelector('.strategy-card-header-text [mat-card-title]');
+    expect(title).toBeTruthy();
+    expect(title.tagName).toBe('H2');
+
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
@@ -164,6 +185,73 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
     expect(region.getAttribute('role')).toBe('region');
     expect(btn.getAttribute('aria-controls')).toBe(region.id);
     expect(region.getAttribute('aria-label')).toBe('stocks strategy details');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+});
+
+describe('StrategyLabComponent a11y — root region labelling (showTitle input)', () => {
+  async function createFixture(showTitle?: boolean) {
+    const apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(NEVER),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    const integrationsSpy = {
+      getTradingViewConfig: vi.fn().mockReturnValue(
+        of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+      ),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        { provide: IntegrationsApiService, useValue: integrationsSpy },
+      ],
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
+
+    const fixture = TestBed.createComponent(StrategyLabComponent);
+    if (showTitle !== undefined) {
+      fixture.componentInstance.showTitle = showTitle;
+    }
+    fixture.detectChanges(); // triggers ngOnInit -> loadResults()
+    return fixture;
+  }
+
+  it('showTitle=true (default): renders the <h2> once and labels the region via aria-labelledby', async () => {
+    const fixture = await createFixture();
+    const root: HTMLElement = fixture.nativeElement.querySelector('.strategy-lab');
+    const heading: HTMLElement = fixture.nativeElement.querySelector('#strategy-lab-heading');
+    expect(root.getAttribute('role')).toBe('region');
+    expect(heading).toBeTruthy();
+    expect(heading.tagName).toBe('H2');
+    expect(root.getAttribute('aria-labelledby')).toBe('strategy-lab-heading');
+    expect(root.hasAttribute('aria-label')).toBe(false);
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('showTitle=false: omits the <h2> (avoiding a duplicate with the wrapper\'s <h1>) and labels the region via a static aria-label', async () => {
+    const fixture = await createFixture(false);
+    const root: HTMLElement = fixture.nativeElement.querySelector('.strategy-lab');
+    expect(root.getAttribute('role')).toBe('region');
+    expect(fixture.nativeElement.querySelector('.lab-title')).toBeNull();
+    expect(fixture.nativeElement.querySelector('#strategy-lab-heading')).toBeNull();
+    expect(root.hasAttribute('aria-labelledby')).toBe(false);
+    expect(root.getAttribute('aria-label')).toBe('Strategy Lab');
 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);

@@ -955,6 +955,37 @@ async def test_workflow_setup_reused_false_overrides_conservative_pre_check(tmp_
 
 
 @pytest.mark.asyncio
+async def test_workflow_passes_job_id_to_check_existing_environment_activity(tmp_path) -> None:
+    """_check_existing_environment must pass this run's own job_id as the
+    activity's second argument, not just agent_id -- DockerProvisionerTool's
+    label-based ownership check can't recognize a resumed job's own earlier
+    attempt without it. A wrong argument order or a silently dropped job_id
+    would only show up in production as a wrong ownership decision, never a
+    test failure, unless this is checked explicitly.
+    """
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+    stub = _ExecActivityStub(
+        {
+            "check_existing_environment_activity": True,
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": RuntimeError("cred boom"),
+            "compensate_activity": None,
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="cred boom"):
+            await wf.AgentProvisioningWorkflow().run("job-77", "agent-9", manifest_path)
+
+    check_call = _call(stub, "check_existing_environment_activity")
+    assert check_call["args"] == ["agent-9", "job-77"]
+
+
+@pytest.mark.asyncio
 async def test_workflow_setup_reused_true_does_not_override_pre_check(tmp_path) -> None:
     """environment.reused=True must never flip pre_existing_environment to True.
 

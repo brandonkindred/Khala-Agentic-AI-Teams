@@ -35,8 +35,8 @@ from ...strategy_lab_context import (
     format_prior_results,
 )
 from ..market_regime import RegimeSummary, regime_to_prompt_block
-from ._llm_budget import DesignBudgetExhausted, charge_active_budget
-from ._llm_envelope import invoke_agent
+from ._llm_budget import DesignBudgetExhausted
+from ._llm_envelope import run_structured_agent
 from ._parse_helpers import (
     StrategySpecParseError,
     build_json_correction_prompt,
@@ -44,6 +44,7 @@ from ._parse_helpers import (
     parse_retry_budget,
     validate_structured_rules,
 )
+from ._response_schemas import DESIGN_SPEC_SCHEMA
 from .design_review import _coerce_critique, _sizing_owned_by_gate, format_prior_critiques
 from .model_factory import get_strands_model
 
@@ -96,6 +97,15 @@ _SELF_REVIEW_SYSTEM_PROMPT = (
     + _STOP_ORDER_SEMANTICS
 )
 
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
+# The Ollama transport routes through the ``llm_service`` client in
+# ``json_object`` wire mode, which forces a JSON object on the wire but not a
+# specific shape; this prompt-embedded schema is what pins the response to
+# the wire shape ``_DesignSpecWire`` documents, on both the initial-generation
+# and revision paths.
+_DESIGN_SPEC_SCHEMA_JSON = json.dumps(DESIGN_SPEC_SCHEMA, indent=2)
+
 _DESIGN_USER_TEMPLATE = """\
 Design ONE novel swing-style strategy (typical holds ~2-14 days unless the asset class implies shorter).
 Objective: maximize annualized return AND win rate, subject to positive, robust expectancy after costs. Clearing ~8% annualized is a necessary floor, not the target — push higher while keeping post-cost expectancy positive. Do NOT chase win rate alone: a tight take-profit against a wide stop posts a high win rate with negative expectancy.
@@ -130,6 +140,13 @@ must be one of `"1m"`, `"5m"`, `"15m"`, `"1h"`, `"1d"`.
 
 DO NOT emit a `strategy_code` field. Code synthesis is a separate phase.
 
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
+
+Concretely (a representative example — the schema above is authoritative):
 {{
   "asset_class": "stocks" | "crypto" | "forex" | "futures" | "commodities",
   "hypothesis": "1-3 sentence investment thesis tying multiple signals to edge",
@@ -180,6 +197,12 @@ Issues:
 2. Preserve every aspect of the spec that was NOT criticised — do not redesign what the reviewer accepted.
 3. If any regressions are listed above, you MUST NOT reintroduce those defects — they were already fixed on an earlier round; keep them fixed while addressing the current issues.
 4. Return ONLY a JSON object with no markdown, matching the same shape as the original spec (structured DSL rules, timeframe, target_symbols, risk_limits, etc.). DO NOT emit a `strategy_code` field.
+
+Your response MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
 """
 
 
@@ -267,6 +290,7 @@ class DesignAgent:
             regime_section=regime_section,
             signal_section=signal_section,
             convergence_directives=directives_text,
+            response_schema_json=_DESIGN_SPEC_SCHEMA_JSON,
         )
 
         strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
@@ -309,6 +333,7 @@ class DesignAgent:
             n_prior_critiques=len(prior_critiques) if prior_critiques else 0,
             prior_critiques_block=prior_critiques_block,
             regression_notice_block=regression_notice or "None.",
+            response_schema_json=_DESIGN_SPEC_SCHEMA_JSON,
         )
 
         strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
@@ -367,10 +392,7 @@ class DesignAgent:
             # Charge before the call so the cycle stops *before* exceeding
             # the per-cycle budget. Each parse-retry is a real LLM call and
             # so counts individually.
-            charge_active_budget()
-            raw = invoke_agent(
-                agent, prompt, agent_key="strategy_design", phase="design_generate", logger=logger
-            )
+            #
             # Malformed JSON is a retriable parse failure, not a fatal cycle
             # abort: with schema-constrained decoding it should be rare, but
             # when the decoder is unconstrained (toggle off / Bedrock / a
@@ -378,7 +400,15 @@ class DesignAgent:
             # otherwise burn the whole cycle. Re-prompt with the same budget
             # as a structured-DSL slip so the model gets a clean retry.
             try:
-                parsed = extract_json_object(raw)
+                parsed = run_structured_agent(
+                    agent,
+                    prompt,
+                    agent_key="strategy_design",
+                    phase="design_generate",
+                    parse=extract_json_object,
+                    charge=True,
+                    logger=logger,
+                )
             except ValueError as exc:
                 logger.warning(
                     "DesignAgent emitted unparseable JSON (attempt %d/%d): %s",
@@ -518,6 +548,7 @@ class DesignAgent:
                 # so a self-revision cannot undo a prior-round defect the external
                 # loop is keeping fixed.
                 regression_notice_block=regression_notice or "None.",
+                response_schema_json=_DESIGN_SPEC_SCHEMA_JSON,
             )
 
             try:
@@ -567,15 +598,15 @@ class DesignAgent:
             "verdict, no markdown.\n\n"
             f"```json\n{spec_json}\n```\n"
         )
-        charge_active_budget()
-        raw = invoke_agent(
+        parsed = run_structured_agent(
             agent,
             user_prompt,
             agent_key="strategy_design",
             phase="design_self_review",
+            parse=extract_json_object,
+            charge=True,
             logger=logger,
         )
-        parsed = extract_json_object(raw)
         # Self-review tolerates advisory warnings on an otherwise-ready
         # verdict: the self-review LLM routinely flags minor notes as
         # warnings while still satisfied with the spec. Only a *critical*

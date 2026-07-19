@@ -203,7 +203,7 @@ class AgentLockStore:
         return not isinstance(expires_at, (int, float)) or expires_at < now
 
     # ---- Public API ----
-    def acquire(self, agent_id: str, owner: str, *, now: Optional[float] = None) -> None:
+    def acquire(self, agent_id: str, owner: str, *, now: Optional[float] = None) -> int:
         """Claim exclusive ownership of ``agent_id`` for ``owner``.
 
         Preconditions:
@@ -217,6 +217,14 @@ class AgentLockStore:
               self-deadlocks.
             * Raises :class:`AgentLockBusyError` when a *different*,
               non-expired owner currently holds the lock.
+            * Returns the record's fencing token: ``1`` for a never-seen
+              ``agent_id``; unchanged from the prior acquire when ``owner``
+              is renewing its own lease; the prior token + 1 when ``owner``
+              is reclaiming a lease a different, expired owner held. The
+              token is monotonically increasing per ``agent_id`` and is
+              persisted alongside ``owner``/``acquired_at``/``expires_at``,
+              so later callers can fence out a reclaimed owner's stale
+              in-flight work.
         """
         assert agent_id, "agent_id must be non-empty"
         assert owner, "owner must be non-empty"
@@ -232,10 +240,22 @@ class AgentLockStore:
                 and not self._is_expired(record, now)
             ):
                 raise AgentLockBusyError(agent_id, record.get("owner"))
+            if record is None:
+                fencing_token = 1
+            elif record.get("owner") == owner:
+                fencing_token = record.get("fencing_token") or 1
+            else:
+                fencing_token = (record.get("fencing_token") or 0) + 1
             self._write_record(
                 agent_id,
-                {"owner": owner, "acquired_at": now, "expires_at": now + self.ttl_seconds},
+                {
+                    "owner": owner,
+                    "acquired_at": now,
+                    "expires_at": now + self.ttl_seconds,
+                    "fencing_token": fencing_token,
+                },
             )
+            return fencing_token
 
     def release(self, agent_id: str, owner: str, *, now: Optional[float] = None) -> None:
         """Release ``owner``'s ownership of ``agent_id`` (best-effort, idempotent).
