@@ -1008,8 +1008,8 @@ export interface StrategyLabCompleteEvent {
   total_batches: number;
 }
 
-export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; }
-export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; }
+export interface StrategyLabErrorDetailEvent  { type: 'error'; detail: string; error?: undefined; terminal_status?: 'failed' | 'interrupted'; }
+export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; detail?: undefined; terminal_status?: undefined; }
 /**
  * Two mutually-exclusive wire shapes: two strategy-lab call sites always
  * send `detail` (both genuine failure paths — user cancellation is its own
@@ -1019,6 +1019,13 @@ export interface StrategyLabErrorReclaimEvent { type: 'error'; error: string; de
  * omitting it) so handleStreamEvent()'s existing `event['detail'] as string`
  * read still type-checks uniformly across the union as `string | undefined`,
  * without needing body changes here.
+ *
+ * `terminal_status` is carried ONLY by the external-stop `detail` publisher
+ * (main.py's between-wave "marked externally" branch), which fires for both
+ * `'failed'` and `'interrupted'`. Consumers use it to distinguish the two
+ * precisely; when it is absent (every genuine in-run failure, and the reclaim
+ * shape) they default to `'failed'`. Declared `?: undefined` on the reclaim
+ * branch so it reads uniformly across the union like `detail`/`error` above.
  */
 export type StrategyLabErrorEvent = StrategyLabErrorDetailEvent | StrategyLabErrorReclaimEvent;
 

@@ -2429,6 +2429,16 @@ def _strategy_lab_worker(
                                 },
                             )
 
+                # A deep failure in this wave already published the run's one
+                # terminal 'error' event (run_failed). There is nothing left to
+                # merge, and — critically — no merge failure here must publish a
+                # second, post-terminal cycle_errored event or bump counters
+                # after the run has already ended. Drop the wave's results so the
+                # merge loop below is a no-op. (The primary tracker's final state
+                # is irrelevant once the run fails: no further waves run.)
+                if run_failed:
+                    wave_results = []
+
                 # Merge wave results into the primary convergence tracker in
                 # deterministic cycle-index order so that stall/diversity
                 # directives are reproducible across runs with identical inputs.
@@ -2533,7 +2543,16 @@ def _strategy_lab_worker(
                 # SSE event and the persisted job-service record.
                 status = external_terminal_status or "failed"
                 _update_run({"status": status, "current_cycle": None, "current_batch": None})
-                _publish("error", {"detail": f"Run was marked {status} externally."})
+                # Carry the true terminal status on the event so live SSE
+                # consumers can announce "interrupted" vs "failed" precisely,
+                # instead of inferring it from `detail`'s free text (which the
+                # poll-fallback path gets right via the persisted status, but
+                # the live 'error' branch otherwise cannot). Absent on genuine
+                # failures elsewhere, where consumers default to "failed".
+                _publish(
+                    "error",
+                    {"detail": f"Run was marked {status} externally.", "terminal_status": status},
+                )
             return
 
         msg = (

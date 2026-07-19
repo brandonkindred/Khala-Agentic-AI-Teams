@@ -18,8 +18,9 @@ import type {
  *   (`batch_warning`, `done`) or when `state` is `null` (no run is being
  *   tracked), returns the exact same `state` reference, unchanged.
  *   `complete`/`error`/`cancelled` fold only `status` (`event.status` for
- *   `complete`; the safe default `'failed'` for `error`, which carries no
- *   structured outcome field; the literal `'cancelled'` for `cancelled`) —
+ *   `complete`; `event.terminal_status` when the `error` carries one — an
+ *   external stop marked `'failed'`/`'interrupted'` — else the safe default
+ *   `'failed'`; the literal `'cancelled'` for `cancelled`) —
  *   every other field is unaffected, since the component derives the
  *   announcement/warning text for these directly from the event outside
  *   this reducer. Every other event type returns a **new**
@@ -106,19 +107,23 @@ export function reduce(
 
     case 'cycle_errored': {
       if (!state) return state;
-      // event.reason carries whatever the backend's cycle_errored publish
-      // put there — a raw exception class name for a cycle's own failure,
-      // or the fixed marker 'tracker_merge_failed' for a post-completion
-      // tracker-merge failure (main.py) — stored under the same-named
-      // `reason` field, not renamed to `exception_type`, so callers that
-      // key off the 'tracker_merge_failed' marker (e.g. the live region's
-      // double-count correction) see it on a live-streamed event exactly
-      // as they would on a polled/snapshot-sourced errored_details entry.
+      // event.reason carries whatever the backend's cycle_errored publish put
+      // there — a raw exception class name for a cycle's own failure, or the
+      // fixed marker 'tracker_merge_failed' for a post-completion tracker-merge
+      // failure (main.py). Store it under the SAME key the backend's persisted
+      // errored_details uses for each case, so a live-streamed detail is
+      // shaped identically to the polled/snapshot one: a regular failure's
+      // class name goes under `exception_type` (matching main.py's cycle
+      // except-handler entry), while the tracker-merge marker goes under
+      // `reason` (matching main.py's merge-failure entry, which the live
+      // region's double-count correction keys off). Mixing the two keys by
+      // source is exactly the drift this split avoids.
+      const isTrackerMerge = event.reason === 'tracker_merge_failed';
       const detail: StrategyLabErroredDetail = {
         cycle_index: event.cycle_index,
         batch_index: event.batch_index,
         error: event.error,
-        reason: event.reason,
+        ...(isTrackerMerge ? { reason: event.reason } : { exception_type: event.reason }),
       };
       return {
         ...state,
@@ -127,8 +132,7 @@ export function reduce(
         // Incremented directly from the live event's own `reason`, mirroring
         // errored_cycles above — independent of errored_details' 50-entry
         // cap, so this stays exact even once matching entries evict.
-        tracker_merge_error_count:
-          (state.tracker_merge_error_count ?? 0) + (event.reason === 'tracker_merge_failed' ? 1 : 0),
+        tracker_merge_error_count: (state.tracker_merge_error_count ?? 0) + (isTrackerMerge ? 1 : 0),
         current_cycle: undefined,
       };
     }
@@ -169,18 +173,16 @@ export function reduce(
     case 'error': {
       if (!state) return state;
       // A genuine user cancellation is its own 'cancelled' event type (see
-      // that case below), never routed through 'error' — so a terminal
-      // 'error' event here always means a real failure or a connection-lost
-      // reclaim, neither of which carries a structured outcome field (just
-      // free-text detail/error). 'failed' is a safe, never-wrongly-successful
-      // default for the same reason as 'complete' above: a run whose
-      // connection stayed open its whole lifetime would otherwise leave
-      // `status` at its initial 'running' value straight through to
-      // finishRun()'s lastTerminalStatus capture. The component's own
-      // detail-based classification (failed vs. connection-lost) for the
-      // live announcement happens outside this reducer, from the event
-      // directly.
-      return { ...state, status: 'failed' };
+      // that case below), never routed through 'error'. A terminal 'error'
+      // event is either a real in-run failure, a connection-lost reclaim, or
+      // an external stop the backend records as 'failed'/'interrupted'. Only
+      // the last carries a structured `terminal_status`; fold it when present
+      // so an externally-interrupted run's status is not mislabeled 'failed'.
+      // Otherwise 'failed' is the safe, never-wrongly-successful default (same
+      // reason as 'complete' above: a run whose connection stayed open its
+      // whole lifetime would otherwise leave `status` at its initial 'running'
+      // value straight through to finishRun()'s lastTerminalStatus capture).
+      return { ...state, status: event.terminal_status ?? 'failed' };
     }
 
     case 'cancelled': {

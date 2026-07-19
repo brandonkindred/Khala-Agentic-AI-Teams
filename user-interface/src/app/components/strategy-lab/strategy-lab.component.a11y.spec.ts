@@ -1117,6 +1117,37 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('announces an interrupt, not a failure, when an external-stop error carries terminal_status "interrupted"', async () => {
+    // Regression: an externally-interrupted run is published as an 'error'
+    // event carrying terminal_status: 'interrupted'. The live announcement
+    // must say "interrupted" (matching the visible banner and the poll
+    // fallback's describeRunStatus wording), not the generic "failed".
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+    });
+    fixture.detectChanges();
+
+    stubOf(fixture).events$.next({
+      type: 'error',
+      detail: 'Run was marked interrupted externally.',
+      terminal_status: 'interrupted',
+    });
+    stubOf(fixture).running.set(false);
+    stubOf(fixture).runStatus.set(null);
+    fixture.detectChanges();
+
+    expect(liveRegionText(fixture)).toBe('Strategy Lab run interrupted.');
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
   it('announces a failure, not a cancellation, when a genuine error message happens to mention "cancel"', async () => {
     // Regression: before cancellation had its own distinct event type, it
     // was detected via a /cancel/i regex on `detail`'s free text — a genuine

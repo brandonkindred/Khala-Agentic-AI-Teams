@@ -880,6 +880,35 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       runService.events$.next({ type: 'error', error: 'subscription reclaimed' });
       expect(component.error()).toBe('Strategy Lab lost track of the run — status unavailable.');
     });
+
+    it('shows the external-stop detail in the error banner for an interrupted run', () => {
+      // An externally-interrupted run is published as an 'error' with a
+      // terminal_status; the visible banner still shows the detail text (the
+      // interrupted-vs-failed distinction is exercised in the announcement's
+      // a11y spec).
+      runService.events$.next({
+        type: 'error',
+        detail: 'Run was marked interrupted externally.',
+        terminal_status: 'interrupted',
+      });
+      expect(component.error()).toBe('Run was marked interrupted externally.');
+    });
+  });
+
+  describe('cancelled', () => {
+    it('surfaces a cancellation in the non-error warning banner, not the red error banner', () => {
+      // A deliberate user cancellation is a notice, not an error — it must not
+      // set the red error banner now that it has its own event type.
+      runService.events$.next({ type: 'cancelled', detail: 'Run cancelled by user' });
+      expect(component.completionWarning()).toBe('Run cancelled by user');
+      expect(component.error()).toBeNull();
+    });
+
+    it('falls back to a default cancellation notice when detail is empty', () => {
+      runService.events$.next({ type: 'cancelled', detail: '' });
+      expect(component.completionWarning()).toBe('Run cancelled by user.');
+      expect(component.error()).toBeNull();
+    });
   });
 
   it('does nothing for a done event', () => {

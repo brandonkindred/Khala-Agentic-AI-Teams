@@ -248,7 +248,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   readonly loading = signal(false);
   readonly clearingAll = signal(false);
   readonly error = signal<string | null>(null);
-  /** Non-fatal warning banner shown when a run finishes with errored/skipped cycles. */
+  /**
+   * Non-fatal notice banner (dismissible, non-error styling): shown when a run
+   * finishes with errored/skipped cycles, when a non-fatal `batch_warning`
+   * arrives mid-run, or when a run is cancelled by the user (a deliberate stop
+   * is a notice, not a red-banner error).
+   */
   readonly completionWarning = signal<string | null>(null);
   /** Lab record id currently being deleted (disables actions on that card). */
   readonly deletingLabRecordId = signal<string | null>(null);
@@ -669,15 +674,27 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       } else {
         // A genuine user cancellation is never routed through 'error' — it's
         // its own 'cancelled' event type (branch below) — so every 'error'
-        // event reaching here is a real failure.
+        // event reaching here is a real failure or an external stop. The
+        // backend marks an external stop 'failed' or 'interrupted' and carries
+        // that on `terminal_status`; announce the two distinctly (matching
+        // `describeRunStatus`'s wording) so an externally-interrupted run
+        // isn't spoken as "failed" while the visible banner says "interrupted".
         const detail = event.detail || 'Run failed';
         this.error.set(detail);
-        this.runOutcomeAnnouncement.set('Strategy Lab run failed.');
+        this.runOutcomeAnnouncement.set(
+          event.terminal_status === 'interrupted'
+            ? 'Strategy Lab run interrupted.'
+            : 'Strategy Lab run failed.',
+        );
       }
     }
 
     if (event.type === 'cancelled') {
-      this.error.set(event.detail);
+      // A deliberate user cancellation is not an error — surface it in the
+      // non-error (dismissible warning) banner rather than the red error one,
+      // now that cancellation has its own event type. The aria-live region
+      // announces the outcome regardless.
+      this.completionWarning.set(event.detail || 'Run cancelled by user.');
       this.runOutcomeAnnouncement.set('Strategy Lab run cancelled.');
     }
   }
