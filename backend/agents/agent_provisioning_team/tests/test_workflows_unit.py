@@ -181,6 +181,93 @@ async def test_workflow_happy_path(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_workflow_threads_fencing_token_into_resource_mutating_activities(
+    tmp_path,
+) -> None:
+    """The fencing token acquire_agent_lock_activity returns must be carried,
+    unchanged, as the trailing argument of every resource-mutating activity
+    call this run makes — setup, credentials, each per-tool provision call,
+    and the account-provisioning checkpoint. Pure plumbing: no rejection
+    logic exists yet, so this only checks the value arrives at each site."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": 7,
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"},
+                    "redis": {"tool_name": "redis", "username": "u", "password": "p"},
+                },
+            },
+            "provision_tool_activity": lambda call: {
+                "tool_name": call["args"][2],
+                "success": True,
+                "provisioner_key": "x",
+            },
+            "record_account_provisioning_activity": {"success": True, "tool_results": []},
+            "audit_activity": {"passed": True, "verifications": []},
+            "documentation_activity": {"success": True, "onboarding": {"summary": "s"}},
+            "deliver_activity": {"success": True, "error": None},
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    assert _call(stub, "setup_activity")["args"][-1] == 7
+    assert _call(stub, "credentials_activity")["args"][-1] == 7
+    provision_calls = [c for c in stub.calls if c["name"] == "provision_tool_activity"]
+    assert len(provision_calls) == 2
+    assert all(c["args"][-1] == 7 for c in provision_calls)
+    assert _call(stub, "record_account_provisioning_activity")["args"][-1] == 7
+
+
+@pytest.mark.asyncio
+async def test_workflow_threads_fencing_token_into_compensation(tmp_path) -> None:
+    """A tool failure's compensate_activity call must also carry the same
+    fencing token this run's own lock acquisition returned."""
+    from agent_provisioning_team.temporal import workflows as wf
+
+    manifest_path = _build_manifest_yaml(tmp_path)
+
+    def provision_responder(call):
+        tool_name = call["args"][2]
+        if tool_name == "redis":
+            return {"tool_name": tool_name, "success": False, "error": "boom"}
+        return {"tool_name": tool_name, "success": True, "provisioner_key": "x"}
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": 3,
+            "setup_activity": {"success": True, "environment": {"workspace_path": "/w"}},
+            "list_manifest_tools_activity": _TOOL_SPECS,
+            "credentials_activity": {
+                "success": True,
+                "credentials": {
+                    "postgresql": {"tool_name": "postgresql", "username": "u", "password": "p"},
+                    "redis": {"tool_name": "redis", "username": "u", "password": "p"},
+                },
+            },
+            "provision_tool_activity": provision_responder,
+            "compensate_activity": None,
+            "mark_job_failed_activity": None,
+        }
+    )
+
+    with patch.object(wf.workflow, "execute_activity", new=stub):
+        with pytest.raises(RuntimeError, match="Tool provisioning failed"):
+            await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
+
+    assert _call(stub, "compensate_activity")["args"][-1] == 3
+
+
+@pytest.mark.asyncio
 async def test_workflow_unpatched_replay_skips_lock_activities(tmp_path, monkeypatch) -> None:
     """P1 regression: a history recorded before the lock existed
     (workflow.patched -> False) must replay its original lock-free command
@@ -531,6 +618,7 @@ async def test_compensate_failed_tools_clears_reused_when_tearing_down_environme
         [{"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": False}],
         "job-1",
         True,
+        None,
     ]
 
 
@@ -560,6 +648,7 @@ async def test_compensate_failed_tools_preserves_reused_when_environment_predate
         [{"tool_name": "postgresql", "provisioner_key": "postgres_provisioner", "reused": True}],
         "job-1",
         False,
+        None,
     ]
 
 
@@ -913,7 +1002,7 @@ async def test_workflow_compensates_setup_on_credentials_failure(tmp_path) -> No
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True, None]
     assert "mark_job_failed_activity" in [c["name"] for c in stub.calls]
 
 
@@ -951,7 +1040,7 @@ async def test_workflow_setup_reused_false_overrides_conservative_pre_check(tmp_
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True, None]
 
 
 @pytest.mark.asyncio
@@ -1018,7 +1107,7 @@ async def test_workflow_setup_reused_true_does_not_override_pre_check(tmp_path) 
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True, None]
 
 
 @pytest.mark.asyncio
@@ -1091,7 +1180,7 @@ async def test_workflow_setup_failure_compensates_and_marks_failed(tmp_path) -> 
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1", True]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", True, None]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "setup boom" in fail_call["args"][1]
@@ -1131,7 +1220,7 @@ async def test_workflow_skips_environment_teardown_when_environment_pre_existed(
             await wf.AgentProvisioningWorkflow().run("job-1", "agent-1", manifest_path)
 
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1", False]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", False, None]
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
     assert "checkpoint boom" in fail_call["args"][1]
@@ -1179,7 +1268,7 @@ async def test_workflow_unpatched_replay_still_compensates_on_setup_failure(
     assert "acquire_agent_lock_activity" not in fn_names
     assert "check_existing_environment_activity" not in fn_names
     compensate_call = _call(stub, "compensate_activity")
-    assert compensate_call["args"] == ["agent-1", [], "job-1", False]
+    assert compensate_call["args"] == ["agent-1", [], "job-1", False, None]
 
 
 @pytest.mark.asyncio
@@ -1216,7 +1305,7 @@ async def test_workflow_credentials_failure_compensation_raises(tmp_path) -> Non
 
     # Compensation was attempted (and raised), the failure was logged, and the
     # job was still marked failed despite the compensation error.
-    assert _call(stub, "compensate_activity")["args"] == ["agent-1", [], "job-1", True]
+    assert _call(stub, "compensate_activity")["args"] == ["agent-1", [], "job-1", True, None]
     mock_logger.error.assert_called_once()
     fail_call = _call(stub, "mark_job_failed_activity")
     assert fail_call["args"][0] == "job-1"
@@ -1381,7 +1470,37 @@ async def test_deprovisioning_workflow_calls_deprovision_activity() -> None:
     owner = fake_info.workflow_id
     assert _call(stub, "acquire_agent_lock_activity")["args"] == [owner, "agent-1"]
     assert _call(stub, "release_agent_lock_activity")["args"] == [owner, "agent-1"]
-    assert _call(stub, "deprovision_activity")["args"] == ["agent-1", True]
+    assert _call(stub, "deprovision_activity")["args"] == ["agent-1", True, None]
+
+
+@pytest.mark.asyncio
+async def test_deprovisioning_workflow_threads_fencing_token_into_deprovision_activity() -> None:
+    """The fencing token acquire_agent_lock_activity returns must be carried
+    as deprovision_activity's trailing argument."""
+    from types import SimpleNamespace
+
+    from agent_provisioning_team.temporal import workflows as wf
+
+    stub = _ExecActivityStub(
+        {
+            "acquire_agent_lock_activity": 9,
+            "deprovision_activity": {
+                "agent_id": "agent-1",
+                "success": True,
+                "details": {},
+                "error": None,
+            },
+        }
+    )
+    fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-agent-1-abc123")
+
+    with (
+        patch.object(wf.workflow, "execute_activity", new=stub),
+        patch.object(wf.workflow, "info", return_value=fake_info),
+    ):
+        await wf.AgentDeprovisioningWorkflow().run("agent-1", True)
+
+    assert _call(stub, "deprovision_activity")["args"] == ["agent-1", True, 9]
 
 
 @pytest.mark.asyncio

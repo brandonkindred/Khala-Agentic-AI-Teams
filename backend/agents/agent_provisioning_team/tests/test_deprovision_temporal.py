@@ -114,7 +114,7 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
         "release_agent_lock_activity",
     ]
     captured = next(c for c in calls if c["name"] == "deprovision_activity")
-    assert captured["args"] == ["a", True]
+    assert captured["args"] == ["a", True, None]
     assert captured["schedule_to_close_timeout"] == PHASE_TIMEOUT
     assert captured["retry_policy"] is wf.DEFAULT_RETRY_POLICY
 
