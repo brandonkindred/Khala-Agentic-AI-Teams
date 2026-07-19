@@ -19,6 +19,20 @@ from agent_provisioning_team.models import DeprovisionCancelledError, Deprovisio
 
 
 @pytest.fixture(autouse=True)
+def _no_open_pre_patch_executions():
+    """Default the rollout drain gate to "nothing open" for every test here.
+
+    Without this, ``deprovision_agent`` would call the real
+    ``find_open_pre_patch_executions``, which blocks on a Temporal client/loop
+    that doesn't exist in this unit-test module.
+    """
+    from agent_provisioning_team.api import main
+
+    with patch.object(main, "find_open_pre_patch_executions", return_value=[]):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _patched_true(monkeypatch):
     """Default every test to the post-lock-deploy replay branch.
 

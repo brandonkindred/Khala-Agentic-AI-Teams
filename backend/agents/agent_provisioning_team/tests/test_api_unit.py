@@ -7,6 +7,7 @@ Marked NON-integration so they run on the default unit lane.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +26,19 @@ from agent_provisioning_team.models import (
 )
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _no_open_pre_patch_executions():
+    """Default the rollout drain gate to "nothing open" for every test.
+
+    ``find_open_pre_patch_executions`` needs a live Temporal client/loop;
+    without this, every provision/deprovision test in this module would block
+    for ``_DRAIN_GATE_CLIENT_READY_TIMEOUT_S`` before failing open. Tests that
+    exercise the gate itself override this within their own ``with`` block.
+    """
+    with patch.object(api_main, "find_open_pre_patch_executions", return_value=[]):
+        yield
 
 
 def test_require_provision_starter_is_agent_provisioning_workflow_entry() -> None:
@@ -188,6 +202,142 @@ def test_provision_returns_503_when_temporal_disabled() -> None:
     assert r.status_code == 503
     assert "Temporal" in r.json()["detail"]
     mock_create_job.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Rollout drain gate (find_open_pre_patch_executions)
+# ---------------------------------------------------------------------------
+
+
+def _fake_pre_patch_execution(agent_id: str = "ag-draining"):
+    from agent_provisioning_team.shared.visibility_query import PrePatchExecution
+
+    return PrePatchExecution(
+        workflow_id="agent-provisioning-old-job",
+        run_id="run-1",
+        workflow_type="AgentProvisioningWorkflow",
+        start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        agent_id=agent_id,
+    )
+
+
+def test_provision_refused_when_pre_patch_execution_open() -> None:
+    """A new /provision request must not race an open pre-patch execution."""
+    fake_starter = MagicMock()
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
+        patch.object(
+            api_main,
+            "find_open_pre_patch_executions",
+            return_value=[_fake_pre_patch_execution("ag-draining")],
+        ),
+    ):
+        r = client.post("/provision", json={"agent_id": "ag-draining"})
+
+    assert r.status_code == 409
+    assert r.headers["retry-after"]
+    body = r.json()
+    assert body["agent_id"] == "ag-draining"
+    assert body["open_pre_patch_executions"] == 1
+    mock_create_job.assert_not_called()
+    fake_starter.assert_not_called()
+
+
+def test_provision_proceeds_when_no_pre_patch_execution_open() -> None:
+    """No open pre-patch execution: the request proceeds as normal."""
+    fake_starter = MagicMock()
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
+        patch.object(api_main, "find_open_pre_patch_executions", return_value=[]),
+    ):
+        r = client.post("/provision", json={"agent_id": "ag-clear"})
+
+    assert r.status_code == 200
+    mock_create_job.assert_called_once()
+    fake_starter.assert_called_once()
+
+
+def test_provision_proceeds_when_drain_gate_disabled_via_env(monkeypatch) -> None:
+    """Disabling the gate lets a request proceed even with an open pre-patch execution."""
+    monkeypatch.setenv(api_main.DRAIN_GATE_ENABLED_ENV_VAR, "false")
+    fake_starter = MagicMock()
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
+        patch.object(
+            api_main,
+            "find_open_pre_patch_executions",
+            return_value=[_fake_pre_patch_execution()],
+        ) as mock_find,
+    ):
+        r = client.post("/provision", json={"agent_id": "ag-gate-off"})
+
+    assert r.status_code == 200
+    mock_create_job.assert_called_once()
+    fake_starter.assert_called_once()
+    mock_find.assert_not_called()
+
+
+def test_provision_proceeds_when_drain_gate_check_fails() -> None:
+    """A visibility-query failure fails open rather than blocking all traffic."""
+    fake_starter = MagicMock()
+
+    with (
+        patch("agent_provisioning_team.api.main.create_job") as mock_create_job,
+        patch.object(api_main, "_require_provision_starter", return_value=fake_starter),
+        patch.object(
+            api_main,
+            "find_open_pre_patch_executions",
+            side_effect=RuntimeError("Temporal client not available"),
+        ),
+    ):
+        r = client.post("/provision", json={"agent_id": "ag-query-fails"})
+
+    assert r.status_code == 200
+    mock_create_job.assert_called_once()
+    fake_starter.assert_called_once()
+
+
+def test_deprovision_refused_when_pre_patch_execution_open() -> None:
+    """A new deprovision request must not race an open pre-patch execution."""
+    fake_runner = MagicMock()
+
+    with (
+        patch.object(api_main, "_require_deprovision_runner", return_value=fake_runner),
+        patch.object(
+            api_main,
+            "find_open_pre_patch_executions",
+            return_value=[_fake_pre_patch_execution("a1")],
+        ),
+    ):
+        r = client.delete("/environments/a1")
+
+    assert r.status_code == 409
+    assert r.headers["retry-after"]
+    assert r.json()["agent_id"] == "a1"
+    fake_runner.assert_not_called()
+
+
+def test_drain_gate_enabled_defaults_true_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv(api_main.DRAIN_GATE_ENABLED_ENV_VAR, raising=False)
+    assert api_main._drain_gate_enabled() is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "False", "no", "off", "OFF"])
+def test_drain_gate_enabled_false_for_recognized_disable_values(monkeypatch, raw: str) -> None:
+    monkeypatch.setenv(api_main.DRAIN_GATE_ENABLED_ENV_VAR, raw)
+    assert api_main._drain_gate_enabled() is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "yes", "garbage"])
+def test_drain_gate_enabled_true_for_everything_else(monkeypatch, raw: str) -> None:
+    monkeypatch.setenv(api_main.DRAIN_GATE_ENABLED_ENV_VAR, raw)
+    assert api_main._drain_gate_enabled() is True
 
 
 # ---------------------------------------------------------------------------
