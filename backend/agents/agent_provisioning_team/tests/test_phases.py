@@ -1082,6 +1082,33 @@ def test_deprovision_tools_requires_agent_id() -> None:
         deprovision_tools("", provisioners={})
 
 
+def test_deprovision_tools_stops_at_cancellation_checkpoint() -> None:
+    from agent_provisioning_team.models import DeprovisionCancelledError, DeprovisionResult
+    from agent_provisioning_team.phases.account_provisioning import deprovision_tools
+
+    p1 = MagicMock()
+    p1.deprovision.return_value = DeprovisionResult(tool_name="p1", success=True)
+    p2 = MagicMock()
+    p2.deprovision.return_value = DeprovisionResult(tool_name="p2", success=True)
+    p3 = MagicMock()
+    p3.deprovision.return_value = DeprovisionResult(tool_name="p3", success=True)
+
+    calls = {"n": 0}
+
+    def checkpoint() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1  # let p1 run, cancel before p2's teardown call
+
+    with pytest.raises(DeprovisionCancelledError) as exc_info:
+        deprovision_tools("a1", provisioners={"p1": p1, "p2": p2, "p3": p3}, checkpoint=checkpoint)
+
+    p1.deprovision.assert_called_once_with("a1")
+    p2.deprovision.assert_not_called()
+    p3.deprovision.assert_not_called()
+    assert exc_info.value.agent_id == "a1"
+    assert exc_info.value.completed == {"p1": True}
+
+
 def test_build_default_tool_agents_for_account_provisioning() -> None:
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
 

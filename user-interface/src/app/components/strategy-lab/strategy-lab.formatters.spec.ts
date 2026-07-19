@@ -5,6 +5,7 @@ import {
   gateSeverityClass,
   getAssetClassIcon,
   returnColor,
+  returnColorLabel,
   verdictColor,
   verdictLabel,
 } from './strategy-lab.formatters';
@@ -25,6 +26,15 @@ describe('returnColor', () => {
 
   it('is losing below 0%', () => {
     expect(returnColor(-0.01)).toBe('losing');
+  });
+});
+
+describe('returnColorLabel', () => {
+  it('mirrors returnColor\'s boundaries with a text alternative', () => {
+    expect(returnColorLabel(8.01)).toBe('Above target');
+    expect(returnColorLabel(8)).toBe('Neutral');
+    expect(returnColorLabel(0)).toBe('Neutral');
+    expect(returnColorLabel(-0.01)).toBe('Negative');
   });
 });
 

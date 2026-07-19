@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 
 from ..models import (
     AccountProvisioningResult,
+    DeprovisionCancelledError,
     GeneratedCredentials,
     ToolProvisionResult,
 )
@@ -135,6 +136,7 @@ def deprovision_tools(
     agent_id: str,
     provisioner_keys: Optional[List[str]] = None,
     provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
+    checkpoint: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, bool]:
     """
     Deprovision an agent's tools by running each provisioner's teardown.
@@ -152,6 +154,9 @@ def deprovision_tools(
             every provisioner in ``provisioners``.
         provisioners: Provisioner instances keyed by registry key. Defaults to
             ``build_default_tool_agents()``.
+        checkpoint: Optional callable polled before each provisioner's teardown
+            call. When it returns ``True``, teardown stops before that call —
+            no further provisioners are torn down. ``None`` disables checking.
 
     Preconditions:
         * ``agent_id`` is non-empty.
@@ -164,11 +169,16 @@ def deprovision_tools(
           name), with a ``bool`` value per key equal to that provisioner's
           ``deprovision`` success; a provisioner that raises maps to ``False``.
         * Contains exactly one entry for every provisioner in ``provisioners``
-          that passes the ``provisioner_keys`` filter, and no other keys.
+          that passes the ``provisioner_keys`` filter and was torn down before
+          ``checkpoint`` (if any) signalled cancellation, and no other keys.
 
     Invariants:
         * Best-effort teardown: never raises on a single provisioner failure, so
           one failing provisioner cannot block the rest.
+
+    Raises:
+        DeprovisionCancelledError: ``checkpoint`` returned ``True`` before a
+            provisioner's teardown call. Carries the results gathered so far.
     """
     assert agent_id, "agent_id must be non-empty"
 
@@ -176,11 +186,14 @@ def deprovision_tools(
     results: Dict[str, bool] = {}
 
     for key, provisioner in provs.items():
-        if provisioner_keys is None or key in provisioner_keys:
-            try:
-                result = provisioner.deprovision(agent_id)
-                results[key] = result.success
-            except Exception:
-                results[key] = False
+        if provisioner_keys is not None and key not in provisioner_keys:
+            continue
+        if checkpoint is not None and checkpoint():
+            raise DeprovisionCancelledError(agent_id, results)
+        try:
+            result = provisioner.deprovision(agent_id)
+            results[key] = result.success
+        except Exception:
+            results[key] = False
 
     return results

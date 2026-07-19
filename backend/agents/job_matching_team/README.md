@@ -65,10 +65,17 @@ any profile field via `profile_overrides`.
 
 Postgres tables `job_matching_runs`, `job_matching_ranked_jobs`, and
 `job_matching_listing_states` (user triage state keyed by posting fingerprint;
-see `postgres/__init__.py`), registered from the FastAPI lifespan via
-`shared_postgres.register_team_schemas`. The lifespan also registers the
-`user_profile` schema so career-profile writes work when this service starts
-first. Requires `POSTGRES_HOST`; there is no SQLite fallback.
+see `postgres/__init__.py`), registered via `shared_app.create_team_app`'s
+`postgres_schema=JOB_MATCHING_SCHEMA`. This team also depends on the central
+`user_profile` schema (`user_profiles`/`user_profile_associations`) for
+career-profile reads/writes, declared via `create_team_app`'s
+`extra_postgres_schemas=[USER_PROFILE_SCHEMA]` rather than registered
+separately from an `on_startup` hook — both schemas land together on
+`app.state.postgres_schemas`, which the team-service wrapper registers
+*before* starting this team's Temporal worker, so a queued
+`job_matching_prepare_scan` activity can never read `user_profiles` before it
+exists on a fresh database. Requires `POSTGRES_HOST`; there is no SQLite
+fallback.
 
 ## Execution
 

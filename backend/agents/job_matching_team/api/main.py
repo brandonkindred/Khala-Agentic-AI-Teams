@@ -63,24 +63,9 @@ from job_matching_team.shared.job_store import (
     update_job,
 )
 from shared_app import create_team_app
+from user_profile import SCHEMA as USER_PROFILE_SCHEMA
 
 logger = logging.getLogger(__name__)
-
-
-def _register_user_profile_schema() -> None:
-    """Ensure the central user-profile tables exist for career-profile writes.
-
-    The unified API registers this schema too, but this service runs in its own
-    container and must not depend on unified-API startup ordering. Registration
-    is idempotent DDL and defensive (logged, never raised into startup).
-    """
-    try:
-        from shared_postgres import register_team_schemas
-        from user_profile import SCHEMA as USER_PROFILE_SCHEMA
-
-        register_team_schemas(USER_PROFILE_SCHEMA)
-    except Exception:  # noqa: BLE001 - startup must not fail on optional DDL
-        logger.warning("Could not register user_profile schema at startup", exc_info=True)
 
 
 def _start_temporal_worker_backstop() -> None:
@@ -109,12 +94,6 @@ def _start_temporal_worker_backstop() -> None:
         logger.warning("job_matching Temporal worker backstop failed to start", exc_info=True)
 
 
-def _on_startup() -> None:
-    """Aggregate app-startup hooks (schema registration + Temporal backstop)."""
-    _register_user_profile_schema()
-    _start_temporal_worker_backstop()
-
-
 app = create_team_app(
     service_name="job-matching",
     team_key="job_matching",
@@ -122,7 +101,8 @@ app = create_team_app(
     description="Scans open roles matching a job-seeker profile and ranks the best to apply for",
     version="1.0.0",
     postgres_schema=JOB_MATCHING_SCHEMA,
-    on_startup=_on_startup,
+    extra_postgres_schemas=[USER_PROFILE_SCHEMA],
+    on_startup=_start_temporal_worker_backstop,
 )
 
 app.add_middleware(

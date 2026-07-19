@@ -211,33 +211,6 @@ class CodingTeamPlanInput(BaseModel):
     assumptions: List[str] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Job state (for persistence / status API)
-# ---------------------------------------------------------------------------
-
-
-class CodingTeamJobState(BaseModel):
-    """Persisted state for a coding_team job: task graph snapshot and agent-task mapping."""
-
-    job_id: str = Field(...)
-    repo_path: str = Field(default="")
-    phase: str = Field(default="task_graph", description="e.g. task_graph, coding, execution")
-    status_text: str = Field(default="")
-    task_graph_snapshot: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="Serialized tasks for this job",
-    )
-    agent_task_map: Dict[str, str] = Field(
-        default_factory=dict,
-        description="agent_id -> task_id for currently assigned non-merged task",
-    )
-    stack_specs: List[Dict[str, Any]] = Field(
-        default_factory=list,
-        description="StackSpec list for this job",
-    )
-    updated_at: Optional[datetime] = None
-
-
 class AgentStatusEntry(BaseModel):
     """Live status of one coding-team agent, derived for the status API / UI.
 

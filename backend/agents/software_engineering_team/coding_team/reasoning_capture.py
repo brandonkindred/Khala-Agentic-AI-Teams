@@ -7,10 +7,10 @@ god-file into named collaborators) — pure structural move, no behavior change.
 from __future__ import annotations
 
 import logging
-import math
-import os
 import threading
 from typing import Any, Callable, Dict, Optional
+
+from shared_env import parse_float
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +32,8 @@ def _thinking_flush_interval_s() -> float:
         Never raises. A non-finite interval would make the heartbeat's
         ``Event.wait(interval)`` block forever, defeating periodic flushing.
     """
-    raw = os.environ.get(_ENV_THINKING_FLUSH_INTERVAL_S)
-    if not raw:
-        return _DEFAULT_THINKING_FLUSH_INTERVAL_S
-    try:
-        value = float(raw)
-    except ValueError:
-        return _DEFAULT_THINKING_FLUSH_INTERVAL_S
-    if not math.isfinite(value) or value <= 0:
-        return _DEFAULT_THINKING_FLUSH_INTERVAL_S
-    return value
+    value = parse_float(_ENV_THINKING_FLUSH_INTERVAL_S, _DEFAULT_THINKING_FLUSH_INTERVAL_S)
+    return value if value > 0 else _DEFAULT_THINKING_FLUSH_INTERVAL_S
 
 
 class _ThinkingBuffer:

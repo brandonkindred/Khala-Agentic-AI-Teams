@@ -749,6 +749,63 @@ def test_truncate_team_tables_rejects_quote_in_name(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# drop_team_tables
+# ---------------------------------------------------------------------------
+
+
+def test_drop_team_tables_noop_on_empty_list(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres.testing import drop_team_tables
+
+    schema = TeamSchema(team="demo", statements=[], table_names=[])
+    assert drop_team_tables(schema) == 0
+
+
+def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import testing as testing_mod
+
+    executed: list[str] = []
+
+    @contextmanager
+    def fake_get_conn(database=None):
+        cursor = MagicMock()
+        cursor.__enter__ = lambda self: cursor
+        cursor.__exit__ = lambda self, *a: None
+        cursor.execute.side_effect = lambda sql: executed.append(sql)
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        yield conn
+
+    monkeypatch.setattr(testing_mod, "get_conn", fake_get_conn)
+
+    schema = TeamSchema(team="demo", table_names=["demo_a", "demo_b"])
+    dropped = testing_mod.drop_team_tables(schema)
+    assert dropped == 2
+    assert len(executed) == 2  # one DROP per table, not one combined statement
+    assert 'DROP TABLE IF EXISTS "demo_a" CASCADE' == executed[0]
+    assert 'DROP TABLE IF EXISTS "demo_b" CASCADE' == executed[1]
+
+
+def test_drop_team_tables_raises_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared_postgres.testing import drop_team_tables
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
+        drop_team_tables(schema)
+
+
+def test_drop_team_tables_rejects_quote_in_name(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres.testing import drop_team_tables
+
+    schema = TeamSchema(team="demo", table_names=['bad"name'])
+    with pytest.raises(ValueError, match="double-quote"):
+        drop_team_tables(schema)
+
+
+# ---------------------------------------------------------------------------
 # @timed_query decorator
 # ---------------------------------------------------------------------------
 

@@ -8,13 +8,14 @@ Temporal server is needed — we stub at the ``temporalio``/dispatch boundary.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from agent_provisioning_team.models import DeprovisionResponse
+from agent_provisioning_team.models import DeprovisionCancelledError, DeprovisionResponse
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +33,33 @@ def _patched_true(monkeypatch):
     from agent_provisioning_team.temporal import workflows as wf
 
     monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: True)
+
+
+async def _never_completing_sleep(_delta):
+    """Stand-in for ``workflow.sleep`` that never resolves on its own.
+
+    Keeps ``AgentDeprovisioningWorkflow._await_deprovision``'s handle-vs-timer
+    race resolving on the activity handle in tests that aren't exercising the
+    soft-timeout path — this timer task is simply cancelled, never awaited to
+    completion, once the handle wins.
+    """
+    await asyncio.Future()
+
+
+def _fake_activity_handle(result=None, *, error=None):
+    """A real ``asyncio.Task`` standing in for a Temporal ``ActivityHandle``.
+
+    ``asyncio.wait()`` requires genuine ``Future``/``Task`` semantics (done
+    callbacks, ``.result()``, ``.cancel()``); wrapping a same-turn-resolving
+    coroutine in a real task gives that without a live Temporal event loop.
+    """
+
+    async def _coro():
+        if error is not None:
+            raise error
+        return result
+
+    return asyncio.ensure_future(_coro())
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +84,7 @@ def test_deprovision_activity_calls_orchestrator() -> None:
     ):
         payload = activities.deprovision_activity("a", force=True)
 
-    fake_orch.deprovision.assert_called_once_with("a", force=True)
+    fake_orch.deprovision.assert_called_once_with("a", force=True, cancellation_checkpoint=ANY)
     assert payload["agent_id"] == "a"
     assert payload["success"] is True
     assert payload["details"] == {"tools": {"pg": True}}
@@ -68,6 +96,62 @@ def test_deprovision_activity_rejects_blank_agent() -> None:
     with patch("temporalio.activity.heartbeat"):
         with pytest.raises(AssertionError):
             activities.deprovision_activity("")
+
+
+def test_deprovision_activity_rejects_stale_fencing_token() -> None:
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator") as fake_orch_cls,
+        patch("temporalio.activity.heartbeat"),
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.deprovision_activity("a", fencing_token=1)
+
+    fake_orch_cls.assert_not_called()
+
+
+def test_deprovision_activity_checkpoint_heartbeats_and_checks_cancellation() -> None:
+    """The checkpoint passed into the orchestrator heartbeats and polls
+    ``activity.is_cancelled()``; when it signals cancellation, the resulting
+    ``DeprovisionCancelledError`` propagates out of the activity uncaught
+    rather than being swallowed into a soft-failure response."""
+    from agent_provisioning_team.temporal import activities
+
+    captured_checkpoint = {}
+
+    def fake_deprovision(agent_id, force=False, cancellation_checkpoint=None):
+        captured_checkpoint["fn"] = cancellation_checkpoint
+        raise DeprovisionCancelledError(agent_id, {"tools": {}})
+
+    fake_orch = MagicMock()
+    fake_orch.deprovision.side_effect = fake_deprovision
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch("temporalio.activity.heartbeat") as fake_heartbeat,
+        patch("temporalio.activity.is_cancelled", return_value=True) as fake_is_cancelled,
+    ):
+        with pytest.raises(DeprovisionCancelledError):
+            activities.deprovision_activity("a")
+
+        # Exercise the captured checkpoint directly to confirm it heartbeats
+        # and defers to activity.is_cancelled() for the cancellation signal.
+        assert captured_checkpoint["fn"]() is True
+        assert fake_heartbeat.call_count >= 2
+        fake_is_cancelled.assert_called()
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +170,11 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
 
     async def fake_exec(activity_fn, *args, **kwargs):
         name = getattr(activity_fn, "__name__", str(activity_fn))
+        calls.append({"name": name, "args": kwargs.get("args")})
+        return None
+
+    def fake_start(activity_fn, *args, **kwargs):
+        name = getattr(activity_fn, "__name__", str(activity_fn))
         calls.append(
             {
                 "name": name,
@@ -94,14 +183,16 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
                 "retry_policy": kwargs.get("retry_policy"),
             }
         )
-        if name == "deprovision_activity":
-            return {"agent_id": "a", "success": True, "details": {}, "error": None}
-        return None
+        return _fake_activity_handle(
+            {"agent_id": "a", "success": True, "details": {}, "error": None}
+        )
 
     fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-a-xyz")
 
     with (
         patch.object(wf.workflow, "execute_activity", new=fake_exec),
+        patch.object(wf.workflow, "start_activity", new=fake_start),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
     ):
         result = await wf.AgentDeprovisioningWorkflow().run("a", True)
@@ -114,7 +205,7 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
         "release_agent_lock_activity",
     ]
     captured = next(c for c in calls if c["name"] == "deprovision_activity")
-    assert captured["args"] == ["a", True]
+    assert captured["args"] == ["a", True, None]
     assert captured["schedule_to_close_timeout"] == PHASE_TIMEOUT
     assert captured["retry_policy"] is wf.DEFAULT_RETRY_POLICY
 

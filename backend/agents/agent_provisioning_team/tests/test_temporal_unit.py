@@ -630,6 +630,25 @@ def test_release_agent_lock_activity_uses_configured_ttl() -> None:
     assert captured["release_args"] == ("agent-1", "job-1")
 
 
+def test_acquire_agent_lock_activity_returns_fencing_token() -> None:
+    """The activity must pass AgentLockStore.acquire's fencing token straight
+    through to its own caller, not swallow it."""
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def acquire(self, agent_id, owner):
+            return 42
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        assert activities.acquire_agent_lock_activity("job-1", "agent-1") == 42
+
+
 def test_acquire_agent_lock_activity_translates_busy_error() -> None:
     """A busy lock surfaces as a plain (retryable) RuntimeError, not
     AgentLockBusyError, so Temporal's retry policy keeps polling."""
@@ -720,6 +739,30 @@ def test_credentials_activity_raises_on_failure() -> None:
     ):
         with pytest.raises(RuntimeError, match="cred boom"):
             activities.credentials_activity("j", "a", "default.yaml")
+
+
+def test_credentials_activity_rejects_stale_fencing_token() -> None:
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch.object(activities, "_best_effort_job_store"),
+        patch(
+            "agent_provisioning_team.phases.credential_generation.run_credential_generation"
+        ) as fake_run,
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.credentials_activity("j", "a", "default.yaml", fencing_token=1)
+
+    fake_run.assert_not_called()
 
 
 def test_provision_tool_activity_calls_provisioner() -> None:
@@ -857,6 +900,38 @@ def test_provision_tool_activity_raises_when_provisioner_missing() -> None:
                 tools_total=1,
                 provisioner="unknown_provisioner",
             )
+
+
+def test_provision_tool_activity_rejects_stale_fencing_token() -> None:
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch.object(activities, "_best_effort_job_store"),
+        patch(
+            "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents"
+        ) as fake_registry,
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.provision_tool_activity(
+                "j",
+                "a",
+                "x",
+                credentials_dump={},
+                tools_total=1,
+                provisioner="postgres_provisioner",
+                fencing_token=1,
+            )
+
+    fake_registry.assert_not_called()
 
 
 def test_audit_activity_restores_from_prior() -> None:
@@ -1097,6 +1172,27 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     fake_orch.tool_agents.get.return_value.verify_and_remove_orphan.assert_called_once_with(
         "agent-1"
     )
+
+
+def test_compensate_activity_rejects_stale_fencing_token() -> None:
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("agent_provisioning_team.orchestrator.ProvisioningOrchestrator") as fake_orch_cls,
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.compensate_activity("agent-1", [], fencing_token=1)
+
+    fake_orch_cls.assert_not_called()
 
 
 def test_compensate_activity_clears_phases_so_resume_reruns_credentials() -> None:
@@ -1394,6 +1490,29 @@ def test_mark_job_failed_activity_rejects_empty_inputs() -> None:
         activities.mark_job_failed_activity("", "err")
     with pytest.raises(AssertionError):
         activities.mark_job_failed_activity("job-1", "")
+
+
+def test_record_account_provisioning_rejects_stale_fencing_token() -> None:
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch.object(activities._js, "add_completed_phase") as mock_phase,
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.record_account_provisioning_activity(
+                "job-1", [], agent_id="agent-1", fencing_token=1
+            )
+
+    mock_phase.assert_not_called()
 
 
 def test_record_account_provisioning_sets_tool_counts() -> None:
@@ -2107,6 +2226,31 @@ def test_setup_activity_raises_when_setup_fails() -> None:
     ):
         with pytest.raises(RuntimeError, match="setup boom"):
             t_acts.setup_activity("j", "a", "default.yaml")
+
+
+def test_setup_activity_rejects_stale_fencing_token() -> None:
+    """A stale token is rejected before anything else runs, including the
+    prior_setup restore path — a reclaimed lease has no legitimate claim to
+    write any state for the agent_id, not just fresh Docker setup."""
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+
+    prior = {"success": True, "environment": None}
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch.object(t_acts, "_best_effort_job_store") as mock_job_store,
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            t_acts.setup_activity("j", "a", "default.yaml", prior_setup=prior, fencing_token=1)
+
+    mock_job_store.assert_not_called()
 
 
 def test_setup_activity_restores_from_prior() -> None:
