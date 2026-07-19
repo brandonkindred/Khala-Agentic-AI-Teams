@@ -17,6 +17,13 @@ export function returnColor(annualized: number): string {
   return 'losing';
 }
 
+/** Text alternative for `returnColor`, so the return-value color cue isn't the sole signal. */
+export function returnColorLabel(annualized: number): string {
+  if (annualized > 8) return 'Above target';
+  if (annualized >= 0) return 'Neutral';
+  return 'Negative';
+}
+
 /** Material icon for an asset class, falling back to a generic trend icon for unknown values. */
 export function getAssetClassIcon(assetClass: string): string {
   return ASSET_CLASS_ICONS[assetClass?.toLowerCase()] ?? 'trending_up';
