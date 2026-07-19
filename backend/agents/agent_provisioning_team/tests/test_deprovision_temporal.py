@@ -8,6 +8,7 @@ Temporal server is needed — we stub at the ``temporalio``/dispatch boundary.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -32,6 +33,33 @@ def _patched_true(monkeypatch):
     from agent_provisioning_team.temporal import workflows as wf
 
     monkeypatch.setattr(wf.workflow, "patched", lambda *a, **k: True)
+
+
+async def _never_completing_sleep(_delta):
+    """Stand-in for ``workflow.sleep`` that never resolves on its own.
+
+    Keeps ``AgentDeprovisioningWorkflow._await_deprovision``'s handle-vs-timer
+    race resolving on the activity handle in tests that aren't exercising the
+    soft-timeout path — this timer task is simply cancelled, never awaited to
+    completion, once the handle wins.
+    """
+    await asyncio.Future()
+
+
+def _fake_activity_handle(result=None, *, error=None):
+    """A real ``asyncio.Task`` standing in for a Temporal ``ActivityHandle``.
+
+    ``asyncio.wait()`` requires genuine ``Future``/``Task`` semantics (done
+    callbacks, ``.result()``, ``.cancel()``); wrapping a same-turn-resolving
+    coroutine in a real task gives that without a live Temporal event loop.
+    """
+
+    async def _coro():
+        if error is not None:
+            raise error
+        return result
+
+    return asyncio.ensure_future(_coro())
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +148,11 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
 
     async def fake_exec(activity_fn, *args, **kwargs):
         name = getattr(activity_fn, "__name__", str(activity_fn))
+        calls.append({"name": name, "args": kwargs.get("args")})
+        return None
+
+    def fake_start(activity_fn, *args, **kwargs):
+        name = getattr(activity_fn, "__name__", str(activity_fn))
         calls.append(
             {
                 "name": name,
@@ -128,14 +161,16 @@ async def test_deprovision_workflow_returns_activity_result() -> None:
                 "retry_policy": kwargs.get("retry_policy"),
             }
         )
-        if name == "deprovision_activity":
-            return {"agent_id": "a", "success": True, "details": {}, "error": None}
-        return None
+        return _fake_activity_handle(
+            {"agent_id": "a", "success": True, "details": {}, "error": None}
+        )
 
     fake_info = SimpleNamespace(workflow_id="agent-provisioning-deprovision-a-xyz")
 
     with (
         patch.object(wf.workflow, "execute_activity", new=fake_exec),
+        patch.object(wf.workflow, "start_activity", new=fake_start),
+        patch.object(wf.workflow, "sleep", new=_never_completing_sleep),
         patch.object(wf.workflow, "info", return_value=fake_info),
     ):
         result = await wf.AgentDeprovisioningWorkflow().run("a", True)

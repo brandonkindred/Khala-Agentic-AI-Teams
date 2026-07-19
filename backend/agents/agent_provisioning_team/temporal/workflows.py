@@ -14,6 +14,7 @@ provision/resume/restart; keep activity order and compensation aligned with
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
@@ -34,6 +35,17 @@ with workflow.unsafe.imports_passed_through():
 PHASE_TIMEOUT = timedelta(minutes=20)
 TOOL_ACTIVITY_TIMEOUT = timedelta(minutes=15)
 TOOL_HEARTBEAT_TIMEOUT = timedelta(minutes=2)
+
+# AgentDeprovisioningWorkflow's own detection deadline for a stuck
+# deprovision_activity, strictly shorter than that activity's
+# schedule_to_close_timeout (PHASE_TIMEOUT). Once schedule_to_close_timeout
+# itself elapses, Temporal has already resolved the activity handle (as a
+# timeout failure) from the workflow's point of view — cancelling a handle
+# that's no longer pending is a no-op — so this margin exists purely to give
+# the workflow a chance to request cancellation, and await its acknowledgement,
+# *while the activity is still outstanding*.
+DEPROVISION_CANCEL_GRACE = timedelta(minutes=2)
+DEPROVISION_SOFT_TIMEOUT = PHASE_TIMEOUT - DEPROVISION_CANCEL_GRACE
 
 DEFAULT_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
@@ -992,6 +1004,13 @@ class AgentDeprovisioningWorkflow:
         * The fencing token this run's own lock acquisition returns is
           carried as an explicit argument into ``deprovision_activity`` —
           currently accepted but not validated there.
+        * ``deprovision_activity`` is started (not executed) so a run past
+          ``DEPROVISION_SOFT_TIMEOUT`` can request its cancellation and await
+          that cancellation's acknowledgement — consuming the cooperative
+          cancellation checkpoints ``deprovision_activity`` heartbeats between
+          — before the ``finally`` below releases the lock, so release is
+          never reached while that activity's worker thread may still be
+          mutating this ``agent_id``'s resources.
     """
 
     @workflow.run
@@ -1008,6 +1027,10 @@ class AgentDeprovisioningWorkflow:
               schedules neither the acquire nor the release activity,
               reproducing that history's original (lock-free) command
               sequence exactly.
+            * Raises ``TimeoutError`` if ``deprovision_activity`` is still
+              running past ``DEPROVISION_SOFT_TIMEOUT`` — only after its
+              cancellation has been requested and acknowledged (see
+              ``_await_deprovision``).
         """
         assert agent_id, "agent_id must be non-empty"
         # Deprovision workflow ids are randomized per-call (repeated/concurrent
@@ -1033,13 +1056,14 @@ class AgentDeprovisioningWorkflow:
                     schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
                     retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
                 )
-            return await workflow.execute_activity(
+            handle = workflow.start_activity(
                 _activities.deprovision_activity,
                 args=[agent_id, force, fencing_token],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=PHASE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
+            return await self._await_deprovision(agent_id, handle)
         finally:
             if locked:
                 try:
@@ -1057,3 +1081,40 @@ class AgentDeprovisioningWorkflow:
                         agent_id,
                         release_exc,
                     )
+
+    async def _await_deprovision(
+        self, agent_id: str, handle: "workflow.ActivityHandle[dict[str, Any]]"
+    ) -> dict[str, Any]:
+        """Await ``deprovision_activity``, gating past-deadline release on a confirmed stop.
+
+        Preconditions:
+            * ``handle`` is the still-pending ``ActivityHandle`` this run just
+              started for ``deprovision_activity``, scheduled with
+              ``schedule_to_close_timeout=PHASE_TIMEOUT``.
+        Postconditions:
+            * If ``handle`` resolves (success or failure) within
+              ``DEPROVISION_SOFT_TIMEOUT``, returns its result / propagates its
+              exception unchanged — the caller's ``finally`` runs immediately
+              after, exactly as before this change.
+            * Past ``DEPROVISION_SOFT_TIMEOUT``, requests ``handle``'s
+              cancellation and awaits it to completion (suppressing whatever it
+              resolves with — success, ``DeprovisionCancelledError``, or any
+              other terminal outcome all count as "confirmed stopped") before
+              raising ``TimeoutError`` — so the caller's ``finally`` only runs
+              once ``deprovision_activity`` has actually stopped, never merely
+              because this soft deadline elapsed.
+        """
+        timer = asyncio.ensure_future(workflow.sleep(DEPROVISION_SOFT_TIMEOUT))
+        done, _pending = await asyncio.wait([handle, timer], return_when=asyncio.FIRST_COMPLETED)
+        if handle in done:
+            timer.cancel()
+            return handle.result()
+
+        handle.cancel()
+        with suppress(BaseException):
+            await handle
+        raise TimeoutError(
+            f"deprovision_activity for agent_id={agent_id} exceeded "
+            f"DEPROVISION_SOFT_TIMEOUT ({DEPROVISION_SOFT_TIMEOUT}); cancellation "
+            "requested and acknowledged before lock release"
+        )
