@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
 from pydantic import ValidationError
-
 from shared_env_config import env_int
 
 from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
@@ -327,6 +326,23 @@ def _design_review_stall_rounds() -> int:
     apart from specs that simply ran out of rounds.
     """
     return env_int("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", 3, floor=1)
+
+
+def _refinement_stall_rounds() -> int:
+    """Resolve the code-refinement loop's within-loop stall threshold.
+
+    Pre: env value, when set, parses to ``int``.
+    Post: returns a positive integer ``n`` such that the code-refinement
+    loop (``_run_synthesis_loop``) short-circuits once the
+    ``(hash(code), hash(failure_details))`` signature is unchanged for
+    ``n`` consecutive rounds. Reads ``STRATEGY_LAB_REFINEMENT_STALL_ROUNDS``
+    (default 3; sub-1 values floored to 1; garbage values fall back to 3) —
+    same shape as ``_design_review_stall_rounds``, applied to the code
+    -refinement loop instead of the design ↔ review loop. The stall break
+    surfaces as ``status="failed: refinement_stalled"``, distinct from
+    honest round-cap exhaustion (``"failed: max_refinement_rounds"``).
+    """
+    return env_int("STRATEGY_LAB_REFINEMENT_STALL_ROUNDS", 3, floor=1)
 
 
 def _design_max_llm_calls() -> int:
@@ -1898,6 +1914,13 @@ class StrategyLabOrchestrator:
         loop never raises — fatal failures short-circuit by setting flags
         and returning.
 
+        A single ``RefinementStallTracker`` scoped to this invocation tracks
+        each failing round's ``(hash(code), hash(failure_details))``
+        signature; when it is unchanged for ``_refinement_stall_rounds()``
+        consecutive rounds the loop exits early with
+        ``max_rounds_exhausted=True`` and ``refinement_stalled=True``,
+        mirroring the design ↔ review loop's ``CritiqueLedger`` stall exit.
+
         State mutations on the caller's lists (``all_gate_results``,
         ``refinement_attempts``, ``zero_trade_attempts``) happen in-place
         and the caller observes them directly; the outcome dataclass
@@ -1926,6 +1949,12 @@ class StrategyLabOrchestrator:
         fetched_symbols: List[str] = []
         provider_used: Dict[str, str] = {}
         max_rounds_exhausted = False
+        # True iff ``max_rounds_exhausted`` was caused by ``stall_tracker``
+        # detecting an unchanged ``(code, failure_details)`` signature for
+        # consecutive rounds, rather than the loop genuinely running out of
+        # rounds. Scoped to this one loop invocation, same as ``stall_tracker``.
+        refinement_stalled = False
+        stall_tracker = RefinementStallTracker()
         # Tracks whether the LAST executed round (including any
         # ``_handle_critical_anomalies`` recovery) surfaced the harness's
         # runtime ``lookahead_violation`` (``error_type == LOOKAHEAD``).
@@ -2009,7 +2038,7 @@ class StrategyLabOrchestrator:
                     f"- [{g.gate_name}{(':' + g.rule_id) if g.rule_id else ''}] {g.details}"
                     for g in critical_failures
                 )
-                spec, code, exhausted = self._refine_or_exhaust(
+                spec, code, exhausted, stalled = self._refine_or_exhaust(
                     spec=spec,
                     code=code,
                     failure_phase="validation",
@@ -2019,10 +2048,12 @@ class StrategyLabOrchestrator:
                     round_num=round_num,
                     default_change_label="validation fix",
                     emit=emit,
+                    stall_tracker=stall_tracker,
                     drift_collector=drift_collector,
                 )
                 if exhausted:
                     max_rounds_exhausted = True
+                    refinement_stalled = stalled
                     break
                 continue
 
@@ -2096,7 +2127,7 @@ class StrategyLabOrchestrator:
                 failure_details = (
                     f"Error type: {exec_result.error_type}\nstderr:\n{exec_result.stderr}"
                 )
-                spec, code, exhausted = self._refine_or_exhaust(
+                spec, code, exhausted, stalled = self._refine_or_exhaust(
                     spec=spec,
                     code=code,
                     failure_phase="execution",
@@ -2106,10 +2137,12 @@ class StrategyLabOrchestrator:
                     round_num=round_num,
                     default_change_label="execution fix",
                     emit=emit,
+                    stall_tracker=stall_tracker,
                     drift_collector=drift_collector,
                 )
                 if exhausted:
                     max_rounds_exhausted = True
+                    refinement_stalled = stalled
                     break
                 continue
 
@@ -2150,6 +2183,7 @@ class StrategyLabOrchestrator:
                 refinement_attempts=refinement_attempts,
                 zero_trade_attempts=zero_trade_attempts,
                 emit=emit,
+                stall_tracker=stall_tracker,
                 drift_collector=drift_collector,
             )
             spec, code = evaluation.spec, evaluation.code
@@ -2159,6 +2193,7 @@ class StrategyLabOrchestrator:
             runtime_lookahead_violation = evaluation.runtime_lookahead_violation
             if evaluation.action == "exhausted":
                 max_rounds_exhausted = True
+                refinement_stalled = evaluation.stalled
                 break
             if evaluation.action == "continue":
                 continue
@@ -2188,6 +2223,7 @@ class StrategyLabOrchestrator:
             open_position_entry_reasons=open_position_entry_reasons,
             runtime_lookahead_violation=runtime_lookahead_violation,
             ran_on_non_conforming_code=ran_on_non_conforming_code,
+            refinement_stalled=refinement_stalled,
         )
 
     def _run_synthesis_validation_gates(
@@ -2319,6 +2355,7 @@ class StrategyLabOrchestrator:
         refinement_attempts: List[str],
         zero_trade_attempts: List[str],
         emit: PhaseCallback,
+        stall_tracker: RefinementStallTracker,
         drift_collector: Optional[_DriftCollector],
     ) -> _SynthesisEvaluateResult:
         """Compute metrics, run the anomaly gates, and route any recovery.
@@ -2379,6 +2416,7 @@ class StrategyLabOrchestrator:
                 zero_trade_attempts=zero_trade_attempts,
                 round_num=round_num,
                 emit=emit,
+                stall_tracker=stall_tracker,
                 drift_collector=drift_collector,
             )
             spec, code = recovery.spec, recovery.code
@@ -2404,6 +2442,7 @@ class StrategyLabOrchestrator:
                 exec_result=exec_result,
                 ran_on_non_conforming_code=ran_on_non_conforming_code,
                 runtime_lookahead_violation=exec_result.error_type == "lookahead_violation",
+                stalled=recovery.stalled,
             )
 
         return _SynthesisEvaluateResult(
@@ -2433,6 +2472,7 @@ class StrategyLabOrchestrator:
         zero_trade_attempts: List[str],
         round_num: int,
         emit: PhaseCallback,
+        stall_tracker: RefinementStallTracker,
         drift_collector: Optional[_DriftCollector] = None,
     ) -> _AnomalyRecoveryOutcome:
         """Recover from critical backtest anomalies in the evaluation phase.
@@ -2516,17 +2556,22 @@ class StrategyLabOrchestrator:
 
         # ── 3: Specialised zero-trade repair (if diagnostics support it) ──
         if diag is not None and diag.zero_trade_category is not None:
-            zt_outcome = self.zero_trade_repairer.try_repair(
-                spec=spec,
-                code=code,
-                exec_result=exec_result,
-                coverage_report=metrics.coverage_report,
-                market_data=market_data,
-                config=config,
-                zero_trade_attempts=zero_trade_attempts,
-                round_num=round_num,
-                emit=emit,
-            )
+            try:
+                zt_outcome = self.zero_trade_repairer.try_repair(
+                    spec=spec,
+                    code=code,
+                    exec_result=exec_result,
+                    coverage_report=metrics.coverage_report,
+                    market_data=market_data,
+                    config=config,
+                    zero_trade_attempts=zero_trade_attempts,
+                    round_num=round_num,
+                    emit=emit,
+                )
+            except DesignBudgetExhausted as exc:
+                exc.latest_spec = spec
+                exc.latest_code = code
+                raise
             all_gate_results.extend(zt_outcome.new_gates)
             if zt_outcome.committed:
                 if zt_outcome.new_spec is None:
@@ -2588,7 +2633,7 @@ class StrategyLabOrchestrator:
                 )
 
         # ── 4: Generic refinement (or exhaust the round budget) ──
-        new_spec, new_code, exhausted = self._refine_or_exhaust(
+        new_spec, new_code, exhausted, stalled = self._refine_or_exhaust(
             spec=spec,
             code=code,
             failure_phase="evaluation",
@@ -2599,6 +2644,7 @@ class StrategyLabOrchestrator:
             round_num=round_num,
             default_change_label="anomaly fix",
             emit=emit,
+            stall_tracker=stall_tracker,
             drift_collector=drift_collector,
         )
         return _AnomalyRecoveryOutcome(
@@ -2608,6 +2654,7 @@ class StrategyLabOrchestrator:
             metrics=metrics,
             exec_result=exec_result,
             exhausted=exhausted,
+            stalled=stalled,
         )
 
     def _run_trade_alignment_loop(
@@ -2893,15 +2940,20 @@ class StrategyLabOrchestrator:
                 "trades_count": len(trades),
             },
         )
-        report, gate_results = self._run_alignment_audit(
-            spec=spec,
-            code=code,
-            trades=trades,
-            metrics=metrics,
-            prior_attempts=alignment_attempts,
-            market_data=market_data,
-            config=config,
-        )
+        try:
+            report, gate_results = self._run_alignment_audit(
+                spec=spec,
+                code=code,
+                trades=trades,
+                metrics=metrics,
+                prior_attempts=alignment_attempts,
+                market_data=market_data,
+                config=config,
+            )
+        except DesignBudgetExhausted as exc:
+            exc.latest_spec = spec
+            exc.latest_code = code
+            raise
         alignment_reports.append(report)
 
         # Per-rule gate rows from the deterministic checker. Stamp the
@@ -3891,6 +3943,7 @@ class StrategyLabOrchestrator:
         drift_collector: Optional[_DriftCollector] = None,
         is_publishable: bool = False,
         publishability_skip_reason: Optional[str] = None,
+        refinement_stalled: bool = False,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
 
@@ -3901,7 +3954,8 @@ class StrategyLabOrchestrator:
         the convergence tracker is updated; a ``"complete"`` event is
         emitted; the record is returned.
 
-        ``status`` resolution mirrors the three terminal-state branches:
+        ``status`` resolution mirrors the four terminal-state branches:
+          * refinement-loop stall → ``"failed: refinement_stalled"``
           * cap exhausted → ``"failed: max_refinement_rounds"``
           * clean exit → ``"completed"``
           * everything else → ``"failed"``
@@ -3912,7 +3966,12 @@ class StrategyLabOrchestrator:
         # ``execution_succeeded=True`` ("anomalous but code is correct"),
         # so without this branch those cycles would silently report
         # ``status="completed"`` despite never reaching a clean backtest.
-        if max_rounds_exhausted:
+        # ``refinement_stalled`` is checked first — it can only be True when
+        # ``max_rounds_exhausted`` is also True (a stall is a form of
+        # exhaustion), and reports the more specific, actionable reason.
+        if refinement_stalled:
+            backtest_status = "failed: refinement_stalled"
+        elif max_rounds_exhausted:
             backtest_status = "failed: max_refinement_rounds"
         elif execution_succeeded:
             backtest_status = "completed"
@@ -4109,22 +4168,55 @@ class StrategyLabOrchestrator:
         config = code_synthesis.config
 
         # ── Phases 1b–2.5: PRE-SYNTHESIS GATE → REFINEMENT → ALIGNMENT ─
-        refine_align = self._orchestrate_refinement_and_alignment(
-            spec=spec,
-            code=code,
-            config=config,
-            original_spec=original_spec,
-            original_code=original_code,
-            rationale=rationale,
-            all_gate_results=all_gate_results,
-            refinement_attempts=refinement_attempts,
-            zero_trade_attempts=zero_trade_attempts,
-            emit=emit,
-            design_attempt=design_attempt,
-            phase_back_count=phase_back_count,
-            drift_collector=drift_collector,
-            design_context=design_context,
-        )
+        try:
+            refine_align = self._orchestrate_refinement_and_alignment(
+                spec=spec,
+                code=code,
+                config=config,
+                original_spec=original_spec,
+                original_code=original_code,
+                rationale=rationale,
+                all_gate_results=all_gate_results,
+                refinement_attempts=refinement_attempts,
+                zero_trade_attempts=zero_trade_attempts,
+                emit=emit,
+                design_attempt=design_attempt,
+                phase_back_count=phase_back_count,
+                drift_collector=drift_collector,
+                design_context=design_context,
+            )
+        except DesignBudgetExhausted as exc:
+            # The per-cycle LLM-call budget (bound for the whole design
+            # attempt, not just the design phase — see ``use_budget`` at
+            # ``run_cycle``) can also trip during refinement, alignment-fix,
+            # or zero-trade repair. Those call sites attach the latest
+            # spec/code they were working on before propagating; fall back
+            # to this attempt's pre-refinement spec/code only if none did
+            # (e.g. the trip happened before any leaf call site ran).
+            latest_spec = getattr(exc, "latest_spec", spec)
+            latest_code = getattr(exc, "latest_code", code)
+            abort_reason = (
+                f"Refinement/alignment phase exhausted its LLM-call budget "
+                f"({exc.calls_made}/{exc.limit} calls) after "
+                f"{len(refinement_attempts)} refinement attempt(s)"
+            )
+            emit("coding", {"sub_phase": "aborted", "reason": abort_reason})
+            return self._build_short_circuit_record(
+                spec=latest_spec,
+                config=config,
+                code=latest_code,
+                original_spec=original_spec,
+                original_code=original_code,
+                rationale=rationale,
+                all_gate_results=all_gate_results,
+                refinement_attempts=refinement_attempts,
+                short_circuit_status="failed: budget_exhausted",
+                short_circuit_reason=abort_reason,
+                emit=emit,
+                design_context=design_context,
+                phase_back_count=phase_back_count,
+                drift_collector=drift_collector,
+            )
         if refine_align.record is not None:
             return refine_align.record
         synthesis = refine_align.synthesis
@@ -4139,6 +4231,7 @@ class StrategyLabOrchestrator:
         provider_used = synthesis.provider_used
         execution_succeeded = synthesis.execution_succeeded
         max_rounds_exhausted = synthesis.max_rounds_exhausted
+        refinement_stalled = synthesis.refinement_stalled
         open_position_entry_reasons = synthesis.open_position_entry_reasons
         ran_on_non_conforming_code = alignment_outcome.ran_on_non_conforming_code
         alignment_rounds = alignment_outcome.alignment_rounds
@@ -4199,6 +4292,7 @@ class StrategyLabOrchestrator:
             fetched_symbols=fetched_symbols,
             provider_used=provider_used,
             max_rounds_exhausted=max_rounds_exhausted,
+            refinement_stalled=refinement_stalled,
             execution_succeeded=execution_succeeded,
             is_winning=is_winning,
             is_publishable=is_publishable,
@@ -4718,6 +4812,7 @@ class StrategyLabOrchestrator:
         fetched_symbols: List[str],
         provider_used: Dict[str, str],
         max_rounds_exhausted: bool,
+        refinement_stalled: bool,
         execution_succeeded: bool,
         is_winning: bool,
         is_publishable: bool,
@@ -4765,6 +4860,7 @@ class StrategyLabOrchestrator:
             fetched_symbols=fetched_symbols,
             provider_used=provider_used,
             max_rounds_exhausted=max_rounds_exhausted,
+            refinement_stalled=refinement_stalled,
             execution_succeeded=execution_succeeded,
             is_winning=is_winning,
             is_publishable=is_publishable,
@@ -4804,6 +4900,8 @@ class StrategyLabOrchestrator:
                 metrics=metrics,
                 prior_attempts=prior_attempts,
             )
+        except DesignBudgetExhausted:
+            raise
         except Exception:
             logger.exception("Refinement agent failed, returning original code")
             return {"changes_made": "refinement failed — no changes"}, code
@@ -4820,18 +4918,25 @@ class StrategyLabOrchestrator:
         round_num: int,
         default_change_label: str,
         emit: PhaseCallback,
+        stall_tracker: RefinementStallTracker,
         refine_label: Optional[str] = None,
         drift_collector: Optional[_DriftCollector] = None,
-    ) -> tuple[StrategySpec, str, bool]:
+    ) -> tuple[StrategySpec, str, bool, bool]:
         """Apply one refinement attempt or exhaust the round budget.
 
         Pre: ``round_num`` is the current 0-indexed loop iteration;
-        ``refinement_attempts`` is the running change-log the caller persists.
-        Post: returns ``(new_spec, new_code, exhausted)``. When
-        ``exhausted=False`` the caller should ``continue`` (refinement was
-        applied and ``refinement_attempts`` was appended in-place); when
+        ``refinement_attempts`` is the running change-log the caller persists;
+        ``stall_tracker`` is scoped to one ``_run_synthesis_loop`` invocation
+        (shared across all three call sites within it).
+        Post: returns ``(new_spec, new_code, exhausted, stalled)``. When
+        ``exhausted=False`` (``stalled`` is always ``False`` in this case)
+        the caller should ``continue`` (refinement was applied and
+        ``refinement_attempts`` was appended in-place); when
         ``exhausted=True`` the caller should ``break`` (no state mutated
-        beyond a warning log).
+        beyond a warning log). ``stalled=True`` means the exhaustion was
+        caused by ``stall_tracker`` detecting an unchanged
+        ``(code, failure_details)`` signature for consecutive rounds, rather
+        than genuinely running out of rounds.
 
         ``refine_label`` overrides ``failure_phase`` for the ``_refine``
         call only — used by the evaluation phase which passes
@@ -4847,13 +4952,44 @@ class StrategyLabOrchestrator:
         if round_num < 0:
             raise ValueError(f"round_num must be non-negative, got {round_num}")
 
+        # Record this round's (code, failure) signature before deciding
+        # stall/round-cap, mirroring the design-review loop's
+        # record-then-check ordering (``CritiqueLedger.record_round`` then
+        # ``is_stalled``). Recorded even on the final allowed round so the
+        # tracker's history is always complete for diagnostics.
+        stall_tracker.record(hash_code(code), hash_code(failure_details))
+        stall_rounds = _refinement_stall_rounds()
+
+        # Stall check first, and only when rounds remain — a stall trip on
+        # the FINAL allowed round is round-cap exhaustion, not an early
+        # abort, mirroring the design-review loop's
+        # ``review_round < max_rounds - 1`` guard exactly.
+        if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1 and stall_tracker.is_stalled(stall_rounds):
+            logger.warning(
+                "Refinement stalled on %s for %s: (code, failure) signature "
+                "unchanged for %d round(s)",
+                failure_phase,
+                spec.strategy_id,
+                stall_rounds,
+            )
+            emit(
+                "coding",
+                {
+                    "sub_phase": "stalled",
+                    "refinement_round": round_num,
+                    "failure_phase": failure_phase,
+                    "stall_rounds": stall_rounds,
+                },
+            )
+            return spec, code, True, True
+
         if round_num >= MAX_CODE_REFINEMENT_ROUNDS - 1:
             logger.warning(
                 "Max code refinement rounds reached on %s for %s",
                 failure_phase,
                 spec.strategy_id,
             )
-            return spec, code, True
+            return spec, code, True, False
 
         emit(
             "coding",
@@ -4863,14 +4999,19 @@ class StrategyLabOrchestrator:
                 "failure_phase": failure_phase,
             },
         )
-        updates, new_code = self._refine(
-            spec,
-            code,
-            refine_label or failure_phase,
-            failure_details,
-            metrics,
-            refinement_attempts,
-        )
+        try:
+            updates, new_code = self._refine(
+                spec,
+                code,
+                refine_label or failure_phase,
+                failure_details,
+                metrics,
+                refinement_attempts,
+            )
+        except DesignBudgetExhausted as exc:
+            exc.latest_spec = spec
+            exc.latest_code = code
+            raise
         try:
             new_spec = self._apply_updates(spec, updates, new_code, failure_phase=failure_phase)
         except SpecImplementabilityError as exc:
@@ -4901,7 +5042,7 @@ class StrategyLabOrchestrator:
                 "changes_made": changes,
             },
         )
-        return new_spec, new_code, False
+        return new_spec, new_code, False, False
 
     def _run_alignment_audit(
         self,
@@ -4975,6 +5116,8 @@ class StrategyLabOrchestrator:
             # holds end-to-end.
             report.issues = findings_to_issues(check_result.findings)
             return report, check_result.gate_results
+        except DesignBudgetExhausted:
+            raise
         except AlignmentAuditError as exc:
             # The envelope already retried transient transport faults; an
             # AlignmentAuditError here means those retries were exhausted, or
@@ -5499,6 +5642,7 @@ class StrategyLabOrchestrator:
 # the helpers cluttering this file.
 # ──────────────────────────────────────────────────────────────────────────
 from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
+    RefinementStallTracker,
     _AlignmentLoopOutcome,
     _AlignmentRoundOutcome,
     _AnomalyRecoveryOutcome,

@@ -11,6 +11,7 @@ assert on the final record's ``status``.
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, Dict
 
 import pytest
@@ -83,12 +84,20 @@ def _spec_dict() -> Dict[str, Any]:
 def test_validation_phase_exhaustion_sets_max_rounds_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Code-safety always critical → loop exhausts validation phase."""
+    """Code-safety always critical → loop exhausts validation phase.
+
+    ``details`` varies per round (a real round counter, not a repeat) so
+    the round-cap path is exercised genuinely rather than tripping the
+    refinement-loop stall guard, which requires the ``(code,
+    failure_details)`` signature to be identical across consecutive rounds.
+    """
     from investment_team.tests.conftest import noop_refine, stub_design_loop
 
     orch = StrategyLabOrchestrator()
     stub_design_loop(monkeypatch, orch, _spec_dict(), _VALID_CODE)
     monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
+
+    round_counter = itertools.count()
 
     def _always_critical(_code: str, _spec=None):
         return [
@@ -97,7 +106,7 @@ def test_validation_phase_exhaustion_sets_max_rounds_status(
                 passed=False,
                 severity="critical",
                 phase="synthesis",
-                details="forced critical for test",
+                details=f"forced critical for test (round {next(round_counter)})",
             )
         ]
 
@@ -115,18 +124,42 @@ def test_validation_phase_exhaustion_sets_max_rounds_status(
 def test_execution_phase_exhaustion_sets_max_rounds_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sandbox always reports execution failure → loop exhausts execution phase."""
+    """Sandbox always reports execution failure → loop exhausts execution phase.
+
+    ``_VALID_CODE`` fails the real ``code_conformance_gate`` (missing
+    ``ctx.indicator`` usage, literal ``qty=``), which would otherwise
+    exhaust the loop at the VALIDATION phase before ever reaching execution;
+    stub it to a clean pass so this test actually isolates the execute path.
+    ``varying_code_refine`` (not ``noop_refine``) keeps each round's code
+    hash distinct so ``BacktestCache`` doesn't freeze the execution failure
+    to round 0's cached result, which would otherwise trip the
+    refinement-loop stall guard instead of reaching genuine round-cap
+    exhaustion.
+    """
     from investment_team.tests.conftest import (
         empty_market_data,
         failing_sandbox,
-        noop_refine,
         stub_design_loop,
+        varying_code_refine,
     )
 
     orch = StrategyLabOrchestrator()
     stub_design_loop(monkeypatch, orch, _spec_dict(), _VALID_CODE)
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", empty_market_data())
-    monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
+    monkeypatch.setattr(
+        orch.code_conformance_gate,
+        "check",
+        lambda _code, _spec=None: [
+            QualityGateResult(
+                gate_name="code_conformance",
+                passed=True,
+                severity="info",
+                phase="synthesis",
+                details="stubbed pass",
+            )
+        ],
+    )
+    monkeypatch.setattr(orch.refinement_agent, "run", varying_code_refine(_VALID_CODE))
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", failing_sandbox())
 
     record = orch.run_cycle(prior_records=[], config=_config())
@@ -140,7 +173,18 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
 ) -> None:
     """Even a high-return anomalous cycle that exhausts the round cap on
     evaluation must NOT be persisted with is_winning=True (#547 review feedback).
-    Otherwise paper-trading would fire on a 'failed: max_refinement_rounds' record."""
+    Otherwise paper-trading would fire on a 'failed: max_refinement_rounds' record.
+
+    ``_VALID_CODE`` fails the real ``code_conformance_gate``, which would
+    otherwise exhaust the loop at the VALIDATION phase before ever reaching
+    evaluation; stub it to a clean pass so this test actually isolates the
+    evaluation path. ``noop_refine`` is fine here (unlike the execution-phase
+    test): the anomaly detector is called fresh every round regardless of
+    ``BacktestCache`` (which only caches the sandbox execution, not anomaly
+    detection), and its ``details`` already vary per round below, so the
+    ``(code, failure_details)`` signature the stall guard tracks changes
+    every round even with unchanged code.
+    """
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
     from investment_team.tests.conftest import (
         empty_market_data,
@@ -155,6 +199,19 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
     orch = StrategyLabOrchestrator()
     stub_design_loop(monkeypatch, orch, _spec_dict(), _VALID_CODE)
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", empty_market_data())
+    monkeypatch.setattr(
+        orch.code_conformance_gate,
+        "check",
+        lambda _code, _spec=None: [
+            QualityGateResult(
+                gate_name="code_conformance",
+                passed=True,
+                severity="info",
+                phase="synthesis",
+                details="stubbed pass",
+            )
+        ],
+    )
 
     # Sandbox always succeeds with benign trades — execution itself is fine.
     def _ok_sandbox(*_a, **_kw):
@@ -164,6 +221,10 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
     monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
 
     # Anomaly detector always reports critical → evaluation-phase exhaustion.
+    # ``details`` varies per round so the round-cap path is exercised
+    # genuinely rather than tripping the refinement-loop stall guard.
+    round_counter = itertools.count()
+
     def _always_anomalous(*_a, **_kw):
         return [
             QualityGateResult(
@@ -171,7 +232,7 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
                 passed=False,
                 severity="critical",
                 phase="verification",
-                details="forced anomaly for test",
+                details=f"forced anomaly for test (round {next(round_counter)})",
             )
         ]
 

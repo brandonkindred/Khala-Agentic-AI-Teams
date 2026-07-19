@@ -9,6 +9,7 @@ fails every round) while counting ``_fetch_market_data`` invocations.
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, Dict
 
 import pytest
@@ -96,6 +97,13 @@ def test_market_data_fetched_once_across_refinement_rounds(
     def _ok_sandbox(*_a, **_kw):
         return _code_exec(success=True, raw_trades=_benign_sandbox_trades())
 
+    # ``details`` varies per round so the refinement-loop stall guard (an
+    # unchanged ``(code, failure_details)`` signature for consecutive
+    # rounds) doesn't trip before genuine round-cap exhaustion — this test
+    # cares about the fetch happening exactly once across many rounds, not
+    # about the stall guard.
+    round_counter = itertools.count()
+
     def _always_anomalous(*_a, **_kw):
         return [
             QualityGateResult(
@@ -103,7 +111,7 @@ def test_market_data_fetched_once_across_refinement_rounds(
                 passed=False,
                 severity="critical",
                 phase="verification",
-                details="forced anomaly for test",
+                details=f"forced anomaly for test (round {next(round_counter)})",
             )
         ]
 
