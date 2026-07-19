@@ -540,6 +540,12 @@ def test_design_invoke_charges_once_despite_transport_retry(
     monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", "2")
     stub = _Stub(httpx.ConnectError("flaky"), '{"asset_class": "stocks", "rationale": "r"}')
     charges = {"n": 0}
+    # This test exercises the legacy unconstrained parse-retry loop
+    # specifically (the transport-retry-then-success path inside
+    # ``run_structured_agent``); force the structured-output seam off so it
+    # is deterministic regardless of ambient ``LLM_PROVIDER`` (unset
+    # defaults to ``"ollama"``, whose capability flag is True).
+    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: False)
     monkeypatch.setattr(design_mod, "Agent", _fake_agent_class(stub))
     monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: None)
     monkeypatch.setattr(design_mod, "validate_structured_rules", lambda _parsed: None)

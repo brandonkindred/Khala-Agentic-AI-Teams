@@ -46,6 +46,28 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
 )
 
+
+@pytest.fixture(autouse=True)
+def _force_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This file exercises the unconstrained parse-retry loop exclusively.
+
+    Force the structured-output seam off so these tests are deterministic
+    regardless of ambient ``LLM_PROVIDER`` (unset defaults to ``"ollama"``,
+    whose capability flag is True) — see
+    ``design_review._structured_output_available`` (imported into
+    ``design.py`` and used by both ``DesignAgent._invoke_and_parse`` and
+    ``DesignAgent._self_review``). ``design.py``'s ``from .design_review
+    import _structured_output_available`` binds a *separate* name in
+    ``design.py``'s own module namespace, so it must be patched there (not on
+    ``design_review``) for calls made from within ``design.py`` to see it.
+    The structured path itself is covered by
+    ``test_strategy_lab_design_structured_output.py``.
+    """
+    import investment_team.strategy_lab.agents.design as design_mod
+
+    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: False)
+
+
 # ---------------------------------------------------------------------------
 # Stubs
 # ---------------------------------------------------------------------------
@@ -1688,9 +1710,7 @@ def test_run_omits_regime_section_for_degraded_empty_summary(
     """A degraded summary with no classified entries must not inject a
     placeholder as if it were signal."""
     capture = _patch_design(monkeypatch, _good_payload())
-    empty = RegimeSummary(
-        computed_at="2026-01-01T00:00:00+00:00", degraded=True, entries=[]
-    )
+    empty = RegimeSummary(computed_at="2026-01-01T00:00:00+00:00", degraded=True, entries=[])
 
     DesignAgent().run(prior_records=[], regime_summary=empty)
 

@@ -24,7 +24,12 @@ from typing import Any, Dict, List, Literal, Optional, Set
 from pydantic import BaseModel, Field, model_validator
 from strands import Agent
 
+from llm_service import provider_supports_structured_output
+from llm_service.config import resolve_provider
+from llm_service.interface import LLMSemanticExhaustionError
+
 from ...models import StrategySpec
+from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
@@ -50,6 +55,86 @@ _SYSTEM_PROMPT = (
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
 _CRITIQUE_SCHEMA_JSON = json.dumps(CRITIQUE_SCHEMA, indent=2)
+
+
+def _structured_output_available() -> bool:
+    """Whether the active LLM provider supports provider-enforced schema-conformant decoding.
+
+    Shared seam for every design-phase LLM call site that emits a
+    ``CRITIQUE_SCHEMA`` or ``DESIGN_SPEC_SCHEMA`` payload
+    (:meth:`DesignReviewAgent.run`, :meth:`DesignAgent._self_review`,
+    :meth:`DesignAgent._invoke_and_parse` — the latter two import this
+    directly from here rather than redefining it, since ``design.py`` already
+    imports other names from this module). A dedicated function (rather than
+    inlining the two-call chain at each use site) so tests can force either
+    branch deterministically without depending on ambient ``LLM_PROVIDER`` env
+    state — see ``test_strategy_lab_refinement_parse_retry.py`` for the
+    pattern this mirrors.
+
+    Preconditions: none.
+    Postconditions: synchronous, no network call, never raises.
+    """
+    return provider_supports_structured_output(resolve_provider())
+
+
+def _invoke_structured_critique(
+    agent_key: str, system_prompt: str, user_prompt: str, *, charge: bool
+) -> Dict[str, Any]:
+    """Request provider-enforced schema-conformant decoding for a ``CRITIQUE_SCHEMA`` call.
+
+    Shared by :meth:`DesignReviewAgent.run` (the external reviewer) and
+    :meth:`DesignAgent._self_review` (the internal self-audit) — both emit the
+    same ``_CritiqueWire`` shape. Bypasses ``strands.Agent`` (whose
+    ``stream()``/``structured_output()`` do not forward a ``schema`` to the
+    backing client) and calls ``LLMClient.complete_json(..., schema=CRITIQUE_SCHEMA)``
+    directly, still routed through :func:`run_structured_agent` for the same
+    charge/invoke/timeout/parse envelope every other call site uses. Mirrors
+    ``RefinementAgent._invoke_structured``.
+
+    ``charge`` is threaded straight through to :func:`run_structured_agent`
+    rather than hardcoded: :meth:`DesignReviewAgent.run` charges the budget
+    itself via an explicit ``charge_active_budget()`` call before invoking
+    this function (so it must pass ``charge=False`` here to avoid double-
+    charging), while :meth:`DesignAgent._self_review` has no such external
+    call and must pass ``charge=True`` so the round is still charged.
+
+    Preconditions: :func:`_structured_output_available` is True (checked by
+    the caller before calling this — only the Ollama provider answers True
+    today, and only Ollama's branch of ``get_strands_model`` returns an
+    adapter exposing ``.client``); ``agent_key`` / ``system_prompt`` /
+    ``user_prompt`` are non-empty strings.
+    Postconditions: returns the parsed JSON dict on success. Raises
+    :class:`~..exceptions.StrategyLabLLMError` on any transport/parse
+    failure — including a ``schema_forced`` semantic-exhaustion starvation
+    signal (``LLMSemanticExhaustionError.schema_forced``), which the caller
+    inspects to decide whether to degrade to the legacy single-shot call.
+    This function never falls back itself and never retries.
+    """
+    client = get_strands_model(agent_key).client
+
+    def _call(prompt: str) -> str:
+        result = client.complete_json(
+            prompt,
+            objective="strategy design review (structured)",
+            system_prompt=system_prompt,
+            schema=CRITIQUE_SCHEMA,
+        )
+        # invoke_agent unconditionally does str(result) on whatever this
+        # callable returns before handing it to `parse` — a raw dict would
+        # come back as Python repr (single-quoted, True/False/None), which
+        # extract_json_object cannot parse. json.dumps re-renders it as valid
+        # JSON so the round trip is exact.
+        return json.dumps(result)
+
+    return run_structured_agent(
+        _call,
+        user_prompt,
+        agent_key=agent_key,
+        phase=f"{agent_key}_critique_structured",
+        parse=extract_json_object,
+        charge=charge,
+        logger=logger,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -487,19 +572,13 @@ class DesignReviewAgent:
             response_schema_json=_CRITIQUE_SCHEMA_JSON,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_design_review"),
-            system_prompt=_SYSTEM_PROMPT,
-            tools=[],
-        )
-
-        # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
-        # propagates to ``_run_design_loop`` instead of being converted into
-        # a fail-closed critique that would let the loop continue past budget.
-        charge_active_budget()
-
-        try:
-            parsed = run_structured_agent(
+        def _invoke_legacy() -> Dict[str, Any]:
+            agent = Agent(
+                model=get_strands_model("strategy_design_review"),
+                system_prompt=_SYSTEM_PROMPT,
+                tools=[],
+            )
+            return run_structured_agent(
                 agent,
                 user_prompt,
                 agent_key="strategy_design_review",
@@ -508,6 +587,32 @@ class DesignReviewAgent:
                 charge=False,
                 logger=logger,
             )
+
+        # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
+        # propagates to ``_run_design_loop`` instead of being converted into
+        # a fail-closed critique that would let the loop continue past budget.
+        charge_active_budget()
+
+        try:
+            if _structured_output_available():
+                try:
+                    parsed = _invoke_structured_critique(
+                        agent_key="strategy_design_review",
+                        system_prompt=_SYSTEM_PROMPT,
+                        user_prompt=user_prompt,
+                        charge=False,
+                    )
+                except StrategyLabLLMError as exc:
+                    cause = exc.cause
+                    if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
+                        raise
+                    logger.warning(
+                        "structured design-review decode starved (schema_forced); "
+                        "degrading to the legacy single-shot call."
+                    )
+                    parsed = _invoke_legacy()
+            else:
+                parsed = _invoke_legacy()
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
             logger.warning("DesignReviewAgent failed to produce parseable JSON: %s", exc)
             return _fail_closed_critique(exc, readiness_findings)

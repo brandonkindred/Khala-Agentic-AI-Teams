@@ -39,6 +39,22 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
 )
 
+
+@pytest.fixture(autouse=True)
+def _force_design_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This file's ``DesignAgent`` tests exercise the unconstrained
+    parse-retry loop exclusively (via ``_patch_design``'s ``Agent`` /
+    ``get_strands_model`` stubs). Force the structured-output seam off so
+    they are deterministic regardless of ambient ``LLM_PROVIDER`` (unset
+    defaults to ``"ollama"``, whose capability flag is True) — see
+    ``design_review._structured_output_available``. The structured path
+    itself is covered by ``test_strategy_lab_design_structured_output.py``.
+    """
+    import investment_team.strategy_lab.agents.design as design_mod
+
+    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

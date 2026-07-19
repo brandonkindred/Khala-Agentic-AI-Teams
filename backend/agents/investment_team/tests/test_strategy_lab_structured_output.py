@@ -103,6 +103,11 @@ def test_design_agent_retries_malformed_json_then_succeeds(
     from investment_team.strategy_lab.agents import design as mod
 
     agent = _ScriptedAgent(["no json here", _valid_spec_payload()])
+    # This test exercises the legacy unconstrained parse-retry loop
+    # specifically; force the structured-output seam off so it is
+    # deterministic regardless of ambient LLM_PROVIDER (unset defaults to
+    # "ollama", whose capability flag is True).
+    monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
     monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
@@ -122,6 +127,7 @@ def test_design_agent_malformed_json_raises_after_budget(
     from investment_team.strategy_lab.agents import design as mod
 
     agent = _ScriptedAgent(["never json"])
+    monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
     monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")

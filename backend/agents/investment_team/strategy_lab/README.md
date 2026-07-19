@@ -278,23 +278,36 @@ former `STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle and the per-call `respons
 have been retired. The canonical wire-shape definitions still live in `agents/_response_schemas.py`
 (validated for well-formedness by the test suite).
 
-`RefinementAgent` is a narrow, deliberate exception to the above: `_invoke_and_parse` requests
-provider-enforced schema-conformant decoding for `REFINEMENT_SCHEMA` via
-`LLMClient.complete_json(schema=...)` — bypassing the strands `Agent`/`chat()` path, which does not
-forward a `schema` — whenever `llm_service.provider_supports_structured_output(resolve_provider())`
-is `True` (Ollama only today). This is a safe re-introduction of the idea behind the retired
-`STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle, not a regression of it: unlike that mechanism, it is
-capability-gated per call site rather than applied unconditionally to every agent, it is bounded to a
-single attempt (`run_structured_agent` never loops on a structured call — a schema-conformant decode
-either succeeds or signals starvation, with no "malformed JSON" middle state to re-prompt), and it
-degrades immediately and deterministically to the exact legacy `extract_json_object` +
-`build_json_correction_prompt` retry loop the moment the client raises
+`RefinementAgent`, `DesignAgent`, and `DesignReviewAgent` are narrow, deliberate exceptions to the
+above: each requests provider-enforced schema-conformant decoding for its schema
+(`REFINEMENT_SCHEMA`, `DESIGN_SPEC_SCHEMA`, `CRITIQUE_SCHEMA`) via `LLMClient.complete_json(schema=...)`
+— bypassing the strands `Agent`/`chat()` path, which does not forward a `schema` — whenever
+`llm_service.provider_supports_structured_output(resolve_provider())` is `True` (Ollama only today).
+This is a safe re-introduction of the idea behind the retired `STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED`
+toggle, not a regression of it: unlike that mechanism, it is capability-gated per call site rather than
+applied unconditionally to every agent, it is bounded to a single attempt (`run_structured_agent` never
+loops on a structured call — a schema-conformant decode either succeeds or signals starvation, with no
+"malformed JSON" middle state to re-prompt), and it degrades immediately and deterministically to the
+exact legacy `extract_json_object` retry loop the moment the client raises
 `LLMSemanticExhaustionError(schema_forced=True)` — the same starvation signal that caused the original
 mechanism's revert, now caught on the first occurrence instead of being retried blind. On success it
-eliminates the happy-path correction resend that made refinement the most token-heavy call in the
-pipeline (a full strategy program re-emitted as a JSON string on every retry). The other
-spec-authoring/reviewing agents (design, design-review, zero-trade repair, alignment fix-proposer) are
-unchanged and still rely solely on the prompt-embedded-schema + `json_object` contract described above.
+eliminates the happy-path correction resend that made these the most token-heavy calls in the pipeline
+(a full strategy program or spec re-emitted as a JSON string on every retry).
+
+`DesignAgent._invoke_and_parse` (used by `run`, `revise`, and the internal self-revision loop) and
+`DesignAgent._self_review` share this wiring with `DesignReviewAgent.run` via
+`design_review._structured_output_available` / `design_review._invoke_structured_critique` — the
+canonical definitions live in `design_review.py` and `design.py` imports them, since `design.py`
+already depends on `design_review.py` for critique helpers. Structured decoding only constrains JSON
+*shape*: it does not guarantee the DSL semantic rules `validate_structured_rules` checks (e.g. a
+bar-field literal wrapped incorrectly), so a schema-valid-but-DSL-invalid structured response still
+falls through to the legacy `_build_correction_prompt` DSL-rejection retry — that path is unconditional
+on structured-output availability, and it does not consume the structured attempt's own retry budget.
+`DesignReviewAgent.run` keeps its pre-existing "never raises" contract unchanged: a non-`schema_forced`
+structured failure resolves through the same `_fail_closed_critique` fallback a legacy-path failure
+would, rather than propagating. The remaining spec-authoring agents (zero-trade repair, alignment
+fix-proposer) are unchanged and still rely solely on the prompt-embedded-schema + `json_object` contract
+described above.
 
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
 Per-cycle hard cap on the total number of LLM calls the design phase may make within a single

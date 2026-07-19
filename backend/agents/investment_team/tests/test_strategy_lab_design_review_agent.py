@@ -37,6 +37,22 @@ from investment_team.strategy_lab.spec_dsl import (
     VolatilityTargetSizing,
 )
 
+
+@pytest.fixture(autouse=True)
+def _force_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This file exercises the legacy single-shot reviewer call exclusively.
+
+    Force the structured-output seam off so these tests are deterministic
+    regardless of ambient ``LLM_PROVIDER`` (unset defaults to ``"ollama"``,
+    whose capability flag is True) — see
+    ``design_review._structured_output_available``. The structured path
+    itself is covered by ``test_strategy_lab_design_structured_output.py``.
+    """
+    import investment_team.strategy_lab.agents.design_review as design_review_mod
+
+    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: False)
+
+
 # ---------------------------------------------------------------------------
 # Stubs / fixtures
 # ---------------------------------------------------------------------------
