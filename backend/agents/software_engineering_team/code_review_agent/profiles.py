@@ -102,7 +102,7 @@ _SHARED_OUTPUT_SECTION = (
     '- "approved": boolean (true ONLY if there are no critical or high issues; be strict)\n'
     '- "issues": list of objects, each with:\n'
     '  - "severity": "critical" | "high" | "medium" | "low" | "info"\n'
-    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability"\n'
+    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability" | "side-effects"\n'
     '  - "file_path": string (which file has the issue)\n'
     '  - "line": integer (1-based line number in the NEW version of file_path where the issue is). '
     'When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to '
@@ -263,7 +263,21 @@ _CODE_REVIEW_CRITERIA = (
     "   - Functions/classes doing more than one job, making future changes riskier\n"
     "   - Default severity is medium/low; escalate only when the maintainability problem is "
     "already causing a concrete defect (e.g. hidden state that produces incorrect behavior), not "
-    "for a design preference alone."
+    "for a design preference alone.\n\n"
+    "12. **Behavior & Side-Effect Impact** - You are shown only this chunk's current content, "
+    "never a prior version -- do NOT guess or invent what the code looked like before. Judge "
+    "the enclosing function/method purely by what it does AS WRITTEN NOW:\n"
+    "   - What does it actually return/raise/mutate/do (return value/type, exceptions, side "
+    "effects such as writes/network calls/mutation of shared or passed-in state, ordering/timing "
+    "guarantees)?\n"
+    "   - Does that CURRENT behavior match what its OWN docstring/comments claim it does? A "
+    "mismatch between documented and actual behavior IS a finding, regardless of whether this "
+    "diff introduced it -- this is the one actionable trigger for this criterion.\n"
+    "   - You cannot see this function's callers from this chunk alone, and this is the only "
+    "check in this criterion -- do NOT flag a finding merely because a caller's safety is "
+    "unknown or because the behavior seems notable (an ordinary return value, mutation, or "
+    "network call is not itself a finding). Stay silent here unless you found the documented-vs-"
+    "actual mismatch above."
 )
 
 _SPEC_CONFORMANCE_CRITERIA = (

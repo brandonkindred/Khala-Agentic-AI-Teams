@@ -415,14 +415,50 @@ class CredentialStore:
         """Retrieve credentials for an agent (all or specific tool).
 
         The whole-dict form (``tool_name`` omitted) never surfaces the
-        internal fencing-token sentinel key.
+        internal fencing-token sentinel key; a blob holding nothing else
+        (a fencing tombstone left by :meth:`delete_credentials`) reads back
+        as ``None``, same as no file at all.
         """
         all_creds, _src = self._read_agent_credentials(agent_id)
         if all_creds is None:
             return None
         if tool_name:
             return all_creds.get(tool_name)
-        return {k: v for k, v in all_creds.items() if k != _FENCING_TOKEN_KEY}
+        visible = {k: v for k, v in all_creds.items() if k != _FENCING_TOKEN_KEY}
+        return visible or None
+
+    def list_tool_names(self, agent_id: str) -> set[str]:
+        """Return every tool name stored for ``agent_id`` across ALL candidates.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Returns the union of keys from every readable candidate path
+              (primary and legacy) — not just whichever single one
+              ``_read_agent_credentials``/``get_credentials`` would prefer.
+              A tool name that exists ONLY in a legacy file (never migrated
+              to primary) is still returned, so callers that need to
+              enumerate "every tool this agent currently has credentials
+              for" — e.g. selective compensation cleanup deciding which
+              stored tools to purge — don't silently skip it the way a
+              single-candidate read would.
+            * An unreadable or corrupt candidate contributes nothing to the
+              result (same tolerance as ``_read_agent_credentials``) rather
+              than raising.
+            * Never includes the internal fencing-token sentinel key.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        names: set[str] = set()
+        for path in self._agent_file_candidates(agent_id):
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(self.multifernet.decrypt(path.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                continue
+            if isinstance(data, dict):
+                names.update(k for k in data.keys() if k != _FENCING_TOKEN_KEY)
+        return names
 
     def rotate_key(self, new_key: str) -> int:
         """Re-encrypt every stored agent file with a new Fernet key.
@@ -467,6 +503,22 @@ class CredentialStore:
         already-recorded fencing token, raises
         :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
         and deletes nothing.
+
+        Postconditions:
+            * When ``fencing_token`` is given, the primary path is not left
+              absent: every candidate (primary and legacy) is removed as
+              before, then the primary is rewritten as a tombstone blob
+              holding only the fencing-token sentinel. Leaving no file at
+              all would reset a later caller's bootstrap comparison
+              (``current_token=None``) to always-accept, letting a stale
+              caller's post-teardown ``store_credentials`` call silently
+              resurrect a secret a newer owner already tore down.
+              ``get_credentials``/``list_tool_names`` both already treat
+              this tombstone as indistinguishable from no credentials at
+              all, so this is invisible to every caller that doesn't care
+              about the fencing high-water mark.
+            * When ``fencing_token`` is ``None``, behavior is unchanged: no
+              tombstone is written.
         """
         if fencing_token is not None:
             existing, _src = self._read_agent_credentials(agent_id)
@@ -482,7 +534,105 @@ class CredentialStore:
             if path.exists():
                 path.unlink()
                 deleted = True
+        if fencing_token is not None:
+            tombstone = self.multifernet.encrypt(
+                json.dumps({_FENCING_TOKEN_KEY: fencing_token}).encode()
+            )
+            primary = self._agent_file(agent_id)
+            primary.write_bytes(tombstone)
+            primary.chmod(0o600)
         return deleted
+
+    def delete_tool_credentials(
+        self, agent_id: str, tool_name: str, *, fencing_token: Optional[int] = None
+    ) -> bool:
+        """Remove one tool's credential entry, preserving the agent's others.
+
+        Preconditions:
+            * ``agent_id`` / ``tool_name`` are non-empty.
+        Postconditions:
+            * When ``fencing_token`` is given and lower than this agent's
+              already-recorded fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and removes nothing — a stale rollback must not purge a tool
+              credential a newer owner may have already regenerated under
+              the same name.
+            * When ``agent_id`` has no stored credentials anywhere (primary or
+              legacy), or none of them contain ``tool_name``, returns
+              ``False`` and nothing is written.
+            * Otherwise every candidate path that independently contains
+              ``tool_name`` is purged of that entry: the primary store path
+              (the same target ``store_credentials`` always writes to) is
+              rewritten in place if other entries survive the removal, or
+              unlinked if left fully empty; every OTHER (legacy) candidate
+              containing ``tool_name`` gets the same treatment. Returns
+              ``True`` iff at least one candidate was purged. Used by
+              compensation to purge a single tool's generated-but-now-stale
+              secret (its account was just rolled back) without discarding
+              the agent's other, still-valid tools' credentials the way
+              ``delete_credentials`` would.
+            * An emptied primary is unlinked rather than left as an encrypted
+              ``{}`` blob: ``_read_agent_credentials`` (and so
+              ``get_credentials``) stops at the first candidate path that
+              EXISTS, regardless of its content, so a primary left behind
+              empty would mask any still-present legacy entries for OTHER
+              tools from ever being read again. Unlinking it lets those
+              reads fall through to the legacy candidate that still
+              legitimately owns them, exactly like an emptied legacy
+              candidate already falls through to the next one.
+            * Each candidate is inspected independently for ``tool_name``'s
+              presence — not gated on whichever single file
+              ``_read_agent_credentials`` would have preferred — because a
+              legacy file can hold a stale copy of this tool's secret even
+              when the primary file exists but does not (yet) contain that
+              tool, e.g. left over from before the primary store cut over.
+              Leaving such a copy behind would let the purged secret
+              resurface later via the legacy-fallback read path.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        assert tool_name, "tool_name must be non-empty"
+        if fencing_token is not None:
+            existing, _src = self._read_agent_credentials(agent_id)
+            prior_token = existing.get(_FENCING_TOKEN_KEY) if existing else None
+            check_fencing_token(
+                agent_id=agent_id,
+                resource="credential_store",
+                provided_token=fencing_token,
+                current_token=prior_token if isinstance(prior_token, int) else None,
+            )
+        removed_any = False
+        primary = self._agent_file(agent_id)
+        if primary.exists():
+            try:
+                data = json.loads(self.multifernet.decrypt(primary.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                data = None
+            if isinstance(data, dict) and tool_name in data:
+                del data[tool_name]
+                if data:
+                    primary.write_bytes(self.multifernet.encrypt(json.dumps(data).encode()))
+                    primary.chmod(0o600)
+                else:
+                    primary.unlink()
+                removed_any = True
+
+        for path in self._agent_file_candidates(agent_id):
+            if path == primary or not path.exists():
+                continue
+            try:
+                other = json.loads(self.multifernet.decrypt(path.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                continue
+            if not isinstance(other, dict) or tool_name not in other:
+                continue
+            del other[tool_name]
+            if other:
+                path.write_bytes(self.multifernet.encrypt(json.dumps(other).encode()))
+                path.chmod(0o600)
+            else:
+                path.unlink()
+            removed_any = True
+        return removed_any
 
     def list_agents(self) -> List[str]:
         """List all agent IDs with stored credentials."""

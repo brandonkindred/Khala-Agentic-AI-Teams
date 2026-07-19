@@ -311,7 +311,6 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "soc2": "llama3.1",
     "blog": "deepseek-v4-pro:cloud",
     "personal_assistant": "llama3.2",
-    "nutrition_meal_planning": "llama3.2",
     "accessibility_audit": "llama3.1",
     "strategy_ideation": "deepseek-v4-pro:cloud",
     "signal_intelligence": "deepseek-v4-pro:cloud",

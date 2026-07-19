@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from fastapi import APIRouter, HTTPException
 
@@ -14,7 +13,7 @@ from software_engineering_team.coding_team.api.models import (
     StatusResponse,
     SubmitAnswersRequest,
 )
-from software_engineering_team.coding_team.token_crypto import decrypt_token
+from software_engineering_team.coding_team.api.orchestration import ResumeSpawnResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -123,19 +122,15 @@ def resume_job(job_id: str) -> RunResponse:
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
-    plan = _main.plan_from_input(plan_raw, repo_path)
+    recovered = _main._recover_resume_plan(job_id, plan_raw, repo_path)
+    if recovered is None:
+        raise HTTPException(
+            status_code=400, detail="Job has an invalid plan_input and cannot be resumed."
+        )
+    repo_path, plan = recovered
 
-    ctx = data.get("github_context") or {}
-    is_github_job = bool(
-        ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
-    )
-    # Prefer the token persisted (encrypted) at job creation; fall back to GITHUB_TOKEN env.
-    token = (
-        (decrypt_token(data.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN"))
-        if is_github_job
-        else None
-    )
-    if is_github_job and not token:
+    resolved = _main._resolve_github_job_token(job_id, data)
+    if resolved is None:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -144,53 +139,39 @@ def resume_job(job_id: str) -> RunResponse:
                 "would be lost without one."
             ),
         )
+    is_github_job, ctx, token = resolved
 
-    # Cross-worker claim FIRST (shared store), then the process-local claim: together they stop two
-    # concurrent resume requests — in the same OR different worker processes — from both spawning an
-    # orchestrator for this job. A store transport error here must surface as a controlled 500: a
-    # bare propagation 500s opaquely, and swallowing it to False would falsely report "already
-    # running" when no claim was actually taken.
-    try:
-        claimed = _main.claim_resume(job_id)
-    except Exception as e:
-        logger.exception("Resume for job %s: resume-claim store error.", job_id)
+    result, post_claim, err = _main._claim_and_spawn_resume(
+        job_id, ctx, repo_path, plan, token, is_github_job
+    )
+    if result is ResumeSpawnResult.CLAIM_STORE_ERROR:
+        # A store transport error here must surface as a controlled 500: a bare propagation 500s
+        # opaquely, and swallowing it to False would falsely report "already running" when no
+        # claim was actually taken.
+        logger.error("Resume for job %s: resume-claim store error.", job_id, exc_info=err)
         raise HTTPException(
             status_code=500, detail="Failed to acquire the resume claim due to a job-store error."
-        ) from e
-    if not claimed:
+        ) from err
+    if result in (ResumeSpawnResult.CLAIM_LOST, ResumeSpawnResult.THREAD_CLAIM_LOST):
         return RunResponse(
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
         )
-    # Post-claim re-read: a wait loop in another worker may have consumed answers and advanced the
-    # job out of waiting_for_user between the initial GET and the claim. claim_resume checks only
-    # the stamp, not the status, so verify freshness here before spawning.
-    try:
-        post_claim = _main.get_job(job_id)
-    except Exception as exc:
-        _main.release_resume_claim(job_id)
+    if result is ResumeSpawnResult.POST_CLAIM_READ_ERROR:
         raise HTTPException(
             status_code=500, detail="Failed to verify job state after acquiring resume claim."
-        ) from exc
-    if not post_claim or post_claim.get("status") != hitl.WAITING_STATUS:
-        _main.release_resume_claim(job_id)
+        ) from err
+    if result is ResumeSpawnResult.NOT_WAITING:
         return RunResponse(
             job_id=job_id,
             status=(post_claim or data).get("status", "running"),
             message="Job already running.",
         )
-    if not _main._claim_run_thread(job_id):
-        _main.release_resume_claim(job_id)
-        return RunResponse(
-            job_id=job_id, status=data.get("status", "running"), message="Job already running."
-        )
-
-    try:
-        if is_github_job:
-            _main._start_github_resume_thread(job_id, ctx, repo_path, plan, token or "")
-        else:
-            _main._start_orchestrator_thread(job_id, repo_path, plan)
-    except Exception:
-        # A failed spawn must release the shared claim so a later /resume can win.
-        _main.release_resume_claim(job_id)
-        raise
+    if result is ResumeSpawnResult.SPAWN_FAILED:
+        # A failed spawn must release the shared claim so a later /resume can win — already done
+        # inside _claim_and_spawn_resume; re-raise the original spawn failure unchanged.
+        raise err
+    if result is not ResumeSpawnResult.SPAWNED:
+        # Exhaustiveness guard: a future ResumeSpawnResult member falling through here would
+        # silently report a successful resume for what is actually a new, unhandled outcome.
+        raise RuntimeError(f"Unhandled ResumeSpawnResult: {result!r}")
     return RunResponse(job_id=job_id, status="running", message="Job resumed.")

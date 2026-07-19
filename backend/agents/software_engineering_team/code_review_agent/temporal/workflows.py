@@ -3,18 +3,20 @@
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
 resumable computation. It orchestrates the review as a sequence of activities —
 prepare → map fan-out → false-positive verify → architecture-consistency /
-redundancy pass → deterministic gate → (conditional) narrative synthesis — so a
-worker restart mid-review re-runs only the unfinished activities instead of
-re-reviewing the whole submission.
+redundancy pass → side-effect / blast-radius pass → deterministic gate →
+(conditional) narrative synthesis — so a worker restart mid-review re-runs only
+the unfinished activities instead of re-reviewing the whole submission.
 
 The verdict is behavior-identical to thread mode because every phase calls the
 same underlying coordinator functions (through :mod:`.activities`): the map unit
 is ``mapping._cached_review_chunk``, verification is
 ``false_positive_filter.filter_false_positives``, the additive architecture pass
 is ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
-gate is ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the
-narrative is ``synthesis.synthesize_review_findings`` with the same
-deterministic-concat fallback.
+additive side-effect pass is
+``side_effect_impact_pass.find_side_effect_impact_issues``, the gate is
+``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
+``synthesis.synthesize_review_findings`` with the same deterministic-concat
+fallback.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
@@ -70,6 +72,17 @@ CODE_REVIEW_UNAVAILABLE_TYPE = "CodeReviewUnavailableError"
 # the Temporal UI), then deprecate the marker with
 # ``workflow.deprecate_patch(_ARCHITECTURE_PASS_PATCH)`` before deleting it.
 _ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
+
+# Replay-compatibility gate for inserting the side-effect / blast-radius activity
+# between the architecture pass and finalization (see ``run``). Same rationale as
+# ``_ARCHITECTURE_PASS_PATCH``: a history recorded before this activity existed has
+# no marker for it, so ``workflow.patched`` returns False on replay and that
+# history's original finalize-next sequence is reproduced exactly.
+# TODO: Remove this gate (and always run the side-effect pass unconditionally)
+# once no pre-migration CodeReviewWorkflow histories remain open (confirm via
+# the Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_SIDE_EFFECT_PASS_PATCH)`` before deleting it.
+_SIDE_EFFECT_PASS_PATCH = "code-review-side-effect-impact-pass"
 
 
 @workflow.defn(name="CodeReviewWorkflow")
@@ -230,6 +243,25 @@ class CodeReviewWorkflow:
                 verified = [*verified, *architecture_findings]
                 has_architecture_findings = True
 
+        has_side_effect_findings = False
+        if workflow.patched(_SIDE_EFFECT_PASS_PATCH):
+            # Side-effect / blast-radius pass: additive, once per submission (not
+            # once per chunk), matching thread mode's run_coordinator (see
+            # coordinator.py's identical call ordering — after the architecture
+            # pass, before the final dedupe/gate). Gated by workflow.patched so a
+            # pre-migration history (recorded before this activity existed)
+            # replays its original finalize-next sequence exactly.
+            side_effect_findings = await workflow.execute_activity(
+                A.find_side_effect_impact_activity,
+                args=[review_input],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=_LLM_RETRY,
+            )
+            if side_effect_findings:
+                verified = [*verified, *side_effect_findings]
+                has_side_effect_findings = True
+
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(
             A.finalize_review_activity,
@@ -242,7 +274,12 @@ class CodeReviewWorkflow:
         gated_issues: List[Dict[str, Any]] = gate["issues"]
 
         summary, notes = await self._narrative(
-            review_input, approved, gated_issues, summaries, spec_notes, has_architecture_findings
+            review_input,
+            approved,
+            gated_issues,
+            summaries,
+            spec_notes,
+            has_architecture_findings or has_side_effect_findings,
         )
 
         self._advance("done", 1.0)
@@ -260,17 +297,18 @@ class CodeReviewWorkflow:
         issues: List[Dict[str, Any]],
         summaries: List[str],
         spec_notes: List[str],
-        has_architecture_findings: bool = False,
+        has_additive_pass_findings: bool = False,
     ) -> tuple[str, str]:
         """Produce the merged ``(summary, spec_compliance_notes)``.
 
         Mirrors ``coordinator._merge_narrative``: a single sub-review with no
-        architecture findings is used verbatim (no synthesis call); otherwise
-        attempts a synthesis activity and falls back to deterministic
-        concatenation on failure, so a blocking architecture finding is never
-        silently absent from the narrative attached to a single-chunk review.
+        additive-pass findings (architecture/redundancy or side-effect/blast-radius)
+        is used verbatim (no synthesis call); otherwise attempts a synthesis
+        activity and falls back to deterministic concatenation on failure, so a
+        blocking additive-pass finding is never silently absent from the
+        narrative attached to a single-chunk review.
         """
-        if len(summaries) == 1 and not has_architecture_findings:
+        if len(summaries) == 1 and not has_additive_pass_findings:
             return summaries[0], (spec_notes[0] if spec_notes else "")
 
         synth = await workflow.execute_activity(

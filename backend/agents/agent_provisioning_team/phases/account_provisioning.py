@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 
 from ..models import (
     AccountProvisioningResult,
+    DeprovisionCancelledError,
     GeneratedCredentials,
     ToolProvisionResult,
 )
@@ -96,8 +97,16 @@ def run_account_provisioning(
 
             # Stamp the registry key so compensate() can look the provisioner
             # back up by key rather than by the fragile class attribute
-            # `tool_name` (see #293).
+            # `tool_name` (see #293). Also force tool_name to the manifest's
+            # alias (mirrors provision_tool_activity, the Temporal path's
+            # equivalent stamp): provisioners return their own class-level
+            # tool_name (e.g. "postgresql"), which can differ from the
+            # manifest name credentials were generated/stored under (e.g.
+            # "pg") — compensate()'s credential purge looks the entry up by
+            # this field, so leaving the provisioner's own name here would
+            # silently miss the credential actually stored for this tool.
             result.provisioner_key = provisioner_name
+            result.tool_name = tool_name
             tool_results.append(result)
 
             if result.success:
@@ -137,6 +146,7 @@ def deprovision_tools(
     agent_id: str,
     provisioner_keys: Optional[List[str]] = None,
     provisioners: Optional[Dict[str, ToolProvisionerInterface]] = None,
+    checkpoint: Optional[Callable[[], bool]] = None,
     *,
     fencing_token: Optional[int] = None,
 ) -> Dict[str, bool]:
@@ -156,6 +166,9 @@ def deprovision_tools(
             every provisioner in ``provisioners``.
         provisioners: Provisioner instances keyed by registry key. Defaults to
             ``build_default_tool_agents()``.
+        checkpoint: Optional callable polled before each provisioner's teardown
+            call. When it returns ``True``, teardown stops before that call —
+            no further provisioners are torn down. ``None`` disables checking.
         fencing_token: Caller's fencing token (see ``shared.fencing``);
             ``None`` skips enforcement.
 
@@ -170,7 +183,8 @@ def deprovision_tools(
           name), with a ``bool`` value per key equal to that provisioner's
           ``deprovision`` success; a provisioner that raises maps to ``False``.
         * Contains exactly one entry for every provisioner in ``provisioners``
-          that passes the ``provisioner_keys`` filter, and no other keys.
+          that passes the ``provisioner_keys`` filter and was torn down before
+          ``checkpoint`` (if any) signalled cancellation, and no other keys.
 
     Invariants:
         * Best-effort teardown: never raises on a single provisioner failure —
@@ -181,6 +195,10 @@ def deprovision_tools(
           resource does not imply the others have moved on too; aborting the
           whole loop on the first rejection would leave the others' real
           infrastructure never even attempted.
+
+    Raises:
+        DeprovisionCancelledError: ``checkpoint`` returned ``True`` before a
+            provisioner's teardown call. Carries the results gathered so far.
     """
     assert agent_id, "agent_id must be non-empty"
 
@@ -188,11 +206,14 @@ def deprovision_tools(
     results: Dict[str, bool] = {}
 
     for key, provisioner in provs.items():
-        if provisioner_keys is None or key in provisioner_keys:
-            try:
-                result = provisioner.deprovision(agent_id, fencing_token=fencing_token)
-                results[key] = result.success
-            except Exception:
-                results[key] = False
+        if provisioner_keys is not None and key not in provisioner_keys:
+            continue
+        if checkpoint is not None and checkpoint():
+            raise DeprovisionCancelledError(agent_id, results)
+        try:
+            result = provisioner.deprovision(agent_id, fencing_token=fencing_token)
+            results[key] = result.success
+        except Exception:
+            results[key] = False
 
     return results

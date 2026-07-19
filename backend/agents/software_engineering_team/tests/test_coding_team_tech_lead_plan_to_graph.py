@@ -148,6 +148,7 @@ def test_tech_lead_run_groom_task(monkeypatch) -> None:
 def test_tech_lead_run_groom_task_llm_failure_returns_defaults(monkeypatch) -> None:
     """When grooming's LLM call fails, return safe defaults that preserve the input dependencies."""
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
 
     def boom(agent, prompt, required_keys=None):
         raise RuntimeError("LLM error")
@@ -157,6 +158,32 @@ def test_tech_lead_run_groom_task_llm_failure_returns_defaults(monkeypatch) -> N
     assert out["priority"] == "medium"
     assert out["acceptance_criteria"] == []
     assert out["task_dependencies"] == ["d1"]
+
+
+def test_tech_lead_run_groom_task_retries_transient_error_then_succeeds(monkeypatch) -> None:
+    """A transient grooming error (rate limit/timeout) is retried, not turned into defaults."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def flaky(agent, prompt, required_keys=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return {
+            "acceptance_criteria": ["done when tests pass"],
+            "out_of_scope": "no UI",
+            "description_enriched": "more detail",
+            "priority": "high",
+            "subtasks": [],
+            "task_dependencies": ["d1"],
+        }
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", flaky)
+    out = TechLeadAgent(model=object()).run_groom_task("t1", "T", "desc", ["d1"], "ctx")
+    assert calls["n"] == 2
+    assert out["priority"] == "high"
+    assert out["acceptance_criteria"] == ["done when tests pass"]
 
 
 def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) -> None:
@@ -171,12 +198,39 @@ def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) 
         raise RuntimeError("LLM error")
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
     agent = TechLeadAgent(model=object())
     out = agent.run_plan_to_task_graph(plan)
     assert out["tasks"] == []
     assert len(out["stacks"]) == 1
     assert out["stacks"][0]["name"] == "default"
+
+
+def test_tech_lead_plan_to_task_graph_retries_transient_error_then_succeeds(monkeypatch) -> None:
+    """A transient planning error (rate limit/timeout) is retried, not turned into defaults."""
+    plan = CodingTeamPlanInput(requirements_title="X", repo_path="/tmp")
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def flaky(agent, prompt, required_keys=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return {
+            "tasks": [{"id": "t1", "title": "T1", "description": "", "dependencies": []}],
+            "stacks": [{"name": "backend_v2", "tools_services": []}],
+            "open_questions": [],
+            "already_complete": False,
+        }
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", flaky)
+    out = TechLeadAgent(model=object()).run_plan_to_task_graph(plan)
+    assert calls["n"] == 2
+    assert len(out["tasks"]) == 1
+    assert out["tasks"][0]["id"] == "t1"
+    assert out["stacks"][0]["name"] == "backend_v2"
 
 
 def test_plan_text_passes_all_fields_uncut() -> None:
@@ -315,7 +369,10 @@ def test_run_revision_adjudication_verdicts(monkeypatch) -> None:
         monkeypatch.setattr(
             tl_mod,
             "_agent_call_json",
-            lambda agent, prompt, _v=verdict, required_keys=None: {"verdict": _v.upper(), "reason": f"because {_v}"},
+            lambda agent, prompt, _v=verdict, required_keys=None: {
+                "verdict": _v.upper(),
+                "reason": f"because {_v}",
+            },
         )
         out = TechLeadAgent(model=object()).run_revision_adjudication(
             "T1", "desc", ["ac"], "summary", [{"source": "tech_lead", "reason": "nope"}]
@@ -335,7 +392,9 @@ def test_run_revision_adjudication_fails_closed(monkeypatch) -> None:
     out = TechLeadAgent(model=object()).run_revision_adjudication("T", "d", [], "s", [])
     assert out["verdict"] == "fail"
 
-    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt, required_keys=None: {"verdict": "maybe"})
+    monkeypatch.setattr(
+        tl_mod, "_agent_call_json", lambda agent, prompt, required_keys=None: {"verdict": "maybe"}
+    )
     out = TechLeadAgent(model=object()).run_revision_adjudication("T", "d", [], "s", [])
     assert out["verdict"] == "fail"
 
@@ -364,3 +423,38 @@ def test_run_groom_task_passes_full_inputs_to_llm(monkeypatch) -> None:
 
     assert big_desc in captured["prompt"]
     assert big_context in captured["prompt"]
+
+
+def test_tech_lead_run_assignments_retries_transient_error_then_succeeds(monkeypatch) -> None:
+    """A transient assignment error (rate limit/timeout) is retried, not silently dropped to []."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def flaky(agent, prompt, required_keys=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return {"assignments": [{"agent_id": "backend_v2", "task_id": "t1"}]}
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", flaky)
+    out = TechLeadAgent(model=object()).run_assignments(
+        agent_ids=["backend_v2"], ready_tasks=[{"id": "t1"}], free_agents=["backend_v2"]
+    )
+    assert calls["n"] == 2
+    assert out["assignments"] == [{"agent_id": "backend_v2", "task_id": "t1"}]
+
+
+def test_tech_lead_run_assignments_llm_failure_returns_defaults(monkeypatch) -> None:
+    """When assignments' LLM call fails, return an empty assignments list."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+
+    def boom(agent, prompt, required_keys=None):
+        raise RuntimeError("LLM error")
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
+    out = TechLeadAgent(model=object()).run_assignments(
+        agent_ids=["backend_v2"], ready_tasks=[{"id": "t1"}], free_agents=["backend_v2"]
+    )
+    assert out["assignments"] == []

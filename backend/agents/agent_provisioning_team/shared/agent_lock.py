@@ -256,7 +256,7 @@ class AgentLockStore:
                 and record.get("owner") == owner
                 and not self._is_expired(record, now)
             )
-            prior_token = record.get("token") if record is not None else None
+            prior_token = record.get("fencing_token") if record is not None else None
             if live_renewal and isinstance(prior_token, int):
                 token = prior_token
             else:
@@ -267,7 +267,7 @@ class AgentLockStore:
                     "owner": owner,
                     "acquired_at": now,
                     "expires_at": now + self.ttl_seconds,
-                    "token": token,
+                    "fencing_token": token,
                 },
             )
             return token
@@ -318,7 +318,7 @@ class AgentLockStore:
             record = self._read_record(agent_id)
             if record is None or record.get("owner") != owner:
                 return
-            current_token = record.get("token")
+            current_token = record.get("fencing_token")
             if (
                 fencing_token is not None
                 and isinstance(current_token, int)
@@ -334,7 +334,7 @@ class AgentLockStore:
                     # strict "<" comparison, so expires_at = now would read as
                     # "not yet expired" for a get_owner(now=<same value>) call.
                     "expires_at": now - 1,
-                    "token": current_token if isinstance(current_token, int) else 1,
+                    "fencing_token": current_token if isinstance(current_token, int) else 1,
                 },
             )
 

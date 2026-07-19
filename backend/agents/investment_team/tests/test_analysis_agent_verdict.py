@@ -134,6 +134,38 @@ def _install_recorder(monkeypatch) -> _Recorder:
     return rec
 
 
+def test_agent_key_is_strategy_analysis_not_ideation(monkeypatch):
+    """Regression guard: both the draft and self-review call sites must
+    identify themselves as ``strategy_analysis`` (not the mislabeled
+    ``strategy_ideation`` copied from an unrelated agent) so per-agent
+    telemetry/timeout/model routing is not mis-attributed."""
+
+    class _StubAgent:
+        def __init__(self, *_: Any, **__: Any) -> None:
+            pass
+
+        def __call__(self, _prompt: str) -> str:
+            return json.dumps(
+                {"draft_narrative": "draft", "revised_narrative": "revised narrative"}
+            )
+
+    model_keys: List[str] = []
+    monkeypatch.setattr(analysis_module, "Agent", _StubAgent)
+    monkeypatch.setattr(
+        analysis_module, "get_strands_model", lambda name: model_keys.append(name) or None
+    )
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+    )
+
+    assert model_keys == ["strategy_analysis", "strategy_analysis"]
+
+
 def test_analysis_agent_honours_explicit_is_winning_false_on_high_return(monkeypatch):
     """Even with metrics.annualized_return_pct=15% (the deterministic rule
     would say WINNING), an explicit ``is_winning=False`` from the caller must

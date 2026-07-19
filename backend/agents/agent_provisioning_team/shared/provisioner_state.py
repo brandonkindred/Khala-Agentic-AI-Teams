@@ -219,26 +219,52 @@ class ProvisionerStateStore:
             data[agent_id] = existing
 
     def delete(self, agent_id: str, *, fencing_token: Optional[int] = None) -> bool:
-        """Remove ``agent_id``'s row entirely.
+        """Clear ``agent_id``'s details and compensations (row itself is kept).
 
         When ``fencing_token`` is given and lower than this agent's
         already-recorded fencing token, raises
         :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
         and deletes nothing.
+
+        Postconditions:
+            * The row is never removed outright — only ``details``/
+              ``compensations`` are cleared, and ``fencing_token`` (when
+              given) becomes the row's new high-water mark. Removing the row
+              entirely would reset a later caller's bootstrap comparison
+              (``current_token=None``) to always-accept, letting a stale
+              caller's post-teardown write silently resurrect state a newer
+              owner already tore down. ``get()``/``list_agents()`` already
+              treat an empty ``details`` dict as absent, so this preserves
+              their existing "gone" contract for every caller that doesn't
+              care about the fencing high-water mark.
+            * Returns ``True`` iff ``agent_id`` had non-empty ``details``
+              before this call — i.e. there was a live entry to clear, not
+              merely a row (a tombstone left by an earlier ``delete`` has an
+              empty ``details``, so a repeat call against it returns
+              ``False``, same idempotent-delete contract as before this row
+              stopped being removed outright).
         """
         with self._locked() as data:
             if agent_id not in data:
                 return False
+            row = data[agent_id]
             if fencing_token is not None:
-                prior_token = data[agent_id].get("fencing_token")
+                prior_token = row.get("fencing_token")
                 check_fencing_token(
                     agent_id=agent_id,
                     resource=f"provisioner_state:{self.provisioner_name}",
                     provided_token=fencing_token,
                     current_token=prior_token if isinstance(prior_token, int) else None,
                 )
-            del data[agent_id]
-            return True
+            had_content = bool(row.get("details"))
+            data[agent_id] = {
+                "details": {},
+                "compensations": [],
+                "fencing_token": fencing_token
+                if fencing_token is not None
+                else row.get("fencing_token"),
+            }
+            return had_content
 
     def check_fencing_token(self, agent_id: str, fencing_token: int) -> None:
         """Reject a stale token before any real infrastructure mutation runs.

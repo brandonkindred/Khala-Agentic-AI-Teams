@@ -348,6 +348,17 @@ class LLMClientModel(Model):
         """
         return self._client.get_max_context_tokens()
 
+    def supports_structured_output(self) -> bool:
+        """Delegate to the backing ``LLMClient`` (see ``LLMClient.supports_structured_output``).
+
+        Postconditions:
+            - Returns the backing client's capability flag. Synchronous, no
+              network call, never raises (assuming the backing client's
+              override doesn't — the default and Ollama's override both
+              don't).
+        """
+        return self._client.supports_structured_output()
+
     def clone(self, **overrides: Any) -> "LLMClientModel":
         """Return a new ``LLMClientModel`` sharing the backing client but with
         per-field overrides applied to the config.

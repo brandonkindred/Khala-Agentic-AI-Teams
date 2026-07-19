@@ -14,6 +14,7 @@ provision/resume/restart; keep activity order and compensation aligned with
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import timedelta
 from typing import Any
 
@@ -35,6 +36,17 @@ with workflow.unsafe.imports_passed_through():
 PHASE_TIMEOUT = timedelta(minutes=20)
 TOOL_ACTIVITY_TIMEOUT = timedelta(minutes=15)
 TOOL_HEARTBEAT_TIMEOUT = timedelta(minutes=2)
+
+# AgentDeprovisioningWorkflow's own detection deadline for a stuck
+# deprovision_activity, strictly shorter than that activity's
+# schedule_to_close_timeout (PHASE_TIMEOUT). Once schedule_to_close_timeout
+# itself elapses, Temporal has already resolved the activity handle (as a
+# timeout failure) from the workflow's point of view — cancelling a handle
+# that's no longer pending is a no-op — so this margin exists purely to give
+# the workflow a chance to request cancellation, and await its acknowledgement,
+# *while the activity is still outstanding*.
+DEPROVISION_CANCEL_GRACE = timedelta(minutes=2)
+DEPROVISION_SOFT_TIMEOUT = PHASE_TIMEOUT - DEPROVISION_CANCEL_GRACE
 
 DEFAULT_RETRY_POLICY = RetryPolicy(
     maximum_attempts=3,
@@ -103,6 +115,18 @@ TOOL_RETRY_POLICY = RetryPolicy(
 # today (zero enforcement anywhere), not a regression.
 _PROVISIONING_LOCK_PATCH = "agent-provisioning-lock"
 _DEPROVISIONING_LOCK_PATCH = "agent-deprovisioning-lock"
+
+# A SEPARATE, independent gate for check_existing_environment_activity —
+# deliberately NOT reusing _PROVISIONING_LOCK_PATCH. An in-flight history
+# recorded after the lock existed but before this check was introduced
+# already recorded "lock acquired -> setup" as its command sequence; since
+# workflow.patched(_PROVISIONING_LOCK_PATCH) is already True for such a
+# history, gating this newer activity behind that same marker would insert
+# it into that history's replay and report nondeterminism. A fresh marker
+# returns False for any history recorded before ITS OWN introduction —
+# whether pre-lock or merely pre-this-check — reproducing each one's
+# original sequence exactly.
+_PRE_EXISTING_ENV_CHECK_PATCH = "agent-provisioning-pre-existing-check"
 
 # Bounded so a cyclic/adversarial cause chain can never loop forever — mirrors
 # shared_temporal.failure_translation.translate_workflow_failure's own bound.
@@ -176,6 +200,10 @@ class AgentProvisioningWorkflow:
             * ``tool_names`` are the current manifest tool names in order.
         Postconditions:
             * Returns ``(tool_results_dump, succeeded, failures)``.
+            * ``succeeded`` entries also carry ``reused`` (from
+              ``details.reused``) so a later compensation call can tell a
+              tool this attempt idempotently reused apart from one it
+              actually created.
         """
         tool_results_dump = list(ap.get("tool_results") or [])
         prior_names = {r.get("tool_name") for r in tool_results_dump if r.get("tool_name")}
@@ -184,6 +212,7 @@ class AgentProvisioningWorkflow:
             {
                 "tool_name": r.get("tool_name"),
                 "provisioner_key": r.get("provisioner_key"),
+                "reused": bool((r.get("details") or {}).get("reused", False)),
             }
             for r in tool_results_dump
             if r.get("success")
@@ -252,9 +281,16 @@ class AgentProvisioningWorkflow:
         Preconditions:
             * ``tool_specs`` are ``{name, provisioner, config}`` dicts in order.
             * ``credentials_by_tool`` is keyed by tool name.
+            * ``fencing_token`` is this run's current lease token on
+              ``agent_id`` (``None`` on a pre-lock replay), threaded into
+              every ``provision_tool_activity`` call.
         Postconditions:
             * Returns ``(tool_results_dump, succeeded, failures)``.
-            * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key``.
+            * ``succeeded`` entries carry ``tool_name`` + ``provisioner_key`` +
+              ``reused`` (from the provisioner's ``details.reused`` — set when
+              it found and idempotently reused an existing account rather
+              than creating one, so a later compensation call knows not to
+              roll it back).
             * Every fanned-out activity call presents the SAME ``fencing_token``
               (captured once before the fan-out starts) — the stores this token
               is checked against accept any caller presenting a token ``>=``
@@ -310,6 +346,7 @@ class AgentProvisioningWorkflow:
                     {
                         "tool_name": res.get("tool_name", name),
                         "provisioner_key": res.get("provisioner_key"),
+                        "reused": bool((res.get("details") or {}).get("reused", False)),
                     }
                 )
                 tool_results_dump.append(res)
@@ -329,18 +366,22 @@ class AgentProvisioningWorkflow:
         Preconditions:
             * ``job_id`` / ``agent_id`` are non-empty.
         Postconditions:
-            * A replay of a history recorded before the lock existed
-              (``workflow.patched(_PROVISIONING_LOCK_PATCH)`` is ``False``)
-              schedules nothing, reproducing that history's original
-              (lock-free) command sequence exactly, and returns ``None``.
-              Otherwise blocks (with backoff, via ``LOCK_ACQUIRE_RETRY_POLICY``)
-              until ``agent_id`` is free or ``LOCK_ACQUIRE_TIMEOUT`` is
-              exhausted, in which case the activity's exception propagates.
-            * On success, returns the fencing token now associated with
-              ``agent_id`` (see ``AgentLockStore.acquire``). The caller must
-              use this (or the value of a later renewal, whichever is more
-              recent) on every subsequent mutating activity call and on
-              ``_release_agent_lock``.
+            * Returns ``None`` and schedules nothing when replaying a history
+              recorded before the lock existed
+              (``workflow.patched(_PROVISIONING_LOCK_PATCH)`` is ``False``),
+              reproducing that history's original (lock-free) command sequence
+              exactly — such a replay never actually held the lock, so callers
+              must not treat a returned value (even ``None``) as proof of
+              exclusive ownership; check
+              ``workflow.patched(_PROVISIONING_LOCK_PATCH)`` for that.
+              Otherwise blocks (with backoff, via
+              ``LOCK_ACQUIRE_RETRY_POLICY``) until ``agent_id`` is free or
+              ``LOCK_ACQUIRE_TIMEOUT`` is exhausted (in which case the
+              activity's exception propagates), and returns the fencing
+              token ``acquire_agent_lock_activity`` reports for this
+              acquisition — the caller must use this (or the value of a
+              later renewal, whichever is more recent) on every subsequent
+              mutating activity call and on ``_release_agent_lock``.
         """
         if not workflow.patched(_PROVISIONING_LOCK_PATCH):
             return None
@@ -350,6 +391,46 @@ class AgentProvisioningWorkflow:
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
             retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
+        )
+
+    async def _check_existing_environment(self, agent_id: str, job_id: str) -> bool:
+        """Report whether ``agent_id`` already had a running environment
+        before this run touched anything.
+
+        Preconditions:
+            * ``agent_id`` is non-empty; this workflow already holds
+              ``agent_id``'s lock (called right after acquiring it, before
+              setup runs, so nothing else can register an environment in the
+              gap between this check and setup starting).
+            * ``job_id`` is this workflow run's own job id — passed through so
+              the activity can recognize a container THIS run's own earlier
+              attempt labeled (e.g. a resumed job reusing ``job_id``) rather
+              than one that predates this run. Adding this argument to an
+              already-scheduled call does not change the command sequence a
+              replay must match — no new ``workflow.patched(...)`` gate is
+              needed for it (unlike whether the call happens at all, which
+              ``_PRE_EXISTING_ENV_CHECK_PATCH`` below still governs).
+        Postconditions:
+            * Gated by its own ``_PRE_EXISTING_ENV_CHECK_PATCH`` marker — NOT
+              ``_PROVISIONING_LOCK_PATCH`` (see that marker's own comment for
+              why reusing the lock's marker would misfire this activity into
+              an in-flight post-lock, pre-this-check history's replay).
+              Returns ``True`` without scheduling anything when unpatched,
+              reproducing that history's original command sequence; this is
+              moot for compensation safety on a pre-lock replay specifically,
+              since ``lock_acquired`` is already ``False`` there, which alone
+              disables compensation regardless of this value.
+            * Otherwise returns ``check_existing_environment_activity``'s
+              result.
+        """
+        if not workflow.patched(_PRE_EXISTING_ENV_CHECK_PATCH):
+            return True
+        return await workflow.execute_activity(
+            _activities.check_existing_environment_activity,
+            args=[agent_id, job_id],
+            task_queue=TASK_QUEUE,
+            schedule_to_close_timeout=PHASE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
         )
 
     async def _renew_agent_lock(self, job_id: str, agent_id: str) -> int | None:
@@ -417,19 +498,53 @@ class AgentProvisioningWorkflow:
             )
 
     async def _compensate_failed_tools(
-        self, agent_id: str, succeeded: list[dict], job_id: str, fencing_token: int | None
+        self,
+        agent_id: str,
+        succeeded: list[dict],
+        job_id: str,
+        tear_down_environment: bool = True,
+        fencing_token: int | None = None,
     ) -> None:
         """Roll back tools that succeeded when the account-provisioning phase fails.
 
         Preconditions:
-            * ``succeeded`` entries are ``{tool_name, provisioner_key}`` dicts.
+            * ``succeeded`` entries are ``{tool_name, provisioner_key, reused}``
+              dicts (``reused`` marks an idempotently-reused, not freshly
+              created, account).
             * ``job_id`` is non-empty (used to clear completed-phase checkpoints).
+            * ``tear_down_environment`` is ``False`` when ``agent_id``'s Docker
+              environment predates this run (``pre_existing_environment``) and
+              must be preserved — ``succeeded`` still gets rolled back either
+              way (except for ``reused`` entries, which are never this run's
+              own creation regardless of ``tear_down_environment``).
+            * ``fencing_token`` is this run's current lease token on
+              ``agent_id`` (``None`` on a pre-lock replay or when compensating
+              before a lock was ever acquired).
         Postconditions:
             * Invokes ``compensate_activity`` once for the partial success set.
+            * When ``tear_down_environment`` is ``True`` (no environment
+              predates this run — see ``pre_existing_environment``), every
+              entry's ``reused`` is forced ``False`` before sending: a tool's
+              own ``reused=True`` there cannot mean "predates this run" (there
+              was nothing at ``agent_id`` for it to predate) — it can only be
+              an artifact of Temporal retrying THIS run's own
+              ``provision_tool_activity`` after its response was lost (the
+              retry's idempotent create then reads back the first attempt's
+              own successful write as "existing"). Left uncorrected, treating
+              that as pre-existing would skip rolling it back and leak it.
+              When ``tear_down_environment`` is ``False``, a genuine
+              pre-existing environment means ``reused`` entries really can
+              predate this run (e.g. a re-run against an already-delivered
+              agent), so it is passed through unmodified there — the residual
+              ambiguity between "predates this run" and "this run's own
+              retry" in that case needs a stronger ownership signal than a
+              same-attempt idempotency read can provide, tracked in #1489.
         """
+        if tear_down_environment:
+            succeeded = [{**s, "reused": False} for s in succeeded]
         await workflow.execute_activity(
             _activities.compensate_activity,
-            args=[agent_id, succeeded, job_id, fencing_token],
+            args=[agent_id, succeeded, job_id, tear_down_environment, fencing_token],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=PHASE_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -614,11 +729,42 @@ class AgentProvisioningWorkflow:
               ``deliver_activity`` has written a terminal completed/failed job
               status.
             * On any unhandled phase failure (setup, credentials, tools, audit,
-              docs, deliver): ``mark_job_failed_activity`` records terminal
-              failure before the exception propagates (tool failures also
-              compensate succeeded tools first). Credentials / manifest-list
-              failures after setup call ``compensate_activity`` with an empty
-              succeeded list to tear down the Docker env / credentials.
+              docs, deliver) while this run holds ``agent_id``'s lock:
+              ``mark_job_failed_activity`` records terminal failure before the
+              exception propagates, and ``compensate_activity`` runs (tool
+              failures compensate the succeeded set; any other failure
+              compensates an empty set) to roll back tool-level side effects
+              this run created, unconditionally including a setup-phase
+              failure. A setup failure ALSO triggers ``run_setup``'s own local
+              best-effort rollback first (scoped to resources that attempt
+              created) — the workflow-level ``compensate_activity`` is a
+              second, independently retried backstop for when that local
+              rollback itself fails (e.g. a transient ``docker rm`` error),
+              not a replacement for it. Calling it is safe (including before
+              setup ever runs, e.g. a manifest-load failure) because
+              ``compensate_activity`` is fully idempotent — a no-op wherever
+              nothing was created — and this run holds ``agent_id``'s
+              exclusive lock throughout, so there is no other job's resources
+              it could tear down instead.
+              WHAT it tears down is separately gated by
+              ``pre_existing_environment`` (checked right after acquiring the
+              lock): holding the lock only excludes a *concurrent* workflow —
+              it says nothing about whether THIS run is the one that created
+              ``agent_id``'s Docker environment specifically (e.g. setup's
+              already-running fast path reuses one and creates nothing). When
+              ``pre_existing_environment`` is ``True``, ``compensate_activity``
+              still rolls back any tool results this run itself produced
+              (``succeeded_tools``/``succeeded``, e.g. a newly added tool on an
+              already-delivered agent), but is told (via
+              ``tear_down_environment=False``) to leave the Docker env,
+              credential store, and environment record alone, since those
+              predate this run.
+              Compensation is skipped entirely — logging which reason applied
+              — when this run never acquired the lock at all (exhausted
+              retries against a live holder) or acquired it but later lost it
+              (a renewal failure might indicate a replacement job now owns
+              ``agent_id``); a pre-existing environment no longer disables
+              compensation outright, only the environment-teardown portion of it.
             * After a successful tool fan-out (not a restored skip),
               ``account_provisioning`` is written to ``completed_phases`` /
               ``phase_results`` before later phases run.
@@ -652,12 +798,17 @@ class AgentProvisioningWorkflow:
         skip = set(skip_phases or [])
         prior = prior_results or {}
         terminal_failure_recorded = False
-        setup_completed = False
         tools_phase_compensated = False
         account_provisioning_done = False
         succeeded_tools: list[dict] = []
+        lock_acquired = False
         lock_lost = False
         fencing_token: int | None = None
+        # Conservative default: until _check_existing_environment proves
+        # otherwise, assume agent_id might already have a live environment
+        # this run didn't create, so a failure before that check completes
+        # can't trigger destructive compensation.
+        pre_existing_environment = True
 
         async def _renew_or_mark_lost() -> None:
             # A renewal failure (AgentLockBusyError from a genuine steal, or
@@ -676,12 +827,62 @@ class AgentProvisioningWorkflow:
                 raise
 
         try:
+            # lock_acquired is only True when acquire actually held the lock —
+            # a pre-lock replay's no-op return, or an acquire that raises
+            # (exhausted retries against a live holder), both mean this run
+            # never held agent_id's lock at all, and the except block below
+            # must treat that exactly like losing it: compensating without
+            # ever having held exclusive ownership could tear down whatever
+            # job currently does hold the lock (or, for a pre-lock replay,
+            # whatever job is running lock-free against the same agent_id).
+            # Recomputed via workflow.patched(...) directly (rather than
+            # trusting fencing_token's truthiness) because a stub/back-compat
+            # activity result of None must not be mistaken for "never
+            # acquired" — the fencing token and lock-acquisition are two
+            # independent facts about the same call.
             fencing_token = await self._acquire_agent_lock(job_id, agent_id)
+            lock_acquired = workflow.patched(_PROVISIONING_LOCK_PATCH)
+
+            # Gated on the SAME marker _check_existing_environment checks
+            # internally: a history recorded before this check existed
+            # scheduled no activity and no renewal at this point (its
+            # original sequence went straight from "lock acquired" to
+            # "setup"), so both must be skipped together on replay, or the
+            # renewal call alone would still insert a new, unrecorded command
+            # into that history and report nondeterminism.
+            if workflow.patched(_PRE_EXISTING_ENV_CHECK_PATCH):
+                try:
+                    # Best-effort: this check exists only to make compensation
+                    # ownership-safe, not as a pipeline gate — an infra hiccup
+                    # here must not abort provisioning outright. Falls back to
+                    # the conservative pre_existing_environment=True default
+                    # set above, which alone is enough to keep compensation
+                    # disabled.
+                    pre_existing_environment = await self._check_existing_environment(
+                        agent_id, job_id
+                    )
+                except Exception:
+                    pass
+                await _renew_or_mark_lost()
 
             environment_dump = await self._execute_setup_phase(
                 job_id, agent_id, manifest_path, skip, prior, fencing_token
             )
-            setup_completed = True
+            if environment_dump is not None and environment_dump.get("reused") is False:
+                # Setup's own confirmed outcome is stronger evidence than the
+                # pre-check: a container run_setup just created cannot also
+                # predate this run, so nothing at agent_id could have either
+                # — this corrects a pre-check that was itself conservative or
+                # inconclusive (e.g. an unreadable registry, or a stale
+                # record whose backing container turned out to be gone, so
+                # run_setup created a fresh one in its place). Only trusted
+                # in this direction: reused=True is never used to flip
+                # pre_existing_environment to True, since it can also be
+                # this same run's own retry of setup_activity reading back
+                # its own earlier (response-lost) success as "existing" —
+                # the same ambiguity documented on _compensate_failed_tools
+                # for tool-level reuse, tracked in #1489.
+                pre_existing_environment = False
             await _renew_or_mark_lost()
 
             # Freeze manifest tools once for credential + provision phases so a
@@ -725,7 +926,13 @@ class AgentProvisioningWorkflow:
             await _renew_or_mark_lost()
 
             if failures:
-                await self._compensate_failed_tools(agent_id, succeeded, job_id, fencing_token)
+                await self._compensate_failed_tools(
+                    agent_id,
+                    succeeded,
+                    job_id,
+                    tear_down_environment=not pre_existing_environment,
+                    fencing_token=fencing_token,
+                )
                 tools_phase_compensated = True
                 err = f"Tool provisioning failed for agent {agent_id}: {'; '.join(failures)}"
                 await self._mark_job_failed(job_id, err)
@@ -771,9 +978,19 @@ class AgentProvisioningWorkflow:
                 fencing_token,
             )
         except Exception as exc:
-            # Pre-tool failures leave Docker/credentials behind → compensate([]).
-            # Fan-out completed but checkpoint/later phase not durable yet →
-            # compensate the tools that already succeeded.
+            # Compensation runs unconditionally (compensate([]) when nothing
+            # succeeded yet, including before setup ever ran) rather than being
+            # gated on how far the pipeline got: `compensate_activity` is fully
+            # idempotent — a no-op wherever nothing was created — and this run
+            # holds agent_id's exclusive lock for its entire duration, so there
+            # is no concurrent owner it could tear down instead. For a setup
+            # failure specifically this is a deliberate SECOND cleanup attempt:
+            # `run_setup` already ran its own local best-effort rollback (see
+            # its postconditions) before this exception ever reached here; this
+            # workflow-level call is retried independently by
+            # `compensate_activity`'s own retry policy, so a transient failure
+            # in the local rollback (e.g. a flaky `docker rm`) still gets torn
+            # down instead of being left as an untracked orphan.
             # Nested try/except: compensation / terminal writes must not mask
             # the original failure if Temporal activity retries are exhausted.
             # lock_lost / stale_token_failure both gate this: either means we
@@ -785,16 +1002,56 @@ class AgentProvisioningWorkflow:
             # every teardown path — would recreate the exact cross-job
             # teardown race this lock exists to prevent.
             stale_token_failure = _is_stale_fencing_token_failure(exc)
+            # lock_acquired / lock_lost gate whether to call compensate AT ALL:
+            # if acquire itself failed, this run never held the lock at all; if
+            # a renewal failed, it no longer can prove it still does (a
+            # replacement job may already own agent_id's resources) —
+            # compensating here, keyed on agent_id alone like every teardown
+            # path, would recreate the exact cross-job teardown race this lock
+            # exists to prevent.
+            # BUT lock_acquired is also False — with no exception raised — for
+            # a pre-lock-deploy replay (_acquire_agent_lock's own no-op-return
+            # branch), which is NOT the same situation: such a history was
+            # recorded before the lock existed at all, back when this except
+            # block's only gate was progress flags (no lock concept to check),
+            # so it may already contain a recorded compensate_activity command
+            # that a lock_acquired-only guard would now omit — a command
+            # dropped from the replayed sequence is genuine nondeterminism.
+            # Re-checking the SAME patch marker _acquire_agent_lock already
+            # consulted internally (safe/idempotent to check again) tells the
+            # two apart: unpatched means this is that pre-lock replay, so fall
+            # back to the pre-lock guard shape (progress flags only) to
+            # reproduce its original sequence; patched means lock_acquired's
+            # value is meaningful (True=held it, False=acquire itself failed).
+            # pre_existing_environment gates WHAT compensate tears down, not
+            # whether it runs: holding the lock only rules out a CONCURRENT
+            # workflow — it says nothing about whether THIS run is the one
+            # that created agent_id's environment specifically. succeeded_tools
+            # (e.g. a newly added tool on an already-delivered agent) still
+            # gets rolled back regardless of pre_existing_environment — except
+            # for any entry marked reused, which by definition predates this
+            # run's own tool fan-out and is excluded from rollback by
+            # compensate() itself, independent of tear_down_environment. Only
+            # the Docker env / credential store / environment record — which
+            # predate this run when pre_existing_environment is True — are
+            # excluded from teardown (see compensate_activity's
+            # tear_down_environment parameter).
+            lock_safe_to_compensate = not workflow.patched(_PROVISIONING_LOCK_PATCH) or (
+                lock_acquired and not lock_lost
+            )
             if (
-                setup_completed
+                lock_safe_to_compensate
+                and not stale_token_failure
                 and not account_provisioning_done
                 and not tools_phase_compensated
-                and not lock_lost
-                and not stale_token_failure
             ):
                 try:
                     await self._compensate_failed_tools(
-                        agent_id, succeeded_tools, job_id, fencing_token
+                        agent_id,
+                        succeeded_tools,
+                        job_id,
+                        tear_down_environment=not pre_existing_environment,
+                        fencing_token=fencing_token,
                     )
                 except Exception as comp_exc:
                     workflow.logger.error(
@@ -803,12 +1060,29 @@ class AgentProvisioningWorkflow:
                         comp_exc,
                         exc,
                     )
-            elif setup_completed and not account_provisioning_done and not tools_phase_compensated:
+            elif not account_provisioning_done and not tools_phase_compensated:
+                # lock_safe_to_compensate / stale_token_failure are the only
+                # remaining reasons to land here now: pre_existing_environment
+                # no longer disables compensation outright (it's threaded into
+                # the call as tear_down_environment instead), so the first
+                # branch's condition can only have failed on the lock (a
+                # genuine post-lock acquire failure or a lost renewal — never
+                # a pre-lock replay, which always takes the first branch) or
+                # on a stale-fencing-token rejection surfaced by a mutating
+                # activity even though this run's own renewals all succeeded.
+                if stale_token_failure:
+                    reason = "a stale-fencing-token rejection from a mutating activity"
+                else:
+                    reason = (
+                        f"this run {'never acquired' if not lock_acquired else 'lost'} "
+                        "the agent_id lock"
+                    )
                 workflow.logger.error(
-                    "Skipped unfenced compensation for job=%s agent=%s after losing the "
-                    "agent_id lock (renewal loss or a stale-fencing-token rejection): %s",
+                    "Skipped unfenced compensation for job=%s agent=%s: %s "
+                    "(a different job may now own its resources): %s",
                     job_id,
                     agent_id,
+                    reason,
                     exc,
                 )
             if not terminal_failure_recorded:
@@ -850,6 +1124,13 @@ class AgentDeprovisioningWorkflow:
           gap where the fencing token captured at acquire time could go
           stale mid-run; the one token captured up front is used for both
           the deprovision call and the release.
+        * ``deprovision_activity`` is started (not executed) so a run past
+          ``DEPROVISION_SOFT_TIMEOUT`` can request its cancellation and await
+          that cancellation's acknowledgement — consuming the cooperative
+          cancellation checkpoints ``deprovision_activity`` heartbeats between
+          — before the ``finally`` below releases the lock, so release is
+          never reached while that activity's worker thread may still be
+          mutating this ``agent_id``'s resources.
     """
 
     @workflow.run
@@ -866,6 +1147,10 @@ class AgentDeprovisioningWorkflow:
               schedules neither the acquire nor the release activity,
               reproducing that history's original (lock-free) command
               sequence exactly.
+            * Raises ``TimeoutError`` if ``deprovision_activity`` is still
+              running past ``DEPROVISION_SOFT_TIMEOUT`` — only after its
+              cancellation has been requested and acknowledged (see
+              ``_await_deprovision``).
         """
         assert agent_id, "agent_id must be non-empty"
         # Deprovision workflow ids are randomized per-call (repeated/concurrent
@@ -891,13 +1176,14 @@ class AgentDeprovisioningWorkflow:
                     schedule_to_close_timeout=LOCK_ACQUIRE_TIMEOUT,
                     retry_policy=LOCK_ACQUIRE_RETRY_POLICY,
                 )
-            return await workflow.execute_activity(
+            handle = workflow.start_activity(
                 _activities.deprovision_activity,
                 args=[agent_id, force, fencing_token],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=PHASE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,
             )
+            return await self._await_deprovision(agent_id, handle)
         finally:
             if locked:
                 try:
@@ -915,3 +1201,40 @@ class AgentDeprovisioningWorkflow:
                         agent_id,
                         release_exc,
                     )
+
+    async def _await_deprovision(
+        self, agent_id: str, handle: "workflow.ActivityHandle[dict[str, Any]]"
+    ) -> dict[str, Any]:
+        """Await ``deprovision_activity``, gating past-deadline release on a confirmed stop.
+
+        Preconditions:
+            * ``handle`` is the still-pending ``ActivityHandle`` this run just
+              started for ``deprovision_activity``, scheduled with
+              ``schedule_to_close_timeout=PHASE_TIMEOUT``.
+        Postconditions:
+            * If ``handle`` resolves (success or failure) within
+              ``DEPROVISION_SOFT_TIMEOUT``, returns its result / propagates its
+              exception unchanged — the caller's ``finally`` runs immediately
+              after, exactly as before this change.
+            * Past ``DEPROVISION_SOFT_TIMEOUT``, requests ``handle``'s
+              cancellation and awaits it to completion (suppressing whatever it
+              resolves with — success, ``DeprovisionCancelledError``, or any
+              other terminal outcome all count as "confirmed stopped") before
+              raising ``TimeoutError`` — so the caller's ``finally`` only runs
+              once ``deprovision_activity`` has actually stopped, never merely
+              because this soft deadline elapsed.
+        """
+        timer = asyncio.ensure_future(workflow.sleep(DEPROVISION_SOFT_TIMEOUT))
+        done, _pending = await asyncio.wait([handle, timer], return_when=asyncio.FIRST_COMPLETED)
+        if handle in done:
+            timer.cancel()
+            return handle.result()
+
+        handle.cancel()
+        with suppress(BaseException):
+            await handle
+        raise TimeoutError(
+            f"deprovision_activity for agent_id={agent_id} exceeded "
+            f"DEPROVISION_SOFT_TIMEOUT ({DEPROVISION_SOFT_TIMEOUT}); cancellation "
+            "requested and acknowledged before lock release"
+        )

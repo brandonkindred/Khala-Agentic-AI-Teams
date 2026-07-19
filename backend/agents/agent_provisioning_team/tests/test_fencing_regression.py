@@ -246,3 +246,128 @@ def test_orchestrator_deprovision_rejects_stale_token(tmp_path: Path) -> None:
     orch.deprovision("agent-1", fencing_token=current_token)
     assert docker.real_side_effects == ["deprovision:agent-1", "deprovision:agent-1"]
     assert cred_store.get_credentials("agent-1") is None
+
+
+def test_credential_store_tombstone_survives_delete_and_rejects_stale_bootstrap_write(
+    tmp_path: Path,
+) -> None:
+    """delete_credentials() must not simply vanish the file: doing so would
+    reset a later caller's prior-token lookup to a bootstrap
+    current_token=None, letting a stale caller's store_credentials call
+    silently resurrect a secret after a legitimate newer owner tore it
+    down."""
+    _lock_store, stale_token, current_token = _acquire_then_reclaim(tmp_path)
+
+    cred_store = CredentialStore(storage_dir=tmp_path / "creds")
+    cred_store.store_credentials(
+        "agent-1", "postgresql", {"password": "b-owns-this"}, fencing_token=current_token
+    )
+    # B legitimately tears down.
+    cred_store.delete_credentials("agent-1", fencing_token=current_token)
+    assert cred_store.get_credentials("agent-1") is None
+
+    # A resumes and tries to write using its stale, pre-reclaim token -- this
+    # must still be rejected, not silently accepted as a "bootstrap" write
+    # just because the file is gone.
+    with pytest.raises(StaleFencingTokenError):
+        cred_store.store_credentials(
+            "agent-1", "postgresql", {"password": "a-resurrects-this"}, fencing_token=stale_token
+        )
+    assert cred_store.get_credentials("agent-1") is None
+
+
+def test_environment_store_tombstone_survives_remove_and_rejects_stale_bootstrap_write(
+    tmp_path: Path,
+) -> None:
+    """remove() must not simply vanish the record: doing so would reset a
+    later caller's prior-token lookup to a bootstrap current_token=None,
+    letting a stale caller's register() call silently recreate an
+    environment after a legitimate newer owner tore it down."""
+    _lock_store, stale_token, current_token = _acquire_then_reclaim(tmp_path)
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    env_store.register(
+        EnvironmentInfo(
+            agent_id="agent-1", container_id="c1", container_name="c1", workspace_path="/w"
+        ),
+        fencing_token=current_token,
+    )
+    env_store.remove("agent-1", fencing_token=current_token)
+    assert env_store.get("agent-1") is None
+
+    with pytest.raises(StaleFencingTokenError):
+        env_store.register(
+            EnvironmentInfo(
+                agent_id="agent-1",
+                container_id="c-resurrected",
+                container_name="c1",
+                workspace_path="/w",
+            ),
+            fencing_token=stale_token,
+        )
+    assert env_store.get("agent-1") is None
+
+
+def test_provisioner_state_tombstone_survives_delete_and_rejects_stale_bootstrap_write(
+    tmp_path: Path,
+) -> None:
+    """delete() must not remove the row entirely: doing so would reset a
+    later caller's prior-token lookup to a bootstrap current_token=None,
+    letting a stale caller's put() call silently resurrect state after a
+    legitimate newer owner tore it down."""
+    _lock_store, stale_token, current_token = _acquire_then_reclaim(tmp_path)
+
+    state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path / "state")
+    state.put("agent-1", {"container_name": "b-owns-this"}, fencing_token=current_token)
+    state.delete("agent-1", fencing_token=current_token)
+    assert state.get("agent-1") is None
+
+    with pytest.raises(StaleFencingTokenError):
+        state.put("agent-1", {"container_name": "a-resurrects-this"}, fencing_token=stale_token)
+    assert state.get("agent-1") is None
+
+
+def test_run_idempotent_reuse_path_persists_bumped_token(tmp_path: Path) -> None:
+    """A reuse-path call (existing state found, no new create) must still
+    persist its fencing_token as the store's new high-water mark -- the
+    short-circuit return never calls state.put() on its own, so without this
+    fix the store's mark would stay wherever the ORIGINAL create left it,
+    letting a caller presenting that original (now-superseded) token still
+    pass a later check even after a legitimate newer owner touched this same
+    state via nothing but a reuse."""
+    from agent_provisioning_team.models import GeneratedCredentials
+
+    lock_store = AgentLockStore(storage_dir=tmp_path / "locks", ttl_seconds=100)
+    token_a = lock_store.acquire("agent-1", owner="job-A", now=1000.0)
+    prov = _RecordingProvisioner(tmp_path / "state")
+    # A creates the resource for real.
+    prov.provision(
+        "agent-1", {}, GeneratedCredentials(tool_name="recording"), fencing_token=token_a
+    )
+    assert prov.real_side_effects == ["create:agent-1"]
+
+    # A's worker goes silent; B reclaims.
+    token_b = lock_store.acquire("agent-1", owner="job-B", now=1200.0)
+    assert token_b > token_a
+
+    # B calls provision() again for the same agent_id -- state.get() finds
+    # A's existing details, so this hits the reuse short-circuit, not create.
+    result = prov.provision(
+        "agent-1", {}, GeneratedCredentials(tool_name="recording"), fencing_token=token_b
+    )
+    assert result.success is True
+    assert prov.real_side_effects == ["create:agent-1"], (
+        "reuse must not re-run the real side effect"
+    )
+
+    # A resumes, unaware of the reclaim, and tries to deprovision using its
+    # original (now-superseded) token. The reuse call above must have
+    # advanced the store's high-water mark to token_b, or this would wrongly
+    # be accepted (token_a would still equal the store's un-bumped mark).
+    with pytest.raises(StaleFencingTokenError):
+        prov.deprovision("agent-1", fencing_token=token_a)
+    assert prov.real_side_effects == ["create:agent-1"], "no teardown ran for the stale caller"
+
+    # B's own teardown, using the token it actually reused with, still works.
+    prov.deprovision("agent-1", fencing_token=token_b)
+    assert prov.real_side_effects == ["create:agent-1", "deprovision:agent-1"]

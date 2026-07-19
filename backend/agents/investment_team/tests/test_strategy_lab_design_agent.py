@@ -27,7 +27,9 @@ from investment_team.strategy_lab.agents._parse_helpers import (
     StrategySpecParseError,
     build_json_correction_prompt,
 )
+from investment_team.strategy_lab.agents._response_schemas import DESIGN_SPEC_SCHEMA
 from investment_team.strategy_lab.agents.design import (
+    _DESIGN_SPEC_SCHEMA_JSON,
     _SELF_REVIEW_SYSTEM_PROMPT,
     DesignAgent,
     _build_correction_prompt,
@@ -456,6 +458,32 @@ def test_run_includes_positive_menu_in_prompt(
     assert all("Choose **asset_class** ONLY from:" not in p for p in capture.calls)
 
 
+def test_run_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The generation prompt carries the JSON Schema so the wire model, the
+    hand-written skeleton, and the downstream coercer cannot drift apart."""
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    capture = _patch_design(monkeypatch, payload)
+
+    DesignAgent().run(prior_records=[])
+
+    prompt = capture.calls[0]
+    assert "MUST conform to this JSON Schema" in prompt
+    assert _DESIGN_SPEC_SCHEMA_JSON in prompt
+    assert "expectancy_forecast" in prompt
+
+
+def test_embedded_schema_matches_format_constraint() -> None:
+    """The schema embedded in the prompt is the same object exported from
+    ``_response_schemas`` — the prompt-level contract cannot silently drift
+    from whatever is validated elsewhere."""
+    assert json.loads(_DESIGN_SPEC_SCHEMA_JSON) == DESIGN_SPEC_SCHEMA
+    assert "expectancy_forecast" in DESIGN_SPEC_SCHEMA["properties"]
+
+
 # ---------------------------------------------------------------------------
 # revise() — must serialize the critique into the prompt
 # ---------------------------------------------------------------------------
@@ -569,6 +597,24 @@ def test_revise_strips_stray_strategy_code(monkeypatch: pytest.MonkeyPatch) -> N
     critique = SpecCritique(ready=False, rationale="r", issues=[])
     parsed, _ = DesignAgent().revise(_prior_spec(), critique)
     assert "strategy_code" not in parsed
+
+
+def test_revise_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The revision prompt asks the LLM to return the same wire shape as
+    initial generation, so it must carry the same schema."""
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    capture = _patch_design(monkeypatch, payload)
+
+    critique = SpecCritique(ready=False, rationale="r", issues=[])
+    DesignAgent().revise(_prior_spec(), critique)
+
+    prompt = capture.calls[0]
+    assert "MUST conform to this JSON Schema" in prompt
+    assert _DESIGN_SPEC_SCHEMA_JSON in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +979,10 @@ def test_run_self_review_flags_then_self_revises(monkeypatch: pytest.MonkeyPatch
     revision_prompt = capture.calls[2]
     assert "entry_rules" in revision_prompt
     assert "ADX" in revision_prompt or "adx" in revision_prompt
+    # The internal self-revision path reuses ``_REVISION_USER_TEMPLATE`` and
+    # must carry the same schema as the external run()/revise() paths.
+    assert "MUST conform to this JSON Schema" in revision_prompt
+    assert _DESIGN_SPEC_SCHEMA_JSON in revision_prompt
 
 
 def test_run_self_review_ready_with_warning_no_revision(

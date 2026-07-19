@@ -6,6 +6,7 @@ subprocess / library boundary — no real services are touched.
 
 from __future__ import annotations
 
+import logging
 import subprocess as _subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -240,6 +241,94 @@ def test_run_idempotent_accepts_and_stamps_fencing_token(tmp_path: Path) -> None
     assert prov._state._load()["a"]["fencing_token"] == 5
 
 
+def test_run_idempotent_calls_on_persist_failure_when_state_put_raises(tmp_path: Path) -> None:
+    """A resource `create` returns must not leak when persisting its state fails.
+
+    If `state.put` raises after `create` succeeds, the store never recorded the
+    resource, so the normal state-lookup-based `deprovision(agent_id)` path has
+    nothing to find it by. `on_persist_failure` gets the just-returned `details`
+    directly so a provisioner can tear the resource down by name instead.
+    """
+    cleanup_calls = []
+
+    class _PersistFailProv(BaseToolProvisioner):
+        tool_name = "persistfail"
+
+        def __init__(self) -> None:
+            self._state = ProvisionerStateStore("persistfail_prov", storage_dir=tmp_path)
+
+        def provision(self, agent_id, config, credentials):
+            return self.run_idempotent(
+                agent_id,
+                credentials=credentials,
+                create=lambda _r: (["read"], {"resource": "x"}),
+                on_persist_failure=cleanup_calls.append,
+            )
+
+        def verify_access(self, agent_id):
+            return self._make_verification(passed=True, actual_permissions=[])
+
+        def deprovision(self, agent_id):
+            from agent_provisioning_team.models import DeprovisionResult
+
+            return DeprovisionResult(tool_name=self.tool_name, success=True)
+
+    prov = _PersistFailProv()
+
+    def _boom(agent_id, value, fencing_token=None):
+        raise OSError("disk full")
+
+    prov._state.put = _boom
+
+    out = prov.provision("a", {}, GeneratedCredentials(tool_name="x"))
+    assert out.success is False
+    assert "disk full" in out.error
+    assert cleanup_calls == [{"resource": "x"}]
+
+
+def test_run_idempotent_on_persist_failure_exception_is_swallowed(tmp_path: Path, caplog) -> None:
+    """A raising `on_persist_failure` cleanup must not mask the original error."""
+
+    class _PersistFailProv(BaseToolProvisioner):
+        tool_name = "persistfail2"
+
+        def __init__(self) -> None:
+            self._state = ProvisionerStateStore("persistfail2_prov", storage_dir=tmp_path)
+
+        def provision(self, agent_id, config, credentials):
+            def _hook_boom(details):
+                raise RuntimeError("cleanup also failed")
+
+            return self.run_idempotent(
+                agent_id,
+                credentials=credentials,
+                create=lambda _r: (["read"], {"resource": "x"}),
+                on_persist_failure=_hook_boom,
+            )
+
+        def verify_access(self, agent_id):
+            return self._make_verification(passed=True, actual_permissions=[])
+
+        def deprovision(self, agent_id):
+            from agent_provisioning_team.models import DeprovisionResult
+
+            return DeprovisionResult(tool_name=self.tool_name, success=True)
+
+    prov = _PersistFailProv()
+
+    def _boom(agent_id, value, fencing_token=None):
+        raise OSError("disk full")
+
+    prov._state.put = _boom
+
+    with caplog.at_level(logging.ERROR):
+        out = prov.provision("a", {}, GeneratedCredentials(tool_name="x"))
+
+    assert out.success is False
+    assert "disk full" in out.error
+    assert "cleanup also failed" not in out.error
+
+
 # ---------------------------------------------------------------------------
 # docker_provisioner.py
 # ---------------------------------------------------------------------------
@@ -283,6 +372,214 @@ def test_docker_provisioner_provision_returns_error_on_nonzero(tmp_path: Path) -
     assert "Docker run failed" in result.error or "something bad" in result.error
 
 
+def _docker_cmd_stub(record, run=None, inspect=None, rm=None):
+    """subprocess.run stub keyed on the docker subcommand; records every cmd."""
+
+    def _respond(cmd, *a, **kw):
+        record.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            return inspect or SimpleNamespace(
+                returncode=1, stdout="", stderr="Error: No such object"
+            )
+        if cmd[:2] == ["docker", "run"]:
+            outcome = run or SimpleNamespace(returncode=125, stdout="", stderr="run failed")
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return rm or SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return _respond
+
+
+def test_docker_provisioner_removes_partial_container_on_failed_run(tmp_path: Path) -> None:
+    """A failed/timed-out `docker run` triggers best-effort removal by name.
+
+    No state row is written on failure, so deprovision-by-state could never find
+    such a container; without this cleanup the leftover name would block every
+    future provision for the agent. The pre-run probe reported the name absent,
+    so the removal is provably scoped to this attempt's container.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+    calls.clear()
+    timeout = _subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=120)
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=timeout)):
+        result = prov.provision("agent-2", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-2"] in calls
+
+
+def test_docker_provisioner_preserves_preexisting_container_on_failed_run(
+    tmp_path: Path,
+) -> None:
+    """A run failing against a PRE-EXISTING same-named container must not remove it.
+
+    When the state row is lost but the container lives on, `docker run` fails on
+    the name conflict; deleting the container by name would destroy a healthy
+    agent, so the cleanup only fires when the pre-run probe reported the name
+    absent. An unknown probe result (daemon error) is also conservative: no rm.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    exists = SimpleNamespace(returncode=0, stdout="abc\n", stderr="")
+    conflict = SimpleNamespace(returncode=125, stdout="", stderr="name is already in use")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, inspect=exists, run=conflict)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
+
+    calls.clear()
+    probe_error = SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+    with patch(
+        "subprocess.run", side_effect=_docker_cmd_stub(calls, inspect=probe_error, run=conflict)
+    ):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
+
+
+def test_docker_provisioner_skips_removal_on_name_conflict(tmp_path: Path) -> None:
+    """A name-conflict run failure must never remove the conflicting container.
+
+    Two concurrent setups can both probe the name as absent; the loser's `docker
+    run` fails with "already in use" — which proves its run created nothing and
+    the container is the winner's. Removing by name would destroy the winner's
+    live container just before it registers.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    conflict = SimpleNamespace(
+        returncode=125,
+        stdout="",
+        stderr='Conflict. The container name "/agent-agent-1" is already in use by container "abc"',
+    )
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=conflict)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert not any(cmd[:3] == ["docker", "rm", "-f"] for cmd in calls)
+
+
+def test_docker_provisioner_removes_container_on_port_bind_failure(tmp_path: Path) -> None:
+    """A port-bind failure ('address already in use') is not a name conflict.
+
+    Docker's port-bind error also contains the substring "already in use" but
+    is unrelated to the container-name conflict; matching that broad substring
+    would suppress cleanup and leak the container docker created before the
+    bind step failed. Only the daemon's actual name-conflict wording should
+    suppress removal.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    bind_failure = SimpleNamespace(
+        returncode=125,
+        stdout="",
+        stderr="failed to bind host port for 0.0.0.0:8000: address already in use",
+    )
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=bind_failure)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+
+def test_docker_provisioner_cleans_up_on_post_launch_exception(tmp_path: Path) -> None:
+    """A post-launch exception (e.g. output decoding) still triggers cleanup.
+
+    subprocess.run can raise after the daemon created the container; only
+    handling TimeoutExpired would leave that container untracked and its name
+    blocking future provisions.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    decode_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=decode_error)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+
+def test_docker_provisioner_logs_failed_best_effort_removal(tmp_path: Path, caplog) -> None:
+    """A best-effort `docker rm -f` that exits nonzero must be logged, not silent."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    rm_fail = SimpleNamespace(returncode=1, stdout="", stderr="cannot remove: device busy")
+    with caplog.at_level(logging.ERROR):
+        with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, rm=rm_fail)):
+            result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+    assert "device busy" in caplog.text
+
+
+def test_docker_provisioner_removes_container_when_state_persist_fails(
+    tmp_path: Path,
+) -> None:
+    """A successfully created container must not leak when persisting state fails.
+
+    `docker run` can succeed and then the idempotency-store write can still
+    raise (e.g. disk full): the store never recorded the container, so
+    `deprovision(agent_id)`'s state-lookup path can't find it afterward — this
+    exercises the `on_persist_failure` wiring that removes it directly by the
+    name `_do_provision` already returned.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    def _put_boom(agent_id, value):
+        raise OSError("disk full")
+
+    prov._state.put = _put_boom
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+    assert prov._state.get("agent-1") is None
+
+
 def test_docker_provisioner_is_idempotent_on_existing_state(tmp_path: Path) -> None:
     from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
 
@@ -293,8 +590,12 @@ def test_docker_provisioner_is_idempotent_on_existing_state(tmp_path: Path) -> N
         first = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
         assert first.success
 
-    # Second call doesn't shell out (no patch needed); reuses state
-    second = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
+    # Second call reuses state; _on_reuse's liveness probe must see the
+    # container as confirmed-alive here, or it (correctly) treats the reuse
+    # as stale and refuses it.
+    exists = SimpleNamespace(returncode=0, stdout="abc\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=exists)):
+        second = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
     assert second.success
     assert second.details.get("reused") is True
 
@@ -382,6 +683,133 @@ def test_docker_deprovision_with_state(tmp_path: Path) -> None:
 
     assert out.success is True
     assert out.details["container_removed"] == "c1"
+
+
+def test_docker_deprovision_reports_failure_and_keeps_state_on_rm_error(
+    tmp_path: Path,
+) -> None:
+    """A `docker rm -f` that exits nonzero must report failure and preserve state.
+
+    Deleting the state row while the container survives would leave it
+    untracked — unreachable by any later deprovision-by-agent-id — and its name
+    would block every future provision.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    rm_fail = SimpleNamespace(returncode=1, stdout="", stderr="cannot remove: device busy")
+    with patch("subprocess.run", return_value=rm_fail):
+        out = prov.deprovision("a1")
+
+    assert out.success is False
+    assert "device busy" in out.error
+    assert prov._state.get("a1") is not None
+
+
+def test_docker_deprovision_confirms_removal_after_ambiguous_rm_failure(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous `rm` failure whose follow-up probe confirms absence still clears state.
+
+    The daemon can remove the container but the CLI still reports failure (the
+    response or connection was lost afterward). Treating that as a genuine
+    failure would strand the state row pointing at a container that is
+    actually gone, which the next provision() would blindly reuse and register
+    as a running environment. A follow-up existence probe disambiguates.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    def _respond(cmd, *a, **kw):
+        if cmd[:2] == ["docker", "rm"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="connection reset by peer")
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object: c1")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_respond):
+        out = prov.deprovision("a1")
+
+    assert out.success is True
+    assert prov._state.get("a1") is None
+
+
+def test_docker_deprovision_ambiguous_rm_failure_with_unknown_followup_preserves_state(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous `rm` failure whose follow-up probe is ALSO ambiguous preserves state.
+
+    Only a CONFIRMED absence (the daemon's specific missing-container response)
+    justifies clearing state; an unknown result from the follow-up probe (e.g.
+    the daemon is unreachable) must not be treated as proof of removal.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    def _respond(cmd, *a, **kw):
+        if cmd[:2] == ["docker", "rm"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="connection reset by peer")
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_respond):
+        out = prov.deprovision("a1")
+
+    assert out.success is False
+    assert prov._state.get("a1") is not None
+
+
+def test_docker_deprovision_infrastructure_error_is_not_absence(tmp_path: Path) -> None:
+    """'no such file or directory' (daemon/storage error) must not pass as absence.
+
+    Only the daemon's specific missing-container response proves the container
+    is gone; a broad "no such" match would delete the state row on an
+    infrastructure error while the container may still be alive.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    infra = SimpleNamespace(
+        returncode=1,
+        stdout="",
+        stderr="error during connect: open //./pipe/docker: no such file or directory",
+    )
+    with patch("subprocess.run", return_value=infra):
+        out = prov.deprovision("a1")
+
+    assert out.success is False
+    assert prov._state.get("a1") is not None
+
+
+def test_docker_deprovision_treats_already_absent_container_as_removed(
+    tmp_path: Path,
+) -> None:
+    """`docker rm -f` reporting 'No such container' counts as a completed removal."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"})
+
+    gone = SimpleNamespace(returncode=1, stdout="", stderr="Error: No such container: c1")
+    with patch("subprocess.run", return_value=gone):
+        out = prov.deprovision("a1")
+
+    assert out.success is True
+    assert prov._state.get("a1") is None
 
 
 def test_docker_deprovision_handles_exception(tmp_path: Path) -> None:
@@ -529,9 +957,317 @@ def test_docker_on_reuse_populates_credentials(tmp_path: Path) -> None:
     )
 
     creds = GeneratedCredentials(tool_name="docker")
-    result = prov.provision("a1", {}, creds)
+    exists = SimpleNamespace(returncode=0, stdout="abc\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=exists)):
+        result = prov.provision("a1", {}, creds)
     assert result.success is True
     assert creds.extra["container_id"] == "abcd"
+
+
+def test_docker_on_reuse_clears_stale_state_when_container_confirmed_gone(
+    tmp_path: Path,
+) -> None:
+    """A stored container that the daemon confirms is gone must not be reused.
+
+    Trusting a stale idempotency row would register a "running" environment
+    backed by nothing. The row is deleted so a retried provision() recreates
+    the container fresh instead of hitting the same stale row forever.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put(
+        "a1",
+        {"container_id": "abcd", "container_name": "c1", "workspace_path": "/ws"},
+    )
+
+    absent = SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=absent)):
+        result = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is False
+    assert prov._state.get("a1") is None
+
+
+def test_docker_on_reuse_proceeds_when_existence_unknown(tmp_path: Path) -> None:
+    """An unreachable daemon during the reuse probe must not block reuse.
+
+    Unknown is not the same as confirmed-absent — treating it as absence would
+    risk tearing down tracking for a container that is actually still alive.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put(
+        "a1",
+        {"container_id": "abcd", "container_name": "c1", "workspace_path": "/ws"},
+    )
+
+    unreachable = SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub([], inspect=unreachable)):
+        result = prov.provision("a1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is True
+    assert result.details.get("reused") is True
+    assert prov._state.get("a1") is not None
+
+
+def test_docker_provisioner_stamps_job_id_label_when_config_key_present(tmp_path: Path) -> None:
+    """A job_id present in config under JOB_ID_CONFIG_KEY is stamped as a
+    khala.job_id Docker label -- the attempt-scoped identity marker
+    compensate_activity/check_existing_environment_activity read back to
+    disambiguate a self-leaked container from a pre-existing one.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "job-42"}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--label" in run_cmd
+    assert run_cmd[run_cmd.index("--label") + 1] == "khala.job_id=job-42"
+
+
+def test_docker_provisioner_omits_label_when_no_job_id_in_config(tmp_path: Path) -> None:
+    """No JOB_ID_CONFIG_KEY in config means no --label flag at all -- keeps
+    non-Temporal / job_id-less callers behaving exactly as before this
+    labeling primitive existed.
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision("agent-1", {}, GeneratedCredentials(tool_name="docker"))
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--label" not in run_cmd
+
+
+def test_inspect_existence_and_owner_returns_exists_and_label() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    labeled = SimpleNamespace(returncode=0, stdout="abc123|||job-42\n", stderr="")
+    with patch("subprocess.run", return_value=labeled):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (True, "job-42")
+
+
+def test_inspect_existence_and_owner_returns_exists_and_none_when_unlabeled() -> None:
+    """Docker's Go-template `index` on a missing label key yields an empty
+    string, not an error -- must be treated the same as "no ownership signal".
+    """
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    unlabeled = SimpleNamespace(returncode=0, stdout="abc123|||\n", stderr="")
+    with patch("subprocess.run", return_value=unlabeled):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (True, None)
+
+
+def test_inspect_existence_and_owner_returns_absent() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    absent = SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object")
+    with patch("subprocess.run", return_value=absent):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (False, None)
+
+
+def test_inspect_existence_and_owner_returns_unknown_on_probe_error() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch("subprocess.run", side_effect=OSError("daemon unreachable")):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (None, None)
+
+
+def test_inspect_existence_and_owner_returns_unknown_on_ambiguous_failure() -> None:
+    """A nonzero exit that isn't the daemon's specific absence response is
+    inconclusive, not confirmed-absent (e.g. a transient daemon error)."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    ambiguous = SimpleNamespace(returncode=1, stdout="", stderr="daemon unavailable")
+    with patch("subprocess.run", return_value=ambiguous):
+        assert DockerProvisionerTool._inspect_existence_and_owner("agent-a1") == (None, None)
+
+
+def test_is_pre_existing_false_when_confirmed_absent() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(False, None)
+    ) as mock_probe:
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is False
+
+    mock_probe.assert_called_once_with("agent-a1")
+
+
+def test_is_pre_existing_false_when_label_matches_job_id() -> None:
+    """Confirmed self-leak: the container's own label matches this run's
+    job_id, so it cannot predate this run."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, "job-42")
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is False
+
+
+def test_is_pre_existing_true_when_label_is_foreign_job(caplog) -> None:
+    """A different job's label stays protected, same as no label -- and is
+    logged informationally rather than as an alarming/unexpected finding."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with (
+        patch.object(
+            DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, "job-99")
+        ),
+        caplog.at_level("INFO"),
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is True
+
+    assert "job-99" in caplog.text
+    assert "job-42" in caplog.text
+
+
+def test_is_pre_existing_true_when_no_label_and_job_id_given() -> None:
+    """The container exists but carries no label at all (e.g. predates this
+    labeling primitive) -- must stay conservative even though job_id was
+    given to compare against."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, None)
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is True
+
+
+def test_is_pre_existing_true_when_job_id_not_given() -> None:
+    """No job_id to compare against at all -- unchanged conservative fallback,
+    matching behavior from before this labeling primitive existed."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(True, "job-1")
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", None) is True
+
+
+def test_is_pre_existing_true_when_inconclusive() -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    with patch.object(
+        DockerProvisionerTool, "_inspect_existence_and_owner", return_value=(None, None)
+    ):
+        assert DockerProvisionerTool.is_pre_existing("a1", "job-42") is True
+
+
+def test_docker_provisioner_normalizes_job_id_whitespace_before_stamping(tmp_path: Path) -> None:
+    """job_id is stripped before being stamped, so it can never disagree with
+    the also-stripped value _inspect_existence_and_owner reads back."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+    with patch("subprocess.run", side_effect=_docker_cmd_stub(calls, run=success)):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "  job-42  "}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is True
+    run_cmd = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert run_cmd[run_cmd.index("--label") + 1] == "khala.job_id=job-42"
+
+
+def test_docker_provisioner_reclaims_container_on_name_conflict_from_same_job_id(
+    tmp_path: Path,
+) -> None:
+    """A container blocking the name, labeled with THIS SAME job_id, is a
+    self-leak from an earlier attempt (e.g. local idempotency state lost
+    after a retried activity) -- reclaimed before docker run, so a retry of
+    the same job_id can converge cleanly instead of hard-failing."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    success = SimpleNamespace(returncode=0, stdout="abc123def456789012\n", stderr="")
+
+    def _inspect_existing_self_owned(cmd, *a, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout="oldid|||job-42\n", stderr="")
+        if cmd[:2] == ["docker", "run"]:
+            return success
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_inspect_existing_self_owned):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "job-42"}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is True
+    assert ["docker", "rm", "-f", "agent-agent-1"] in calls
+
+
+def test_docker_provisioner_does_not_reclaim_container_from_different_job_id(
+    tmp_path: Path,
+) -> None:
+    """A container blocking the name labeled with a DIFFERENT job's job_id
+    must not be proactively removed -- only a confirmed self-leak is safe
+    to reclaim before docker run."""
+    from agent_provisioning_team.tool_agents.docker_provisioner import (
+        JOB_ID_CONFIG_KEY,
+        DockerProvisionerTool,
+    )
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+
+    calls = []
+    conflict = SimpleNamespace(returncode=125, stdout="", stderr="already in use by container")
+
+    def _inspect_existing_foreign_owned(cmd, *a, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout="oldid|||some-other-job\n", stderr="")
+        if cmd[:2] == ["docker", "run"]:
+            return conflict
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=_inspect_existing_foreign_owned):
+        result = prov.provision(
+            "agent-1", {JOB_ID_CONFIG_KEY: "job-42"}, GeneratedCredentials(tool_name="docker")
+        )
+
+    assert result.success is False
+    assert ["docker", "rm", "-f", "agent-agent-1"] not in calls
 
 
 # ---------------------------------------------------------------------------

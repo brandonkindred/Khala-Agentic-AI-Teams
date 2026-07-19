@@ -137,7 +137,6 @@ jobs:
               - 'backend/agents/team_assistant/**'
               - 'backend/agents/agentic_team_provisioning/**'
               - 'backend/agents/blogging/**'
-              - 'backend/agents/nutrition_meal_planning_team/**'
               - 'backend/agents/requirements.txt'
               - 'backend/unified_api/postgres/**'
               - 'backend/unified_api/postgres.py'

@@ -440,6 +440,26 @@ The docker stack sets `2`.
 
 ---
 
+## Agent Provisioning
+
+`agent_provisioning_team`'s per-`agent_id` ownership lock
+(`shared/agent_lock.py`) is gated behind `workflow.patched(...)` markers in
+`temporal/workflows.py` so a workflow history recorded before the lock
+existed keeps replaying its original, lock-free command sequence. The
+markers can only be safely removed once no such pre-lock history is still
+open.
+
+### AGENT_PROVISIONING_LOCK_PATCH_CUTOFF_AT
+ISO-8601 timestamp (e.g. `2026-07-17T00:00:00Z`) — the deploy time of the
+lock-patch release, set by ops once that release is live. Read by
+`shared/visibility_query.find_open_pre_patch_executions`, which reports every
+open `AgentProvisioningWorkflow`/`AgentDeprovisioningWorkflow` execution
+started before this cutoff — the drain-gate/runbook signal for when the
+`workflow.patched(...)` markers can be deleted. Unset or unparseable values
+are treated as "no cutoff configured" (fail safe: every open execution of
+either workflow type is reported, never silently none) rather than falling
+back to a default timestamp.
+
 ## Agentic Team Provisioning
 
 WAIT-state reliability for Agent Studio pipeline test runs
@@ -787,6 +807,46 @@ Caps the architecture document (plus the rendered `overview`/`components`/
 Default `40000`, floor `2000` — generous relative to the per-chunk
 `CODE_REVIEW_ARCH_OVERVIEW_CHARS` excerpt because this pass pays its cost once
 per submission, not once per chunk.
+
+### CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS
+Default-on toggle for the side-effect / blast-radius pass. After the
+architecture-consistency pass runs, this pass makes exactly one additional LLM
+call for the whole submission (never once per chunk) with read access to the
+rest of the repository (the same `read_file`/`list_files`/`search_codebase`/
+`find_function_at_line` tools the false-positive filter and architecture pass
+use, plus a new `search_repository` tool that searches the REST of the
+repository — beyond the submission — for a substring, capped well below the
+GitHub PR-review path's shared per-review fetch budget since three passes draw
+from the same budget and this one runs last). It can only ADD findings, in one
+category: `side-effects` — the current implementation's behavior (return
+value, exceptions, side effects, ordering/timing) breaking a tool-verified
+caller, or not matching what the function's own docstring/comments claim.
+This pass is only ever given CURRENT file content, never a prior revision, so
+it judges behavior as written now rather than comparing against history. It
+never removes or alters any finding the map phase, the false-positive filter,
+or the architecture pass already produced. `search_repository` requires a
+repository reader to be attached (the GitHub PR-review path and the
+software-engineering pipeline both supply one; without one, this pass can
+still find callers within the submission's own files via `search_codebase`).
+
+Temporal is this agent's default execution mode. A live `RepoReader` cannot
+cross that boundary directly, so the reader used for `search_repository`
+depends on which kind was supplied: the software-engineering pipeline's
+`DiskRepoReader` is rebuilt worker-side from a serializable `repo_root` field
+on `CodeReviewInput` (the same mechanism the false-positive filter and
+architecture pass use), so repo-wide search works there even under Temporal;
+the GitHub PR-review path's reader holds a per-request auth token that cannot
+be reconstructed, so that caller forces in-process execution whenever it
+supplies a reader instead, bypassing Temporal for that one review. The only
+remaining gap is a Temporal review with no reader and no reachable
+`repo_root` at all, where `search_repository` falls back to the submission's
+own files via `search_codebase` — the same conservative (keep-more) behavior
+the other two passes already have in that case.
+
+Any setup or LLM failure is fail-safe: it is logged and yields no additional
+findings, so a broken pass never blocks or changes the rest of the review. Set
+to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
+enabled).
 
 ---
 

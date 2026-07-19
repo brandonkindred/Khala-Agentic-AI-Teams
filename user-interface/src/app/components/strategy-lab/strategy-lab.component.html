@@ -1,30 +1,37 @@
-<div class="strategy-lab">
+<div
+  class="strategy-lab"
+  role="region"
+  [attr.aria-labelledby]="showTitle ? 'strategy-lab-heading' : null"
+  [attr.aria-label]="showTitle ? null : 'Strategy Lab'"
+>
 
   <!-- Header row -->
   <div class="lab-header">
-    <div class="lab-title">
-      <mat-icon aria-hidden="true">science</mat-icon>
-      <div>
-        <h2>Strategy Lab</h2>
-        <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
+    @if (showTitle) {
+      <div class="lab-title">
+        <mat-icon aria-hidden="true">science</mat-icon>
+        <div>
+          <h2 id="strategy-lab-heading">Strategy Lab</h2>
+          <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
+        </div>
       </div>
-    </div>
+    }
     <div class="lab-header-actions">
-      @if (totalCount > 0) {
+      @if (totalCount() > 0) {
         <button
           mat-stroked-button
           color="warn"
           type="button"
           class="clear-all-btn"
           (click)="clearAllLabData()"
-          [disabled]="running || loading || clearingAll || deletingLabRecordId !== null"
+          [disabled]="running() || loading() || clearingAll() || deletingLabRecordId() !== null"
         >
-          @if (clearingAll) {
+          @if (clearingAll()) {
             <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
           } @else {
             <mat-icon aria-hidden="true">delete_sweep</mat-icon>
           }
-          <span>{{ clearingAll ? 'Clearing…' : 'Clear all' }}</span>
+          <span>{{ clearingAll() ? 'Clearing…' : 'Clear all' }}</span>
         </button>
       }
       <mat-form-field appearance="outline" class="batch-input">
@@ -35,7 +42,7 @@
           [(ngModel)]="batchSize"
           [min]="BATCH_SIZE_MIN"
           [max]="BATCH_SIZE_MAX"
-          [disabled]="running || loading || clearingAll"
+          [disabled]="running() || loading() || clearingAll()"
           aria-label="Strategies per batch"
         />
         <mat-hint>{{ BATCH_SIZE_MIN }}–{{ BATCH_SIZE_MAX }}</mat-hint>
@@ -47,28 +54,28 @@
           type="number"
           [(ngModel)]="batchCount"
           [min]="BATCH_COUNT_MIN"
-          [max]="BATCH_COUNT_MAX"
-          [disabled]="running || loading || clearingAll"
+          [max]="BATCH_COUNT_MAX()"
+          [disabled]="running() || loading() || clearingAll()"
           aria-label="Number of batches"
         />
-        <mat-hint>{{ BATCH_COUNT_MIN }}–{{ BATCH_COUNT_MAX }}; each new batch learns from prior batches</mat-hint>
+        <mat-hint>{{ BATCH_COUNT_MIN }}–{{ BATCH_COUNT_MAX() }}; each new batch learns from prior batches</mat-hint>
       </mat-form-field>
       <button
         mat-raised-button
         color="primary"
         class="run-btn"
         (click)="runNewStrategy()"
-        [disabled]="running || loading || clearingAll || !categoriesValid"
+        [disabled]="running() || loading() || clearingAll() || !categoriesValid"
       >
-        @if (running) {
+        @if (running()) {
           <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
         } @else {
           <mat-icon aria-hidden="true">auto_awesome</mat-icon>
         }
         <span>
-          @if (running && runStatus) {
+          @if (running() && runService.runStatus(); as runStatus) {
             Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
-          } @else if (running) {
+          } @else if (running()) {
             Starting…
           } @else {
             {{ runButtonLabel() }}
@@ -80,7 +87,7 @@
 
   <!-- Data-source notice: shown only when TradingView is not configured, linking
        to the Integrations page with the TradingView panel deep-linked in focus. -->
-  @if (tradingViewStatusKnown && !tradingViewConfigured) {
+  @if (tradingViewStatusKnown() && !tradingViewConfigured()) {
     <div class="ds-notice">
       <mat-icon class="ds-notice__icon" aria-hidden="true">insights</mat-icon>
       <div class="ds-notice__text">
@@ -109,14 +116,14 @@
     </div>
     <mat-button-toggle-group
       multiple
-      [ngModel]="selectedCategories"
+      [ngModel]="selectedCategories()"
       (ngModelChange)="onCategoriesChanged($event)"
-      [disabled]="running || loading || clearingAll"
+      [disabled]="running() || loading() || clearingAll()"
       class="category-toggle-group"
       aria-label="Asset categories to generate strategies for"
       aria-describedby="category-hint"
     >
-      @for (cat of categoryOptions; track cat.value) {
+      @for (cat of categoryOptions(); track cat.value) {
         <mat-button-toggle [value]="cat.value">
           <mat-icon aria-hidden="true">{{ cat.icon }}</mat-icon>
           <span>{{ cat.label }}</span>
@@ -131,21 +138,21 @@
   </div>
 
   <!-- Error banner -->
-  @if (error) {
-    <app-inline-banner variant="error" [message]="error" />
+  @if (error(); as errorMessage) {
+    <app-inline-banner variant="error" [message]="errorMessage" />
   }
 
   <!-- Non-fatal completion warning -->
-  @if (completionWarning) {
-    <app-inline-banner variant="warning" [message]="completionWarning">
-      <button mat-icon-button (click)="completionWarning = null" aria-label="Dismiss warning">
+  @if (completionWarning(); as warning) {
+    <app-inline-banner variant="warning" [message]="warning">
+      <button mat-icon-button (click)="completionWarning.set(null)" aria-label="Dismiss warning">
         <mat-icon aria-hidden="true">close</mat-icon>
       </button>
     </app-inline-banner>
   }
 
   <!-- In-progress tracking -->
-  @if (running && runStatus) {
+  @if (running() && runService.runStatus(); as runStatus) {
     <div class="in-progress-section">
       <div class="progress-header">
         <mat-icon class="pulse-icon" aria-hidden="true">hub</mat-icon>
@@ -209,7 +216,7 @@
           <div class="metrics-preview">
             @if (runStatus.current_cycle.metrics.annualized_return_pct !== undefined) {
               <div class="metric-chip" [class]="returnColor(runStatus.current_cycle.metrics.annualized_return_pct!)">
-                <span class="metric-value">{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
+                <span class="metric-value"><span class="visually-hidden">{{ returnColorLabel(runStatus.current_cycle.metrics.annualized_return_pct!) }}: </span>{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
                 <span class="metric-label">Return pa</span>
               </div>
             }
@@ -235,9 +242,9 @@
         }
 
         <!-- Activity log -->
-        @if (activityLog.length > 0) {
+        @if (activityLog().length > 0) {
           <div class="activity-log" #logContainer tabindex="0" role="group" aria-label="Strategy run activity log, scrollable">
-            @for (entry of activityLog; track $index) {
+            @for (entry of activityLog(); track $index) {
               <div class="log-entry" [class]="'log-' + entry.status">
                 <span class="log-time">{{ entry.time }}</span>
                 <span class="log-indicator">
@@ -264,60 +271,60 @@
   }
 
   <!-- Summary chips -->
-  @if (totalCount > 0) {
+  @if (totalCount() > 0) {
     <div class="summary-row">
       <div class="summary-chip total">
-        <span class="chip-count">{{ totalCount }}</span>
+        <span class="chip-count">{{ totalCount() }}</span>
         <span class="chip-label">Total Strategies</span>
       </div>
       <div class="summary-chip winning">
         <mat-icon aria-hidden="true">trending_up</mat-icon>
-        <span class="chip-count">{{ winningCount }}</span>
+        <span class="chip-count">{{ winningCount() }}</span>
         <span class="chip-label">Winning (&gt;8% pa)</span>
       </div>
       <div class="summary-chip losing">
         <mat-icon aria-hidden="true">trending_down</mat-icon>
-        <span class="chip-count">{{ losingCount }}</span>
+        <span class="chip-count">{{ losingCount() }}</span>
         <span class="chip-label">Losing</span>
       </div>
       <div class="summary-chip rate">
         <mat-icon aria-hidden="true">percent</mat-icon>
-        <span class="chip-count">{{ (winningCount / totalCount * 100) | number:'1.0-0' }}%</span>
+        <span class="chip-count">{{ (winningCount() / totalCount() * 100) | number:'1.0-0' }}%</span>
         <span class="chip-label">Win Rate</span>
       </div>
     </div>
   }
 
   <!-- Filter toggle -->
-  @if (totalCount > 0) {
+  @if (totalCount() > 0) {
     <div class="filter-row">
       <mat-button-toggle-group
         [value]="filter"
         (change)="onFilterChange($event.value)"
         aria-label="Filter strategies"
       >
-        <mat-button-toggle value="all">All ({{ totalCount }})</mat-button-toggle>
+        <mat-button-toggle value="all">All ({{ totalCount() }})</mat-button-toggle>
         <mat-button-toggle value="winning">
           <mat-icon class="toggle-icon winning-icon" aria-hidden="true">check_circle</mat-icon>
-          Winning ({{ winningCount }})
+          Winning ({{ winningCount() }})
         </mat-button-toggle>
         <mat-button-toggle value="losing">
           <mat-icon class="toggle-icon losing-icon" aria-hidden="true">cancel</mat-icon>
-          Losing ({{ losingCount }})
+          Losing ({{ losingCount() }})
         </mat-button-toggle>
       </mat-button-toggle-group>
     </div>
   }
 
   <!-- Loading spinner -->
-  @if (loading) {
+  @if (loading()) {
     <div class="loading-wrap">
       <mat-spinner diameter="36"></mat-spinner>
     </div>
   }
 
   <!-- Empty state -->
-  @if (!loading && totalCount === 0) {
+  @if (!loading() && totalCount() === 0) {
     <div class="empty-state">
       <mat-icon aria-hidden="true">science</mat-icon>
       <h3>No strategies yet</h3>
@@ -326,9 +333,9 @@
   }
 
   <!-- Results list -->
-  @if (!loading && displayedItems.length > 0) {
+  @if (!loading() && displayedItems().length > 0) {
     <div class="results-list">
-      @for (record of displayedItems; track record.lab_record_id) {
+      @for (record of displayedItems(); track record.lab_record_id) {
         <mat-card class="strategy-card" [class.is-winning]="record.is_winning" [class.is-losing]="!record.is_winning">
 
           <!-- Card header -->
@@ -337,9 +344,15 @@
               <mat-icon aria-hidden="true">{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
             <div class="strategy-card-header-text">
-              <mat-card-title>
-                {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
-              </mat-card-title>
+              @if (showTitle) {
+                <h3 mat-card-title>
+                  {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+                </h3>
+              } @else {
+                <h2 mat-card-title>
+                  {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+                </h2>
+              }
               <mat-card-subtitle>
                 {{ record.created_at | date:'MMM d, y, h:mm a' }} &bull; {{ record.strategy.strategy_id }}
               </mat-card-subtitle>
@@ -351,9 +364,9 @@
               aria-label="Delete this strategy lab run"
               matTooltip="Delete this run"
               (click)="deleteRecord(record); $event.stopPropagation()"
-              [disabled]="deletingLabRecordId !== null || clearingAll || running"
+              [disabled]="deletingLabRecordId() !== null || clearingAll() || running()"
             >
-              @if (deletingLabRecordId === record.lab_record_id) {
+              @if (deletingLabRecordId() === record.lab_record_id) {
                 <mat-spinner diameter="22"></mat-spinner>
               } @else {
                 <mat-icon aria-hidden="true">delete_outline</mat-icon>
@@ -372,7 +385,7 @@
 
               <div class="metric">
                 <span class="metric-value" [class]="returnColor(record.backtest.result.annualized_return_pct)">
-                  {{ record.backtest.result.annualized_return_pct > 0 ? '+' : '' }}{{ record.backtest.result.annualized_return_pct | number:'1.1-1' }}%
+                  <span class="visually-hidden">{{ returnColorLabel(record.backtest.result.annualized_return_pct) }}: </span>{{ record.backtest.result.annualized_return_pct > 0 ? '+' : '' }}{{ record.backtest.result.annualized_return_pct | number:'1.1-1' }}%
                 </span>
                 <span class="metric-label">Annual Return</span>
               </div>
@@ -490,11 +503,11 @@
                       <span class="ls-label">Net P&amp;L</span>
                     </div>
                     <div class="ledger-stat">
-                      <span class="ls-value">{{ record.backtest.config.start_date | slice:0:10 }}</span>
+                      <span class="ls-value">{{ record.backtest.config.start_date | dateOnly }}</span>
                       <span class="ls-label">Start</span>
                     </div>
                     <div class="ledger-stat">
-                      <span class="ls-value">{{ record.backtest.config.end_date | slice:0:10 }}</span>
+                      <span class="ls-value">{{ record.backtest.config.end_date | dateOnly }}</span>
                       <span class="ls-label">End</span>
                     </div>
                     <div class="ledger-stat">
@@ -521,13 +534,13 @@
                       <!-- Entry Date -->
                       <ng-container matColumnDef="entry_date">
                         <th mat-header-cell *matHeaderCellDef>Entry</th>
-                        <td mat-cell *matCellDef="let t">{{ t.entry_date | slice:0:10 }}</td>
+                        <td mat-cell *matCellDef="let t">{{ t.entry_date | dateOnly }}</td>
                       </ng-container>
 
                       <!-- Exit Date -->
                       <ng-container matColumnDef="exit_date">
                         <th mat-header-cell *matHeaderCellDef>Exit</th>
-                        <td mat-cell *matCellDef="let t">{{ t.exit_date | slice:0:10 }}</td>
+                        <td mat-cell *matCellDef="let t">{{ t.exit_date | dateOnly }}</td>
                       </ng-container>
 
                       <!-- Symbol -->
@@ -585,7 +598,8 @@
                         <th mat-header-cell *matHeaderCellDef>W/L</th>
                         <td mat-cell *matCellDef="let t">
                           <span class="outcome-pip" [class.win-pip]="t.outcome === 'win'" [class.loss-pip]="t.outcome === 'loss'">
-                            {{ t.outcome === 'win' ? 'W' : 'L' }}
+                            <span class="visually-hidden">{{ t.outcome === 'win' ? 'Win' : 'Loss' }}</span>
+                            <span aria-hidden="true">{{ t.outcome === 'win' ? 'W' : 'L' }}</span>
                           </span>
                         </td>
                       </ng-container>
@@ -672,14 +686,14 @@
                     </mat-panel-description>
                   </mat-expansion-panel-header>
                   <div class="gate-results">
-                    @for (gate of record.quality_gate_results; track $index) {
-                      <div class="gate-result" [class]="gateSeverityClass(gate, record)">
-                        <mat-icon class="gate-icon" aria-hidden="true">{{ gateIcon(gate, record) }}</mat-icon>
-                        <span class="gate-name">{{ gate.gate_name }}</span>
+                    @for (vm of gateViewModels(record); track $index) {
+                      <div class="gate-result" [class]="vm.severityClass">
+                        <mat-icon class="gate-icon" aria-hidden="true">{{ vm.icon }}</mat-icon>
+                        <span class="gate-name">{{ vm.gate.gate_name }}</span>
                         <span class="gate-detail">
-                          {{ gate.details }}
-                          @if (isRemedied(gate, record)) {
-                            <span class="gate-remedied-label">(remedied in round {{ (gate.refinement_round ?? 0) + 1 }})</span>
+                          {{ vm.gate.details }}
+                          @if (vm.isRemedied) {
+                            <span class="gate-remedied-label">(remedied in round {{ (vm.gate.refinement_round ?? 0) + 1 }})</span>
                           }
                         </span>
                       </div>
@@ -733,10 +747,10 @@
                         </div>
                         <span class="paper-meta">
                           {{ session.trades.length }} trades &bull;
-                          {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
+                          {{ session.data_period_start | dateOnly }} to {{ session.data_period_end | dateOnly }}
                         </span>
                         @if (record.is_publishable) {
-                          @if (paperTradingLabRecordId === record.lab_record_id) {
+                          @if (paperTradingLabRecordId() === record.lab_record_id) {
                             <button mat-stroked-button class="rerun-paper-btn" disabled>
                               <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
                               Re-run
@@ -746,7 +760,7 @@
                               mat-stroked-button
                               class="rerun-paper-btn"
                               (click)="runPaperTrading(record)"
-                              [disabled]="paperTradingLabRecordId !== null || running"
+                              [disabled]="paperTradingLabRecordId() !== null || running()"
                             >
                               <mat-icon aria-hidden="true">refresh</mat-icon>
                               Re-run
@@ -780,11 +794,9 @@
                                 <td class="num-cell">{{ m.backtest }}</td>
                                 <td class="num-cell">{{ m.paper }}</td>
                                 <td class="cmp-aligned">
-                                  <!-- Sole content of this cell, no text alternative yet (color-cue
-                                       follow-up work); aria-hidden here only matches mat-icon's own
-                                       default, it does not add a new gap. -->
                                   <mat-icon
-                                    aria-hidden="true"
+                                    aria-hidden="false"
+                                    [attr.aria-label]="m.aligned ? 'Aligned' : 'Not aligned'"
                                     [class.aligned-yes]="m.aligned"
                                     [class.aligned-no]="!m.aligned"
                                   >
@@ -820,7 +832,7 @@
                   </div>
                 } @else if (record.is_publishable) {
                   <!-- No paper trading yet — show button only when publishable -->
-                  @if (paperTradingLabRecordId === record.lab_record_id) {
+                  @if (paperTradingLabRecordId() === record.lab_record_id) {
                     <button
                       mat-stroked-button
                       color="primary"
@@ -836,7 +848,7 @@
                       color="primary"
                       class="paper-trade-btn"
                       (click)="runPaperTrading(record)"
-                      [disabled]="paperTradingLabRecordId !== null || running"
+                      [disabled]="paperTradingLabRecordId() !== null || running()"
                     >
                       <mat-icon aria-hidden="true">candlestick_chart</mat-icon>
                       <span>Paper Trade This Strategy</span>
@@ -863,7 +875,7 @@
   }
 
   <!-- No results after filtering -->
-  @if (!loading && totalCount > 0 && displayedItems.length === 0) {
+  @if (!loading() && totalCount() > 0 && displayedItems().length === 0) {
     <div class="empty-state">
       <mat-icon aria-hidden="true">filter_list_off</mat-icon>
       <p>No {{ filter }} strategies found. Try a different filter.</p>

@@ -1,8 +1,0 @@
-# Reserved for SPEC-009 (recipe nutrient rollup) to pull raw→cooked
-# retention factors. nutrition_calc does not read this file at v1.0.0.
-#
-# Placed alongside the other calculator tables so the retention data
-# lives in one reviewable location once SPEC-009 lands.
-
-# Intentionally empty in v1.
-{}

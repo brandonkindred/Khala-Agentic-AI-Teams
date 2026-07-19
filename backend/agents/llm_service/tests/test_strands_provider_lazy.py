@@ -34,7 +34,7 @@ def test_lazy_model_does_not_resolve_on_construction(monkeypatch):
     resolve_calls = []
     monkeypatch.setattr(sp, "get_client", lambda *a, **kw: resolve_calls.append((a, kw)))
 
-    model = get_strands_model("nutrition_meal_planning", lazy=True)
+    model = get_strands_model("blogging", lazy=True)
 
     assert isinstance(model, _LazyLLMClientModel)
     assert resolve_calls == []
@@ -44,7 +44,7 @@ def test_lazy_model_does_not_resolve_on_construction(monkeypatch):
 def test_lazy_model_rejects_explicit_client():
     """``lazy=True`` with an explicit ``client`` is a caller contract violation."""
     with pytest.raises(AssertionError):
-        get_strands_model("nutrition_meal_planning", lazy=True, client=object())
+        get_strands_model("blogging", lazy=True, client=object())
 
 
 def test_lazy_model_resolves_on_first_call_and_caches(monkeypatch):
@@ -59,7 +59,7 @@ def test_lazy_model_resolves_on_first_call_and_caches(monkeypatch):
 
     monkeypatch.setattr(sp, "get_client", _fake_get_client)
 
-    model = get_strands_model("nutrition_meal_planning", lazy=True)
+    model = get_strands_model("blogging", lazy=True)
     assert model.get_max_context_tokens() > 0
     assert model.get_max_context_tokens() > 0
 
@@ -74,6 +74,6 @@ def test_lazy_model_propagates_missing_provider_error(monkeypatch):
 
     monkeypatch.setattr(sp, "get_client", _raise)
 
-    model = get_strands_model("nutrition_meal_planning", lazy=True)
+    model = get_strands_model("blogging", lazy=True)
     with pytest.raises(LLMNotConfiguredError):
         model.get_max_context_tokens()

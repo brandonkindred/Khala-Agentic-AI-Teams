@@ -160,6 +160,91 @@ def list_manifest_tools_activity(manifest_path: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+@activity.defn(name="agent_provisioning_check_existing_environment")
+def check_existing_environment_activity(agent_id: str, job_id: Optional[str] = None) -> bool:
+    """Report whether ``agent_id`` already has an environment on record (read-only).
+
+    Called by the workflow right after acquiring ``agent_id``'s lock, before
+    setup runs, so a later failure's compensation decision can tell "this run
+    created everything at ``agent_id`` from scratch" (safe to unconditionally
+    tear down) apart from "``agent_id`` already had an environment before
+    this run touched anything" (compensating could destroy it).
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+        * ``job_id``, when given, is the calling workflow's own job id — used
+          only to recognize a container THIS run's own earlier attempt
+          labeled (see below); optional and defaulted so activity tasks
+          already scheduled (recorded in history with the old 1-arg payload)
+          before a rolling deploy still execute correctly against a newer
+          worker binary.
+    Postconditions:
+        * When ``EnvironmentStore`` holds a record for ``agent_id``: returns
+          ``True`` unless the record's own ``container_name`` is CONFIRMED
+          absent from Docker (a direct ``docker inspect`` probe, not the
+          record's ``status`` field). A status other than ``"running"``/
+          ``"ready"`` (e.g. ``"stopped"``) still means a container may
+          previously have existed for this agent — ``run_setup`` only
+          fast-paths on ``"running"``, but ``docker.provision()``'s own
+          idempotency state (independent of ``EnvironmentStore``) can still
+          resolve to reusing that same underlying container regardless of
+          what status this record carries. But a record whose container is
+          verifiably GONE is stale metadata with nothing left to protect:
+          ``run_setup`` will create an entirely fresh container and overwrite
+          the record, so treating the stale record as "pre-existing" would
+          instead leak the container THIS run creates (a later failure would
+          pass ``tear_down_environment=False`` and skip tearing it down). A
+          probe that can't tell (daemon unreachable, timeout — ``None``) is
+          treated the same as "alive": conservatively, "might exist".
+        * Also returns ``True`` — conservatively, "might exist" — when the
+          record location is present but genuinely unreadable (``get()``
+          returns ``None`` for that case too, indistinguishable from
+          confirmed absence without ``readable()``): the registry being
+          unreadable is not proof nothing is there.
+        * When ``EnvironmentStore`` holds NO record at all (confirmed
+          readable-and-empty) AND the deterministic container name
+          (``agent-<agent_id>``, the same name every provisioner/rollback
+          path in this codebase uses) is CONFIRMED absent from Docker:
+          returns ``False``. The record and the container are two
+          independently-losable things — a record can go missing (disk
+          issue, manual cleanup, a prior compensation that removed the
+          record but not the container) while the container itself, or
+          ``DockerProvisionerTool``'s own separate idempotency state, is
+          still there; ``docker.provision()`` would then reuse it via its
+          own ``_on_reuse`` check regardless of what ``EnvironmentStore``
+          says. Skipping this probe would let a later phase's failure
+          authorize tearing down (or ``verify_and_remove_orphan``-ing) a
+          container that predates this run, just because its record
+          happened to be the thing that was lost.
+        * When that container is confirmed present (or the probe is
+          inconclusive): defers to ``DockerProvisionerTool.is_pre_existing``,
+          which consults the container's ``khala.job_id`` label (stamped at
+          creation, ``tool_agents/docker_provisioner.py``) when ``job_id`` was
+          given — a label matching THIS ``job_id`` means this run's own
+          earlier attempt created it (e.g. a resumed job reusing ``job_id``;
+          ``start_workflow.py`` derives the Temporal workflow id
+          deterministically from it), so it does not predate this run:
+          returns ``False``. Anything else (no ``job_id`` given, no label, or
+          a different job's label) is treated as possibly pre-existing:
+          returns ``True``. See ``is_pre_existing``'s own docstring for the
+          full reasoning, including why a different job's label usually
+          reflects normal sequential reuse rather than a problem.
+        * Never raises (``EnvironmentStore.get``/``readable`` never raise;
+          the Docker probes are themselves never-raising and advisory only).
+    """
+    assert agent_id, "agent_id must be non-empty"
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    env_store = EnvironmentStore()
+    existing = env_store.get(agent_id)
+    if existing is not None:
+        return DockerProvisionerTool._container_exists(existing.container_name) is not False
+    if not env_store.readable(agent_id):
+        return True
+    return DockerProvisionerTool.is_pre_existing(agent_id, job_id)
+
+
 @activity.defn(name="agent_provisioning_acquire_lock")
 def acquire_agent_lock_activity(job_id: str, agent_id: str) -> int:
     """Claim exclusive ownership of ``agent_id`` for this workflow run.
@@ -237,9 +322,39 @@ def setup_activity(
         * ``job_id`` / ``agent_id`` / ``manifest_path`` are non-empty.
         * When ``prior_setup`` is set, it is a serialized setup phase snapshot
           acceptable to ``restore_setup``.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id`` (from ``acquire_agent_lock_activity``),
+          threaded into ``run_setup`` and checked there before any mutation.
     Postconditions:
-        * Returns ``{"success": True, "environment": <dump|None>}``.
-        * Writes setup progress (or restore status) into ``job_store``.
+        * Returns ``{"success": True, "environment": <dump|None>}`` reflecting
+          THIS call's own outcome (including its own ``reused`` value) —
+          UNLESS a stronger checkpoint from an earlier attempt of this same
+          activity already exists (see below), in which case that earlier,
+          stronger result is returned instead.
+        * Writes setup progress (or restore status) into ``job_store``. The
+          durable ``phase_results["setup"]`` checkpoint itself is never
+          overwritten once present — only the first call to actually
+          checkpoint (whether via ``on_registered`` on a fresh
+          registration, or this fallback on the always-reused fast path)
+          wins, so a Temporal retry whose fast path reuses what an earlier,
+          response-lost attempt of this same activity already created
+          (and durably recorded as ``reused=False``) can't replace that
+          stronger ownership evidence with its own weaker ``reused=True``.
+          The RETURN VALUE mirrors this: when this call's own fast path
+          finds that stronger checkpoint already on record, it returns that
+          checkpoint's payload rather than its own weaker one — the caller
+          (the workflow) makes its ``pre_existing_environment`` correction
+          from this activity's own return value, not from ``job_store``
+          directly, so returning the weaker ``reused=True`` result here
+          would silently drop the stronger evidence for the rest of this
+          run even though it is right there on record.
+        * Passes this call's own ``job_id`` through to ``run_setup`` so a
+          freshly created container is labeled with it (see
+          ``docker_provisioner.JOB_ID_LABEL``), giving
+          ``compensate_activity``/``check_existing_environment_activity`` a
+          durable, container-native way to attribute the container to this
+          attempt even if the local idempotency state that would otherwise
+          prove it never gets written.
         * Raises ``RuntimeError`` when a fresh setup fails.
         * When ``fencing_token`` is given and stale, raises
           :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
@@ -270,11 +385,30 @@ def setup_activity(
     )
     orch, manifest = _load_ctx(manifest_path)
     activity.heartbeat("setup")
+
+    checkpointed = False
+
+    def _checkpoint_on_register(env_info) -> None:
+        # Runs inside run_setup's own rollback boundary: if this durable
+        # checkpoint write fails or the activity is cancelled here, run_setup
+        # tears the container/env record it just registered back down instead
+        # of leaking it. Only reached on a freshly created/registered
+        # environment, never the already-running fast path below.
+        nonlocal checkpointed
+        _js.add_completed_phase(
+            job_id,
+            "setup",
+            {"success": True, "environment": env_info.model_dump() if env_info else None},
+        )
+        checkpointed = True
+
     result = run_setup(
         agent_id=agent_id,
         manifest=manifest,
         environment_store=orch.environment_store,
         docker_provisioner=orch.tool_agents.get("docker_provisioner"),
+        on_registered=_checkpoint_on_register,
+        job_id=job_id,
         fencing_token=fencing_token,
     )
     if not result.success:
@@ -284,8 +418,37 @@ def setup_activity(
         "success": True,
         "environment": result.environment.model_dump() if result.environment else None,
     }
-    # Durable checkpoint — must raise so Temporal retries before later phases.
-    _js.add_completed_phase(job_id, "setup", payload)
+    if not checkpointed:
+        # Fast path: an already-running environment was reused, so nothing new
+        # was created here — a checkpoint failure has nothing to leak, and a
+        # bare durable write (Temporal retries the whole activity) suffices.
+        # But don't blindly overwrite: if an EARLIER attempt of this same
+        # activity already durably checkpointed "setup" via on_registered
+        # (its own completion response then got lost, so Temporal retried
+        # the whole activity), that checkpoint's environment carries
+        # reused=False — proof this job's own earlier try created the
+        # container fresh. This retry's fast path reuses that same
+        # container (reused=True here) and must not overwrite the stronger
+        # ownership evidence already on record with this weaker one, or a
+        # later resume reading phase_results would lose track of the fact
+        # that this job created the environment, not something pre-existing.
+        existing_job = _js.get_job(job_id)
+        already_checkpointed = "setup" in (existing_job.get("completed_phases") or [])
+        if not already_checkpointed:
+            _js.add_completed_phase(job_id, "setup", payload)
+        else:
+            # Also RETURN the stronger checkpoint, not just preserve it on
+            # disk: the workflow corrects a conservative
+            # pre_existing_environment from THIS activity's own return
+            # value (environment_dump.get("reused") is False), never by
+            # reading job_store directly — so if this fast-path retry
+            # returned its own weaker reused=True payload instead, that
+            # correction would silently never fire for the rest of this
+            # run, even though the stronger reused=False evidence is
+            # sitting right here on record.
+            existing_setup_result = (existing_job.get("phase_results") or {}).get("setup")
+            if isinstance(existing_setup_result, dict):
+                payload = existing_setup_result
     _best_effort_job_store(_js.update_job, job_id, progress=15, status_text="Setup complete")
     return payload
 
@@ -307,6 +470,9 @@ def credentials_activity(
           acceptable to ``restore_credentials``.
         * When ``tool_specs`` is set (fresh generate path), each entry has a
           non-empty ``name`` — the same frozen snapshot used for tool fan-out.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``, threaded into
+          ``run_credential_generation`` and checked there before any mutation.
     Postconditions:
         * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
         * Job-store checkpoint never stores plaintext secrets.
@@ -429,6 +595,9 @@ def provision_tool_activity(
         * ``credentials_dump`` is a serializable ``GeneratedCredentials`` dump
           for this tool.
         * ``tools_total`` must be ``> 0``.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``, threaded into ``agent.provision(...)``
+          and checked there before any mutation.
     Postconditions:
         * Returns ``ToolProvisionResult.model_dump()`` from the provisioner
           with ``provisioner_key`` set to the registry key (needed by
@@ -440,6 +609,19 @@ def provision_tool_activity(
         * Updates ``job_store`` with the current tool / phase progress.
           Does not write ``tools_completed`` — parallel fan-out indexes are not
           completion counts and would race/regress under ``asyncio.gather``.
+        * When ``job_id`` is truthy AND ``provisioner`` is
+          ``"docker_provisioner"``, injects ``job_id`` into ``config`` under
+          ``docker_provisioner.JOB_ID_CONFIG_KEY`` before calling
+          ``agent.provision(...)``, so ``DockerProvisionerTool`` can stamp
+          the ``khala.job_id`` container label used to disambiguate
+          self-leaked containers from pre-existing ones during compensation.
+          Scoped to that one provisioner specifically — not injected
+          generically into every provisioner's ``config`` — because at least
+          one other provisioner (``generic_provisioner``) echoes its whole
+          ``config`` dict verbatim into persisted/returned state
+          (``credentials.extra``/``details``), which is not redacted for an
+          unrecognized key like this one; injecting unconditionally would
+          leak this internal id into checkpoints and API responses.
         * When ``fencing_token`` is given and stale, raises
           :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
           — registered as non-retryable (``TOOL_RETRY_POLICY``) so Temporal
@@ -447,6 +629,7 @@ def provision_tool_activity(
     """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
 
     assert tool_name, "tool_name must be non-empty"
     assert provisioner, "provisioner must be non-empty"
@@ -467,10 +650,14 @@ def provision_tool_activity(
 
     creds = GeneratedCredentials.model_validate(credentials_dump)
 
+    tool_config_dict = dict(tool_config or {})
+    if job_id and provisioner == "docker_provisioner":
+        tool_config_dict[JOB_ID_CONFIG_KEY] = job_id
+
     activity.heartbeat(f"provisioning {tool_name}")
     result = agent.provision(
         agent_id=agent_id,
-        config=dict(tool_config or {}),
+        config=tool_config_dict,
         credentials=creds,
         fencing_token=fencing_token,
     )
@@ -697,6 +884,9 @@ def record_account_provisioning_activity(
         * ``job_id`` is non-empty.
         * ``tool_results_dump`` is the serializable per-tool result list.
         * ``agent_id`` is non-empty when environment tool recording is required.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``, threaded into ``store_credentials_payload``
+          and ``EnvironmentStore.add_tools`` and checked there before any mutation.
     Postconditions:
         * ``completed_phases`` includes ``account_provisioning`` and
           ``phase_results`` carries sanitized tool results (no plaintext
@@ -765,28 +955,95 @@ def compensate_activity(
     agent_id: str,
     succeeded_tools: List[Dict[str, Any]],
     job_id: Optional[str] = None,
+    tear_down_environment: bool = True,
     fencing_token: Optional[int] = None,
 ) -> None:
     """Roll back a partially-provisioned agent (best effort).
 
     Preconditions:
         * ``agent_id`` identifies the agent whose tools should be rolled back.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``, threaded into
+          ``ProvisioningOrchestrator.compensate`` and checked there,
+          per-resource, before any mutation.
         * ``succeeded_tools`` entries are dicts with ``tool_name`` and
           ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
-          The orchestrator looks provisioners up by that registry key.
+          The orchestrator looks provisioners up by that registry key. An
+          optional ``reused`` flag (from the provisioner's own
+          ``details.reused``) marks an entry as idempotently reused rather
+          than created by this attempt — ``ProvisioningOrchestrator.compensate``
+          excludes those from rollback, since tearing one down would destroy
+          an account that predates this attempt.
         * When ``job_id`` is set, it identifies the job whose completed-phase
           checkpoints must be cleared after teardown.
+        * ``tear_down_environment`` is ``False`` when ``agent_id``'s Docker
+          environment predates this workflow run (e.g. a re-run against an
+          already-delivered agent) and must be preserved — ``succeeded_tools``
+          rollback still runs either way, since those are always this
+          attempt's own creation.
     Postconditions:
-        * Invokes ``ProvisioningOrchestrator.compensate`` once. Failures inside
-          compensation are absorbed by the orchestrator (best effort) —
-          including a stale ``fencing_token`` for any individual resource,
-          which is logged and skipped rather than raised (see
+        * Invokes ``ProvisioningOrchestrator.compensate`` once, passing
+          ``tear_down_environment`` through. Failures inside compensation are
+          absorbed by the orchestrator (best effort) — every step there,
+          including the Docker teardown, is individually try/except-wrapped
+          so one failing step doesn't block the others — including a stale
+          ``fencing_token`` for any individual resource, which is logged and
+          skipped rather than raised (see
           ``ProvisioningOrchestrator.compensate``'s per-resource fencing
           contract).
         * When ``job_id`` is set: clears ``completed_phases`` / ``phase_results``
-          so a later ``/resume`` cannot skip credential_generation (or setup)
-          after CredentialStore / Docker were torn down. Missing jobs are a
+          immediately after ``compensate`` returns — BEFORE the docker
+          verification below, which can raise — so a later ``/resume`` can
+          never skip credential_generation (or setup) on the strength of
+          checkpoints that survived only because this activity happened to
+          fail on its final check. ``compensate`` may already have torn down
+          CredentialStore / Docker / the env record by that point regardless
+          of whether verification below then raises. Missing jobs are a
           no-op; job-store write failures raise for Temporal retry.
+        * Independent of ``tear_down_environment``: when a docker provisioner
+          is registered and ``EnvironmentStore`` confirms NO record currently
+          exists for ``agent_id`` (checked live, right here — not inferred
+          from ``tear_down_environment`` or from how ``compensate`` happened
+          to fare), raises ``RuntimeError`` if the docker provisioner still
+          confirms (or can't rule out) a live container for ``agent_id`` —
+          checked directly against the deterministic container name via
+          ``verify_and_remove_orphan``, not merely the provisioner's own
+          idempotency state, since a container can exist with no
+          corresponding state row (e.g. persisting that state failed right
+          after ``docker run`` succeeded, and the best-effort removal that
+          followed that specific failure also failed) — a state-only check
+          would then see nothing to clean up and report false success.
+          Raising here (rather than silently returning as if teardown
+          succeeded) lets Temporal's own retry policy give teardown another
+          attempt instead of leaking the container — the workflow's
+          setup-failure path in particular relies on this activity actually
+          retrying when its local rollback fails, INCLUDING when
+          ``tear_down_environment`` was conservatively ``False`` because the
+          pre-run ownership check itself failed rather than because an
+          environment genuinely predates this run.
+        * A live record for ``agent_id`` skips this verification entirely: a
+          container that record still legitimately references must not be
+          probed-and-removed by name out from under it. Checking
+          ``EnvironmentStore`` fresh here (rather than trusting
+          ``tear_down_environment`` or inferring safety from whether
+          ``compensate`` happened to raise internally) is deliberate: a
+          genuinely pre-existing environment leaves its record untouched by
+          ``compensate`` either way, so it always still has one; a record
+          whose removal itself failed inside ``compensate`` also still has
+          one; only the "nothing ever got registered, or it did and was
+          since removed" case has none, and that is exactly when a container
+          matching the name might be orphaned. When no record exists at all
+          AND ``tear_down_environment`` is ``False`` (ownership was never
+          settled), defers to ``DockerProvisionerTool.is_pre_existing`` —
+          the same shared, label-aware ownership check
+          ``check_existing_environment_activity`` uses — since a name match
+          alone cannot tell "predates this run" apart from "this run's own
+          leak"; see that method's own docstring for the full reasoning.
+          When ``tear_down_environment`` is ``True``, ownership is already
+          settled — this run is known to have created/own the environment —
+          so that check is skipped entirely: a surviving container in that
+          case is unconditionally this run's own leaked orphan to reclaim
+          via ``verify_and_remove_orphan``.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
@@ -796,14 +1053,55 @@ def compensate_activity(
             tool_name=t.get("tool_name", ""),
             provisioner_key=t.get("provisioner_key"),
             success=True,
+            # Mirrors ToolProvisionResult's shape (a `.details` dict) so
+            # `compensate` reads reuse the same way for both the Temporal
+            # shim path here and the in-process ToolProvisionResult path.
+            details={"reused": bool(t.get("reused", False))},
         )
         for t in succeeded_tools
     ]
-    orch.compensate(agent_id, shims, fencing_token=fencing_token)
+    orch.compensate(
+        agent_id, shims, tear_down_environment=tear_down_environment, fencing_token=fencing_token
+    )
+
     if job_id:
         # Compensate tears down Docker, env, and CredentialStore — no prior
-        # phase remains safe to skip on resume.
+        # phase remains safe to skip on resume. Cleared before the
+        # (possibly-raising) verification below so a raise there can never
+        # leave stale, resumable checkpoints over already-torn-down state.
         _js.clear_completed_phases(job_id)
+
+    docker = orch.tool_agents.get("docker_provisioner")
+    if docker is not None:
+        env_store = orch.environment_store
+        # Live, not the (possibly stale/conservative) tear_down_environment
+        # flag: unreadable counts as "might have a record" — conservative,
+        # same as everywhere else this ambiguity shows up.
+        record_may_exist = env_store.get(agent_id) is not None or not env_store.readable(agent_id)
+        if not record_may_exist and not tear_down_environment:
+            # No EnvironmentStore record, and ownership is still ambiguous
+            # (tear_down_environment=False) — but the record and the
+            # container are independently losable (mirrors
+            # check_existing_environment_activity's own reasoning): a
+            # pre-existing container can still be sitting there under the
+            # deterministic name with no record at all, e.g. the setup
+            # name-conflict path where Docker/idempotency state was lost
+            # but the container itself predates this run. Defer to the same
+            # shared, label-aware ownership check before concluding there is
+            # nothing left to protect.
+            #
+            # When tear_down_environment=True, ownership is already settled
+            # — this run is known to have created/own the environment — so
+            # this check must NOT run: a container that still exists there
+            # is our own leaked orphan to reclaim, not something to protect
+            # from verify_and_remove_orphan.
+            record_may_exist = docker.is_pre_existing(agent_id, job_id)
+        if not record_may_exist and not docker.verify_and_remove_orphan(agent_id):
+            raise RuntimeError(
+                f"compensate_activity: docker teardown for agent_id={agent_id!r} did not "
+                "complete (container still confirmed alive, or its state is unknown, "
+                "after compensate)"
+            )
 
 
 @activity.defn(name="agent_provisioning_mark_job_failed")
@@ -850,6 +1148,10 @@ def deprovision_activity(
           partially removed) agent.
         * Runs inside a Temporal activity worker for the Agent Provisioning
           task queue.
+        * ``fencing_token``, when given, is the calling workflow's current
+          lease token on ``agent_id``, threaded into
+          ``ProvisioningOrchestrator.deprovision`` and checked there before
+          any mutation.
     Postconditions:
         * Returns ``DeprovisionResponse.model_dump()`` — a JSON-serializable dict
           with ``agent_id``/``success``/``details``/``error``. Cleanup is
@@ -869,12 +1171,25 @@ def deprovision_activity(
           ``details["tools"]`` map, unchanged — each provisioner tracks its
           own fencing high-water mark independently, so one's rejection must
           not abort teardown of the others.
+        * Heartbeats (and checks ``activity.is_cancelled()``) between each
+          per-tool teardown call via a checkpoint passed into the orchestrator.
+          If cancellation is observed, ``DeprovisionCancelledError`` propagates
+          out of this activity uncaught rather than a soft-failure response —
+          consuming that signal to gate the workflow is a follow-up change.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
 
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("deprovision")
+
+    def _cancellation_checkpoint() -> bool:
+        activity.heartbeat("deprovision")
+        return activity.is_cancelled()
+
     response = ProvisioningOrchestrator().deprovision(
-        agent_id, force=force, fencing_token=fencing_token
+        agent_id,
+        force=force,
+        cancellation_checkpoint=_cancellation_checkpoint,
+        fencing_token=fencing_token,
     )
     return response.model_dump()

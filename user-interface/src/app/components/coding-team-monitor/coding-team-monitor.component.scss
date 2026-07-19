@@ -10,10 +10,11 @@
 
   &__section-label {
     display: block;
-    font-size: 0.72rem;
+    font-size: var(--kh-text-xs);
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    // No text-transform: distinguished from body text by weight + tertiary color instead,
+    // since uppercase at this size hurt legibility (see accessibility follow-up).
+    letter-spacing: 0.02em;
     color: var(--kh-text-tertiary);
   }
 
@@ -248,7 +249,7 @@
   }
 
   &__status {
-    font-size: 0.7rem;
+    font-size: var(--kh-text-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -288,7 +289,7 @@
   }
 
   &__tool {
-    font-size: 0.68rem;
+    font-size: var(--kh-text-xs);
     padding: 1px 6px;
     border-radius: 4px;
     background: var(--kh-surface-3);
@@ -328,7 +329,7 @@
   }
 
   &__activity-step {
-    font-size: 0.74rem;
+    font-size: var(--kh-text-xs);
     color: var(--kh-text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;

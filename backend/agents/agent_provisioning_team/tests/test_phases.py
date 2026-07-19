@@ -7,8 +7,9 @@ coverage on every branch.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -141,6 +142,82 @@ def test_run_setup_threads_fencing_token(tmp_path: Path) -> None:
     assert stored["fencing_token"] == 5
 
 
+def test_run_setup_passes_job_id_to_docker_provision(tmp_path: Path) -> None:
+    """run_setup is the ONLY code path that creates the real agent_id
+    environment container -- job_id must reach docker.provision's config
+    here, or the khala.job_id label this feature depends on never gets
+    stamped on the container check_existing_environment_activity /
+    compensate_activity actually inspect.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    manifest = ToolManifest()
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-new",
+            "container_name": "agent-a2",
+            "ssh_port": 22002,
+            "workspace_path": "/workspace/a2",
+        },
+    )
+
+    run_setup(
+        agent_id="a2",
+        manifest=manifest,
+        environment_store=env_store,
+        docker_provisioner=docker,
+        progress_callback=lambda msg: None,
+        job_id="job-77",
+    )
+
+    _args, kwargs = docker.provision.call_args
+    assert kwargs["config"][JOB_ID_CONFIG_KEY] == "job-77"
+
+
+def test_run_setup_omits_job_id_from_docker_provision_when_not_given(tmp_path: Path) -> None:
+    """job_id is optional -- omitting it must not inject anything, keeping
+    non-Temporal callers behaving exactly as before this labeling primitive
+    existed."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+    from agent_provisioning_team.tool_agents.docker_provisioner import JOB_ID_CONFIG_KEY
+
+    env_store = EnvironmentStore(storage_dir=tmp_path / "envs")
+    manifest = ToolManifest()
+
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker",
+        success=True,
+        details={
+            "container_id": "c-new",
+            "container_name": "agent-a2",
+            "ssh_port": 22002,
+            "workspace_path": "/workspace/a2",
+        },
+    )
+
+    run_setup(
+        agent_id="a2",
+        manifest=manifest,
+        environment_store=env_store,
+        docker_provisioner=docker,
+        progress_callback=lambda msg: None,
+    )
+
+    _args, kwargs = docker.provision.call_args
+    assert JOB_ID_CONFIG_KEY not in kwargs["config"]
+
+
 def test_run_setup_preserves_created_at_and_refreshes_updated_at_on_reregister(
     tmp_path: Path,
 ) -> None:
@@ -218,16 +295,25 @@ def test_run_setup_returns_failure_on_docker_error(tmp_path: Path) -> None:
     assert "docker daemon down" in result.error
 
 
-def test_cleanup_setup_calls_docker_and_env_store(tmp_path: Path) -> None:
+def test_cleanup_setup_removes_record_before_deprovisioning(tmp_path: Path) -> None:
+    """cleanup_setup clears the env record BEFORE deleting the container.
+
+    The reverse order could strand a ``running`` record pointing at a deleted
+    container, which a later ``run_setup`` fast path would return as success.
+    """
     from agent_provisioning_team.phases.setup import cleanup_setup
 
-    docker = MagicMock()
-    env_store = MagicMock()
+    manager = MagicMock()
+    docker = manager.docker
+    env_store = manager.env_store
 
     result = cleanup_setup("a1", environment_store=env_store, docker_provisioner=docker)
     assert result is True
     docker.deprovision.assert_called_once_with("a1", fencing_token=None)
     env_store.remove.assert_called_once_with("a1", fencing_token=None)
+    assert manager.mock_calls.index(
+        ("env_store.remove", ("a1",), {"fencing_token": None})
+    ) < manager.mock_calls.index(("docker.deprovision", ("a1",), {"fencing_token": None}))
 
 
 def test_cleanup_setup_threads_fencing_token(tmp_path: Path) -> None:
@@ -239,6 +325,485 @@ def test_cleanup_setup_threads_fencing_token(tmp_path: Path) -> None:
     cleanup_setup("a1", environment_store=env_store, docker_provisioner=docker, fencing_token=7)
     docker.deprovision.assert_called_once_with("a1", fencing_token=7)
     env_store.remove.assert_called_once_with("a1", fencing_token=7)
+
+
+def test_cleanup_setup_reports_failed_teardown(tmp_path: Path, caplog) -> None:
+    """A teardown that reports failure must surface as False, not silent success.
+
+    The provisioner keeps its state row on a failed removal, so the surviving
+    container stays reachable by agent id — but the caller must know cleanup
+    was partial.
+    """
+    from agent_provisioning_team.models import DeprovisionResult
+    from agent_provisioning_team.phases.setup import cleanup_setup
+
+    docker = MagicMock()
+    docker.deprovision.return_value = DeprovisionResult(
+        tool_name="docker", success=False, error="docker rm failed: device busy"
+    )
+    env_store = MagicMock()
+
+    with caplog.at_level(logging.ERROR):
+        result = cleanup_setup("a1", environment_store=env_store, docker_provisioner=docker)
+
+    assert result is False
+    assert "device busy" in caplog.text
+
+
+# Rollback-scenario helpers: every case arranges the same shape — a provision
+# result, a (possibly failing) register, and an ownership state — so the
+# factories keep each test down to its meaningful delta.
+
+
+def _rollback_env_store(get=None, register_error=None):
+    """MagicMock EnvironmentStore: ``get`` behavior plus a failing register."""
+    env_store = MagicMock()
+    if isinstance(get, list):
+        env_store.get.side_effect = get
+    else:
+        env_store.get.return_value = get
+    env_store.register.side_effect = register_error or RuntimeError("register boom")
+    return env_store
+
+
+def _docker_stub(**details):
+    """MagicMock docker provisioner whose provision succeeds with ``details``."""
+    docker = MagicMock()
+    docker.provision.return_value = ToolProvisionResult(
+        tool_name="docker", success=True, details=details
+    )
+    return docker
+
+
+def _stored_env(agent_id, status="ready", container_id="c-existing", ssh_port=22004):
+    from agent_provisioning_team.shared.environment_store import (
+        EnvironmentInfo as StoreEnvInfo,
+    )
+
+    return StoreEnvInfo(
+        agent_id=agent_id,
+        container_id=container_id,
+        container_name=f"agent-{agent_id}",
+        ssh_host="localhost",
+        ssh_port=ssh_port,
+        workspace_path=f"/workspace/{agent_id}",
+        status=status,
+    )
+
+
+def _run_setup_expecting(match, agent_id, env_store, docker, **kwargs):
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    with pytest.raises(RuntimeError, match=match):
+        run_setup(
+            agent_id=agent_id,
+            manifest=ToolManifest(),
+            environment_store=env_store,
+            docker_provisioner=docker,
+            **kwargs,
+        )
+
+
+def test_run_setup_rolls_back_new_container_when_register_fails() -> None:
+    """A container this attempt created is deprovisioned when register fails.
+
+    Register is atomic, so the failed attempt left no record; nothing needs
+    removing from the store.
+    """
+    env_store = _rollback_env_store(get=None)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a2")
+
+    _run_setup_expecting("register boom", "a2", env_store, docker)
+
+    docker.deprovision.assert_called_once_with("a2", fencing_token=None)
+    env_store.remove.assert_not_called()
+
+
+def test_run_setup_preserves_ready_agent_on_reused_container() -> None:
+    """A reused container backed by a prior record (any status) is preserved.
+
+    Re-provisioning a completed agent leaves a ``ready`` record; the reused
+    container belongs to that prior setup, and atomic register means the failed
+    attempt could not have corrupted that record — nothing is torn down or
+    rewritten.
+    """
+    ready_env = _stored_env("a4")
+    env_store = _rollback_env_store(get=ready_env)
+    docker = _docker_stub(container_id="c-existing", container_name="agent-a4", reused=True)
+
+    _run_setup_expecting("register boom", "a4", env_store, docker)
+
+    docker.deprovision.assert_not_called()
+    env_store.remove.assert_not_called()
+
+
+def test_run_setup_preserves_concurrent_owner_on_reused_orphan() -> None:
+    """A record appearing between pre-check and rollback marks a concurrent owner.
+
+    reused=True with no pre-check record looks like an orphan, but the
+    rollback's ownership read finds a record — this attempt's register is
+    atomic and failed, so that record can only be a concurrent job's; its
+    container must be preserved.
+    """
+    env_store = _rollback_env_store(get=[None, _stored_env("a5", status="running")])
+    docker = _docker_stub(container_id="c-x", container_name="agent-a5", reused=True)
+
+    _run_setup_expecting("register boom", "a5", env_store, docker)
+
+    assert env_store.get.call_count == 2
+    docker.deprovision.assert_not_called()
+
+
+def test_run_setup_reclaims_reused_orphan_with_no_env_record() -> None:
+    """A reused container with no record anywhere is a retry orphan: reclaim it."""
+    env_store = _rollback_env_store(get=None)
+    docker = _docker_stub(container_id="c-orphan", container_name="agent-a7", reused=True)
+
+    _run_setup_expecting("register boom", "a7", env_store, docker)
+
+    docker.deprovision.assert_called_once_with("a7", fencing_token=None)
+
+
+def test_run_setup_preserves_reused_container_when_registry_unreadable() -> None:
+    """A missing record is only proof of an orphan when the registry is readable.
+
+    get() maps unreadable-store errors (e.g. EACCES) to None, so with the
+    registry unreadable a healthy reused container would look like an orphan;
+    the rollback must preserve it when ownership cannot be established.
+    """
+    env_store = _rollback_env_store(get=None)
+    env_store.readable.return_value = False
+    docker = _docker_stub(container_id="c-live", container_name="agent-a9", reused=True)
+
+    _run_setup_expecting("register boom", "a9", env_store, docker)
+
+    docker.deprovision.assert_not_called()
+
+
+def test_run_setup_preserves_container_adopted_by_concurrent_job() -> None:
+    """A created container that a concurrent job registered is theirs now.
+
+    Job A creates the container; job B reuses and registers it before A's
+    register fails. A's rollback sees a record it did not write (register is
+    atomic, so A's failed write left nothing) and must not deprovision B's
+    container.
+    """
+    adopted = _stored_env("a6", status="running", container_id="c-shared")
+    env_store = _rollback_env_store(get=[None, adopted])
+    docker = _docker_stub(container_id="c-shared", container_name="agent-a6")
+
+    _run_setup_expecting("register boom", "a6", env_store, docker)
+
+    docker.deprovision.assert_not_called()
+    env_store.remove.assert_not_called()
+
+
+def test_run_setup_reclaims_fresh_container_despite_unrelated_record_update() -> None:
+    """An unrelated concurrent update to the OLD record must not fake adoption.
+
+    Ownership must be decided by container identity, not by whether ANY field
+    of the record changed: a concurrent add_tool/update_status touching the
+    OLD (non-running) container's record — e.g. bumping updated_at — makes the
+    whole-record comparison differ even though nobody adopted the container
+    THIS attempt just created. That must still be reclaimed, not leaked.
+    """
+    prior = _stored_env("a14", status="stopped", container_id="c-old")
+    updated_prior = _stored_env("a14", status="stopped", container_id="c-old")
+    updated_prior.updated_at = "2030-01-01T00:00:00+00:00"  # unrelated field bump
+    assert updated_prior.to_dict() != prior.to_dict()  # sanity: whole-dict differs
+
+    env_store = _rollback_env_store(get=[prior, updated_prior])
+    docker = _docker_stub(container_id="c-new", container_name="agent-a14")
+
+    _run_setup_expecting("register boom", "a14", env_store, docker)
+
+    docker.deprovision.assert_called_once_with("a14", fencing_token=None)
+
+
+def test_run_setup_keeps_prior_record_when_fresh_create_rolls_back() -> None:
+    """Reclaiming a fresh container leaves an untouched prior record in place.
+
+    A prior non-running record (docker state lost, so provision created fresh)
+    is not this attempt's to delete: the fresh container is torn down, but the
+    record keeps its continuity (created_at / tools) and its non-running status
+    cannot short-circuit a retry's fast path.
+    """
+    prior = _stored_env("a8", status="stopped", container_id="c-old")
+    # Pre-check and rollback read the same, unchanged record.
+    env_store = _rollback_env_store(get=prior)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a8")
+
+    _run_setup_expecting("register boom", "a8", env_store, docker)
+
+    docker.deprovision.assert_called_once_with("a8", fencing_token=None)
+    env_store.remove.assert_not_called()
+
+
+def test_run_setup_rolls_back_when_progress_callback_raises() -> None:
+    """A progress callback that raises after provisioning triggers the rollback."""
+    env_store = _rollback_env_store(get=None)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a12")
+
+    def cb(msg):
+        if "Registering" in msg:
+            raise RuntimeError("callback boom")
+
+    _run_setup_expecting("callback boom", "a12", env_store, docker, progress_callback=cb)
+
+    docker.deprovision.assert_called_once_with("a12", fencing_token=None)
+
+
+def test_run_setup_rolls_back_when_on_registered_raises(tmp_path: Path) -> None:
+    """A failing on_registered hook rolls back this attempt's own record too.
+
+    A durable checkpoint write (e.g. a Temporal activity's job-store record)
+    belongs inside this same atomic boundary: if it fails or the activity is
+    cancelled here, the container this attempt just created must not leak,
+    exactly like a failing register call. Unlike a failing register() call,
+    though, this attempt's own record now sits in the store with a
+    container_id that matches `result` — the exact signal the "adopted by a
+    concurrent job" heuristic uses for the register-failure case — so the
+    rollback must recognize this as its own write (not a concurrent owner's)
+    and remove it, using a REAL EnvironmentStore rather than an always-None
+    stub so `get()` reflects what `register()` actually just wrote.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a15")
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a15", env_store, docker, on_registered=on_registered)
+
+    docker.deprovision.assert_called_once_with("a15", fencing_token=None)
+    assert env_store.get("a15") is None
+
+
+def test_run_setup_removes_overwritten_prior_record_when_on_registered_raises(
+    tmp_path: Path,
+) -> None:
+    """Contrast with the register()-fails case: here register() overwrote a
+    prior record before on_registered raised, so there is no stale prior
+    content left to preserve for continuity — the rollback must remove this
+    attempt's own (now current) record, not leave a dangling `running` row.
+    """
+    from agent_provisioning_team.shared.environment_store import EnvironmentInfo as StoreEnvInfo
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(
+        StoreEnvInfo(
+            agent_id="a19",
+            container_id="c-old",
+            container_name="agent-a19",
+            status="stopped",
+        )
+    )
+    docker = _docker_stub(container_id="c-new", container_name="agent-a19")
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a19", env_store, docker, on_registered=on_registered)
+
+    docker.deprovision.assert_called_once_with("a19", fencing_token=None)
+    assert env_store.get("a19") is None
+
+
+def test_run_setup_preserves_container_when_record_removal_fails() -> None:
+    """A record-removal failure during rollback must not fall through to teardown.
+
+    If env_store.remove() itself raises (e.g. a now-read-only registry
+    directory) after on_registered failed, the record this attempt just wrote
+    survives (status="running") — deprovisioning the container anyway would
+    leave that surviving record pointing at a container that's actually gone,
+    which a later run_setup's fast path would trust as healthy. Skipping
+    teardown here keeps record and container consistent with each other,
+    matching cleanup_setup's own record-then-container ordering rule.
+    """
+    env_store = _rollback_env_store(get=None, register_error=lambda *a, **kw: None)
+    env_store.remove.side_effect = OSError("registry directory is read-only")
+    docker = _docker_stub(container_id="c-new", container_name="agent-a20")
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a20", env_store, docker, on_registered=on_registered)
+
+    env_store.remove.assert_called_once_with("a20", fencing_token=None)
+    docker.deprovision.assert_not_called()
+
+
+def test_run_setup_preserves_reused_container_when_checkpoint_fails_after_reregister() -> None:
+    """A delivered ("ready") agent's container must survive a checkpoint failure.
+
+    A non-running existing record (e.g. "ready", set by phases/deliver.py)
+    skips run_setup's fast path, but docker.provision() still resolves via
+    docker-level reuse (reused=True) — register() succeeding on top of that
+    doesn't mean THIS attempt's own docker.provision call created a fresh
+    container. If on_registered then fails, the container must be preserved
+    even though registered_by_this_call is True: only a genuinely fresh
+    (non-reused) container is this attempt's own to tear down. The prior
+    "ready" record this attempt overwrote must be restored verbatim, not
+    merely deleted — deleting it would erase a delivered agent's record from
+    the registry with nothing left to re-register it.
+    """
+    ready = _stored_env("a21", container_id="c-existing")  # status="ready" by default
+    env_store = _rollback_env_store(get=ready, register_error=lambda *a, **kw: None)
+    docker = _docker_stub(container_id="c-existing", container_name="agent-a21", reused=True)
+
+    def on_registered(env_info):
+        raise RuntimeError("checkpoint boom")
+
+    _run_setup_expecting("checkpoint boom", "a21", env_store, docker, on_registered=on_registered)
+
+    assert env_store.register.call_args_list[-1] == call(ready, fencing_token=None)
+    env_store.remove.assert_not_called()
+    docker.deprovision.assert_not_called()
+
+
+def test_run_setup_calls_on_registered_with_fresh_environment(tmp_path: Path) -> None:
+    """on_registered fires with the freshly registered EnvironmentInfo on success."""
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a16")
+
+    received = []
+    result = run_setup(
+        agent_id="a16",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+        on_registered=received.append,
+    )
+
+    assert result.success is True
+    assert len(received) == 1
+    assert received[0].container_id == "c-new"
+    assert result.environment.reused is False
+
+
+def test_run_setup_skips_on_registered_on_fast_path(tmp_path: Path) -> None:
+    """on_registered is not called when an already-running environment is reused.
+
+    Nothing new is created on the fast path, so there is nothing for a
+    checkpoint failure there to leak — the hook is scoped to fresh
+    registrations only.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    ready_env = _stored_env("a17", status="running")
+    env_store = _rollback_env_store(get=ready_env)
+    docker = _docker_stub()
+
+    received = []
+    result = run_setup(
+        agent_id="a17",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+        on_registered=received.append,
+    )
+
+    assert result.success is True
+    assert received == []
+    assert result.environment.reused is True
+
+
+def test_run_setup_falls_through_fast_path_when_container_confirmed_gone(tmp_path: Path) -> None:
+    """A "running" record whose container is CONFIRMED gone must not short-circuit.
+
+    Trusting it would deliver success=True pointing at a dead container_id.
+    Falling through to docker.provision() lets DockerProvisionerTool's own
+    reuse check (_on_reuse) detect and clear the same staleness in its own
+    idempotency state and create a fresh container instead.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(_stored_env("a18", status="running", container_id="c-dead"))
+
+    docker = _docker_stub(container_id="c-new", container_name="agent-a18")
+    docker._container_exists = MagicMock(return_value=False)
+
+    result = run_setup(
+        agent_id="a18",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+    )
+
+    assert result.success is True
+    docker.provision.assert_called_once()
+    assert result.environment.container_id == "c-new"
+    assert result.environment.reused is False
+
+
+def test_run_setup_takes_fast_path_when_container_liveness_unknown(tmp_path: Path) -> None:
+    """An inconclusive liveness probe (daemon unreachable) still trusts the record.
+
+    Conservative default: unknown is not proof the container is gone, so
+    falling through and potentially creating a duplicate container would be
+    the wrong tradeoff.
+    """
+    from agent_provisioning_team.phases.setup import run_setup
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolManifest
+
+    env_store = EnvironmentStore(storage_dir=tmp_path)
+    env_store.register(_stored_env("a19", status="running", container_id="c-existing"))
+
+    docker = _docker_stub()
+    docker._container_exists = MagicMock(return_value=None)
+
+    result = run_setup(
+        agent_id="a19",
+        manifest=ToolManifest(),
+        environment_store=env_store,
+        docker_provisioner=docker,
+    )
+
+    assert result.success is True
+    docker.provision.assert_not_called()
+    assert result.environment.container_id == "c-existing"
+
+
+def test_run_setup_rollback_swallows_deprovision_error() -> None:
+    """The best-effort rollback must not mask the original register failure."""
+    env_store = _rollback_env_store(get=None)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a5")
+    docker.deprovision.side_effect = RuntimeError("teardown boom")
+
+    _run_setup_expecting("register boom", "a5", env_store, docker)
+
+    docker.deprovision.assert_called_once_with("a5", fencing_token=None)
+
+
+def test_run_setup_rollback_reports_failed_teardown(caplog) -> None:
+    """A rollback whose teardown *reports* failure (not raises) must be logged."""
+    from agent_provisioning_team.models import DeprovisionResult
+
+    env_store = _rollback_env_store(get=None)
+    docker = _docker_stub(container_id="c-new", container_name="agent-a6")
+    docker.deprovision.return_value = DeprovisionResult(
+        tool_name="docker", success=False, error="docker stop timed out"
+    )
+
+    with caplog.at_level(logging.ERROR):
+        _run_setup_expecting("register boom", "a6", env_store, docker)
+
+    docker.deprovision.assert_called_once_with("a6", fencing_token=None)
+    assert "orphaned" in caplog.text
+    assert "a6" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +1179,44 @@ def test_run_account_provisioning_propagates_stale_fencing_token_from_env_store(
         )
 
 
+def test_run_account_provisioning_stamps_manifest_tool_name(tmp_path: Path) -> None:
+    """The manifest's tool alias overrides the provisioner's own tool_name.
+
+    A provisioner returns its own class-level tool_name (e.g. "postgresql"),
+    which can differ from the manifest's alias for it (e.g. "pg") — but
+    credentials are generated/stored under the MANIFEST name. Compensation's
+    credential purge looks the entry up by result.tool_name, so leaving the
+    provisioner's own name here would make it silently miss the credential
+    actually stored for this tool. Mirrors provision_tool_activity (the
+    Temporal path), which already does this override.
+    """
+    from agent_provisioning_team.phases.account_provisioning import run_account_provisioning
+    from agent_provisioning_team.shared.environment_store import EnvironmentStore
+    from agent_provisioning_team.shared.tool_manifest import ToolDefinition, ToolManifest
+
+    aliased = MagicMock()
+    aliased.provision.return_value = ToolProvisionResult(
+        tool_name="postgresql",
+        success=True,
+        provisioner_key="postgres_provisioner",
+        permissions=["read"],
+    )
+
+    manifest = ToolManifest(
+        tools=[ToolDefinition(name="pg", provisioner="postgres_provisioner", config={})]
+    )
+
+    result = run_account_provisioning(
+        agent_id="a1",
+        manifest=manifest,
+        credentials={"pg": GeneratedCredentials(tool_name="pg")},
+        provisioners={"postgres_provisioner": aliased},
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+    )
+
+    assert result.tool_results[0].tool_name == "pg"
+
+
 def test_deprovision_tools_all() -> None:
     from agent_provisioning_team.models import DeprovisionResult
     from agent_provisioning_team.phases.account_provisioning import deprovision_tools
@@ -688,6 +1291,33 @@ def test_deprovision_tools_requires_agent_id() -> None:
 
     with pytest.raises(AssertionError):
         deprovision_tools("", provisioners={})
+
+
+def test_deprovision_tools_stops_at_cancellation_checkpoint() -> None:
+    from agent_provisioning_team.models import DeprovisionCancelledError, DeprovisionResult
+    from agent_provisioning_team.phases.account_provisioning import deprovision_tools
+
+    p1 = MagicMock()
+    p1.deprovision.return_value = DeprovisionResult(tool_name="p1", success=True)
+    p2 = MagicMock()
+    p2.deprovision.return_value = DeprovisionResult(tool_name="p2", success=True)
+    p3 = MagicMock()
+    p3.deprovision.return_value = DeprovisionResult(tool_name="p3", success=True)
+
+    calls = {"n": 0}
+
+    def checkpoint() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1  # let p1 run, cancel before p2's teardown call
+
+    with pytest.raises(DeprovisionCancelledError) as exc_info:
+        deprovision_tools("a1", provisioners={"p1": p1, "p2": p2, "p3": p3}, checkpoint=checkpoint)
+
+    p1.deprovision.assert_called_once_with("a1", fencing_token=None)
+    p2.deprovision.assert_not_called()
+    p3.deprovision.assert_not_called()
+    assert exc_info.value.agent_id == "a1"
+    assert exc_info.value.completed == {"p1": True}
 
 
 def test_build_default_tool_agents_for_account_provisioning() -> None:

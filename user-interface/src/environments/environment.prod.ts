@@ -19,7 +19,6 @@ export const environment = {
   agentRegistryApiUrl: `${apiBase}/api/agents`,
   aiSystemsApiUrl: `${apiBase}/api/ai-systems`,
   investmentApiUrl: `${apiBase}/api/investment`,
-  nutritionApiUrl: `${apiBase}/api/nutrition-meal-planning`,
   integrationsApiUrl: `${apiBase}/api/integrations`,
   llmConfigApiUrl: `${apiBase}/api/llm-config`,
   salesApiUrl: `${apiBase}/api/sales`,

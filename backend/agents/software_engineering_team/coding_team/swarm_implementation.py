@@ -77,7 +77,7 @@ class _ImplementationMixin:
             worktree_path = self._worktrees.path_for(swe.agent_id)
             if live_progress:
                 update_fn(status_text=f"Implementing: {task.title}")
-            result = swe.run_implement(task, worktree_path, repo_context=self.repo_context)
+            result = swe.run_implement(task, worktree_path)
 
             if result.get("status") == "needs_decision":
                 # The engineer hit a product/design decision it must not make. Escalate to the

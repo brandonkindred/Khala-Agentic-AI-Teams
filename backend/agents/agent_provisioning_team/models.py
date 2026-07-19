@@ -65,6 +65,22 @@ class EnvironmentInfo(BaseModel):
     ssh_port: int = Field(default=22)
     workspace_path: str = Field(default="/workspace")
     status: str = Field(default="running")
+    # True iff run_setup reused an existing container (its own already-running
+    # fast path, or docker.provision()'s idempotent reuse) rather than
+    # creating one fresh. Lets the workflow tell, from setup's own confirmed
+    # outcome rather than a pre-setup guess, when nothing could possibly have
+    # predated this run's environment (reused=False is unambiguous — a
+    # container this call just created cannot also predate it). reused=True
+    # is NOT symmetric evidence of a genuinely pre-existing environment: it
+    # can also reflect this same run's own earlier (response-lost) attempt at
+    # this same activity being read back as "already there" on retry, so
+    # callers must not treat it as proof of pre-existing ownership. Defaults
+    # to True (the conservative, "don't know, assume reused" reading) so a
+    # dump reconstructed from data written before this field existed can't
+    # silently read as an explicit False — both run_setup call sites always
+    # set this explicitly, so the default only ever applies to that
+    # backward-compatibility gap.
+    reused: bool = Field(default=True)
 
 
 class ToolProvisionResult(BaseModel):
@@ -276,3 +292,19 @@ class DeprovisionResponse(BaseModel):
     success: bool
     details: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
+
+
+class DeprovisionCancelledError(Exception):
+    """Raised when a cancellation checkpoint fires mid-``deprovision``.
+
+    Signals that ``ProvisioningOrchestrator.deprovision`` stopped before
+    completing its per-tool teardown sequence, so the caller (a Temporal
+    activity wrapper) can distinguish an interrupted run from a normal
+    completed one by exception type rather than by inspecting a response
+    payload.
+    """
+
+    def __init__(self, agent_id: str, completed: Dict[str, Any]) -> None:
+        self.agent_id = agent_id
+        self.completed = completed
+        super().__init__(f"Deprovision for {agent_id} cancelled mid-teardown")

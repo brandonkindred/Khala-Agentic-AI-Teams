@@ -24,7 +24,6 @@ export type JobSource =
   | 'personal_assistant'
   | 'planning'
   | 'road_trip_planning'
-  | 'nutrition_meal_planning'
   | 'coding_team'
   | 'sales';
 
@@ -235,7 +234,6 @@ export const SOURCE_DISPLAY: Record<
   personal_assistant: { label: 'Personal Assistant', icon: 'assistant', route: '/personal-assistant' },
   planning: { label: 'Planning', icon: 'description', route: '/software-engineering/planning' },
   road_trip_planning: { label: 'Road Trip', icon: 'directions_car', route: '/dashboard' },
-  nutrition_meal_planning: { label: 'Nutrition', icon: 'restaurant', route: '/nutrition' },
   coding_team: { label: 'Coding Team', icon: 'terminal', route: '/software-engineering/coding-team' },
   sales: { label: 'Sales', icon: 'storefront', route: '/sales' },
 };
