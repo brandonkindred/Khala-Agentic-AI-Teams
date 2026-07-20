@@ -163,7 +163,7 @@
             @for (rule of record.strategy.entry_rules; track $index) {
               <li>
                 <dl class="rule-fields">
-                  @for (row of flattenObjectRows(rule); track row.label) {
+                  @for (row of entryRuleRows(rule); track row.label) {
                     <dt>{{ row.label }}</dt>
                     <dd>{{ row.value }}</dd>
                   }
@@ -178,7 +178,7 @@
             @for (rule of record.strategy.exit_rules; track $index) {
               <li>
                 <dl class="rule-fields">
-                  @for (row of flattenObjectRows(rule); track row.label) {
+                  @for (row of exitRuleRows(rule); track row.label) {
                     <dt>{{ row.label }}</dt>
                     <dd>{{ row.value }}</dd>
                   }
@@ -191,7 +191,7 @@
           <div class="detail-section">
             <strong>Sizing</strong>
             <dl class="rule-fields">
-              @for (row of flattenObjectRows(record.strategy.sizing); track row.label) {
+              @for (row of sizingRows(record.strategy.sizing); track row.label) {
                 <dt>{{ row.label }}</dt>
                 <dd>{{ row.value }}</dd>
               }
