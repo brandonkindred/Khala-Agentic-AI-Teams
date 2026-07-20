@@ -359,6 +359,19 @@ describe('StrategyCardComponent', () => {
       fixture.destroy();
       expect(component['copyResetTimer']).toBeNull();
     });
+
+    it('is a safe no-op for a falsy code, without touching the clipboard', () => {
+      const writeText = vi.fn();
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      try {
+        component.copyStrategyCode('');
+        expect(writeText).not.toHaveBeenCalled();
+        expect(component.strategyCodeCopied).toBe(false);
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
+    });
   });
 
   describe('showTitle / expanded gating', () => {
@@ -478,6 +491,47 @@ describe('StrategyCardComponent', () => {
 
       const signalPanel: HTMLElement = fixture.nativeElement.querySelector('.signal-panel');
       expect(allText(signalPanel)).toEqual(['Summary', 'Momentum confirmed by volume.']);
+    });
+
+    it('renders real, schema-conforming entry/exit rules and sizing as semantic rows, not a JSON-in-a-row blob', () => {
+      component.record = makeRecord({
+        strategy: {
+          strategy_id: 'strat-1',
+          authored_by: 'design-agent',
+          asset_class: 'stocks',
+          hypothesis: 'Stocks with rising volume tend to continue trending.',
+          signal_definition: 'volume_zscore > 2',
+          timeframe: 'daily',
+          entry_rules: [
+            { kind: 'entry', side: 'long', when: { lhs: { name: 'rsi', params: { period: 14 } }, op: '<', rhs: 30 } },
+          ],
+          exit_rules: [{ kind: 'stop_loss', pct: 0.05 }],
+          sizing: { kind: 'fixed_fraction', fraction: 0.02 },
+          target_symbols: ['AAPL'],
+          risk_limits: {},
+          speculative: false,
+          requires_redesign: false,
+          unparsed_rules: [],
+          audit: {},
+        } as unknown as StrategyLabRecord['strategy'],
+      });
+      component.expanded = true;
+      fixture.detectChanges();
+
+      const allText = (el: Element) =>
+        Array.from(el.querySelectorAll('dt, dd')).map((n) => n.textContent?.trim());
+
+      const detailSections: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.detail-section'));
+      const entrySection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Entry Rules')!;
+      const exitSection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Exit Rules')!;
+      const sizingSection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Sizing')!;
+
+      // The nested `when` predicate is broken into its own Indicator/Operator/Threshold
+      // rows — never collapsed into a single JSON-stringified row value.
+      expect(allText(entrySection)).toEqual(['Side', 'Long', 'Indicator', 'RSI(Period: 14)', 'Operator', '<', 'Threshold', '30']);
+      expect(entrySection.textContent).not.toContain('{"lhs"');
+      expect(allText(exitSection)).toEqual(['Type', 'Stop Loss', 'Stop Distance', '5.0%', 'Basis', 'Entry Price']);
+      expect(allText(sizingSection)).toEqual(['Method', 'Fixed Fraction', 'Position Size', '2.0%']);
     });
   });
 });

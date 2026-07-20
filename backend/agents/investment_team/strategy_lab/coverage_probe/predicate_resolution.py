@@ -4,22 +4,24 @@ Houses the free functions that resolve position gates, symbol scopes,
 static predicates, and name bindings ahead of subcondition construction —
 extracted from
 :mod:`investment_team.strategy_lab.coverage_probe.indicator_probe`
-(#1777, Part 2 of the decomposition started by
+(Part 2 of the decomposition started by
 :mod:`investment_team.strategy_lab.coverage_probe.subcondition_visitor`
 in #1960). Pure: no I/O, no LLM, no subprocess.
 
 This module and ``indicator_probe`` import back from each other:
-``indicator_probe`` calls into several of the resolution helpers defined
-here (``_extract_subconditions``, ``_union_target_symbols``,
-``_flatten_top_terms``, ``_symbol_gate``, ``_NameStrings``,
-``_iter_entry_path_assigns``), while this module needs ``_BLOCK_FIELDS``
-and ``_numeric_literal`` from ``indicator_probe``'s not-yet-decomposed
-"builder cluster". Both cross-imports are placed as the **last top-level
-statement** in their respective module — after every same-file definition
-that module needs — which keeps the two-way cycle safe regardless of
-which of the two modules a caller imports first (whichever loads first
-runs to completion, then hands back to the other, which by then finds
-everything it needs already bound).
+``indicator_probe`` calls into two of the resolution helpers defined
+here (``_extract_subconditions``, ``_union_target_symbols``), while this
+module needs ``_BLOCK_FIELDS`` from ``indicator_probe``. Both
+cross-imports are placed as the **last top-level statement** in their
+respective module — after every same-file definition that module
+needs — which keeps the two-way cycle safe regardless of which of the
+two modules a caller imports first (whichever loads first runs to
+completion, then hands back to the other, which by then finds
+everything it needs already bound). ``_numeric_literal`` — needed by
+this module — now lives in
+:mod:`investment_team.strategy_lab.coverage_probe.subcond_builder`
+(Part 3 of the decomposition) and is imported back from there instead,
+alongside ``_BLOCK_FIELDS``, at this module's bottom.
 
 ``_extract_subconditions`` additionally needs ``SubconditionVisitor``
 from ``subcondition_visitor``, which itself imports back from both this
@@ -1230,13 +1232,15 @@ def _collect_name_periods(
     return recorder.result
 
 
-# _BLOCK_FIELDS and _numeric_literal are part of indicator_probe.py's
-# not-yet-decomposed "builder cluster" (out of scope for this move —
-# tracked separately). Imported at the bottom, after every name in this
+# _BLOCK_FIELDS lives in indicator_probe.py; _numeric_literal lives in
+# subcond_builder.py (the probe-construction slice extracted from
+# indicator_probe.py). Imported at the bottom, after every name in this
 # module is defined, so this module can be imported first or after
-# indicator_probe.py without hitting a partial-init ImportError either
+# either of those two without hitting a partial-init ImportError either
 # way — see the module docstring.
 from investment_team.strategy_lab.coverage_probe.indicator_probe import (  # noqa: E402
     _BLOCK_FIELDS,
+)
+from investment_team.strategy_lab.coverage_probe.subcond_builder import (  # noqa: E402
     _numeric_literal,
 )

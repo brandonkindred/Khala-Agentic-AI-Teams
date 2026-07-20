@@ -1,4 +1,4 @@
-import { formatPct, formatRatio } from './number-format';
+import { formatPct, formatRatio, formatUsd } from './number-format';
 
 describe('formatPct', () => {
   it('formats with the default 1 decimal and a trailing %', () => {
@@ -28,5 +28,21 @@ describe('formatRatio', () => {
 
   it('honors an explicit decimals count', () => {
     expect(formatRatio(1.5, 1)).toBe('1.5');
+  });
+});
+
+describe('formatUsd', () => {
+  it('formats with a leading $ and thousands separators, 0 decimals by default', () => {
+    expect(formatUsd(150000)).toBe('$150,000');
+  });
+
+  it('honors an explicit decimals count', () => {
+    expect(formatUsd(150000.5, 2)).toBe('$150,000.50');
+  });
+
+  it('formats zero and negative values, with the sign before the $', () => {
+    expect(formatUsd(0)).toBe('$0');
+    expect(formatUsd(-150000)).toBe('-$150,000');
+    expect(formatUsd(-1234.5, 2)).toBe('-$1,234.50');
   });
 });
