@@ -91,7 +91,7 @@ export class TradeLedgerComponent {
     // mat-table dataSource diff instead of re-rendering every row each CD cycle.
     const { cache, value } = this.memoize(
       this.pagedTradesCache,
-      [this.record, this.pageIndex],
+      [this.record, this.pageIndex] as [StrategyLabRecord, number],
       (a, b) => a[0] === b[0] && a[1] === b[1],
       () => {
         const start = this.pageIndex * this.PAGE_SIZE;
