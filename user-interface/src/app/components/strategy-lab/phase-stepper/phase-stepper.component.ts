@@ -18,6 +18,19 @@ const STRATEGY_LAB_PHASES: PhaseDefinition[] = [
 const PHASE_ORDER = STRATEGY_LAB_PHASES.map(p => p.id);
 
 /**
+ * Human-readable label for a phase id, for display outside the stepper
+ * itself (e.g. a "Current phase: X" readout) without duplicating
+ * `STRATEGY_LAB_PHASES` at the call site.
+ *
+ * Preconditions: none — accepts any string, null, or undefined.
+ * Postconditions: returns the matching phase's label, or null if `phaseId`
+ *   doesn't match any entry in `STRATEGY_LAB_PHASES`.
+ */
+export function phaseLabel(phaseId: string | null | undefined): string | null {
+  return STRATEGY_LAB_PHASES.find(p => p.id === phaseId)?.label ?? null;
+}
+
+/**
  * Presentational run-phase stepper for an in-progress Strategy Lab cycle.
  * Renders the four fixed pipeline phases (ideate/code/backtest/analyze) and
  * highlights which are completed, current, or pending relative to `currentPhase`.

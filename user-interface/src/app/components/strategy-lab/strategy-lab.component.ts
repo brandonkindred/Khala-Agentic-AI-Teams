@@ -47,7 +47,7 @@ import {
   getAssetClassIcon,
   publishabilitySkipLabel,
 } from './strategy-lab.formatters';
-import { PhaseStepperComponent } from './phase-stepper/phase-stepper.component';
+import { PhaseStepperComponent, phaseLabel } from './phase-stepper/phase-stepper.component';
 import { StrategyCardComponent } from './strategy-card/strategy-card.component';
 import type {
   PaperTradingSession,
@@ -749,6 +749,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   readonly returnColor = returnColor;
   readonly returnColorLabel = returnColorLabel;
   readonly getAssetClassIcon = getAssetClassIcon;
+  readonly phaseLabel = phaseLabel;
 
   // ---------------------------------------------------------------------------
   // Activity log
@@ -918,6 +919,30 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     const status = this.runService.runStatus();
     if (!status || !status.batch_count) return 1;
     return Math.min(status.current_batch ?? (status.completed_batches ?? 0) + 1, status.batch_count);
+  });
+
+  /**
+   * Human-readable meter value text for the run progress bar (e.g. "63% —
+   * Strategy 5 of 8", or "63% — Batch 2 of 3 — Strategy 5 of 8"), read by
+   * assistive tech in place of the raw percentage a `<mat-progress-bar>`
+   * alone would expose. Mirrors `.progress-title`'s own visible text shape
+   * so the two can never disagree. Deliberately independent of
+   * `runAnnouncement` (the SR-only live region) rather than sharing its
+   * segment-building — that computed has its own "Finishing up" terminal-gap
+   * handling this meter doesn't need, and is out of scope for this change.
+   *
+   * Preconditions: none.
+   * Postconditions: returns '' when idle; otherwise a non-empty string
+   *   combining `progressPercent()` with the same batch/strategy position
+   *   shown in `.progress-title`.
+   */
+  readonly progressValueText = computed(() => {
+    const status = this.runService.runStatus();
+    if (!status) return '';
+    const batchPrefix = status.batch_count && status.batch_count > 1
+      ? `Batch ${this.currentBatchNumber()} of ${status.batch_count} — `
+      : '';
+    return `${this.progressPercent()}% — ${batchPrefix}Strategy ${this.currentStrategyNumber()} of ${status.total_cycles}`;
   });
 
   /**
