@@ -360,6 +360,44 @@ describe('StrategyCardComponent', () => {
     });
   });
 
+  describe('copyStrategyCode', () => {
+    it('writes the code to the clipboard and flashes strategyCodeCopied', () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      try {
+        expect(component.strategyCodeCopied).toBe(false);
+        component.copyStrategyCode('print("hello")');
+        expect(writeText).toHaveBeenCalledWith('print("hello")');
+        expect(component.strategyCodeCopied).toBe(true);
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
+    });
+
+    it('swallows a rejected clipboard write instead of leaking an unhandled rejection', async () => {
+      const writeText = vi.fn().mockRejectedValue(new Error('permission denied'));
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      try {
+        expect(() => component.copyStrategyCode('print("hello")')).not.toThrow();
+        expect(component.strategyCodeCopied).toBe(true);
+        // Let the rejected promise settle; the .catch() must absorb it.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
+    });
+
+    it('cancels the copy-confirmation timer on destroy', () => {
+      component.copyStrategyCode('print("hello")');
+      expect(component.strategyCodeCopied).toBe(true);
+      expect(component['copyResetTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['copyResetTimer']).toBeNull();
+    });
+  });
+
   describe('showTitle / expanded gating', () => {
     // OnPush + a decorator `@Input()`: mutating the property directly (bypassing
     // Angular's own input-binding path, which is what a real `[showTitle]="..."`
