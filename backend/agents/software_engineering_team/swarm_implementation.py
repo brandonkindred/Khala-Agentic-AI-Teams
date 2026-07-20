@@ -348,8 +348,6 @@ class _ImplementationMixin:
         round until the round cap. Count each occurrence against the shared revision cap and, on
         exhaustion, fail the task (and its dependents) terminally with the reason recorded.
         """
-        from software_engineering_team import coding_team_orchestrator as _orch
-
         if result.get("status") == "in_progress":
             reason = "Engineer did not mark the work ready for review"
         else:
@@ -363,8 +361,10 @@ class _ImplementationMixin:
         # feedback is now persisted, so the status writes below need not re-pass it).
         if self._escalate_if_no_change(task, [entry]):
             return
-        revision_count = task.revision_count + 1
-        if revision_count >= _orch.MAX_TASK_REVISIONS:
+
+        def _fail(revision_count: int) -> None:
+            from software_engineering_team import coding_team_orchestrator as _orch
+
             logger.warning(
                 "Task %s did not reach review and exhausted revisions (%d); marking FAILED",
                 task.id,
@@ -376,13 +376,16 @@ class _ImplementationMixin:
                 revision_count=revision_count,
             )
             self._cascade_fail_dependents(task.id)
-            return
-        # Keep it with the same engineer for another bounded attempt; record the reason.
-        self.graph.update_task(
-            task.id,
-            status=TaskStatus.IN_PROGRESS,
-            revision_count=revision_count,
-        )
+
+        def _continue(revision_count: int) -> None:
+            # Keep it with the same engineer for another bounded attempt; record the reason.
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.IN_PROGRESS,
+                revision_count=revision_count,
+            )
+
+        self._bump_and_check_revision_cap(task, on_exhausted=_fail, on_continue=_continue)
 
     def _escalate_decision(self, task: Task, result: Dict[str, Any], update_fn: Any) -> None:
         """Pause the job for a user decision a worker raised, then thread the answer back to the task.
