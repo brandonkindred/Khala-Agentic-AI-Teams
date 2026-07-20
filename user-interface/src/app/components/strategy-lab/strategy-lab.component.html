@@ -187,14 +187,26 @@
         <span class="status-badge status-running">Running</span>
       </div>
 
-      <div class="progress-section">
-        <!-- aria-hidden: the SR-only role="status" region above already announces this same
-             batch/strategy state via runAnnouncement(); a name here would double-announce it. -->
+      <div
+        class="progress-section"
+        role="meter"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        [attr.aria-valuenow]="progressPercent()"
+        [attr.aria-valuetext]="progressValueText()"
+        aria-label="Strategy Lab run progress"
+      >
+        <!-- aria-hidden: the wrapping .progress-section div now owns the
+             accessible meter semantics (role="meter" + aria-valuetext); a
+             name/value here too would double-announce the same info. -->
         <mat-progress-bar mode="determinate" [value]="progressPercent()" aria-hidden="true"></mat-progress-bar>
         <span class="progress-text">{{ progressPercent() }}%</span>
       </div>
 
       @if (runStatus.current_cycle) {
+        @if (phaseLabel(runStatus.current_cycle.phase); as currentPhaseName) {
+          <p class="current-phase-label">Current phase: {{ currentPhaseName }}</p>
+        }
         <app-phase-stepper [currentPhase]="runStatus.current_cycle.phase" />
 
         <!-- Strategy preview (once ideation completes) -->
