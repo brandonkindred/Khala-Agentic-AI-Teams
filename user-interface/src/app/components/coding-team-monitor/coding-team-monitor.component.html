@@ -27,6 +27,7 @@
         [mode]="progressMode()"
         [value]="overallProgress() ?? 0"
         [color]="progressColor()"
+        [attr.aria-label]="'Run progress: ' + objectiveText()"
       ></mat-progress-bar>
 
       <div class="ct-monitor__stepper">
@@ -58,7 +59,11 @@
         </div>
         @if (activityFraction() !== null) {
           <div class="ct-monitor__activity-bar">
-            <mat-progress-bar mode="determinate" [value]="activityFraction()! * 100"></mat-progress-bar>
+            <mat-progress-bar
+              mode="determinate"
+              [value]="activityFraction()! * 100"
+              [attr.aria-label]="activityAgentLabel() + ' progress'"
+            ></mat-progress-bar>
             <span class="ct-monitor__activity-pct">{{ (activityFraction()! * 100).toFixed(0) }}%</span>
           </div>
         }
@@ -101,7 +106,11 @@
                     {{ agent.activity_detail || agent.current_step }}
                   </span>
                   @if (agentFraction(agent) !== null) {
-                    <mat-progress-bar mode="determinate" [value]="agentFraction(agent)! * 100"></mat-progress-bar>
+                    <mat-progress-bar
+                    mode="determinate"
+                    [value]="agentFraction(agent)! * 100"
+                    [attr.aria-label]="agent.display_name + ' — ' + agentStatusLabel(agent)"
+                  ></mat-progress-bar>
                   }
                 </div>
               }

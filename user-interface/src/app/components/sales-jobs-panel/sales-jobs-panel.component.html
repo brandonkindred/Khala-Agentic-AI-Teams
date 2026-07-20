@@ -33,6 +33,7 @@
                 mode="determinate"
                 [value]="job.progress"
                 class="job-progress"
+                [attr.aria-label]="job.product_name + ' pipeline progress'"
               />
               <span class="job-time">{{ timeAgo(job.last_updated_at) }}</span>
             </button>
