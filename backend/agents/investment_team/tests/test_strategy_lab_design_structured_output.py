@@ -289,8 +289,8 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
 
     assert captured["agent_key"] == "strategy_design"
     assert captured["phase"] == "design_generate_structured"
-    # Unlike RefinementAgent (charge=False), design charges every real LLM
-    # call including retries — the structured pre-flight is a real call too.
+    # Both DesignAgent and RefinementAgent charge every real LLM call
+    # including retries — the structured pre-flight is a real call too.
     assert captured["charge"] is True
 
 

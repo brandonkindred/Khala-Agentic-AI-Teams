@@ -398,12 +398,10 @@ class DesignAgent:
         starvation signal (``LLMSemanticExhaustionError.schema_forced``),
         which the caller inspects to decide whether to degrade to the
         unconstrained parse-retry loop. This method never falls back itself
-        and never retries. ``charge=True`` (unlike
-        ``RefinementAgent._invoke_structured``'s ``charge=False``): the
-        legacy loop below charges the design-phase budget on every real LLM
-        call including retries, so this pre-flight call must charge too for
-        budget-accounting parity. Mirrors
-        :meth:`RefinementAgent._invoke_structured`.
+        and never retries. ``charge=True``: the legacy loop below charges the
+        design-phase budget on every real LLM call including retries, so this
+        pre-flight call must charge too for budget-accounting parity. Mirrors
+        :meth:`RefinementAgent._invoke_structured`, which also charges.
         """
         client = get_strands_model("strategy_design").client
 
