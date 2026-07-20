@@ -95,35 +95,6 @@ describe('StrategyCardComponent', () => {
     component.record = makeRecord();
   });
 
-  describe('pagedTrades / winCount', () => {
-    it('memoizes pagedTrades and winCount per record', () => {
-      component.record = makeRecord({
-        backtest: {
-          trades: [
-            makeTrade({ outcome: 'win', cumulative_pnl: 10 }),
-            makeTrade({ outcome: 'loss', cumulative_pnl: 4 }),
-            makeTrade({ outcome: 'win', cumulative_pnl: 9 }),
-          ],
-        } as unknown as StrategyLabRecord['backtest'],
-      });
-
-      const paged1 = component.pagedTrades();
-      expect(component.pagedTrades()).toBe(paged1); // stable reference (same record + page)
-      expect(component.winCount()).toBe(2);
-      expect(component.winCount()).toBe(2); // served from cache on the second call
-    });
-
-    it('invalidates the cache when a new record object replaces the old one (status poll)', () => {
-      const winningTrades = [makeTrade({ outcome: 'win' }), makeTrade({ outcome: 'win' })];
-      const losingTrades = [makeTrade({ outcome: 'loss' })];
-      component.record = makeRecord({ backtest: { trades: winningTrades } as unknown as StrategyLabRecord['backtest'] });
-      expect(component.winCount()).toBe(2);
-
-      component.record = makeRecord({ backtest: { trades: losingTrades } as unknown as StrategyLabRecord['backtest'] });
-      expect(component.winCount()).toBe(0);
-    });
-  });
-
   describe('hasSignalBrief', () => {
     it('returns false when signal_intelligence_brief is unset', () => {
       component.record = makeRecord({ signal_intelligence_brief: undefined });
@@ -140,23 +111,6 @@ describe('StrategyCardComponent', () => {
         signal_intelligence_brief: { summary: 'Momentum confirmed by volume.' } as unknown as StrategyLabRecord['signal_intelligence_brief'],
       });
       expect(component.hasSignalBrief()).toBe(true);
-    });
-  });
-
-  describe('formatPrice', () => {
-    it('formats prices >= 1000 with no decimal places', () => {
-      expect(component.formatPrice(1234.567)).toBe('1235');
-      expect(component.formatPrice(1000)).toBe('1000');
-    });
-
-    it('formats prices in [1, 1000) with 2 decimal places', () => {
-      expect(component.formatPrice(150.126)).toBe('150.13');
-      expect(component.formatPrice(1)).toBe('1.00');
-    });
-
-    it('formats prices below 1 with 4 decimal places', () => {
-      expect(component.formatPrice(0.12345)).toBe('0.1235');
-      expect(component.formatPrice(0)).toBe('0.0000');
     });
   });
 

@@ -43,6 +43,14 @@ export function verdictColor(verdict: string | undefined | null): string {
   return 'neutral';
 }
 
+/** Precomputed per-gate template data — see `StrategyCardComponent.gateViewModels`. */
+export interface GateViewModel {
+  gate: QualityGateResult;
+  icon: string;
+  severityClass: string;
+  isRemedied: boolean;
+}
+
 /**
  * Icon for a quality-gate result. Takes the already-computed `isRemedied`
  * flag rather than the gate's owning record, since remediation status
