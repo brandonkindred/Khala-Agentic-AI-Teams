@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
-import type { PaperTradingComparison, QualityGateResult, StrategyLabRecord, TradeRecord } from '../../../models';
+import type { PaperTradingComparison, PaperTradingSession, QualityGateResult, StrategyLabRecord, TradeRecord } from '../../../models';
 import { StrategyCardComponent } from './strategy-card.component';
 
 function makeBacktest(overrides: Partial<StrategyLabRecord['backtest']> = {}): StrategyLabRecord['backtest'] {
@@ -490,6 +490,33 @@ describe('StrategyCardComponent', () => {
       }));
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('.signal-panel')).toBeTruthy();
+    });
+
+    it('gives the comparison table its own accessible name via a visually-hidden caption', () => {
+      const comparison: PaperTradingComparison = {
+        backtest_win_rate_pct: 55, paper_win_rate_pct: 52,
+        backtest_annualized_return_pct: 12, paper_annualized_return_pct: 11,
+        backtest_sharpe_ratio: 1.5, paper_sharpe_ratio: 1.4,
+        backtest_max_drawdown_pct: -5, paper_max_drawdown_pct: -6,
+        backtest_profit_factor: 1.8, paper_profit_factor: 1.7,
+        win_rate_aligned: true, return_aligned: true, sharpe_aligned: true,
+        drawdown_aligned: true, profit_factor_aligned: true, overall_aligned: true,
+      };
+      component.paperSession = {
+        status: 'completed',
+        verdict: 'ready_for_live',
+        trades: [],
+        data_period_start: '2025-01-01',
+        data_period_end: '2025-06-01',
+        comparison,
+      } as unknown as PaperTradingSession;
+      component.expanded = true;
+      fixture.detectChanges();
+
+      const caption: HTMLElement | null = fixture.nativeElement.querySelector('table.comparison-table > caption');
+      expect(caption).toBeTruthy();
+      expect(caption?.className).toContain('visually-hidden');
+      expect(caption?.textContent?.trim()).toBe('Backtest vs. paper-trading metric comparison');
     });
   });
 });

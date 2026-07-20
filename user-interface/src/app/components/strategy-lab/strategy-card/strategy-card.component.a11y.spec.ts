@@ -102,7 +102,11 @@ describe('StrategyCardComponent a11y', () => {
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.card-expanded-region')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('.gate-results')).toBeTruthy();
-    expect(fixture.nativeElement.querySelector('.trade-table')).toBeTruthy();
+    const table: HTMLElement | null = fixture.nativeElement.querySelector('.trade-table');
+    expect(table).toBeTruthy();
+    // The <table> itself needs its own accessible name — table-navigation
+    // screen-reader commands read the <table>'s name, not the wrapper's.
+    expect(table?.getAttribute('aria-label')).toBe('Trade ledger, 1 trades');
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

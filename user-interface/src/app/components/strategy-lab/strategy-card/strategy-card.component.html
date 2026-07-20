@@ -185,7 +185,8 @@
             role="group"
             [attr.aria-label]="tradeTableRegionLabel()"
           >
-            <table mat-table [dataSource]="pagedTrades()" class="trade-table">
+            <table mat-table [dataSource]="pagedTrades()" class="trade-table"
+                   [attr.aria-label]="tradeTableAccessibleName()">
 
               <!-- # -->
               <ng-container matColumnDef="trade_num">
@@ -441,6 +442,7 @@
                 [attr.aria-label]="comparisonTableRegionLabel()"
               >
                 <table class="comparison-table">
+                  <caption class="visually-hidden">Backtest vs. paper-trading metric comparison</caption>
                   <thead>
                     <tr>
                       <th>Metric</th>
