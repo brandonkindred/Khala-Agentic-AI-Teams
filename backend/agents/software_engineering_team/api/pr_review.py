@@ -284,9 +284,10 @@ def _fetch_head_files(
           head content fetched as non-blank text. A file whose content cannot be
           fetched (404, API error, blank, or a client without the capability) is
           simply omitted. Never raises: whole-file review is an enhancement, so a
-          fetch failure degrades (the CALLER decides whole-file vs. hunk mode and
-          only uses whole-file mode when EVERY reviewable file fetched, so a
-          partial result never silently narrows review scope).
+          fetch failure degrades (the CALLER uses whole-file mode for every
+          successfully-fetched file and falls back to hunk rendering only for the
+          files whose fetch failed, so a partial result never silently narrows
+          review scope).
     """
     targets = [f for f in files if _is_whole_file_reviewable(f)]
     if not targets:
@@ -378,20 +379,10 @@ _REVIEW_ADMISSION_LOCK = threading.Lock()
 def _pr_review_admission(owner: str, repo: str, pr_number: int):
     """Mutual exclusion for PR-review admission (duplicate scan + job creation).
 
-    Preconditions: ``owner``/``repo``/``pr_number`` identify the PR being admitted.
-    Postconditions: while the ``with`` body runs, no other admission for the same PR can
-        run — in this process via ``_REVIEW_ADMISSION_LOCK``, and across worker processes
-        via a Postgres transaction-scoped advisory lock (``pg_advisory_xact_lock`` keyed
-        on the casefolded ``owner/repo#pr``) when Postgres is configured. The advisory
-        lock auto-releases when its transaction ends (body exit, exception, or connection
-        death — crash-safe). When Postgres is unconfigured or the lock cannot be taken,
-        degrades to the process-local lock alone (logged): single-worker admission stays
-        fully serialized, and the residual cross-worker window is the pre-lock behavior,
-        never worse. Exceptions from the body (e.g. the 409) propagate unchanged; lock
-        acquisition itself never raises.
-
-    Invariants: the process lock is always taken before (and released after) the advisory
-        lock's transaction, so lock ordering is fixed and deadlock-free.
+    Delegates to :func:`advisory_lock` with ``_REVIEW_ADMISSION_LOCK`` as the
+    process lock, namespace ``"coding_team_review_pr"``, and key derived from
+    the casefolded ``owner/repo#pr`` string. See :func:`advisory_lock` for the
+    full locking contract (degradation, invariants, exception behavior).
     """
     with advisory_lock(
         _REVIEW_ADMISSION_LOCK,

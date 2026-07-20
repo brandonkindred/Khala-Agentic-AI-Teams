@@ -125,16 +125,10 @@ def _issue_creation_process_lock(job_id: str) -> threading.Lock:
 def _issue_creation_lock(job_id: str):
     """Mutual exclusion for filing GitHub issues from one review's proposals.
 
-    Preconditions: ``job_id`` names the review whose issue-filing is being serialized.
-    Postconditions: while the ``with`` body runs, no other issue-filing request for
-        this ``job_id`` can run — in this process via
-        :func:`_issue_creation_process_lock`, and across worker processes via a
-        Postgres transaction-scoped advisory lock (``pg_advisory_xact_lock`` keyed
-        on ``job_id``) when Postgres is configured, exactly mirroring
-        ``_pr_review_admission``. Degrades to the process-local lock alone
-        (logged) when Postgres is unconfigured or the lock cannot be taken —
-        single-worker serialization stays intact, and the residual cross-worker
-        window is the pre-lock behavior, never worse.
+    Delegates to :func:`advisory_lock` with :func:`_issue_creation_process_lock`
+    as the process lock, namespace ``"coding_team_issue_creation"``, and
+    ``job_id`` as the key. See :func:`advisory_lock` for the full locking
+    contract (degradation, invariants, exception behavior).
     """
     with advisory_lock(_issue_creation_process_lock(job_id), "coding_team_issue_creation", job_id):
         yield

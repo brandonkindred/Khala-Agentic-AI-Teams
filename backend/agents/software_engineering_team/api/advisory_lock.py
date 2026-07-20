@@ -44,22 +44,25 @@ def advisory_lock(process_lock: threading.Lock, namespace: str, key: str) -> Ite
                 get_conn,
                 is_postgres_enabled,
             )
-
+        except ImportError:
+            pass
+        else:
             if is_postgres_enabled():
-                conn = stack.enter_context(get_conn())
-                conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                    (namespace, key),
-                )
-        except Exception:  # noqa: BLE001 - degrade to process-local lock, never block the caller
-            # Release the Postgres connection (and its transaction) immediately; the
-            # advisory lock, if acquired, is now released.
-            stack.pop_all().close()
-            logger.warning(
-                "could not take cross-worker advisory lock (namespace=%s, key=%s); "
-                "falling back to process-local locking only",
-                namespace,
-                key,
-                exc_info=True,
-            )
+                try:
+                    conn = stack.enter_context(get_conn())
+                    conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                        (namespace, key),
+                    )
+                except Exception:  # noqa: BLE001 - degrade to process-local lock, never block the caller
+                    # Release the Postgres connection (and its transaction) immediately;
+                    # the advisory lock, if acquired, is now released.
+                    stack.pop_all().close()
+                    logger.warning(
+                        "could not take cross-worker advisory lock (namespace=%s, key=%s); "
+                        "falling back to process-local locking only",
+                        namespace,
+                        key,
+                        exc_info=True,
+                    )
         yield
