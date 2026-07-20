@@ -85,14 +85,14 @@ class _ReviewMixin:
         loop is detected the task is escalated to the Tech Lead (terminal or a fresh window) and
         this returns False so the caller does not push the unchanged work into review.
         """
-        from software_engineering_team import coding_team_orchestrator as _orch
-
         # Records the gate feedback and escalates on a no-change loop (so the Tech Lead adjudicates
         # over this round's reason); the feedback is now persisted for the status writes below.
         if self._escalate_if_no_change(task, feedback):
             return False
-        revision_count = task.revision_count + 1
-        if revision_count >= _orch.MAX_TASK_REVISIONS:
+
+        def _accept_as_is(revision_count: int) -> bool:
+            from software_engineering_team import coding_team_orchestrator as _orch
+
             logger.warning(
                 "Task %s exceeded max revisions (%d); accepting as-is",
                 task.id,
@@ -103,17 +103,24 @@ class _ReviewMixin:
             # the bump). Otherwise a later bounce would re-derive the count from a stale value.
             self.graph.update_task(task.id, revision_count=revision_count)
             return True  # accept despite issues
-        # revision_feedback already carries this round's gate feedback (appended above, before the
-        # no-change check); only the status/count change here, so do not re-append it.
-        self.graph.update_task(
-            task.id,
-            status=TaskStatus.TO_DO,
-            revision_count=revision_count,
+
+        def _bounce(revision_count: int) -> bool:
+            # revision_feedback already carries this round's gate feedback (appended above, before
+            # the no-change check); only the status/count change here, so do not re-append it.
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.TO_DO,
+                revision_count=revision_count,
+            )
+            # Release the task before the next round (status went to TO_DO above): it must be
+            # genuinely unassigned and its agent freed, or it stays mapped to its agent and can be
+            # double-assigned.
+            self.graph.unassign_task(task.id)
+            return False
+
+        return self._bump_and_check_revision_cap(
+            task, on_exhausted=_accept_as_is, on_continue=_bounce
         )
-        # Release the task before the next round (status went to TO_DO above): it must be genuinely
-        # unassigned and its agent freed, or it stays mapped to its agent and can be double-assigned.
-        self.graph.unassign_task(task.id)
-        return False
 
     def _user_decisions_for(self, task: Task) -> List[str]:
         """Render the user's already-made decisions for ``task`` as 'question → answer' lines.
@@ -291,8 +298,13 @@ class _ReviewMixin:
             - ``review`` is the value ``_compute_review`` returned for ``task``; ``diff`` is the diff
               it collected (empty string on an error review).
         Postconditions:
-            - ``error`` → task FAILED once (no revision loop); ``approved`` → branch merged and task
-              MERGED; otherwise → task sent back to its engineer for revision. Exactly one of these.
+            - ``error`` → task FAILED once (no revision loop); ``approved`` and merge succeeds →
+              branch merged and task MERGED; ``approved`` but merge fails without raising → task
+              sent back for revision (same as an unapproved review, via ``_request_revision``) with
+              the merge failure recorded as feedback; ``approved`` but ``merge_branch`` raises →
+              task marked MERGED anyway (best-effort, with a warning logged, so an unexpected git
+              failure doesn't crash the swarm); any other unapproved review → task sent back for
+              revision. Exactly one of these.
         """
         if review.get("error"):
             # The review itself could not run (e.g. evidence exceeded the model context window). Do
@@ -304,14 +316,30 @@ class _ReviewMixin:
             from software_engineering_team import coding_team_orchestrator as _orch
 
             try:
-                ok, _ = merge_branch(
+                ok, merge_msg = merge_branch(
                     self.path, _orch._feature_branch_name(task), DEVELOPMENT_BRANCH
                 )
-                if ok:
-                    self.graph.mark_branch_merged(task.id)
             except Exception as e:
                 logger.warning("Merge failed for %s: %s; marking merged anyway", task.id, e)
                 self.graph.mark_branch_merged(task.id)
+                return
+            if ok:
+                self.graph.mark_branch_merged(task.id)
+                return
+            # Non-exception merge failure (e.g. conflict): do NOT leave the task silently stuck
+            # IN_REVIEW — route it through the same revision-cap-bounded bounce every other
+            # stuck-review path uses, with the merge failure recorded as feedback.
+            logger.warning(
+                "Merge rejected for %s: %s; sending back for revision", task.id, merge_msg
+            )
+            self._request_revision(
+                task,
+                {
+                    "reason": f"Approved branch failed to merge: {merge_msg}",
+                    "requested_changes": [],
+                },
+                diff=diff,
+            )
         else:
             # Pass the diff already collected for the reviewer so the no-change check reuses it
             # rather than re-shelling out to git for the same branch.
@@ -405,8 +433,11 @@ class _ReviewMixin:
         Preconditions:
             - task is currently IN_REVIEW and assigned to a worker.
         Postconditions:
-            - task.status is IN_PROGRESS (revision pending) or FAILED (exhausted); never left
-              IN_REVIEW with no state change, so the swarm loop cannot deadlock on it.
+            - task.status is IN_PROGRESS (revision pending) or FAILED (exhausted); if the
+              no-change cap is reached first, control passes to ``_escalate_to_tech_lead``
+              instead, which may also leave the task MERGED (a "done" verdict) — see that
+              method's Postconditions. Never left IN_REVIEW with no state change, so the swarm
+              loop cannot deadlock on it.
         """
         from software_engineering_team import coding_team_orchestrator as _orch
 
