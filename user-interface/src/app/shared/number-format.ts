@@ -1,4 +1,4 @@
-/** Format a fraction-of-100 value as a percentage string, e.g. `formatPct(12.34)` → `'12.3%'`. */
+/** Format a percentage value as a string, e.g. `formatPct(12.34)` → `'12.3%'`. */
 export function formatPct(value: number, decimals = 1): string {
   return value.toFixed(decimals) + '%';
 }

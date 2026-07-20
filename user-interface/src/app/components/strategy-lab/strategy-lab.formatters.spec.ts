@@ -264,6 +264,31 @@ describe('entryRuleRows', () => {
     warnSpy.mockRestore();
   });
 
+  it('passes through an unrecognized predicate side string unchanged, warning about the conformance gap', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const rule: EntryRule = {
+      kind: 'entry',
+      side: 'long',
+      when: { lhs: 'bar.typo' as unknown as EntryRule['when']['lhs'], op: '>', rhs: 1 },
+    };
+    expect(entryRuleRows(rule)).toEqual([
+      { label: 'Side', value: 'Long' },
+      { label: 'Price Field', value: 'bar.typo' },
+      { label: 'Operator', value: '>' },
+      { label: 'Threshold', value: '1' },
+    ]);
+    expect(warnSpy).toHaveBeenCalledWith('Unrecognized predicate side string:', 'bar.typo');
+    warnSpy.mockRestore();
+  });
+
+  it('does not warn for a recognized BarFieldRef string', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const rule: EntryRule = { kind: 'entry', side: 'long', when: { lhs: 'bar.close', op: '>', rhs: 1 } };
+    entryRuleRows(rule);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it('returns an empty array for null/undefined', () => {
     expect(entryRuleRows(null as unknown as EntryRule)).toEqual([]);
     expect(entryRuleRows(undefined as unknown as EntryRule)).toEqual([]);

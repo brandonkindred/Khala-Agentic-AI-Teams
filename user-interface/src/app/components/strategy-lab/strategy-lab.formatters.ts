@@ -1,3 +1,4 @@
+import { isDevMode } from '@angular/core';
 import type {
   QualityGateResult,
   StrategyLabRecord,
@@ -183,7 +184,17 @@ function formatIndicatorParams(params: Record<string, IndicatorParamValue> | nul
 function formatPredicateSide(side: PredicateSide | number | null | undefined): string {
   if (side === null || side === undefined) return '—';
   if (typeof side === 'number') return String(side);
-  if (typeof side === 'string') return BAR_FIELD_LABELS[side as BarFieldRef] ?? side;
+  if (typeof side === 'string') {
+    const label = BAR_FIELD_LABELS[side as BarFieldRef];
+    // Defensive: a string that isn't a known BarFieldRef passes through unchanged
+    // rather than throwing/dropping data. Dev-only warn (see the object-shape
+    // fallback below for why this is gated) — surfaces a real conformance gap
+    // without shipping console noise to production for malformed upstream data.
+    if (label === undefined && isDevMode()) {
+      console.warn('Unrecognized predicate side string:', side);
+    }
+    return label ?? side;
+  }
   if (isIndicatorRef(side)) {
     const name = INDICATOR_DISPLAY_NAMES[side.name] ?? String(side.name);
     const paramsStr = formatIndicatorParams(side.params);
@@ -191,10 +202,13 @@ function formatPredicateSide(side: PredicateSide | number | null | undefined): s
     return paramsStr ? `${name}(${paramsStr})${sourceStr}` : `${name}${sourceStr}`;
   }
   // Defensive: unexpected shape for a predicate side — never throws, never drops data.
-  // Surfaced via console.warn (matching reviewDuration's clock-skew warning in
-  // review-metrics.ts) rather than silently swallowed, since it signals a real
-  // conformance gap in upstream data rather than an expected case.
-  console.warn('Unexpected predicate side shape:', side);
+  // Dev-only warn (isDevMode()) rather than the ungated console.warn this codebase's
+  // one other data-anomaly precedent uses (reviewDuration() in review-metrics.ts) —
+  // gated here specifically to avoid shipping console noise to production for
+  // malformed upstream data, per explicit reviewer preference on this PR.
+  if (isDevMode()) {
+    console.warn('Unexpected predicate side shape:', side);
+  }
   return typeof side === 'object' ? JSON.stringify(side) : String(side);
 }
 
