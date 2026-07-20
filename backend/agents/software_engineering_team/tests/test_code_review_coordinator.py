@@ -1983,6 +1983,21 @@ def test_side_effects_category_survives_chunk_output_validation() -> None:
     assert issues[0].category == "side-effects"
 
 
+def test_documentation_category_survives_chunk_output_validation() -> None:
+    """The "documentation" category (advertised to the chunk reviewer by
+    profiles.py's Documentation criterion / output contract, and used for a
+    docstring-vs-implementation mismatch) must be accepted by the same
+    validator as every other documented category rather than clamped to
+    "general" -- mirrors the side-effects regression above."""
+    seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
+    chunk = ReviewChunk(segments=[seg])
+    issues = _issues_from_chunk_output(
+        chunk,
+        [{"description": "d", "category": "documentation", "severity": "medium"}],
+    )
+    assert issues[0].category == "documentation"
+
+
 def test_pre_existing_tag_is_carried_through_and_defaults_false() -> None:
     """The optional ``pre_existing`` tag (used by the PR-review path to route a
     finding to an issue proposal instead of a PR comment) survives conversion,
