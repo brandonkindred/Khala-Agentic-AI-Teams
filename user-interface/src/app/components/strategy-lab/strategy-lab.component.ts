@@ -789,6 +789,21 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }, 50);
   }
 
+  /**
+   * Render a human-readable activity-log message for one progress-event
+   * phase/sub-phase pair, used by `addLogEntry` to populate the Strategy Lab
+   * run's live activity feed.
+   *
+   * Preconditions: `phase`/`subPhase` are the `phase`/`sub_phase` of a
+   *   `StrategyLabProgressEvent`, and `data` is that same event (the three
+   *   are never mixed from different events).
+   * Postconditions: always returns a non-empty string — every known
+   *   phase/sub-phase combination returns a specific message; an unrecognized
+   *   sub-phase within a known phase falls back to that phase's generic
+   *   in-progress message, and an unrecognized phase falls back to
+   *   `` `${phase} — ${subPhase ?? 'processing'}` ``. Never mutates `data` or
+   *   any component state.
+   */
   private buildLogMessage(phase: string, subPhase: string | undefined, data: StrategyLabProgressEvent): string {
     const strategy = data['strategy'] as { asset_class?: string; hypothesis?: string } | undefined;
     const round = data['refinement_round'] as number | undefined;
