@@ -93,7 +93,7 @@
                   }
                   @if (activityFraction() !== null) {
                     <div class="current-activity-progress">
-                      <mat-progress-bar mode="determinate" [value]="activityFraction()! * 100"></mat-progress-bar>
+                      <mat-progress-bar mode="determinate" [value]="activityFraction()! * 100" [attr.aria-label]="activityAgentLabel() + ' progress'"></mat-progress-bar>
                       <span class="current-activity-pct">{{ (activityFraction()! * 100).toFixed(0) }}%</span>
                     </div>
                   }
@@ -218,12 +218,13 @@
             mode="determinate"
             [value]="status.progress"
             [color]="status.status === 'failed' ? 'warn' : 'primary'"
+            aria-label="Job progress"
           ></mat-progress-bar>
           <span class="progress-label">{{ status.progress }}%</span>
         </div>
       } @else if ((status.status === 'running' || status.status === 'pending') && !status.waiting_for_answers) {
         <div class="progress-section">
-          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+          <mat-progress-bar mode="indeterminate" aria-label="Job progress"></mat-progress-bar>
         </div>
       }
 

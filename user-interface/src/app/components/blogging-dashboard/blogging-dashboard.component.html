@@ -119,7 +119,7 @@
               <td class="col-progress">
                 <div class="progress-cell">
                   @if (!isTerminalStatus(job.status)) {
-                    <mat-progress-bar mode="determinate" [value]="job.progress"></mat-progress-bar>
+                    <mat-progress-bar mode="determinate" [value]="job.progress" [attr.aria-label]="job.brief + ' progress'"></mat-progress-bar>
                     <span class="progress-label">{{ job.progress }}%</span>
                   } @else {
                     <span class="progress-label">{{ job.progress }}%</span>
@@ -198,7 +198,7 @@
         }
       </div>
       @if (!isTerminalStatus(selectedJobStatus.status)) {
-        <mat-progress-bar mode="determinate" [value]="selectedJobStatus.progress"></mat-progress-bar>
+        <mat-progress-bar mode="determinate" [value]="selectedJobStatus.progress" [attr.aria-label]="(selectedJobStatus.selected_title || 'Blog job') + ' progress'"></mat-progress-bar>
       }
       @if (selectedJobStatus.status_text) {
         <p class="job-detail-activity">{{ selectedJobStatus.status_text }}</p>

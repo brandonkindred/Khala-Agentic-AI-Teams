@@ -94,7 +94,7 @@
   } @else {
     <div class="jobs-table-container">
       @if (loading) {
-        <mat-progress-bar class="table-refresh-bar" mode="indeterminate"></mat-progress-bar>
+        <mat-progress-bar class="table-refresh-bar" mode="indeterminate" aria-label="Refreshing job list"></mat-progress-bar>
       }
       <table class="jobs-table">
         <thead>
@@ -152,10 +152,11 @@
                       mode="determinate"
                       [value]="getProgress(job)!"
                       [color]="job.unified.status === 'failed' ? 'warn' : 'primary'"
+                      [attr.aria-label]="getJobAriaLabel(job) + ' progress'"
                     ></mat-progress-bar>
                     <span class="progress-label">{{ getProgress(job) }}%</span>
                   } @else if (getShowIndeterminate(job)) {
-                    <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+                    <mat-progress-bar mode="indeterminate" [attr.aria-label]="getJobAriaLabel(job) + ' progress'"></mat-progress-bar>
                   } @else {
                     <span class="cell-empty">·</span>
                   }
