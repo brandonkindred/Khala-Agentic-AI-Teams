@@ -1323,6 +1323,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       });
   }
 
+  /**
+   * Prompts the user to confirm before wiping all strategy lab data, then calls the API to
+   * delete every lab run, lab strategy/backtest, and paper-trading session and refreshes the view.
+   */
   clearAllLabData(): void {
     this.confirmDestructive({
       title: 'Clear all strategy lab data',
