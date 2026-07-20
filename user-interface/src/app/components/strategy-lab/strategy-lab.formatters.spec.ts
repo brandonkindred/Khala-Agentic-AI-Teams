@@ -247,7 +247,8 @@ describe('entryRuleRows', () => {
     ]);
   });
 
-  it('stringifies a predicate side that is an object but not a recognized IndicatorRef shape', () => {
+  it('stringifies a predicate side that is an object but not a recognized IndicatorRef shape, warning about the malformed shape', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const rule: EntryRule = {
       kind: 'entry',
       side: 'long',
@@ -259,6 +260,8 @@ describe('entryRuleRows', () => {
       { label: 'Operator', value: '>' },
       { label: 'Threshold', value: '1' },
     ]);
+    expect(warnSpy).toHaveBeenCalledWith('Unexpected predicate side shape:', { foo: 'bar' });
+    warnSpy.mockRestore();
   });
 
   it('returns an empty array for null/undefined', () => {

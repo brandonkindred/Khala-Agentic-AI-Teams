@@ -191,6 +191,10 @@ function formatPredicateSide(side: PredicateSide | number | null | undefined): s
     return paramsStr ? `${name}(${paramsStr})${sourceStr}` : `${name}${sourceStr}`;
   }
   // Defensive: unexpected shape for a predicate side — never throws, never drops data.
+  // Surfaced via console.warn (matching reviewDuration's clock-skew warning in
+  // review-metrics.ts) rather than silently swallowed, since it signals a real
+  // conformance gap in upstream data rather than an expected case.
+  console.warn('Unexpected predicate side shape:', side);
   return typeof side === 'object' ? JSON.stringify(side) : String(side);
 }
 
