@@ -1856,3 +1856,145 @@ describe('StrategyLabComponent a11y — phase stepper state (WCAG 1.3.1 / 4.1.2)
     });
   }, 15000);
 });
+
+describe('StrategyLabComponent a11y — visible run progress (role=meter + current phase)', () => {
+  async function createFixture() {
+    const apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(NEVER),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    const integrationsSpy = {
+      getTradingViewConfig: vi.fn().mockReturnValue(
+        of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+      ),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        { provide: IntegrationsApiService, useValue: integrationsSpy },
+      ],
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
+
+    const fixture = TestBed.createComponent(StrategyLabComponent);
+    fixture.detectChanges(); // triggers ngOnInit
+    return fixture;
+  }
+
+  it('progress-section exposes role="meter" with a human-readable aria-valuetext', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 8,
+      completed_cycles: 4,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 4, phase: 'backtesting' },
+    });
+    fixture.detectChanges();
+
+    const meter: HTMLElement = fixture.nativeElement.querySelector('.progress-section');
+    expect(meter).toBeTruthy();
+    expect(meter.getAttribute('role')).toBe('meter');
+    expect(meter.getAttribute('aria-valuemin')).toBe('0');
+    expect(meter.getAttribute('aria-valuemax')).toBe('100');
+    expect(meter.getAttribute('aria-valuenow')).toBe('50');
+    expect(meter.getAttribute('aria-valuetext')).toBe('50% — Strategy 5 of 8');
+    expect(meter.getAttribute('aria-label')).toBe('Strategy Lab run progress');
+
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('aria-valuetext includes the batch position for a multi-batch run, matching the visible progress-title', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      batch_count: 3,
+      current_batch: 2,
+      current_cycle: { cycle_index: 1, phase: 'ideating' },
+    });
+    fixture.detectChanges();
+
+    const meter: HTMLElement = fixture.nativeElement.querySelector('.progress-section');
+    expect(meter.getAttribute('aria-valuetext')).toBe('0% — Batch 2 of 3 — Strategy 1 of 5');
+
+    const sightedText: string = fixture.nativeElement.querySelector('.progress-title').textContent;
+    expect(sightedText).toContain('Batch 2 of 3');
+    expect(sightedText).toContain('Strategy 1 of 5');
+
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('renders a visible "Current phase" readout adjacent to the stepper', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 1, phase: 'backtesting' },
+    });
+    fixture.detectChanges();
+
+    const label: HTMLElement = fixture.nativeElement.querySelector('.current-phase-label');
+    expect(label).toBeTruthy();
+    expect(label.textContent?.trim()).toBe('Current phase: Backtest');
+
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('omits the "Current phase" readout when there is no current_cycle yet', async () => {
+    const fixture = await createFixture();
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 1,
+      skipped_cycles: 0,
+      completed_record_ids: ['rec-1'],
+    });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('.current-phase-label')).toBeNull();
+
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+});
