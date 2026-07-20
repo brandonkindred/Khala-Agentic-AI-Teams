@@ -1,9 +1,9 @@
 """Indicator-coverage report aggregation for Strategy Lab strategies (#448).
 
 Aggregates per-leg and per-group evaluation results from the AST-extracted
-predicate groups (see :mod:`investment_team.strategy_lab.coverage_probe.
-predicate_resolution`) into a partial :class:`CoverageReport`, via the
-public entry point :func:`run_indicator_probe`.
+predicate groups (see :mod:`.predicate_resolution`) into a partial
+:class:`CoverageReport`, via the public entry point
+:func:`run_indicator_probe`.
 
 Pure: no I/O, no LLM, no subprocess. Bounded: per-symbol vectorised pandas
 evaluation only when at least one recognised subcondition exists. The
