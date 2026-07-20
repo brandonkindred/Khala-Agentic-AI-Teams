@@ -1243,6 +1243,6 @@ def _safe_comment(
     try:
         client.add_issue_comment(owner, repo, number, scrub_token_from_text(body))
         return True
-    except GitHubAPIError as e:
+    except Exception as e:  # noqa: BLE001 - comment is best-effort, never fails the job
         logger.warning("Failed to comment on issue #%s: %s", number, e)
         return False

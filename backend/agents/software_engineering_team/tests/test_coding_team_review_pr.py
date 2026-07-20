@@ -3300,6 +3300,43 @@ class TestParallelReviewReads:
         assert _fetch_existing_comments(_C(), "o", "r", 7) == []
 
 
+class TestSafeCommentUnit:
+    """_safe_comment's docstring promises "Never raises"; this must hold for any
+    failure from add_issue_comment, not just GitHubAPIError."""
+
+    def test_returns_false_on_github_api_error(self, review_app) -> None:
+        from software_engineering_team.coding_team.api.pr_review import _safe_comment
+
+        class _C:
+            def add_issue_comment(self, o, r, n, body):
+                raise GitHubAPIError(403, "rate limited")
+
+        assert _safe_comment(_C(), "o", "r", 7, "body") is False
+
+    def test_returns_false_on_non_api_error(self, review_app) -> None:
+        """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) must
+        ALSO degrade to False rather than propagate."""
+        from software_engineering_team.coding_team.api.pr_review import _safe_comment
+
+        class _C:
+            def add_issue_comment(self, o, r, n, body):
+                raise RuntimeError("unexpected")
+
+        assert _safe_comment(_C(), "o", "r", 7, "body") is False
+
+    def test_returns_true_on_success(self, review_app) -> None:
+        from software_engineering_team.coding_team.api.pr_review import _safe_comment
+
+        posted: list[tuple[int, str]] = []
+
+        class _C:
+            def add_issue_comment(self, o, r, n, body):
+                posted.append((n, body))
+
+        assert _safe_comment(_C(), "o", "r", 7, "body") is True
+        assert posted == [(7, "body")]
+
+
 # ---------------------------------------------------------------------------
 # Pre-existing findings -> issue proposals -> GitHub issues
 # ---------------------------------------------------------------------------
