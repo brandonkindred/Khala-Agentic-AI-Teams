@@ -1201,10 +1201,10 @@ def _parse_bar_date(d: str) -> Any:
 
 
 def _resolve_vix_provider() -> Optional[Callable[[Sequence[Any]], List[float]]]:
-    """Return a VIX provider callable when ``STRATEGY_LAB_VIX_SOURCE`` is
-    set, otherwise None so :func:`vix_quartile_subwindows` falls back to
-    realized-vol on the benchmark series. Production deployments can
-    wire in a Yahoo ``^VIX`` fetcher here without touching callers."""
+    """Always returns None today, so :func:`vix_quartile_subwindows` falls
+    back to realized-vol on the benchmark series. ``STRATEGY_LAB_VIX_SOURCE``
+    is a reserved hook point for a future production VIX provider (e.g. a
+    Yahoo ``^VIX`` fetcher); setting it currently has no effect."""
     source = os.environ.get("STRATEGY_LAB_VIX_SOURCE", "").strip().lower()
     if not source:
         return None
