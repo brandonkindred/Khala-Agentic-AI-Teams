@@ -107,6 +107,11 @@ describe('StrategyCardComponent a11y', () => {
     // The <table> itself needs its own accessible name — table-navigation
     // screen-reader commands read the <table>'s name, not the wrapper's.
     expect(table?.getAttribute('aria-label')).toBe('Trade ledger, 1 trades');
+    // The paper-trading panel is a real child component, not just markup —
+    // assert it actually rendered its CTA, not just that this test's own
+    // description claims it did.
+    expect(fixture.nativeElement.querySelector('app-paper-trading-panel')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('.paper-trade-btn')).toBeTruthy();
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
@@ -197,8 +202,11 @@ describe('StrategyCardComponent a11y', () => {
     const openTags = html.match(/<mat-icon\b[^>]*>/g) ?? [];
 
     // Sanity check: fails loudly if the template moved/renamed and the regex
-    // above stopped matching anything, rather than passing vacuously.
-    expect(openTags.length).toBeGreaterThan(15);
+    // above stopped matching anything, rather than passing vacuously. Lower
+    // than before extraction — the paper-trading section's icons moved to
+    // PaperTradingPanelComponent's own template (and its own equivalent
+    // check), see paper-trading-panel.component.a11y.spec.ts.
+    expect(openTags.length).toBeGreaterThan(5);
 
     const isExplicit = (tag: string): boolean => {
       if (/aria-hidden\s*=\s*"true"/.test(tag)) return true;
