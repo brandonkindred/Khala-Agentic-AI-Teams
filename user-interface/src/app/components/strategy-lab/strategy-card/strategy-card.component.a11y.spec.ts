@@ -107,6 +107,11 @@ describe('StrategyCardComponent a11y', () => {
     // The <table> itself needs its own accessible name — table-navigation
     // screen-reader commands read the <table>'s name, not the wrapper's.
     expect(table?.getAttribute('aria-label')).toBe('Trade ledger, 1 trades');
+    // The paper-trading panel is a real child component, not just markup —
+    // assert it actually rendered its CTA, not just that this test's own
+    // description claims it did.
+    expect(fixture.nativeElement.querySelector('app-paper-trading-panel')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('.paper-trade-btn')).toBeTruthy();
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 

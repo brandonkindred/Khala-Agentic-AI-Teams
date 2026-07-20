@@ -62,7 +62,14 @@ export class PaperTradingPanelComponent {
     this.paperTradeRequested.emit();
   }
 
-  /** Accessible name for the paper-trading comparison table's scrollable wrapper (same rationale as the trade-ledger's own equivalent in `TradeLedgerComponent`). */
+  /**
+   * Accessible name for the paper-trading comparison table's scrollable
+   * wrapper (same rationale as the trade-ledger's own equivalent in
+   * `TradeLedgerComponent`).
+   *
+   * Preconditions: `record.strategy.asset_class` is a non-empty string.
+   * Postconditions: returns a non-empty, state-independent label.
+   */
   comparisonTableRegionLabel(): string {
     return `${this.record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
   }
