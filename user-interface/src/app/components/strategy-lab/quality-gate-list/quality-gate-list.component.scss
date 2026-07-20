@@ -1,0 +1,60 @@
+.panel-icon {
+  font-size: 1.1rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  vertical-align: middle;
+  margin-right: 0.4rem;
+  color: var(--kh-text-muted);
+}
+
+// ── Quality Gates ──────────────────────────────────────────────────────────
+
+.gate-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gate-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--kh-radius-sm);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+
+  .gate-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .gate-name {
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 140px;
+    color: var(--kh-text-primary);
+  }
+
+  .gate-detail {
+    color: var(--kh-text-tertiary);
+  }
+
+  &.gate-info .gate-icon { color: var(--kh-success); }
+  &.gate-warning .gate-icon { color: var(--kh-warning); }
+  &.gate-critical .gate-icon { color: var(--kh-error); }
+  &.gate-remedied .gate-icon { color: var(--kh-warning); }
+  &.gate-warning { background: var(--kh-warning-subtle); }
+  &.gate-critical { background: var(--kh-error-subtle); }
+  &.gate-remedied { background: var(--kh-warning-subtle); opacity: 0.75; }
+}
+
+.gate-remedied-label {
+  font-style: italic;
+  color: var(--kh-warning);
+  font-size: 0.75rem;
+  margin-left: 0.25rem;
+}

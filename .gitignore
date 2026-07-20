@@ -84,3 +84,4 @@ backend/.tmp/
 # Author profile (PII): never commit real profile, only the example.
 **/author_profile.yaml
 !**/author_profile.example.yaml
+.worktrees/
