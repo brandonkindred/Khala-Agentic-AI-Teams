@@ -1,0 +1,199 @@
+@use '../card-shared';
+
+// .card-divider and .narrative-icon come from ../_card-shared.scss (also
+// used by StrategyCardComponent's own remaining template).
+
+// ── Paper Trade button ──────────────────────────────────────────────────────
+
+.paper-trade-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 38px;
+  flex-shrink: 0;
+  margin: -4px 0 0 0;
+  color: var(--kh-accent-text);
+
+  &:hover:not(:disabled) {
+    color: var(--kh-accent);
+  }
+}
+
+// ── Paper Trading ─────────────────────────────────────────────────────────────
+
+.paper-trading-section {
+  margin-top: 0.5rem;
+}
+
+.paper-trading-skipped {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.75rem;
+  color: var(--kh-text-muted);
+}
+
+.paper-trading-skipped-inline {
+  margin-top: 0.75rem;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.paper-skip-icon {
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.paper-skip-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.paper-skip-title {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--kh-text);
+}
+
+.paper-skip-reason {
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+
+.rerun-paper-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 32px;
+  font-size: 0.8rem;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.paper-trading-result {
+  margin-top: 0.25rem;
+}
+
+.paper-verdict-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.paper-verdict-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+
+  mat-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+  }
+
+  &.verdict-ready {
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
+  }
+
+  &.verdict-not-performant {
+    background: var(--kh-warning-subtle);
+    color: var(--kh-warning);
+  }
+
+  &.verdict-inconclusive {
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
+  }
+
+  &.verdict-running {
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
+  }
+}
+
+.paper-meta {
+  font-size: 0.8rem;
+  color: var(--kh-text-tertiary);
+}
+
+.comparison-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--kh-border);
+
+  &:focus-visible {
+    // Transparent outline shows in forced-colors / High Contrast Mode,
+    // where the inset box-shadow ring is dropped (WCAG 2.4.7).
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 2px var(--kh-focus-ring);
+  }
+}
+
+.comparison-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+
+  th {
+    background: var(--kh-surface-3);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--kh-text-secondary);
+    padding: 6px 12px;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 5px 12px;
+    border-top: 1px solid var(--kh-border);
+    white-space: nowrap;
+  }
+}
+
+.cmp-label {
+  font-weight: 500;
+}
+
+.cmp-aligned {
+  text-align: center;
+
+  mat-icon {
+    font-size: 1.1rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    vertical-align: middle;
+  }
+
+  .aligned-yes { color: var(--kh-success); }
+  .aligned-no  { color: var(--kh-error); }
+}
+
+.divergence-analysis {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--kh-text-secondary);
+  padding: 0.75rem;
+  background: var(--kh-warning-subtle);
+  border-radius: 6px;
+  border: 1px solid var(--kh-warning-subtle);
+
+  p {
+    margin: 0;
+  }
+}
