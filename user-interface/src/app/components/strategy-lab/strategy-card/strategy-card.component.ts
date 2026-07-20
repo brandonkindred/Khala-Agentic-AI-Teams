@@ -46,8 +46,10 @@ interface ComparisonRow {
  * paper-trading section. Owns no cross-record state (expand/collapse
  * tracking, delete-in-flight, pagination, paper-trading-in-flight all live on
  * the host, which passes the derived value for *this* record down as
- * `@Input()`s) and performs no side effects itself — every user action is
- * reported up via the `@Output()`s below for the host to act on.
+ * `@Input()`s) and performs no side effects itself except for
+ * `copyStrategyCode`, which writes to the clipboard and manages a
+ * confirmation timer. Every other user action is reported up via the
+ * `@Output()`s below for the host to act on.
  *
  * Preconditions: `record` is set before the first render (required input).
  * Postconditions: renders identically for the same `record`/inputs regardless
