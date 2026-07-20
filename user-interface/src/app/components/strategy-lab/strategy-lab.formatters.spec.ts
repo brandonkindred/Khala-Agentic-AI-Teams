@@ -1,9 +1,11 @@
 import type { QualityGateResult, StrategyLabRecord } from '../../models';
 import {
   ASSET_CLASS_ICONS,
+  flattenObjectRows,
   gateIcon,
   gateSeverityClass,
   getAssetClassIcon,
+  humanizeKey,
   publishabilitySkipLabel,
   returnColor,
   returnColorLabel,
@@ -135,5 +137,59 @@ describe('publishabilitySkipLabel', () => {
 
   it('returns null when neither reason is present', () => {
     expect(publishabilitySkipLabel(makeRecord())).toBeNull();
+  });
+});
+
+describe('humanizeKey', () => {
+  it('title-cases a snake_case key', () => {
+    expect(humanizeKey('target_annual_vol')).toBe('Target Annual Vol');
+  });
+
+  it('title-cases a single-word key', () => {
+    expect(humanizeKey('kind')).toBe('Kind');
+  });
+});
+
+describe('flattenObjectRows', () => {
+  it('returns an empty array for null/undefined', () => {
+    expect(flattenObjectRows(null)).toEqual([]);
+    expect(flattenObjectRows(undefined)).toEqual([]);
+  });
+
+  it('falls back to a single "Value" row for a primitive, never throwing', () => {
+    expect(flattenObjectRows(42)).toEqual([{ label: 'Value', value: '42' }]);
+    expect(flattenObjectRows('plain string')).toEqual([{ label: 'Value', value: 'plain string' }]);
+  });
+
+  it('falls back to a single "Value" row for an array, never throwing', () => {
+    expect(flattenObjectRows([1, 2, 3])).toEqual([{ label: 'Value', value: '1,2,3' }]);
+  });
+
+  it('flattens a flat object into humanized { label, value } rows, in key order', () => {
+    expect(flattenObjectRows({ indicator: 'rsi', operator: '>', value: 30 })).toEqual([
+      { label: 'Indicator', value: 'rsi' },
+      { label: 'Operator', value: '>' },
+      { label: 'Value', value: '30' },
+    ]);
+  });
+
+  it('drops keys whose value is null or undefined, rather than rendering them', () => {
+    expect(flattenObjectRows({ kind: 'stop_loss', pct: 5, note: null, basis: undefined })).toEqual([
+      { label: 'Kind', value: 'stop_loss' },
+      { label: 'Pct', value: '5' },
+    ]);
+  });
+
+  it('JSON.stringifies a nested-object value rather than recursing or throwing', () => {
+    expect(
+      flattenObjectRows({ side: 'long', when: { lhs: 'rsi', op: '>', rhs: 60 } }),
+    ).toEqual([
+      { label: 'Side', value: 'long' },
+      { label: 'When', value: '{"lhs":"rsi","op":">","rhs":60}' },
+    ]);
+  });
+
+  it('handles an empty object by returning no rows', () => {
+    expect(flattenObjectRows({})).toEqual([]);
   });
 });
