@@ -124,6 +124,42 @@ describe('StrategyCardComponent', () => {
     });
   });
 
+  describe('hasSignalBrief', () => {
+    it('returns false when signal_intelligence_brief is unset', () => {
+      component.record = makeRecord({ signal_intelligence_brief: undefined });
+      expect(component.hasSignalBrief()).toBe(false);
+    });
+
+    it('returns false when signal_intelligence_brief is an empty object', () => {
+      component.record = makeRecord({ signal_intelligence_brief: {} as StrategyLabRecord['signal_intelligence_brief'] });
+      expect(component.hasSignalBrief()).toBe(false);
+    });
+
+    it('returns true when signal_intelligence_brief has at least one key', () => {
+      component.record = makeRecord({
+        signal_intelligence_brief: { summary: 'Momentum confirmed by volume.' } as unknown as StrategyLabRecord['signal_intelligence_brief'],
+      });
+      expect(component.hasSignalBrief()).toBe(true);
+    });
+  });
+
+  describe('formatPrice', () => {
+    it('formats prices >= 1000 with no decimal places', () => {
+      expect(component.formatPrice(1234.567)).toBe('1235');
+      expect(component.formatPrice(1000)).toBe('1000');
+    });
+
+    it('formats prices in [1, 1000) with 2 decimal places', () => {
+      expect(component.formatPrice(150.126)).toBe('150.13');
+      expect(component.formatPrice(1)).toBe('1.00');
+    });
+
+    it('formats prices below 1 with 4 decimal places', () => {
+      expect(component.formatPrice(0.12345)).toBe('0.1235');
+      expect(component.formatPrice(0)).toBe('0.0000');
+    });
+  });
+
   describe('isRemedied / gateIcon / gateSeverityClass', () => {
     beforeEach(() => {
       component.record = makeRecord({ refinement_rounds: 2, quality_gate_results: [] });
@@ -441,6 +477,19 @@ describe('StrategyCardComponent', () => {
       const skipped: HTMLElement = fixture.nativeElement.querySelector('.paper-trading-skipped');
       expect(skipped).toBeTruthy();
       expect(skipped.textContent).toContain('realism_failed');
+    });
+
+    it('renders the Signal Intelligence panel only when hasSignalBrief() is true', () => {
+      component.record = makeRecord({ signal_intelligence_brief: undefined });
+      component.expanded = true;
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.signal-panel')).toBeNull();
+
+      fixture.componentRef.setInput('record', makeRecord({
+        signal_intelligence_brief: { summary: 'Momentum confirmed by volume.' } as unknown as StrategyLabRecord['signal_intelligence_brief'],
+      }));
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.signal-panel')).toBeTruthy();
     });
   });
 });

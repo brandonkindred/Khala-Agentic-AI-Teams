@@ -463,6 +463,10 @@
 // ── Paper Trade button ──────────────────────────────────────────────────────
 
 .paper-trade-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 38px;
   flex-shrink: 0;
   margin: -4px 0 0 0;
   color: var(--kh-accent-text);
@@ -513,13 +517,6 @@
   font-size: 0.8rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   word-break: break-word;
-}
-
-.paper-trade-btn {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  height: 38px;
 }
 
 .rerun-paper-btn {
