@@ -3174,6 +3174,43 @@ class TestParallelReviewReads:
         assert [f.filename for f in files] == ["a.py"]
         assert reviewer_login == ""
 
+    def test_fetch_pr_metadata_get_authenticated_login_non_api_error_degrades(
+        self, review_app
+    ) -> None:
+        """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) from
+        get_authenticated_login must ALSO degrade to "" rather than propagate —
+        the docstring promises this lookup "must never fail the review", not
+        just for GitHubAPIError."""
+        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+
+        class _C:
+            def get_pull_request(self, o, r, n):
+                return PullRequestDetail(
+                    number=n,
+                    html_url=f"https://example/pull/{n}",
+                    head="feature",
+                    base="main",
+                    head_sha="sha1",
+                    title="Add feature",
+                    body="body",
+                    draft=False,
+                    author="alice",
+                    state="open",
+                    updated_at="2026-01-01T00:00:00Z",
+                    labels=(),
+                )
+
+            def get_pull_request_files(self, o, r, n):
+                return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+
+            def get_authenticated_login(self):
+                raise RuntimeError("unexpected")
+
+        pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        assert pr.number == 7
+        assert [f.filename for f in files] == ["a.py"]
+        assert reviewer_login == ""
+
     def test_fetch_existing_comments_concurrent_fetches_do_not_corrupt_results(
         self, review_app
     ) -> None:
@@ -3239,6 +3276,25 @@ class TestParallelReviewReads:
             def list_issue_comments(self, o, r, n):
                 if failing_method == "list_issue_comments":
                     raise GitHubAPIError(500, "boom")
+                return []
+
+        assert _fetch_existing_comments(_C(), "o", "r", 7) == []
+
+    def test_fetch_existing_comments_non_api_error_degrades_whole_result(self, review_app) -> None:
+        """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) from any
+        of the three calls must ALSO degrade the whole result to [] — the
+        docstring promises "Any failure ... degrades the WHOLE result", not
+        just a GitHubAPIError."""
+        from software_engineering_team.coding_team.api.pr_review import _fetch_existing_comments
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                raise RuntimeError("unexpected")
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                return set()
+
+            def list_issue_comments(self, o, r, n):
                 return []
 
         assert _fetch_existing_comments(_C(), "o", "r", 7) == []
