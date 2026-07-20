@@ -958,6 +958,10 @@ class StrategyLabOrchestrator(DesignMixin):
         # avoids recomputing and recording duplicate reachability gate results
         # every round for an unchanged spec.
         last_reachability_sig: Optional[tuple] = None
+        # Pre-bound so the post-loop invariant check below never sees an
+        # unbound name if MAX_CODE_REFINEMENT_ROUNDS is ever 0 (loop body
+        # never executes).
+        round_num = -1
 
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
