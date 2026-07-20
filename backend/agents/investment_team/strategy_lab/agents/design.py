@@ -449,38 +449,109 @@ class DesignAgent:
         :class:`~..exceptions.StrategyLabLLMError` when the LLM envelope
         exhausts its transport retries / budget.
 
-        When the active provider supports provider-enforced structured
-        decoding (:func:`_structured_output_available`), a single
-        schema-constrained call is attempted first via
-        :meth:`_invoke_structured` — no parse-retry loop needed for
-        unparseable JSON, since a schema-conformant decode cannot emit it.
-        Any failure OTHER than a ``schema_forced`` starvation signal
-        propagates immediately (unchanged fail-fast semantics for a genuine
-        transport/auth failure) rather than degrading — a deliberate,
-        narrow reading of this call site's degrade contract, mirroring
-        :meth:`RefinementAgent._invoke_and_parse`. On capability absence, or
-        on ``schema_forced`` starvation specifically, this falls through to
-        the unconstrained parse-retry loop below, reproducing today's
-        behavior exactly.
+        Delegates to :meth:`_structured_preflight` (the provider-enforced
+        schema-constrained call, with its own DSL-correction re-prompt on a
+        shape miss) and :meth:`_legacy_parse_retry_loop` (the unconstrained
+        JSON-and-DSL retry loop) — see their docstrings for the full degrade
+        contract. This method's own contract — inputs, outputs, exceptions
+        — is unchanged by the split.
+        """
+        structured_attempted = _structured_output_available()
+        prompt = user_prompt
+        if structured_attempted:
+            finalized, prompt = self._structured_preflight(system_prompt, user_prompt)
+            if finalized is not None:
+                return finalized
+
+        return self._legacy_parse_retry_loop(
+            system_prompt, prompt, user_prompt, structured_attempted
+        )
+
+    def _structured_preflight(
+        self, system_prompt: str, user_prompt: str
+    ) -> Tuple[Optional[Tuple[Dict[str, Any], str]], str]:
+        """Attempt one provider-enforced schema-constrained design call.
+
+        Pre: ``_structured_output_available()`` is True (checked by the
+        caller, :meth:`_invoke_and_parse`); ``system_prompt`` / ``user_prompt``
+        are non-empty strings.
+        Post: returns ``(finalized, prompt)``.
+          * On success: ``finalized`` is the ``(parsed, rationale)`` tuple
+            the caller should return immediately; ``prompt`` is
+            ``user_prompt`` (unused in that case).
+          * On a DSL-shape rejection (:class:`StrategySpecParseError`):
+            ``finalized`` is ``None`` and ``prompt`` is a correction prompt
+            built via :func:`_build_correction_prompt` — the caller must
+            fall through to :meth:`_legacy_parse_retry_loop` with it.
+          * On ``schema_forced`` starvation: ``finalized`` is ``None`` and
+            ``prompt`` is ``user_prompt`` unchanged.
+        Any :class:`~..exceptions.StrategyLabLLMError` OTHER than a
+        ``schema_forced`` semantic-exhaustion signal propagates immediately
+        (unchanged fail-fast semantics for a genuine transport/auth
+        failure) rather than degrading — a deliberate, narrow reading of
+        this call site's degrade contract, mirroring
+        :meth:`RefinementAgent._invoke_and_parse`.
 
         Structured decoding constrains JSON *shape*, not the DSL semantic
         rules :func:`validate_structured_rules` enforces — a schema-valid
         response can still fail DSL validation (e.g. a bar-field literal
-        wrapped incorrectly). When that happens on the structured pre-flight
-        call, this method re-prompts with :func:`_build_correction_prompt`
-        and hands off to the SAME unconstrained retry loop below, which gets
-        its own full ``STRATEGY_LAB_DESIGN_PARSE_RETRIES`` budget — the
-        DSL-correction retry path stays in place regardless of
-        structured-output availability; only the unparseable-JSON
+        wrapped incorrectly). That miss re-prompts with
+        :func:`_build_correction_prompt` and hands off to
+        :meth:`_legacy_parse_retry_loop`, which gets its own full
+        ``STRATEGY_LAB_DESIGN_PARSE_RETRIES`` budget — the DSL-correction
+        retry path stays in place regardless of structured-output
+        availability; only the unparseable-JSON
         (``build_json_correction_prompt``) resend is eliminated on the
         structured happy path.
+        """
+        try:
+            parsed = self._invoke_structured(system_prompt, user_prompt)
+        except StrategyLabLLMError as exc:
+            cause = exc.cause
+            if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
+                raise
+            logger.warning(
+                "structured design decode starved (schema_forced); degrading to "
+                "unconstrained parse-retry loop."
+            )
+            return None, user_prompt
+
+        try:
+            finalized = _finalize_parsed(parsed)
+        except StrategySpecParseError as exc:
+            logger.warning(
+                "DesignAgent (structured) emitted invalid rule shape; "
+                "re-prompting via the DSL-correction path: %s",
+                exc,
+            )
+            return None, _build_correction_prompt(user_prompt, exc)
+
+        logger.info(
+            "strategy_lab structured_output outcome=succeeded "
+            "agent=strategy_design phase=design_generate_structured",
+        )
+        return finalized, user_prompt
+
+    def _legacy_parse_retry_loop(
+        self, system_prompt: str, prompt: str, user_prompt: str, structured_attempted: bool
+    ) -> Tuple[Dict[str, Any], str]:
+        """Unconstrained JSON-and-DSL retry loop, one fresh ``Agent`` per attempt.
+
+        Pre: ``system_prompt`` / ``user_prompt`` are non-empty strings;
+        ``prompt`` is the prompt to send on the first attempt — either
+        ``user_prompt`` unchanged, or a DSL-correction prompt handed off by
+        :meth:`_structured_preflight`; ``structured_attempted`` is a
+        diagnostic flag used only in log messages.
+        Post: returns ``(parsed, rationale)`` on success. Raises
+        ``ValueError`` on malformed JSON, or
+        :class:`StrategySpecParseError` on prose/off-shape rules, once the
+        retry budget (``STRATEGY_LAB_DESIGN_PARSE_RETRIES``, default 2
+        retries → 3 attempts total; ``0`` disables retry) is exhausted.
 
         On :class:`StrategySpecParseError` the agent re-prompts the LLM
         with the offending field and pydantic error as feedback (the model
         often slips the DSL by exactly one field — wrapping a bar-field
         literal in an IndicatorRef, or naming an indicator in ``source``).
-        Budget is set by ``STRATEGY_LAB_DESIGN_PARSE_RETRIES`` (default 2
-        retries → 3 attempts total; ``0`` disables retry).
 
         Each attempt builds a fresh ``Agent``: the correction re-prompt must
         be read as "reissue the whole object correctly given this guidance",
@@ -490,36 +561,6 @@ class DesignAgent:
         it toward defending the malformed shape it just produced.
         """
         retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
-        prompt = user_prompt
-
-        structured_attempted = _structured_output_available()
-        if structured_attempted:
-            try:
-                parsed = self._invoke_structured(system_prompt, user_prompt)
-            except StrategyLabLLMError as exc:
-                cause = exc.cause
-                if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
-                    raise
-                logger.warning(
-                    "structured design decode starved (schema_forced); degrading to "
-                    "unconstrained parse-retry loop."
-                )
-            else:
-                try:
-                    finalized = _finalize_parsed(parsed)
-                except StrategySpecParseError as exc:
-                    logger.warning(
-                        "DesignAgent (structured) emitted invalid rule shape; "
-                        "re-prompting via the DSL-correction path: %s",
-                        exc,
-                    )
-                    prompt = _build_correction_prompt(user_prompt, exc)
-                else:
-                    logger.info(
-                        "strategy_lab structured_output outcome=succeeded "
-                        "agent=strategy_design phase=design_generate_structured",
-                    )
-                    return finalized
 
         for attempt in range(retries + 1):
             # A history-free agent per attempt (see method docstring). Strands
@@ -581,7 +622,7 @@ class DesignAgent:
 
         # Unreachable: the loop either returns on success or re-raises on
         # the final attempt. Kept so type-checkers see a definite return.
-        raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
+        raise AssertionError("unreachable: _legacy_parse_retry_loop exited without return")
 
     def _with_self_review(
         self,
@@ -875,10 +916,9 @@ def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") ->
 def _finalize_parsed(parsed: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     """Strip stray ``strategy_code``, pop ``rationale``, and validate DSL rule shape.
 
-    Shared by both branches of :meth:`DesignAgent._invoke_and_parse` (the
-    structured pre-flight call and the legacy retry loop) so the
-    post-processing contract is identical regardless of how ``parsed`` was
-    obtained.
+    Shared by both :meth:`DesignAgent._structured_preflight` and
+    :meth:`DesignAgent._legacy_parse_retry_loop` so the post-processing
+    contract is identical regardless of how ``parsed`` was obtained.
 
     Pre: ``parsed`` is a JSON-shape-valid dict (JSON-schema-conformant via
     structured decoding, or brace-extracted via :func:`extract_json_object`).
