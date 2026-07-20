@@ -7,9 +7,10 @@ phase, gated by ``SpecReadinessGate`` and the design-review loop, so the
 designer cannot soften the spec to fit broken code.
 
 Invariants:
-  * ``run`` and ``revise`` both return a parsed JSON dict whose
-    ``strategy_code`` key (if the LLM emitted one anyway) is stripped
-    with a warning before return.
+  * ``run`` and ``revise`` both return a ``(strategy_dict, rationale)``
+    tuple; ``strategy_dict`` never contains a ``strategy_code`` key —
+    if the LLM emitted one anyway, it is stripped with a warning
+    before return.
   * Both methods raise :class:`StrategySpecParseError` when the LLM
     returns prose / off-shape rules; the orchestrator surfaces this as
     a critical design-phase failure rather than constructing a half-
