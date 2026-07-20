@@ -3,20 +3,24 @@ Shared "call an LLM, parse JSON out of it, retry on failure" helper.
 
 Every blogging agent that needs a structured response from the model
 (compliance, fact-check, plan-critic, copy-editor, ghost-writer, writer,
-publication) hand-rolls the same loop: invoke an agent, run
-``extract_json_from_response`` on the text, retry once with a stricter
-prompt on a parse failure, and re-raise transient LLM errors unwrapped so
-the caller (Temporal's activity funnel, or the thread-mode job runner) owns
-the retry instead of blocking here. ``call_json_with_retry`` is the single
-place that policy lives, parameterized enough to cover every call site's
-variant (attempt count, a fresh agent per attempt, backoff, and the
-copy-editor's extra step of unwrapping a wrapped exception before
-classifying its cause).
+publication) currently hand-rolls its own version of the same loop: invoke
+an agent, run ``extract_json_from_response`` on the text, retry once with a
+stricter prompt on a parse failure, and re-raise transient LLM errors
+unwrapped so the caller (Temporal's activity funnel, or the thread-mode job
+runner) owns the retry instead of blocking here. ``call_json_with_retry``
+extracts that policy into one parameterized helper, covering every existing
+call site's variant (attempt count, a fresh agent per attempt, backoff, and
+the copy-editor's extra step of unwrapping a wrapped exception before
+classifying its cause) so that callers CAN configure it via parameters
+instead of duplicating the loop.
+
+No call site has been migrated onto this helper yet — that migration is
+tracked separately; this module only makes the shared helper available.
 
 Invariants:
-    - Exactly one JSON-parse retry policy and one transient-error
-      classification rule is defined here; every call site configures it via
-      parameters instead of duplicating the loop.
+    - Once a call site adopts this helper, exactly one JSON-parse retry
+      policy and one transient-error classification rule governs it here
+      instead of a duplicated inline loop.
 """
 
 from __future__ import annotations
