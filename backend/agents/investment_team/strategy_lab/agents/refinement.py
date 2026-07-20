@@ -226,6 +226,13 @@ class RefinementAgent:
         signals starvation — there is no "malformed JSON" middle state for a
         correction re-prompt to recover from.
         """
+        assert _structured_output_available(), (
+            "precondition: caller must verify _structured_output_available() before "
+            "invoking (only that path exposes an adapter with a .client)"
+        )
+        assert system_prompt and user_prompt and failure_phase, (
+            "precondition: system_prompt, user_prompt, and failure_phase must be non-empty"
+        )
         client = get_strands_model("strategy_refinement").client
 
         def _call(prompt: str) -> str:

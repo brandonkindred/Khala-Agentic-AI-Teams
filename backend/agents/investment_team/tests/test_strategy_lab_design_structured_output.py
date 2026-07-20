@@ -497,13 +497,15 @@ def test_self_review_uses_structured_path_when_available(
     monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
     # The self-review critique call routes through the shared
-    # design_review._invoke_structured_critique helper, which resolves
-    # get_strands_model from design_review.py's own module binding — a
-    # separate name from design.py's, even though both start out bound to
-    # the same function object at import time.
+    # design_review._invoke_structured_critique helper, which resolves both
+    # get_strands_model and _structured_output_available from design_review.py's
+    # own module bindings — separate names from design.py's, even though both
+    # start out bound to the same function objects at import time. The helper
+    # asserts its own module's _structured_output_available() precondition.
     monkeypatch.setattr(
         design_review_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client)
     )
+    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
 
@@ -543,6 +545,7 @@ def test_self_review_schema_forced_starvation_degrades_to_legacy_agent(
     monkeypatch.setattr(
         design_review_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client)
     )
+    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)
     critique_agent = _ScriptedAgent(['{"ready": true, "rationale": "fine", "issues": []}'])
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: critique_agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
@@ -571,6 +574,9 @@ def test_self_review_non_schema_forced_failure_propagates_without_degrading(
     monkeypatch.setattr(
         design_review_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client)
     )
+    # The self-review critique routes through design_review's shared helper,
+    # which asserts its own module's _structured_output_available().
+    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
     with pytest.raises(design_mod.StrategyLabLLMError):

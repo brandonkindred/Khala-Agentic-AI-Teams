@@ -403,6 +403,13 @@ class DesignAgent:
         pre-flight call must charge too for budget-accounting parity. Mirrors
         :meth:`RefinementAgent._invoke_structured`, which also charges.
         """
+        assert _structured_output_available(), (
+            "precondition: caller must verify _structured_output_available() before "
+            "invoking (only that path exposes an adapter with a .client)"
+        )
+        assert system_prompt and user_prompt, (
+            "precondition: system_prompt and user_prompt must be non-empty"
+        )
         client = get_strands_model("strategy_design").client
 
         def _call(prompt: str) -> str:
