@@ -1,0 +1,130 @@
+.phase-stepper {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0;
+  padding: var(--kh-space-5) var(--kh-space-3);
+  margin: 0 0 var(--kh-space-4) 0;
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-lg);
+}
+
+.phase-step {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  z-index: 1;
+
+  &.has-connector::after {
+    content: '';
+    position: absolute;
+    top: 18px;
+    left: 50%;
+    width: 50%;
+    height: 2px;
+    background: var(--kh-border-strong);
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  &.has-connector.next-completed::after {
+    background: var(--kh-success);
+  }
+}
+
+.phase-node {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  border-radius: 50%;
+  border: 2px solid var(--kh-border-strong);
+  background: var(--kh-surface-3);
+  transition: all var(--kh-transition-slow);
+  z-index: 1;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--kh-text-muted);
+  }
+}
+
+.phase-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--kh-text-muted);
+  text-align: center;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  padding: 0 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+// Completed phase
+.phase-step.completed {
+  .phase-node {
+    border-color: var(--kh-success);
+    background: var(--kh-success);
+
+    mat-icon { color: var(--kh-text-on-accent); }
+  }
+
+  .phase-label { color: var(--kh-success); }
+}
+
+// Current/active phase
+.phase-step.current {
+  .phase-node {
+    border-color: var(--kh-accent);
+    background: var(--kh-accent-muted);
+    box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.25);
+
+    mat-icon { color: var(--kh-accent); }
+  }
+
+  .phase-label {
+    color: var(--kh-accent-text);
+    font-weight: 700;
+  }
+}
+
+// Pending phase
+.phase-step.pending {
+  .phase-node {
+    border-color: var(--kh-border-strong);
+    background: var(--kh-surface-3);
+
+    mat-icon { color: var(--kh-text-muted); }
+  }
+
+  .phase-label { color: var(--kh-text-muted); }
+}
+
+// Skipped phase (refine not needed)
+.phase-step.skipped {
+  .phase-node {
+    border-color: var(--kh-border);
+    border-style: dashed;
+    background: var(--kh-surface-2);
+
+    mat-icon { color: var(--kh-text-muted); opacity: 0.4; }
+  }
+
+  .phase-label { color: var(--kh-text-muted); opacity: 0.5; }
+}
