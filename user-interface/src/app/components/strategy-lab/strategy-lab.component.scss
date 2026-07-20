@@ -372,6 +372,12 @@
   }
 }
 
+.current-phase-label {
+  margin: 0 0 var(--kh-space-2);
+  font-size: var(--kh-text-xs);
+  color: var(--kh-text-tertiary);
+}
+
 // ── Strategy Preview ────────────────────────────────────────────────────────
 
 .strategy-preview {
