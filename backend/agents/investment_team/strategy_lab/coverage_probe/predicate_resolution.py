@@ -698,7 +698,10 @@ def _flatten_test(
 ) -> List[
     ast.Compare
 ]:  # pragma: no cover — legacy AST helper superseded by _flatten_top_terms; kept for external import compatibility
-    """Flatten ``a and b and (c < d)`` into individual ``Compare`` nodes."""
+    """Deprecated: superseded by :func:`_flatten_top_terms`.
+
+    Flatten ``a and b and (c < d)`` into individual ``Compare`` nodes.
+    """
     if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
         out: List[ast.Compare] = []
         for value in test.values:
