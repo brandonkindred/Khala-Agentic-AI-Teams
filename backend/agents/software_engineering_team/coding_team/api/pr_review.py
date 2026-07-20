@@ -602,6 +602,45 @@ def _complete_review_noop(
     )
 
 
+def _join_nonblank(parts: List[str]) -> str:
+    """Join non-blank strings with a blank-line separator, dropping blanks.
+
+    Postconditions:
+        - Returns every non-blank entry of ``parts`` (each ``.strip()``ped)
+          joined by ``"\\n\\n"``; ``""`` when every entry is blank. Never raises.
+    """
+    return "\n\n".join(p.strip() for p in parts if (p or "").strip())
+
+
+class _MergedReviewerOutput:
+    """Duck-typed merge of a PR's whole-file and hunk-fallback reviewer outputs.
+
+    A partial whole-file fetch (see ``_run_reviewer``) reviews the fetched
+    subset of files whole and the rest via hunks, as two separate reviewer
+    calls. This combines both calls' outputs into one object exposing only
+    the three attributes this module reads downstream: ``issues``,
+    ``summary``, ``spec_compliance_notes``.
+
+    Preconditions:
+        - ``outputs`` has at least one entry; each exposes ``.issues`` (a
+          list), ``.summary``/``.spec_compliance_notes`` (str). The outputs
+          originate from disjoint file sets (the whole-file subset and the
+          hunk-fallback subset), so their issues never describe the same
+          finding twice.
+    Postconditions:
+        - ``.issues`` is the concatenation of every output's ``.issues``, in
+          ``outputs`` order (whole-file findings before hunk-fallback ones).
+        - ``.summary``/``.spec_compliance_notes`` join each output's non-blank
+          text via :func:`_join_nonblank`, so neither call's narrative is
+          silently dropped.
+    """
+
+    def __init__(self, outputs: List[Any]) -> None:
+        self.issues: List[Any] = [i for o in outputs for i in o.issues]
+        self.summary = _join_nonblank([o.summary for o in outputs])
+        self.spec_compliance_notes = _join_nonblank([o.spec_compliance_notes for o in outputs])
+
+
 def _run_reviewer(
     provider: Any,
     client: Any,
@@ -615,29 +654,49 @@ def _run_reviewer(
     head_files: Optional[Dict[str, str]] = None,
     repo_reader: Any = None,
 ) -> Optional[Any]:
-    """Run the injected review engine, recording a failure and returning ``None`` on error.
+    """Run the injected review engine over ``head_files`` and/or ``code``,
+    merging their outputs; records a failure and returns ``None`` on error.
 
     The PR reviewer is an injected engine (software_engineering_team owns it);
     coding_team calls it through the CodeEngineProvider so this package imports
-    nothing from SE. Progress is coalesced through an ``ActivityBridge`` (shared
-    schema, swallow-on-failure, clear-on-exit) whose sub-progress entry is always
-    cleared on the way out so it never outlives the review.
+    nothing from SE. Progress is coalesced through ONE shared ``ActivityBridge``
+    (shared schema, swallow-on-failure) across every attempt, cleared once on
+    the way out so it never outlives the review.
+
+    One reviewer call per non-empty source: a truthy ``head_files`` drives a
+    whole-file attempt (``pre_numbered=False``, steered via
+    ``_whole_file_focus`` to focus on the change since it now also sees
+    unchanged code); a truthy ``code`` drives a diff-hunk attempt
+    (``pre_numbered=True``, since ``_build_review_code``'s rendering already
+    carries its own ``"N: "`` line-number prefixes). The two sources can never
+    be mixed into a single call (the underlying engine's ``files``/``code``
+    are mutually exclusive), which is why a partial fetch needs two calls
+    instead of one.
 
     Preconditions:
         - ``provider`` was resolved before the first GitHub call.
-        - When ``head_files`` is a non-empty ``{path: whole-file}`` mapping the
-          review runs in whole-file mode (``pre_numbered=False``); otherwise it
-          falls back to the pre-numbered diff-hunk ``code`` blob.
+        - ``head_files`` and ``code`` are not BOTH empty/falsy — the caller
+          (``_run_pr_review_body``) never reaches this function otherwise (its
+          own "nothing reviewable" guard returns first). A PR whose whole-file
+          fetch fully succeeds supplies only ``head_files`` (``code=""``); one
+          whose fetch fully failed supplies only ``code`` (``head_files``
+          falsy); one whose fetch PARTIALLY failed supplies BOTH —
+          ``head_files`` for the fetched subset, ``code`` built ONLY from the
+          files that failed to fetch — so both attempts run and are merged.
         - ``repo_reader`` is None or a ``RepoReader`` handed to the false-positive
           verifier so it can confirm existing repository files outside the diff.
     Postconditions:
-        - Returns a truthy reviewer output on success. On any reviewer failure —
-          an exception, OR a reviewer that returns ``None`` without raising —
-          records the failure on the PR/job via ``_record_review_outage`` and
-          returns ``None``. The caller returns on ``None``, so recording the failure here
-          is what keeps the daemon-thread job from wedging in ``running`` (the
-          pre-decomposition body reached the same terminal-failed state when a
-          ``None`` output hit ``output.issues`` and raised into the outer except).
+        - On success, returns the single attempt's output unchanged when only
+          one ran (identical behavior/kwargs to a single-mode dispatch for
+          both the all-whole-file and all-hunk cases). When two ran, returns a
+          merged duck-typed output — see ``_MergedReviewerOutput``.
+        - On ANY attempt's failure — an exception, OR a reviewer that returns
+          ``None`` without raising — records the failure on the PR/job via
+          ``_record_review_outage`` and returns ``None`` immediately, without
+          running any remaining attempt. A successful earlier attempt's output
+          is discarded in that case: the review stays all-or-nothing per call.
+          The caller returns on ``None``, so recording the failure here is
+          what keeps the daemon-thread job from wedging in ``running``.
     """
     # last_activity_at is stamped centrally by the job service on every real
     # update, so these writes count as activity for stall detection.
@@ -646,66 +705,79 @@ def _run_reviewer(
         agent="code_review",
         label=f"Reviewing PR #{pr_number}",
     )
-    # One call, two modes: only the source shape (files/pre_numbered) and, in
-    # whole-file mode, a "focus on the change" requirement differ; everything else
-    # is shared, so a new kwarg cannot silently diverge between the branches.
     common = dict(
         repo_reader=repo_reader,
         task_description=f"Review pull request #{pr_number}: {pr.title}",
         language=_infer_review_language(files),
         progress_callback=pr_bridge,
     )
+    # One reviewer call per non-empty source; see the docstring above. A PR
+    # whose whole-file fetch fully succeeds supplies only head_files (code is
+    # ""); one that fully fails supplies only code; a partial fetch supplies
+    # both and both attempts run, merged below.
+    attempts: List[Dict[str, Any]] = []
     if head_files:
         # Whole-file review: the reviewer sees complete files (no hunk-end
         # "truncation"), and the false-positive filter (via repo_reader) can
-        # confirm existing files a finding claims are missing. Because it now sees
-        # unchanged code too, steer it to only raise issues about the change and
-        # treat the rest as context — otherwise it would comment on pre-existing,
-        # unchanged code the PR never touched.
-        mode_kwargs: Dict[str, Any] = dict(
-            files=head_files,
-            pre_numbered=False,
-            task_requirements=_whole_file_focus(pr.body or ""),
+        # confirm existing files a finding claims are missing. Because it now
+        # sees unchanged code too, steer it to only raise issues about the
+        # change and treat the rest as context — otherwise it would comment on
+        # pre-existing, unchanged code the PR never touched.
+        attempts.append(
+            dict(
+                files=head_files,
+                pre_numbered=False,
+                task_requirements=_whole_file_focus(pr.body or ""),
+            )
         )
-    else:
+    if code:
         # _build_review_code renders every line with its original line-number
         # prefix; declaring pre_numbered here (instead of letting the reviewer
         # sniff the format) keeps issue lines verbatim.
-        mode_kwargs = dict(code=code, pre_numbered=True, task_requirements=pr.body or "")
+        attempts.append(dict(code=code, pre_numbered=True, task_requirements=pr.body or ""))
+    assert attempts, "caller must supply a non-empty head_files and/or non-empty code"
+
+    outputs: List[Any] = []
     try:
-        output = provider.run_pr_code_review(**common, **mode_kwargs)
-    except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
-        logger.exception("PR review agent failed: %s", e)
-        # A reviewer-side failure (LLM outage, unrecoverable exhaustion, etc.) is
-        # not a code defect: record the detail in the job store but never post the
-        # raw exception on the PR — degrade to a quiet, re-runnable outage.
-        # str(e) is "" for a bare zero-arg exception (e.g. a durable-review
-        # client-side wait timing out with no attached detail); recording just
-        # "code review failed: " is useless for later triage, so fall back to
-        # naming the exception type when it carries no message of its own.
-        detail = str(e) if e.args else f"{type(e).__name__} (no error message)"
-        _main._record_review_outage(
-            client, owner, repo, pr_number, job_id, f"code review failed: {detail}"
-        )
-        return None
+        for mode_kwargs in attempts:
+            try:
+                output = provider.run_pr_code_review(**common, **mode_kwargs)
+            except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
+                logger.exception("PR review agent failed: %s", e)
+                # A reviewer-side failure (LLM outage, unrecoverable exhaustion,
+                # etc.) is not a code defect: record the detail in the job
+                # store but never post the raw exception on the PR — degrade
+                # to a quiet, re-runnable outage. str(e) is "" for a bare
+                # zero-arg exception (e.g. a durable-review client-side wait
+                # timing out with no attached detail); recording just "code
+                # review failed: " is useless for later triage, so fall back
+                # to naming the exception type when it carries no message of
+                # its own.
+                detail = str(e) if e.args else f"{type(e).__name__} (no error message)"
+                _main._record_review_outage(
+                    client, owner, repo, pr_number, job_id, f"code review failed: {detail}"
+                )
+                return None
+            if output is None:
+                # A reviewer that returns no output (rather than raising) must
+                # not slip through as a silent success — the caller returns on
+                # None with no terminal write, which would wedge the job in
+                # "running" forever.
+                logger.error("PR review agent returned no output for PR #%s", pr_number)
+                _main._record_review_outage(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    job_id,
+                    "code review failed: reviewer returned no output",
+                )
+                return None
+            outputs.append(output)
     finally:
         # Clear so a stale sub-progress entry never outlives the review itself.
         pr_bridge.clear()
-    if output is None:
-        # A reviewer that returns no output (rather than raising) must not slip
-        # through as a silent success — the caller returns on None with no
-        # terminal write, which would wedge the job in "running" forever.
-        logger.error("PR review agent returned no output for PR #%s", pr_number)
-        _main._record_review_outage(
-            client,
-            owner,
-            repo,
-            pr_number,
-            job_id,
-            "code review failed: reviewer returned no output",
-        )
-        return None
-    return output
+    return outputs[0] if len(outputs) == 1 else _MergedReviewerOutput(outputs)
 
 
 def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int) -> List[Any]:
@@ -872,6 +944,15 @@ def _run_pr_review_body(
         when no provider is installed.
     Postconditions: identical to :func:`_run_pr_review` (this IS that contract's
         implementation; see its docstring). Never raises.
+
+        Whole-file vs. hunk review is decided PER FILE, not per PR: every
+        reviewable file whose head content fetches successfully is reviewed
+        whole; only the files whose fetch fails fall back to hunk rendering
+        (see :func:`_run_reviewer`), so one file's failed fetch never discards
+        another file's successfully-fetched whole-file body. The hunk ``code``
+        blob is built only for the files that actually need it, never
+        unconditionally, so a PR whose whole-file fetch fully succeeds pays
+        nothing for hunk rendering.
     """
     try:
         with _main.GitHubClient(token=token) as client:
@@ -899,8 +980,15 @@ def _run_pr_review_body(
             changed_by_path = {
                 f.filename: parse_valid_lines(f.patch, added_only=True) for f in files
             }
-            code, files_reviewed = _build_review_code(files)
-            if not code:
+
+            # "Nothing reviewable" gate, BEFORE any hunk rendering or whole-file
+            # fetch: `reviewable` applies the same non-removed+has-patch
+            # predicate _build_review_code applies internally, so an empty set
+            # here means _build_review_code(files) would also render "" — skip
+            # straight to the noop rather than paying for a hunk render or a
+            # head-content fetch that could only ever come back empty.
+            reviewable = {f.filename for f in files if _is_whole_file_reviewable(f)}
+            if not reviewable:
                 _complete_review_noop(
                     client,
                     job_id,
@@ -913,26 +1001,67 @@ def _run_pr_review_body(
                 )
                 return
 
-            # Prefer whole-file review over diff hunks: complete files remove the
-            # hunk-boundary "truncation" false positive, and the repo reader lets
-            # the false-positive filter confirm existing (unchanged) repo files a
-            # finding claims are missing. Use whole-file mode ONLY when EVERY
-            # reviewable file fetched — a partial fetch would silently drop the
-            # un-fetched files, so fall back to the hunk ``code`` blob (which
-            # covers every changed file from already-fetched patch data).
-            reviewable = {f.filename for f in files if _is_whole_file_reviewable(f)}
+            # Prefer whole-file review over diff hunks: complete files remove
+            # the hunk-boundary "truncation" false positive, and the repo
+            # reader lets the false-positive filter confirm existing
+            # (unchanged) repo files a finding claims are missing. A file
+            # whose whole-file fetch fails falls back to ITS OWN hunk
+            # rendering rather than reverting the whole PR to hunk mode — a
+            # partial fetch failure must not discard the whole-file bodies
+            # that DID come back.
             head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
-            whole_file = bool(head_files) and set(head_files) == reviewable
-            if not whole_file and head_files:
+            missing = reviewable - set(head_files)
+            code = ""
+            if head_files and not missing:
+                # Every reviewable file fetched whole: the hunk blob would be
+                # thrown away unread, so skip rendering it entirely.
+                files_reviewed = len(head_files)
+            elif head_files:
+                # Partial fetch: hunk-render ONLY the files that failed to
+                # fetch whole; files that DID fetch stay in whole-file mode.
+                fallback_files = [f for f in files if f.filename in missing]
+                code, hunk_reviewed = _build_review_code(fallback_files)
+                files_reviewed = len(head_files) + hunk_reviewed
                 logger.info(
-                    "PR review #%s: fetched %d/%d whole files; falling back to hunk review "
-                    "for full coverage",
+                    "PR review #%s: fetched %d/%d whole files; the remaining "
+                    "%d file(s) fall back to hunk review",
                     pr_number,
                     len(head_files),
                     len(reviewable),
+                    len(missing),
                 )
-            if whole_file:
-                files_reviewed = len(head_files)
+            else:
+                # Total fetch failure: unchanged from before this change —
+                # render every changed file's hunks (not just `reviewable`,
+                # since _build_review_code applies its own equivalent filter
+                # internally).
+                code, files_reviewed = _build_review_code(files)
+                if not code:
+                    # Belt-and-suspenders: `reviewable` is non-empty (the gate
+                    # above passed) but every reviewable file's diff hunk
+                    # happened to render blank (e.g. a hunk that only removes
+                    # lines, adding no +/context line for
+                    # render_annotated_hunks to emit). _build_review_code
+                    # filters on the same non-removed+has-patch predicate as
+                    # _is_whole_file_reviewable, so this is the only place
+                    # `code` can still end up empty once `reviewable` passed.
+                    _complete_review_noop(
+                        client,
+                        job_id,
+                        owner,
+                        repo,
+                        pr_number,
+                        pr,
+                        comment="Code review: no reviewable file content.",
+                        status_text="No reviewable file content",
+                    )
+                    return
+                logger.info(
+                    "PR review #%s: whole-file fetch failed for all %d "
+                    "reviewable file(s); falling back to hunk review",
+                    pr_number,
+                    len(reviewable),
+                )
             repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
 
             output = _run_reviewer(
@@ -945,7 +1074,7 @@ def _run_pr_review_body(
                 pr,
                 files,
                 code,
-                head_files=head_files if whole_file else None,
+                head_files=head_files or None,
                 repo_reader=repo_reader,
             )
             if output is None:

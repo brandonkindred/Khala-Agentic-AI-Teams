@@ -69,6 +69,44 @@ export function gateSeverityClass(gate: QualityGateResult, isRemedied: boolean):
   return 'gate-' + gate.severity;
 }
 
+/** Title-Case a snake_case (or already-plain) field key for display, e.g. 'target_annual_vol' → 'Target Annual Vol'. */
+export function humanizeKey(key: string): string {
+  return key
+    .split('_')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+/**
+ * Flattens a rule/sizing/signal-brief object into `{ label, value }` rows for
+ * display, replacing a raw `| json` dump. Generic and defensive rather than
+ * per-discriminated-union: real payloads (see this component's own test
+ * fixtures) don't reliably match the declared EntryRule/ExitRule/SizingRule
+ * TS unions, and signal_intelligence_brief is declared as free-form
+ * `Record<string, unknown> | null`.
+ *
+ * Preconditions: none — accepts any value, including null/undefined/arrays/
+ *   primitives.
+ * Postconditions: returns `[]` for null/undefined; a single fallback
+ *   `{ label: 'Value', value: String(obj) }` row for a non-object (primitive
+ *   or array) input; otherwise one row per own-enumerable key whose value is
+ *   not null/undefined, with the key humanized and a nested-object value
+ *   JSON.stringify'd (never recurses, never throws).
+ */
+export function flattenObjectRows(obj: unknown): { label: string; value: string }[] {
+  if (obj == null) return [];
+  if (typeof obj !== 'object' || Array.isArray(obj)) {
+    return [{ label: 'Value', value: String(obj) }];
+  }
+  return Object.entries(obj as Record<string, unknown>)
+    .filter(([, value]) => value != null)
+    .map(([key, value]) => ({
+      label: humanizeKey(key),
+      value: typeof value === 'object' ? JSON.stringify(value) : String(value),
+    }));
+}
+
 /**
  * Human-readable publishability skip reason for a winning-but-blocked record.
  *
