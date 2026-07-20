@@ -38,7 +38,9 @@ RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
 USER appuser
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app/agents:/app/agents/blogging:/app
+# /app must precede /app/agents/blogging: both expose a top-level `shared`
+# package (platform shared.* vs blogging/shared); wrong order shadows the platform module.
+ENV PYTHONPATH=/app:/app/agents:/app/agents/blogging
 
 ARG TEAM_PORT=8090
 ENV TEAM_PORT=${TEAM_PORT}
