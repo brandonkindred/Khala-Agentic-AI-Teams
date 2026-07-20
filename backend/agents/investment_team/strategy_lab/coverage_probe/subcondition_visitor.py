@@ -503,22 +503,28 @@ class SubconditionVisitor:
         """Process ``if A or B or C:`` — each leg becomes an independent
         subcondition row, classified disjunctively at aggregation time.
 
-        Body recursion runs with bare ancestors rather than
-        ``ancestors + or_legs`` because we don't have a single conjunct
-        to attach: any one of the legs being true is sufficient for the
-        body, and modelling the OR as an extra ancestor would amount to
-        building a synthetic merged-mask we can't represent in the
-        per-Subcond ``evaluate`` callback. Conservative under-flagging
-        on the body's nested coverage is preferable to over-flagging.
+        When the OR test itself can be modelled (via
+        ``_build_compound_subcond`` with ``_OR_OPS``), body recursion
+        carries it as a single compound ancestor —
+        ``ancestors + [or_compound]`` — so a nested predicate is
+        correctly ANDed against the OR's bar-wise mask rather than
+        being evaluated as if the OR were unconditionally true. Only
+        when the OR can't be modelled at all does body recursion fall
+        back to bare ``ancestors``.
 
         ``orelse`` recursion remains bare-ancestor (consistent with the
-        AND path).
+        AND path): the OR's compound mask has no bearing on the branch
+        taken when the whole test is false.
 
-        ``ancestor_unknown`` (an inherited AND-side unknown narrowing,
-        not the OR-side leg uncertainty) is propagated unchanged to
-        body and orelse: an OR test does not introduce its own AND
-        narrowing, so descendants only inherit what was already in
-        place at this node's entry.
+        ``body_unknown`` — the flag descendants use to know their
+        recognised mask is only an upper bound — is
+        ``ancestor_unknown or has_unknown_leg`` (any inherited AND-side
+        narrowing OR a locally un-modelled OR leg), further forced
+        ``True`` when the OR predicate couldn't be modelled at all or
+        ``tree_or_unknown`` flags the compound mask itself as unknown.
+        ``orelse`` is unaffected by any of this and inherits the bare
+        ``ancestor_unknown`` — an OR test's own uncertainty doesn't
+        apply to the branch where the whole test was false.
         """
         own_subs: List[Leg] = []
         # Track legs we couldn't statically model (e.g. an unrecognised
