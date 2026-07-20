@@ -1742,47 +1742,27 @@ def _resolve_series_input(
     return None
 
 
-# The predicate/symbol-gate/name-binding resolution helpers below moved to
-# predicate_resolution.py (#1777). Imported back here — after every
-# remaining definition in this module — for two reasons: (1) several
-# (_extract_subconditions, _union_target_symbols, _flatten_top_terms,
-# _symbol_gate, _NameStrings, _iter_entry_path_assigns) are still called
-# from code above in this file; (2) the rest are re-exported so
-# `indicator_probe.X`-style imports keep working for any existing caller.
+# The predicate/symbol-gate/name-binding resolution helpers live in
+# predicate_resolution.py (#1777); imported back here — after every
+# remaining definition in this module — for the handful this file's own
+# code still calls: _extract_subconditions/_union_target_symbols (used by
+# run_indicator_probe), _flatten_top_terms/_symbol_gate (used by
+# _build_compound_subcond), _NameStrings (type hint in
+# _build_compound_subcond's signature), and _iter_entry_path_assigns
+# (used by _resolve_assign_evaluator). A repo-wide audit (#1978) found no
+# caller importing any of the other resolution helpers via this
+# indicator_probe path — they're reachable directly from
+# predicate_resolution.py, the canonical home for this cluster.
 # predicate_resolution.py imports _BLOCK_FIELDS and _numeric_literal back
 # from this module at ITS bottom, forming a two-way cycle; keeping both
 # cross-imports as each module's last statement is what makes the cycle
 # safe regardless of which module is imported first — see
 # predicate_resolution.py's module docstring.
-from investment_team.strategy_lab.coverage_probe.predicate_resolution import (  # noqa: E402, F401
-    _BINOP_FOLDERS,
-    _STATIC_CMP_OPS,
-    _bar_param_name,
-    _BindingRecorder,
-    _classify_position_check,
-    _collect_name_bindings,
-    _collect_name_periods,
-    _collect_name_strings,
-    _collect_unconditional_constructor_assigns,
-    _constructor_param_defaults,
-    _early_return_symbol_guard,
-    _evaluate_static_predicate,
+from investment_team.strategy_lab.coverage_probe.predicate_resolution import (  # noqa: E402
     _extract_subconditions,
-    _find_on_bar,
-    _find_strategy_class,
-    _flatten_test,
     _flatten_top_terms,
-    _intersect_symbols,
-    _is_return_only_body,
     _iter_entry_path_assigns,
     _NameStrings,
-    _PeriodRecorder,
-    _resolve_constant_predicate,
-    _resolve_string_in_method,
-    _static_scalar_value,
-    _StringRecorder,
-    _strip_position_gate,
     _symbol_gate,
-    _tree_symbol_scope,
     _union_target_symbols,
 )
