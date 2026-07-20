@@ -8,20 +8,22 @@ from typing import Optional
 import pytest
 
 from software_engineering_team.coding_team.github_source.client import Issue
-from software_engineering_team.coding_team.github_source.pr_review_mapping import (
+from software_engineering_team.coding_team.github_source.issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
-    build_review_body,
-    choose_event,
     duplicate_check_max_open_issues,
     find_matching_open_issue,
+    group_similar_findings,
+    proposal_from_findings,
+)
+from software_engineering_team.coding_team.github_source.pr_review_mapping import (
+    build_review_body,
+    choose_event,
     format_comment_body,
     format_issue_comment,
-    group_similar_findings,
     inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
-    proposal_from_findings,
     render_annotated_hunks,
     split_review_comments,
 )
@@ -825,6 +827,22 @@ def test_find_matching_open_issue_rejects_substring_within_unrelated_filename() 
     # of 0.8), so a match here could only happen via the (bogus) location signal.
     issue = _open_issue(
         1, "possible null pointer issue in the parser module", body="See `myapp.py` for details."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
+def test_find_matching_open_issue_rejects_extension_variant_of_a_different_file() -> None:
+    # Regression: "app.py" is a literal prefix of an unrelated "app.py.bak" -- a
+    # trailing-boundary check that only rejects a following word character (not a
+    # following ".") would wrongly treat that as the location signal firing.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="app.py", description="null pointer dereference in parser")], 0
+    )
+    # Same moderate-similarity title as test_find_matching_open_issue_location_plus_moderate_text_matches
+    # (ratio ~0.585, between the with-location bar of 0.5 and the no-location bar
+    # of 0.8), so a match here could only happen via the (bogus) location signal.
+    issue = _open_issue(
+        1, "possible null pointer issue in the parser module", body="See `app.py.bak` for details."
     )
     assert find_matching_open_issue(proposal, [issue]) is None
 
