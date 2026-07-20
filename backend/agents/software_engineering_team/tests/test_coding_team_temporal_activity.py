@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from software_engineering_team.coding_team.temporal import run_pipeline_activity
+from software_engineering_team.temporal.coding_team_workflow import run_pipeline_activity
 
 
 def test_activity_raises_without_provider(monkeypatch) -> None:
-    import software_engineering_team.coding_team.engine_provider as ep
+    import software_engineering_team.engine_provider as ep
 
     monkeypatch.setattr(ep, "get_engine_provider", lambda: None)
     with pytest.raises(RuntimeError, match="no CodeEngineProvider"):
@@ -21,7 +21,7 @@ def test_activity_raises_without_provider(monkeypatch) -> None:
 
 
 def test_activity_raises_without_plan(monkeypatch) -> None:
-    import software_engineering_team.coding_team.engine_provider as ep
+    import software_engineering_team.engine_provider as ep
 
     monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
     with pytest.raises(ValueError, match="requires a plan_input"):
@@ -29,8 +29,8 @@ def test_activity_raises_without_plan(monkeypatch) -> None:
 
 
 def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
-    import software_engineering_team.coding_team.api.main as main
-    import software_engineering_team.coding_team.engine_provider as ep
+    import software_engineering_team.api.coding_team_main as main
+    import software_engineering_team.engine_provider as ep
 
     monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
     created: dict = {}
@@ -63,8 +63,8 @@ def test_activity_reuses_supplied_job_id_and_skips_create_job(monkeypatch) -> No
     """When the dispatcher (the API) already created the row and passes its
     job_id, the activity must reuse it — so the client polls the row the
     orchestrator writes — and must NOT create a second row."""
-    import software_engineering_team.coding_team.api.main as main
-    import software_engineering_team.coding_team.engine_provider as ep
+    import software_engineering_team.api.coding_team_main as main
+    import software_engineering_team.engine_provider as ep
 
     monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
     create_calls: list = []
@@ -90,7 +90,7 @@ def test_activity_reuses_supplied_job_id_and_skips_create_job(monkeypatch) -> No
 def test_plan_from_input_binds_request_repo_path_over_embedded() -> None:
     """The shared plan builder makes the request's repo_path authoritative — a
     repo_path embedded in the plan payload must not win."""
-    import software_engineering_team.coding_team.api.main as main
+    import software_engineering_team.api.coding_team_main as main
 
     plan = main.plan_from_input({"objective": "x", "repo_path": "/embedded"}, "/authoritative")
     assert plan.repo_path == "/authoritative"
@@ -99,8 +99,8 @@ def test_plan_from_input_binds_request_repo_path_over_embedded() -> None:
 def test_run_orchestrator_wired_passes_standard_job_store_wiring(monkeypatch) -> None:
     """The shared helper is the single source of the (update_job_fn, get_job_fn,
     cache_dir) wiring — verify it forwards exactly that to the orchestrator."""
-    import software_engineering_team.coding_team.api.main as main
-    from software_engineering_team.coding_team.models import CodingTeamPlanInput
+    import software_engineering_team.api.coding_team_main as main
+    from software_engineering_team.models import CodingTeamPlanInput
 
     captured: dict = {}
 

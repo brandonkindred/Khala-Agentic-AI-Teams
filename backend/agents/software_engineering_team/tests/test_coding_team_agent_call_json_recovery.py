@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from software_engineering_team.coding_team.tech_lead_agent.agent import _agent_call_json
+from software_engineering_team.tech_lead_agent.agent import _agent_call_json
 
 
 class _FakeAgent:

@@ -8,9 +8,9 @@ from typing import Any, Dict, List
 
 import pytest
 
-from software_engineering_team.coding_team import v2_team_worker as worker_mod
-from software_engineering_team.coding_team.models import StackSpec, Task
-from software_engineering_team.coding_team.v2_team_worker import V2TeamWorker
+from software_engineering_team import v2_team_worker as worker_mod
+from software_engineering_team.models import StackSpec, Task
+from software_engineering_team.v2_team_worker import V2TeamWorker
 
 
 class _FakeV2Lead:

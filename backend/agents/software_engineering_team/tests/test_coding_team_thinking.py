@@ -7,14 +7,14 @@ from typing import Any, Dict
 
 from fastapi.testclient import TestClient
 
-from software_engineering_team.coding_team.api import main as api
-from software_engineering_team.coding_team.orchestrator import (
+from software_engineering_team.api import coding_team_main as api
+from software_engineering_team.coding_team_orchestrator import (
     _flush_thinking,
     _make_reasoning_llm_getter,
     _thinking_flush_interval_s,
     _ThinkingBuffer,
 )
-from software_engineering_team.coding_team.reasoning_capture import (
+from software_engineering_team.reasoning_capture import (
     _DEFAULT_THINKING_FLUSH_INTERVAL_S,
 )
 

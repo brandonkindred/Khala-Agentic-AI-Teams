@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from software_engineering_team.coding_team.models import CodingTeamPlanInput
-from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
-from software_engineering_team.coding_team.tech_lead_agent.agent import TechLeadAgent
+from software_engineering_team.models import CodingTeamPlanInput
+from software_engineering_team.tech_lead_agent import agent as tl_mod
+from software_engineering_team.tech_lead_agent.agent import TechLeadAgent
 
 
 def test_tech_lead_plan_to_task_graph_output_structure(monkeypatch) -> None:

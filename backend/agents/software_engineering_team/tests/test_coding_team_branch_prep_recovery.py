@@ -30,15 +30,14 @@ def _ensure_real_modules() -> None:
         "shared_git.git_utils",
         "software_engineering_team.shared",
         "software_engineering_team",
-        "software_engineering_team.coding_team.orchestrator",
+        "software_engineering_team.coding_team_orchestrator",
     ):
         mod = sys.modules.get(name)
         if mod is not None and not getattr(mod, "__file__", None):
             del sys.modules[name]
             stale = True
     if stale:
-        sys.modules.pop("software_engineering_team.coding_team.api.main", None)
-        sys.modules.pop("software_engineering_team.coding_team.api", None)
+        sys.modules.pop("software_engineering_team.api.coding_team_main", None)
 
 
 def _stub_orchestrator_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,17 +52,17 @@ def _stub_orchestrator_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     import types
 
-    if "software_engineering_team.coding_team.orchestrator" not in sys.modules:
-        stub = types.ModuleType("software_engineering_team.coding_team.orchestrator")
+    if "software_engineering_team.coding_team_orchestrator" not in sys.modules:
+        stub = types.ModuleType("software_engineering_team.coding_team_orchestrator")
         stub.run_coding_team_orchestrator = lambda *a, **kw: None  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team.orchestrator", stub)
+        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team_orchestrator", stub)
 
 
 @pytest.fixture
 def api(monkeypatch):
     _ensure_real_modules()
     _stub_orchestrator_only(monkeypatch)
-    from software_engineering_team.coding_team.api import main as api_main
+    from software_engineering_team.api import coding_team_main as api_main
 
     return api_main
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import software_engineering_team.coding_team.review_history_store as store
+import software_engineering_team.review_history_store as store
 
 
 def test_writes_are_noop_when_postgres_disabled(monkeypatch) -> None:
