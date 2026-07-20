@@ -650,8 +650,8 @@ def _run_reviewer(
     Postconditions:
         - Returns a truthy reviewer output on success. On any reviewer failure —
           an exception, OR a reviewer that returns ``None`` without raising —
-          records the failure on the PR/job via ``_record_failure`` and returns
-          ``None``. The caller returns on ``None``, so recording the failure here
+          records the failure on the PR/job via ``_record_review_outage`` and
+          returns ``None``. The caller returns on ``None``, so recording the failure here
           is what keeps the daemon-thread job from wedging in ``running`` (the
           pre-decomposition body reached the same terminal-failed state when a
           ``None`` output hit ``output.issues`` and raised into the outer except).

@@ -331,19 +331,22 @@ def _location_appears_in(file_path: str, issue: Issue) -> bool:
           every string in Python, which would otherwise make every issue "match" a
           location-less finding). Otherwise returns True iff ``file_path`` (casefolded)
           appears in ``issue.title`` or ``issue.body`` (casefolded) with no word
-          character (letter/digit/underscore) immediately before or after the match --
-          a plain substring check would also match a short/top-level name like
-          ``a.py`` inside an unrelated ``data.py``, or ``app.py`` inside ``myapp.py``,
-          since both are literal substrings of the other. Requiring a path/word
-          boundary on both sides rejects those false positives while still matching
-          the exact `` `file_path` ``/`` `file_path:line` `` rendering (bounded by
-          backticks, whitespace, or punctuation) and a longer path merely carrying
-          ``file_path`` as a `` / ``-separated suffix. Never raises.
+          character (letter/digit/underscore) immediately before, and neither a word
+          character nor a ``.`` immediately after, the match -- a plain substring
+          check would also match a short/top-level name like ``a.py`` inside an
+          unrelated ``data.py``, ``app.py`` inside ``myapp.py``, or ``app.py`` inside
+          an unrelated ``app.py.bak``, since all three are literal substrings of the
+          other. Requiring a path boundary on both sides (and rejecting a trailing
+          ``.`` too, so a same-stem file with a different/extra extension doesn't
+          count) rejects those false positives while still matching the exact
+          `` `file_path` ``/`` `file_path:line` `` rendering (bounded by backticks,
+          whitespace, or punctuation) and a longer path merely carrying ``file_path``
+          as a `` / ``-separated suffix. Never raises.
     """
     if not file_path:
         return False
     needle = re.escape(file_path.casefold())
-    pattern = re.compile(rf"(?<!\w){needle}(?!\w)")
+    pattern = re.compile(rf"(?<!\w){needle}(?![.\w])")
     return bool(
         pattern.search((issue.title or "").casefold())
         or pattern.search((issue.body or "").casefold())

@@ -831,6 +831,22 @@ def test_find_matching_open_issue_rejects_substring_within_unrelated_filename() 
     assert find_matching_open_issue(proposal, [issue]) is None
 
 
+def test_find_matching_open_issue_rejects_extension_variant_of_a_different_file() -> None:
+    # Regression: "app.py" is a literal prefix of an unrelated "app.py.bak" -- a
+    # trailing-boundary check that only rejects a following word character (not a
+    # following ".") would wrongly treat that as the location signal firing.
+    proposal = proposal_from_findings(
+        [_Issue(file_path="app.py", description="null pointer dereference in parser")], 0
+    )
+    # Same moderate-similarity title as test_find_matching_open_issue_location_plus_moderate_text_matches
+    # (ratio ~0.585, between the with-location bar of 0.5 and the no-location bar
+    # of 0.8), so a match here could only happen via the (bogus) location signal.
+    issue = _open_issue(
+        1, "possible null pointer issue in the parser module", body="See `app.py.bak` for details."
+    )
+    assert find_matching_open_issue(proposal, [issue]) is None
+
+
 def test_find_matching_open_issue_location_signal_still_matches_at_path_boundary() -> None:
     # The stricter boundary check must not reject a genuine match: file_path
     # bounded by a path separator and punctuation (not embedded in a longer
