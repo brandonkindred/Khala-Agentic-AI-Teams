@@ -109,6 +109,18 @@ def test_get_job_501_when_store_unavailable(patched_client, monkeypatch) -> None
     assert exc_info.value.detail == "Job store not available"
 
 
+def test_get_job_501_when_get_blog_job_omitted_from_helper_names(
+    patched_client, monkeypatch
+) -> None:
+    """get_blog_job is always store-checked even if the caller forgets to list it."""
+    monkeypatch.setattr(_api_main, "get_blog_job", None)
+    dependency = get_job()
+    with pytest.raises(HTTPException) as exc_info:
+        dependency("anything")
+    assert exc_info.value.status_code == 501
+    assert exc_info.value.detail == "Job store not available"
+
+
 def test_get_job_404_when_job_missing(patched_client) -> None:
     dependency = get_job("get_blog_job")
     with pytest.raises(HTTPException) as exc_info:

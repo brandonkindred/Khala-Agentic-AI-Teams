@@ -29,7 +29,7 @@ def require_job_store(
     Postconditions:
         - Returns a zero-arg callable suitable for ``Depends(...)``. Calling it
           raises ``HTTPException(501, detail=detail)`` if any named attribute on
-          ``main`` is ``None``; otherwise it returns ``None``.
+          ``main`` is ``None`` or missing; otherwise it returns ``None``.
     """
 
     def _dependency() -> None:
@@ -92,7 +92,9 @@ def get_job(
     """Build the combined store-available -> job-found -> optional-state-check dependency.
 
     Preconditions:
-        - ``helper_names`` are the ``api.main`` attributes the route needs available.
+        - ``helper_names`` are additional ``api.main`` attributes the route needs
+          available, beyond ``get_blog_job`` — which is always checked
+          automatically, since ``get_job_or_404`` unconditionally calls it.
         - ``waiting_for``, when given, is ``(flag_name, detail)`` for the
           job-in-expected-state check (e.g. ``("waiting_for_title_selection",
           "Job is not currently waiting for title selection")``).
@@ -103,7 +105,7 @@ def get_job(
     """
 
     def _dependency(job_id: str) -> Dict[str, Any]:
-        require_job_store(*helper_names, detail=store_detail)()
+        require_job_store("get_blog_job", *helper_names, detail=store_detail)()
         job = get_job_or_404(job_id)
         if waiting_for is not None:
             flag_name, state_detail = waiting_for
