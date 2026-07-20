@@ -9,6 +9,14 @@ import { DateOnlyPipe } from '../../../shared/date-only.pipe';
 import type { StrategyLabRecord, TradeRecord } from '../../../models';
 
 /**
+ * Cache key for `pagedTrades`. Named (rather than written inline) so the key
+ * passed to `memoize` can be annotated with it — an inline `[record, page]`
+ * literal infers as the array type `(StrategyLabRecord | number)[]`, which
+ * doesn't satisfy the two-element tuple the cache field is declared with.
+ */
+type PagedTradesKey = [StrategyLabRecord, number];
+
+/**
  * Presentational trade-ledger panel for a single Strategy Lab result. Renders
  * the ledger summary bar, the paginated trade table, and the paginator itself
  * — extracted from `StrategyCardComponent`, which owns no trade-ledger state
@@ -56,7 +64,7 @@ export class TradeLedgerComponent {
   // on `this.record` identity (not just derived inputs like `pageIndex`) to
   // invalidate correctly when that happens. Assumes the host always replaces
   // the record by reference rather than mutating one in place.
-  private pagedTradesCache: { key: [StrategyLabRecord, number]; value: TradeRecord[] } | null = null;
+  private pagedTradesCache: { key: PagedTradesKey; value: TradeRecord[] } | null = null;
   private winCountCache: { key: StrategyLabRecord; value: number } | null = null;
 
   /**
@@ -89,9 +97,10 @@ export class TradeLedgerComponent {
   pagedTrades(): TradeRecord[] {
     // Returning a stable array reference for the same (record, page) lets the
     // mat-table dataSource diff instead of re-rendering every row each CD cycle.
+    const key: PagedTradesKey = [this.record, this.pageIndex];
     const { cache, value } = this.memoize(
       this.pagedTradesCache,
-      [this.record, this.pageIndex] as [StrategyLabRecord, number],
+      key,
       (a, b) => a[0] === b[0] && a[1] === b[1],
       () => {
         const start = this.pageIndex * this.PAGE_SIZE;
