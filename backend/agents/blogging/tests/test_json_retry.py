@@ -1,0 +1,157 @@
+"""Tests for the shared call_json_with_retry() helper."""
+
+from __future__ import annotations
+
+import pytest
+from agents.blogging.shared import call_json_with_retry
+from agents.blogging.shared import json_retry as json_retry_module
+
+from llm_service import LLMJsonParseError, LLMRateLimitError, LLMTemporaryError
+
+
+class _FakeAgent:
+    """Records prompts it was called with and returns/raises queued responses.
+
+    ``responses`` is shared (not copied) with the owning factory so that
+    successive agents built by ``fresh_agent_per_attempt`` continue draining
+    the same queue instead of each restarting from the original responses.
+    """
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.prompts = []
+
+    def __call__(self, prompt):
+        self.prompts.append(prompt)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class _FakeAgentFactory:
+    """Callable matching AgentFactory; builds a new _FakeAgent per call, tracking builds."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.agents = []
+
+    def __call__(self):
+        agent = _FakeAgent(self.responses)
+        self.agents.append(agent)
+        return agent
+
+
+def test_success_on_first_attempt():
+    """A well-formed JSON response returns immediately, consuming one call."""
+    factory = _FakeAgentFactory(['{"ok": true}'])
+    data = call_json_with_retry(factory, "prompt")
+    assert data == {"ok": True}
+    assert len(factory.agents[0].prompts) == 1
+
+
+def test_success_after_one_json_retry_uses_strict_suffix():
+    """A JSON-parse failure retries once with the strict suffix appended."""
+    factory = _FakeAgentFactory(["not json", '{"ok": true}'])
+    data = call_json_with_retry(factory, "prompt", max_attempts=2)
+    assert data == {"ok": True}
+    agent = factory.agents[0]
+    assert agent.prompts[0] == "prompt"
+    assert agent.prompts[1].startswith("prompt")
+    assert agent.prompts[1] != "prompt"
+
+
+def test_exhausted_retries_use_on_exhausted_fallback():
+    """When every attempt fails to parse, on_exhausted's dict is returned."""
+    factory = _FakeAgentFactory(["not json", "still not json"])
+    fallback = {"fallback": True}
+    data = call_json_with_retry(factory, "prompt", max_attempts=2, on_exhausted=lambda e: fallback)
+    assert data is fallback
+
+
+def test_exhausted_retries_without_fallback_reraises():
+    """Without on_exhausted, the last LLMJsonParseError propagates."""
+    factory = _FakeAgentFactory(["not json", "still not json"])
+    with pytest.raises(LLMJsonParseError):
+        call_json_with_retry(factory, "prompt", max_attempts=2)
+
+
+def test_transient_error_reraises_immediately_without_consuming_retry():
+    """A transient LLM error escapes unwrapped on the first attempt, no retry consumed."""
+    err = LLMRateLimitError("rate limited")
+    factory = _FakeAgentFactory([err, '{"ok": true}'])
+    with pytest.raises(LLMRateLimitError):
+        call_json_with_retry(factory, "prompt", max_attempts=3)
+    # Only the single failing call happened; the queued success was never consumed.
+    assert len(factory.agents[0].prompts) == 1
+    assert factory.agents[0].responses == ['{"ok": true}']
+
+
+def test_unwrap_exception_hook_classifies_and_raises_unwrapped_cause():
+    """A wrapped transient error is unwrapped, classified as transient, and raised unwrapped."""
+
+    class _Wrapper(Exception):
+        def __init__(self, original_exception):
+            super().__init__("wrapped")
+            self.original_exception = original_exception
+
+    cause = LLMTemporaryError("temporary")
+    factory = _FakeAgentFactory([_Wrapper(cause)])
+
+    def unwrap(e):
+        return e.original_exception if isinstance(e, _Wrapper) else e
+
+    with pytest.raises(LLMTemporaryError) as exc_info:
+        call_json_with_retry(factory, "prompt", unwrap_exception=unwrap)
+    assert exc_info.value is cause
+
+
+def test_fresh_agent_per_attempt_builds_a_new_agent_each_attempt():
+    """fresh_agent_per_attempt=True calls agent_factory() once per attempt."""
+    factory = _FakeAgentFactory(["not json", '{"ok": true}'])
+    data = call_json_with_retry(factory, "prompt", max_attempts=2, fresh_agent_per_attempt=True)
+    assert data == {"ok": True}
+    assert len(factory.agents) == 2
+    assert len(factory.agents[0].prompts) == 1
+    assert len(factory.agents[1].prompts) == 1
+
+
+def test_backoff_seconds_called_with_attempt_index_between_json_retries(monkeypatch):
+    """backoff_seconds(attempt) is invoked (and its sleep applied) before a JSON retry."""
+    sleeps = []
+    monkeypatch.setattr(json_retry_module.time, "sleep", lambda s: sleeps.append(s))
+    factory = _FakeAgentFactory(["not json", '{"ok": true}'])
+    data = call_json_with_retry(
+        factory, "prompt", max_attempts=2, backoff_seconds=lambda attempt: attempt + 0.5
+    )
+    assert data == {"ok": True}
+    assert sleeps == [0.5]
+
+
+def test_on_unexpected_error_fallback_for_non_transient_exception():
+    """A non-transient, non-JSON exception is handled by on_unexpected_error."""
+    factory = _FakeAgentFactory([RuntimeError("boom")])
+    fallback = {"fallback": True}
+    data = call_json_with_retry(factory, "prompt", on_unexpected_error=lambda e: fallback)
+    assert data is fallback
+
+
+def test_unexpected_error_without_fallback_reraises():
+    """Without on_unexpected_error, the unexpected exception propagates."""
+    factory = _FakeAgentFactory([RuntimeError("boom")])
+    with pytest.raises(RuntimeError):
+        call_json_with_retry(factory, "prompt")
+
+
+def test_expected_keys_threaded_through_to_extract_json_from_response(monkeypatch):
+    """expected_keys is forwarded to extract_json_from_response as a frozenset."""
+    seen = {}
+
+    def fake_extract(text, *, expected_keys=None):
+        seen["expected_keys"] = expected_keys
+        return {"ok": True}
+
+    monkeypatch.setattr(json_retry_module, "extract_json_from_response", fake_extract)
+    factory = _FakeAgentFactory(["irrelevant"])
+    call_json_with_retry(factory, "prompt", expected_keys=["required_key"])
+    assert seen["expected_keys"] == frozenset({"required_key"})
