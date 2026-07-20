@@ -4,6 +4,7 @@ Shared utilities for the blogging agent suite.
 Provides artifact persistence, brand spec loading, error handling, and other common functionality.
 """
 
+from .agent_base import _BlogAgentBase
 from .artifacts import (
     ARTIFACT_NAMES,
     read_artifact,
@@ -67,6 +68,7 @@ from .models import (
 from .style_loader import load_style_file
 
 __all__ = [
+    "_BlogAgentBase",
     "ARTIFACT_NAMES",
     "BrandSpec",
     "BloggingError",
