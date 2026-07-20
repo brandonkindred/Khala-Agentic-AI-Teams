@@ -280,6 +280,28 @@
 
 // ── Strategy Code ──────────────────────────────────────────────────────────
 
+.strategy-code-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.4rem;
+}
+
+.strategy-code-caption-text {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kh-text-muted);
+}
+
+.strategy-code-copy-btn {
+  color: var(--kh-text-muted);
+
+  &:hover:not(:disabled) {
+    color: var(--kh-text-primary);
+  }
+}
+
 .strategy-code {
   margin: 0;
   padding: 0.75rem 1rem;
