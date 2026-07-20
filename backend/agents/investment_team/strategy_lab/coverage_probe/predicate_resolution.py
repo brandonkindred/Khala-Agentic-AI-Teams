@@ -12,9 +12,8 @@ This module and ``indicator_probe`` import back from each other:
 ``indicator_probe`` calls into several of the resolution helpers defined
 here (``_extract_subconditions``, ``_union_target_symbols``,
 ``_flatten_top_terms``, ``_symbol_gate``, ``_NameStrings``,
-``_iter_entry_path_assigns``) and re-exports the rest for backward
-compatibility, while this module needs ``_BLOCK_FIELDS`` and
-``_numeric_literal`` from ``indicator_probe``'s not-yet-decomposed
+``_iter_entry_path_assigns``), while this module needs ``_BLOCK_FIELDS``
+and ``_numeric_literal`` from ``indicator_probe``'s not-yet-decomposed
 "builder cluster". Both cross-imports are placed as the **last top-level
 statement** in their respective module — after every same-file definition
 that module needs — which keeps the two-way cycle safe regardless of
