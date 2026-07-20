@@ -20,9 +20,10 @@ Mirrors the ``agent_console`` store idioms (``get_conn`` / ``Json`` /
 
 from __future__ import annotations
 
+import functools
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 from psycopg import sql
 from psycopg.rows import dict_row
@@ -39,9 +40,64 @@ _STORE = "coding_team"
 # can never carry user-controlled SQL.
 _UPDATABLE_COLUMNS = frozenset({"status", "status_text", "review_summary", "error", "completed_at"})
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+def _readonly_query(default: Any) -> Callable[[_F], _F]:
+    """Decorate a read function with the "degrade to `default`" shape.
+
+    Preconditions:
+        - The wrapped function performs a Postgres read and returns the value to
+          hand back to the caller on success.
+    Postconditions:
+        - The wrapped function only runs when Postgres is enabled. Returns
+          `default` when Postgres is disabled, or when the wrapped function
+          raises (the exception is logged as a warning tagged with the wrapped
+          function's name and swallowed). Never raises.
+    """
+
+    def _default() -> Any:
+        # `default` may be a mutable literal (e.g. `[]`) shared across every
+        # degraded call; hand back a fresh copy so no caller can mutate the
+        # decorator's captured value.
+        return list(default) if isinstance(default, list) else default
+
+    def decorator(func: _F) -> _F:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if not is_postgres_enabled():
+                return _default()
+            try:
+                return func(*args, **kwargs)
+            except Exception:  # noqa: BLE001 - degrade rather than error
+                logger.warning("code_review_runs: %s failed", func.__name__, exc_info=True)
+                return _default()
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
+
+
+def _best_effort_write(op_name: str, write_fn: Callable[[], None]) -> None:
+    """Run `write_fn` when Postgres is enabled, logging and swallowing any failure.
+
+    Preconditions:
+        - Postgres is enabled (callers check `is_postgres_enabled()` first, since
+          they may need to skip other work — e.g. building a query — on top of
+          the write itself). `write_fn` takes no arguments and performs the
+          Postgres write.
+    Postconditions:
+        - `write_fn` is invoked. Any exception it raises is logged as a warning
+          tagged with `op_name` and swallowed. Never raises.
+    """
+    try:
+        write_fn()
+    except Exception:  # noqa: BLE001 - persistence must never break the review
+        logger.warning("code_review_runs: %s failed", op_name, exc_info=True)
 
 
 @timed_query(store=_STORE, op="record_review_start")
@@ -68,7 +124,8 @@ def record_review_start(
     created_at = _now()
     if not is_postgres_enabled():
         return created_at
-    try:
+
+    def _write() -> None:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO code_review_runs
@@ -77,8 +134,8 @@ def record_review_start(
                    ON CONFLICT (job_id) DO NOTHING""",
                 (job_id, owner, repo, pr_number, pr_url, "pending", author, created_at),
             )
-    except Exception:  # noqa: BLE001 - persistence must never break the review
-        logger.warning("code_review_runs: record_review_start failed", exc_info=True)
+
+    _best_effort_write("record_review_start", _write)
     return created_at
 
 
@@ -139,14 +196,16 @@ def update_review(
     )
     params: list[Any] = [val for _, val in assignments]
     params.append(job_id)
-    try:
+
+    def _write() -> None:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(query, params)
-    except Exception:  # noqa: BLE001 - persistence must never break the review
-        logger.warning("code_review_runs: update_review failed", exc_info=True)
+
+    _best_effort_write("update_review", _write)
 
 
 @timed_query(store=_STORE, op="get_review")
+@_readonly_query(default=None)
 def get_review(job_id: str) -> Optional[dict[str, Any]]:
     """Return one review row by ``job_id``, or None.
 
@@ -162,23 +221,18 @@ def get_review(job_id: str) -> Optional[dict[str, Any]]:
           ``pr_url``/``status``) for ``job_id``, or None when it does not exist,
           Postgres is unavailable, or the query fails (never raises).
     """
-    if not is_postgres_enabled():
-        return None
     query = (
         "SELECT job_id, owner, repo, pr_number, pr_url, status, status_text, "
         "       review_summary, error, author, created_at, completed_at "
         "FROM code_review_runs WHERE job_id = %s"
     )
-    try:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(query, (job_id,))
-            return cur.fetchone()
-    except Exception:  # noqa: BLE001 - degrade to "not found" rather than error
-        logger.warning("code_review_runs: get_review failed", exc_info=True)
-        return None
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, (job_id,))
+        return cur.fetchone()
 
 
 @timed_query(store=_STORE, op="list_reviews")
+@_readonly_query(default=[])
 def list_reviews(
     owner: str,
     repo: str,
@@ -196,8 +250,6 @@ def list_reviews(
         - Returns up to ``limit`` rows ordered by ``created_at`` DESC. Returns
           ``[]`` when Postgres is unavailable or the query fails (never raises).
     """
-    if not is_postgres_enabled():
-        return []
     limit = max(1, min(limit, 2000))
     # ``query`` (not ``sql``) so we don't shadow the imported ``psycopg.sql`` module.
     # Compare owner/repo case-insensitively: GitHub treats them as case-insensitive, and
@@ -214,10 +266,6 @@ def list_reviews(
         params.append(pr_number)
     query += " ORDER BY created_at DESC LIMIT %s"
     params.append(limit)
-    try:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(query, params)
-            return list(cur.fetchall())
-    except Exception:  # noqa: BLE001 - degrade to no history rather than error
-        logger.warning("code_review_runs: list_reviews failed", exc_info=True)
-        return []
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, params)
+        return list(cur.fetchall())
