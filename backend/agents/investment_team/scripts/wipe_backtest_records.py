@@ -13,7 +13,7 @@ the lab are preserved.
 Run once before deploying the schema-tightening commit (issue #432).
 Run from ``backend/`` (same directory as ``Makefile``)::
 
-    PYTHONPATH=agents python3 -m investment_team.scripts.wipe_backtest_records [--dry-run]
+    PYTHONPATH=.:agents python3 -m investment_team.scripts.wipe_backtest_records [--dry-run]
 
 Requires ``JOB_SERVICE_URL`` to be set (same env var as the running API).
 

@@ -7,7 +7,7 @@ or 1 otherwise.
 
 Run from ``backend/`` (same directory as ``Makefile``)::
 
-    PYTHONPATH=agents python3 -m investment_team.scripts.audit_recent_runs \\
+    PYTHONPATH=.:agents python3 -m investment_team.scripts.audit_recent_runs \\
         --since=30d --sample=10 --min-pass-rate=0.8
 
 Requires ``JOB_SERVICE_URL`` to be set (same env var as the running API).

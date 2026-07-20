@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r /app/agents/requirements.txt
 
 # Application: unified API + all agent teams
 COPY agents /app/agents
+COPY shared /app/shared
 COPY unified_api /app/unified_api
 COPY run_unified_api.py /app/
 

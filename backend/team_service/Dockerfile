@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # and avoids needing per-team Dockerfiles.
 COPY agents/ /app/agents/
 
+# Platform shared packages (shared.env, shared.postgres, shared.temporal, …).
+COPY shared/ /app/shared/
+
 # Unified API modules needed by some teams (Medium integration, credential store)
 COPY unified_api/__init__.py /app/unified_api/__init__.py
 COPY unified_api/integrations_store.py /app/unified_api/integrations_store.py

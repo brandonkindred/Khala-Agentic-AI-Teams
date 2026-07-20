@@ -20,27 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && playwright install chromium
 
 # ── Shared code ──────────────────────────────────────────────────────────────
-# Shared env-var parser (leaf, stdlib-only). Imported by llm_service.config,
-# shared.postgres.client, and shared.observability.process_health — copy it
-# first so those imports resolve.
-COPY shared/env /app/shared.env
-
-# Typed env-config helpers (env_bool/env_int/env_float; leaf, stdlib-only).
-# Imported by agents.blogging.shared.job_event_bus.
-COPY shared/env_config /app/shared.env_config
-
-# Shared per-job SSE event bus (BusState + pure publish/subscribe/reap; leaf).
-# Imported by agents.blogging.shared.job_event_bus.
-COPY shared/job_event_bus /app/shared.job_event_bus
-
-# Shared SSE streaming helper (framing + per-job stream generators; leaf).
-# Imported by agents.blogging.api.main's job-status stream endpoint.
-COPY shared/sse /app/shared.sse
-
-# Neutral JSON-salvage engine (stdlib-only leaf; lazy-imports json-repair from
-# requirements.txt). Imported by llm_service.clients.ollama to recover
-# prose-wrapped/fenced LLM output — copy it before llm_service so that resolves.
-COPY shared/llm_recovery /app/shared.llm_recovery
+# Platform shared packages (shared.env, shared.env_config, shared.job_event_bus,
+# shared.sse, shared.llm_recovery, shared.concurrency, shared.http,
+# shared.postgres, shared.temporal, shared.observability, shared.app, …).
+COPY shared/ /app/shared/
 
 # LLM service (used by all blogging agents)
 COPY agents/llm_service /app/llm_service
@@ -48,35 +31,13 @@ COPY agents/llm_service /app/llm_service
 # Job service HTTP client
 COPY agents/job_service_client.py /app/job_service_client.py
 
-# Shared concurrency primitives (BackgroundHeartbeat) imported by job_service_client
-COPY shared/concurrency /app/shared.concurrency
-
-# Shared HTTP connection pool (get_pooled_client) imported by job_service_client
-COPY shared/http /app/shared.http
-
 # Integration contracts (used by integrations_store)
 COPY agents/integrations /app/integrations
-
-# Postgres schema registry (used by blogging lifespan to register its schema)
-COPY shared/postgres /app/shared.postgres
 
 # Cross-team user profile — blog_job_store records a best-effort artifact
 # association on job creation (`from user_profile import ...`). Depends only on
 # shared.postgres (copied above) + psycopg/pydantic (in requirements.txt).
 COPY agents/user_profile /app/user_profile
-
-# Shared Temporal helpers (checkpoints/runner/worker) imported by blog_job_store
-COPY shared/temporal /app/shared.temporal
-
-# Shared OpenTelemetry helpers (init_otel/instrument_fastapi_app) imported by
-# agents.blogging.api.main. Falls through to no-op when the opentelemetry SDK
-# packages are not installed, so no extra deps needed in this slim image.
-COPY shared/observability /app/shared.observability
-
-# Team FastAPI app factory (create_team_app) imported by agents.blogging.api.main.
-# Wraps init_otel + the schema-registering lifespan; depends only on
-# shared.observability (above) and a lazy shared.postgres import (below).
-COPY shared/app /app/shared.app
 
 # Minimal unified_api modules needed by blogging Medium integration.
 # These are lazy-imported by agents/blogging/shared/medium_integration_access.py.
