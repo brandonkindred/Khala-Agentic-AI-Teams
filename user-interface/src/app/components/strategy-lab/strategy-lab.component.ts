@@ -1345,6 +1345,15 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // Paper Trading
   // ---------------------------------------------------------------------------
 
+  /**
+   * Fetches paper trading sessions and hydrates run-service state from them.
+   *
+   * Preconditions: none.
+   * Postconditions: for each `lab_record_id`, only the most recent session
+   * (by `paperSessionRecencyKey`) is kept and handed to
+   * `runService.hydratePaperTradingSessions`, so any still-running sessions
+   * resume polling.
+   */
   loadPaperTradingResults(): void {
     this.api
       .getPaperTradingResults()
