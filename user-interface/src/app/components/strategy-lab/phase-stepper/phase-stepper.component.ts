@@ -27,7 +27,11 @@ const PHASE_ORDER = STRATEGY_LAB_PHASES.map(p => p.id);
  *   treated as "no phase" (every step renders pending).
  * Postconditions: renders exactly one `.phase-step` per entry in
  *   `STRATEGY_LAB_PHASES`, each with exactly one of the `completed`/`current`/
- *   `pending` classes applied.
+ *   `pending` classes applied; the container has `role="list"`, each step has
+ *   `role="listitem"`, the current step (if any) carries `aria-current="step"`,
+ *   and each step's label carries a visually-hidden state suffix so its
+ *   completed/current/not-started state reaches assistive tech, not just sighted
+ *   users via CSS.
  */
 @Component({
   selector: 'app-phase-stepper',
@@ -58,5 +62,22 @@ export class PhaseStepperComponent {
 
   isPhasePending(phaseId: string): boolean {
     return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId);
+  }
+
+  /**
+   * Screen-reader state text for a phase-stepper step, mirroring the visual
+   * completed/current/pending cue that sighted users get from CSS classes and
+   * the icon swap.
+   *
+   * Preconditions: `phaseId` is one of the STRATEGY_LAB_PHASES ids; called only
+   *   while a run is active (the stepper renders under `runStatus.current_cycle`).
+   * Postconditions: returns exactly one of `'completed'`, `'current step'`, or
+   *   `'not started'`, derived solely from `isPhaseCompleted`/`isCurrentPhase`
+   *   (no independent ordering logic), so it never disagrees with the visual state.
+   */
+  phaseStateLabel(phaseId: string): string {
+    if (this.isPhaseCompleted(phaseId)) return 'completed';
+    if (this.isCurrentPhase(phaseId)) return 'current step';
+    return 'not started';
   }
 }

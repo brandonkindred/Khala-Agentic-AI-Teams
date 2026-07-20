@@ -19,7 +19,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..execution.metrics import build_equity_curve_from_trades
 from ..execution.risk_filter import _RISK_LIMIT_TIGHTEN_DIRECTION, RiskLimits
@@ -35,6 +35,9 @@ from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strate
 from .coverage_probe import run_coverage_stage, should_run_probes
 from .exceptions import OrchestratorContractError
 from .quality_gates.models import QualityGateResult
+
+if TYPE_CHECKING:
+    from .phases import Phase
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,62 @@ def publishability_skip_reason(
     if runtime_lookahead_violation:
         parts.append("lookahead_violation")
     return ",".join(parts) if parts else None
+
+
+def _env_flag(name: str, *, default: bool = True) -> bool:
+    """Resolve a boolean on/off env toggle.
+
+    Pre: ``name`` is a non-empty env-var name.
+    Post: returns ``default`` when the var is unset; otherwise ``True`` only
+    for the recognised truthy values ``true``/``1``/``yes`` (case-insensitive),
+    ``False`` for anything else. Centralises the truthy-env idiom that the
+    strategy-lab toggles share.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("true", "1", "yes")
+
+
+def _emit_phase_transition(
+    emit: Callable[[str, Dict[str, Any]], None],
+    *,
+    from_phase: "Phase",
+    to_phase: Optional["Phase"],
+    spec: StrategySpec,
+    code: str,
+    attempt: int,
+) -> None:
+    """Emit a :class:`PhaseTransition` event through the orchestrator callback.
+
+    Preconditions:
+      - ``emit`` is a no-op-safe phase callback.
+      - ``from_phase`` is a member of :data:`PHASES`.
+      - ``to_phase`` is the next member of :data:`PHASES` after
+        ``from_phase``, or ``None`` for the terminal boundary.
+      - ``spec`` is the spec as it exists at the boundary; ``code`` is
+        the strategy code as it exists at the boundary (empty string
+        before ``CODE_SYNTHESIS`` exits).
+      - ``attempt`` is the zero-indexed ``run_cycle`` design-attempt
+        counter.
+
+    Postconditions:
+      - Emits exactly one event via ``emit`` with name
+        :data:`PHASE_TRANSITION_EVENT_NAME` and payload equal to
+        ``PhaseTransition.model_dump(mode="json")``.
+      - The payload carries SHA-256 ``spec_hash`` and ``code_hash``
+        computed by :func:`hash_spec` / :func:`hash_code`.
+    """
+    from .phases import PHASE_TRANSITION_EVENT_NAME, PhaseTransition, hash_code, hash_spec
+
+    transition = PhaseTransition(
+        from_phase=from_phase,
+        to_phase=to_phase,
+        spec_hash=hash_spec(spec),
+        code_hash=hash_code(code),
+        attempt=attempt,
+    )
+    emit(PHASE_TRANSITION_EVENT_NAME, transition.model_dump(mode="json"))
 
 
 # Cap on how many ``last_order_events`` entries the diagnostics block

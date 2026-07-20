@@ -30,23 +30,25 @@ from .existing_comments import (
     match_existing_comment,
     partition_issues_by_existing_comments,
 )
+from .issue_proposals import (
+    annotate_duplicate_proposals,
+    build_issue_from_proposal,
+    duplicate_check_max_open_issues,
+    find_matching_open_issue,
+    group_similar_findings,
+    proposal_from_findings,
+)
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
     anchor_to_first_file,
-    annotate_duplicate_proposals,
-    build_issue_from_proposal,
     build_review_body,
     choose_event,
-    duplicate_check_max_open_issues,
-    find_matching_open_issue,
     format_comment_body,
     format_issue_comment,
-    group_similar_findings,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
     parse_valid_lines,
-    proposal_from_findings,
     render_annotated_hunks,
     split_review_comments,
 )

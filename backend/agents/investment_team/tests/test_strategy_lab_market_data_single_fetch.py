@@ -73,8 +73,8 @@ def test_market_data_fetched_once_across_refinement_rounds(
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
     from investment_team.tests.conftest import (
         empty_market_data,
-        noop_refine,
         stub_design_loop,
+        varying_code_refine,
     )
     from investment_team.tests.test_strategy_lab_alignment import (
         _benign_sandbox_trades,
@@ -94,8 +94,24 @@ def test_market_data_fetched_once_across_refinement_rounds(
         fetch_calls["n"] += 1
         return underlying(self, *args, **kwargs)
 
+    # The code varies per round (``varying_code_refine``, not ``noop_refine``)
+    # so ``_cached_run_strategy_code``'s ``BacktestCache`` treats every round
+    # as a fresh execution instead of replaying round 0's cached result — and
+    # the trade ledger itself also varies per round (via ``offset``) so each
+    # round's ``(metrics, trades)`` genuinely differs. Both are needed to
+    # keep the anomaly-check cache (guarding ``anomaly_detector.check``
+    # against redundant re-runs on an unchanged ledger) from collapsing
+    # every round after the first into a single cached verdict — which
+    # would freeze the ``details`` below and trip the stall guard before
+    # genuine round-cap exhaustion. This test cares about the fetch
+    # happening exactly once across many rounds, not about either cache or
+    # the stall guard.
+    trade_round_counter = itertools.count()
+
     def _ok_sandbox(*_a, **_kw):
-        return _code_exec(success=True, raw_trades=_benign_sandbox_trades())
+        return _code_exec(
+            success=True, raw_trades=_benign_sandbox_trades(offset=next(trade_round_counter))
+        )
 
     # ``details`` varies per round so the refinement-loop stall guard (an
     # unchanged ``(code, failure_details)`` signature for consecutive
@@ -122,7 +138,7 @@ def test_market_data_fetched_once_across_refinement_rounds(
     monkeypatch.setattr(orch.code_safety_checker, "check", lambda *a, **kw: [])
     monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _counting_fetch)
-    monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
+    monkeypatch.setattr(orch.refinement_agent, "run", varying_code_refine(_VALID_CODE))
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", _ok_sandbox)
     monkeypatch.setattr(orch.anomaly_detector, "check", _always_anomalous)
 

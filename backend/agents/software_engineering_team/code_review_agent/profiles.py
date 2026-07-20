@@ -102,7 +102,7 @@ _SHARED_OUTPUT_SECTION = (
     '- "approved": boolean (true ONLY if there are no critical or high issues; be strict)\n'
     '- "issues": list of objects, each with:\n'
     '  - "severity": "critical" | "high" | "medium" | "low" | "info"\n'
-    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability" | "side-effects"\n'
+    '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability" | "side-effects" | "documentation"\n'
     '  - "file_path": string (which file has the issue)\n'
     '  - "line": integer (1-based line number in the NEW version of file_path where the issue is). '
     'When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to '
@@ -212,9 +212,14 @@ _CODE_REVIEW_CRITERIA = (
     "   - Proper error handling\n"
     "   - No hardcoded values that should be configurable\n"
     "   - No security vulnerabilities (SQL injection, XSS, etc.)\n\n"
-    "5. **Documentation** - Is code properly documented?\n"
+    "5. **Documentation** - Is code properly documented, and is that documentation ACCURATE?\n"
     "   - JSDoc/docstrings on classes, methods, and functions\n"
-    "   - Comments explain WHY, not just WHAT\n\n"
+    "   - Comments explain WHY, not just WHAT\n"
+    "   - Does each docstring/comment match what the code AS WRITTEN NOW actually does (its "
+    "return value, the exceptions it raises, the state it mutates, its side effects)? A docstring "
+    "or comment that claims behavior the implementation does not provide is a finding -- use "
+    'category "documentation". (A stale docstring is a documentation-accuracy problem, not a '
+    'side effect; do NOT file it under "side-effects".)\n\n'
     "6. **Testing** - Are tests adequate?\n"
     "   - Unit tests for public methods\n"
     "   - Test coverage appears adequate (aim for 85%+)\n"
@@ -264,20 +269,25 @@ _CODE_REVIEW_CRITERIA = (
     "   - Default severity is medium/low; escalate only when the maintainability problem is "
     "already causing a concrete defect (e.g. hidden state that produces incorrect behavior), not "
     "for a design preference alone.\n\n"
-    "12. **Behavior & Side-Effect Impact** - You are shown only this chunk's current content, "
-    "never a prior version -- do NOT guess or invent what the code looked like before. Judge "
-    "the enclosing function/method purely by what it does AS WRITTEN NOW:\n"
-    "   - What does it actually return/raise/mutate/do (return value/type, exceptions, side "
-    "effects such as writes/network calls/mutation of shared or passed-in state, ordering/timing "
-    "guarantees)?\n"
-    "   - Does that CURRENT behavior match what its OWN docstring/comments claim it does? A "
-    "mismatch between documented and actual behavior IS a finding, regardless of whether this "
-    "diff introduced it -- this is the one actionable trigger for this criterion.\n"
-    "   - You cannot see this function's callers from this chunk alone, and this is the only "
-    "check in this criterion -- do NOT flag a finding merely because a caller's safety is "
-    "unknown or because the behavior seems notable (an ordinary return value, mutation, or "
-    "network call is not itself a finding). Stay silent here unless you found the documented-vs-"
-    "actual mismatch above."
+    "12. **Behavior & Side-Effect Impact** - A *side effect* is something a function does that is "
+    "observable beyond its return value -- it mutates shared or passed-in state, writes to a "
+    "store, performs I/O or a network call, raises an exception, or changes ordering/timing that "
+    "other code can observe. The risk this criterion cares about is a side effect that carries an "
+    "UNINTENDED LOGICAL CONSEQUENCE: a change to what a function returns, raises, mutates, or does "
+    "that would make its CALLERS elsewhere in the system misbehave, crash, or silently produce "
+    "wrong results. You are shown only this chunk's current content, never a prior version -- do "
+    "NOT guess or invent what the code looked like before; judge the enclosing function/method "
+    "purely by what it does AS WRITTEN NOW.\n"
+    "   - Verifying caller impact requires searching the whole codebase for callers, which you "
+    "have no tools to do from this bounded chunk. That cross-caller check is the job of the "
+    "dedicated side-effect / blast-radius pass, which runs once per submission with the tools to "
+    "do it -- defer to it.\n"
+    "   - Therefore, do NOT flag a side-effect finding merely because a function has a side effect "
+    "(an ordinary return value, mutation, write, or network call is not itself a finding) or "
+    "because a caller's safety is unknown. Only raise a side-effect finding here for a "
+    "self-evident, self-contained behavioral defect fully visible within this chunk (e.g. the "
+    "function unconditionally raises where its own surrounding code plainly cannot handle it). A "
+    "stale docstring is NOT a side effect -- that belongs to the Documentation criterion above."
 )
 
 _SPEC_CONFORMANCE_CRITERIA = (

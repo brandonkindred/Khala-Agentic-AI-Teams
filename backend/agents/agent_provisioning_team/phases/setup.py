@@ -29,6 +29,7 @@ def run_setup(
     progress_callback: Optional[Callable[[str], None]] = None,
     on_registered: Optional[Callable[[EnvironmentInfo], None]] = None,
     job_id: Optional[str] = None,
+    fencing_token: Optional[int] = None,
 ) -> SetupResult:
     """
     Execute the setup phase: create (or reuse) the agent's Docker container.
@@ -55,6 +56,8 @@ def run_setup(
             ``check_existing_environment_activity`` can positively attribute
             it to this attempt even if the local idempotency state that
             would otherwise prove it never gets written.
+        fencing_token: Caller's fencing token (see ``shared.fencing``);
+            ``None`` skips enforcement.
 
     Returns:
         SetupResult with environment info
@@ -143,6 +146,7 @@ def run_setup(
         agent_id=agent_id,
         config=docker_config,
         credentials=credentials,
+        fencing_token=fencing_token,
     )
 
     if not result.success:
@@ -184,7 +188,8 @@ def run_setup(
                 # for a brand-new registration, leave it unset so it defaults to
                 # the same created_at value rather than a few microseconds before it.
                 updated_at=(datetime.now(timezone.utc).isoformat() if existing else None),
-            )
+            ),
+            fencing_token=fencing_token,
         )
         # Set only after register() itself succeeds — _rollback_failed_setup
         # uses this to tell "we just wrote the record ourselves" (on_registered
@@ -193,7 +198,9 @@ def run_setup(
         if on_registered is not None:
             on_registered(env_info)
     except Exception:
-        _rollback_failed_setup(agent_id, existing, result, env_store, docker, registered)
+        _rollback_failed_setup(
+            agent_id, existing, result, env_store, docker, registered, fencing_token=fencing_token
+        )
         raise
 
     return SetupResult(
@@ -209,6 +216,8 @@ def _rollback_failed_setup(
     env_store: EnvironmentStore,
     docker: DockerProvisionerTool,
     registered_by_this_call: bool = False,
+    *,
+    fencing_token: Optional[int] = None,
 ) -> None:
     """Best-effort teardown after a failure between provisioning and commit.
 
@@ -257,6 +266,12 @@ def _rollback_failed_setup(
         * ``registered_by_this_call`` is ``True`` iff this attempt's own
           ``env_store.register(...)`` call already completed before the
           failure being rolled back.
+        * ``fencing_token``, when given, is threaded into every mutating
+          store/provisioner call below; each is already individually wrapped
+          in its own best-effort ``try/except Exception`` (see Postconditions),
+          so a rejected :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          is logged and that one step skipped, same as any other rollback-step
+          failure — this path never re-raises.
     Postconditions:
         * Never raises; teardown / restore failures are logged so they cannot
           mask the original setup error.
@@ -296,7 +311,7 @@ def _rollback_failed_setup(
             # from it until some later attempt happens to rediscover the
             # container and re-register from scratch.
             try:
-                env_store.register(existing)
+                env_store.register(existing, fencing_token=fencing_token)
             except Exception:
                 logger.exception(
                     "Setup rollback: failed to restore agent_id=%s's prior "
@@ -307,7 +322,7 @@ def _rollback_failed_setup(
                 )
             return
         try:
-            env_store.remove(agent_id)
+            env_store.remove(agent_id, fencing_token=fencing_token)
         except Exception:
             # Never let a record-removal failure (e.g. a now-read-only registry
             # directory) escape and mask the original setup error — but also
@@ -365,7 +380,7 @@ def _rollback_failed_setup(
         # non-running record (kept for continuity) — either way the fresh container
         # is exclusively this attempt's, so tear it down.
     try:
-        teardown = docker.deprovision(agent_id)
+        teardown = docker.deprovision(agent_id, fencing_token=fencing_token)
         # deprovision() reports failure (e.g. a `docker stop` timeout) via its
         # result rather than raising; surface it or the container leaks silently.
         if not teardown.success:
@@ -386,6 +401,8 @@ def cleanup_setup(
     agent_id: str,
     environment_store: Optional[EnvironmentStore] = None,
     docker_provisioner: Optional[DockerProvisionerTool] = None,
+    *,
+    fencing_token: Optional[int] = None,
 ) -> bool:
     """Clean up a failed setup by removing its environment record and container.
 
@@ -407,8 +424,8 @@ def cleanup_setup(
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
 
-    env_store.remove(agent_id)
-    teardown = docker.deprovision(agent_id)
+    env_store.remove(agent_id, fencing_token=fencing_token)
+    teardown = docker.deprovision(agent_id, fencing_token=fencing_token)
     if not teardown.success:
         logger.error(
             "Cleanup: container teardown for agent_id=%s failed; container may "

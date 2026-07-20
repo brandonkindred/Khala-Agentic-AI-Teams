@@ -14,6 +14,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.fencing import StaleFencingTokenError
 from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
 
@@ -102,6 +103,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Create and start a Docker container for the agent (idempotent)."""
         return self.run_idempotent(
@@ -117,6 +119,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
             on_persist_failure=lambda details: self._best_effort_remove_container(
                 details["container_name"]
             ),
+            fencing_token=fencing_token,
         )
 
     def _do_provision(
@@ -524,8 +527,17 @@ class DockerProvisionerTool(BaseToolProvisioner):
         self._best_effort_remove_container(container_name)
         return self._container_exists(container_name) is False
 
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
-        """Stop and remove the Docker container."""
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
+        """Stop and remove the Docker container.
+
+        ``fencing_token``, when given, is checked *before* the real
+        ``docker stop``/``docker rm`` calls run, not just before the final
+        state persist, so a stale caller is rejected before it can touch the
+        live container.
+        """
+        if fencing_token is not None:
+            self._state.check_fencing_token(agent_id, fencing_token)
+
         container_info = self._state.get(agent_id)
 
         if not container_info:
@@ -561,7 +573,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 # the state row, since deleting it while the container survives
                 # would leave it untracked and its name blocking reprovisioning.
                 if self._container_exists(container_name) is False:
-                    self._state.delete(agent_id)
+                    self._state.delete(agent_id, fencing_token=fencing_token)
                     return DeprovisionResult(
                         tool_name=self.tool_name,
                         success=True,
@@ -576,7 +588,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
                     error=f"docker rm failed: {stderr.strip() or removal.returncode}",
                 )
 
-            self._state.delete(agent_id)
+            self._state.delete(agent_id, fencing_token=fencing_token)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,
@@ -584,6 +596,11 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 details={"container_removed": container_name},
             )
 
+        except StaleFencingTokenError:
+            # A stale-token rejection from the fenced _state.delete is an
+            # ownership error, not an infra failure: propagate it (non-retryable)
+            # instead of folding it into a soft success=False result.
+            raise
         except Exception as e:
             return DeprovisionResult(
                 tool_name=self.tool_name,

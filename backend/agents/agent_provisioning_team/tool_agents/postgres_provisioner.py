@@ -13,6 +13,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.fencing import StaleFencingTokenError
 from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner, CompensationRegistrar
 
@@ -67,6 +68,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Create a PostgreSQL database and user for the agent."""
         if not HAS_PSYCOPG2:
@@ -79,6 +81,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 agent_id, config, credentials, register_compensation
             ),
             reuse=lambda existing: self._on_reuse(existing, credentials),
+            fencing_token=fencing_token,
         )
 
     def _do_provision(
@@ -213,14 +216,23 @@ class PostgresProvisionerTool(BaseToolProvisioner):
             actual_permissions=actual_permissions,
         )
 
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
-        """Remove PostgreSQL database and user."""
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
+        """Remove PostgreSQL database and user.
+
+        ``fencing_token``, when given, is checked *before* the real
+        ``DROP DATABASE``/``DROP USER`` statements run, not just before the
+        final state persist, so a stale caller is rejected before it can
+        touch the live database.
+        """
         if not HAS_PSYCOPG2:
             return DeprovisionResult(
                 tool_name=self.tool_name,
                 success=False,
                 error="psycopg2 is not installed",
             )
+
+        if fencing_token is not None:
+            self._state.check_fencing_token(agent_id, fencing_token)
 
         prov_info = self._state.get(agent_id)
         if not prov_info:
@@ -244,7 +256,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
             cursor.close()
             conn.close()
 
-            self._state.delete(agent_id)
+            self._state.delete(agent_id, fencing_token=fencing_token)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,
@@ -255,6 +267,11 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 },
             )
 
+        except StaleFencingTokenError:
+            # A stale-token rejection from the fenced _state.delete is an
+            # ownership error, not an infra failure: propagate it (non-retryable)
+            # instead of folding it into a soft success=False result.
+            raise
         except Exception as e:
             return DeprovisionResult(
                 tool_name=self.tool_name,

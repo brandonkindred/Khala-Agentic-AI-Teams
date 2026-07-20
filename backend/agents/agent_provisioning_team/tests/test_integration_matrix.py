@@ -68,9 +68,12 @@ class _FakeState:
     def __init__(self) -> None:
         self.deleted: List[str] = []
 
-    def delete(self, agent_id: str) -> bool:
+    def delete(self, agent_id: str, fencing_token=None) -> bool:
         self.deleted.append(agent_id)
         return True
+
+    def check_fencing_token(self, agent_id: str, fencing_token) -> None:
+        pass
 
 
 class _FakeProvisioner(BaseToolProvisioner):
@@ -85,7 +88,7 @@ class _FakeProvisioner(BaseToolProvisioner):
         self._seeded_comps: Dict[str, List[CompensationRecord]] = {}
         self._state = _FakeState()
 
-    def provision(self, agent_id, config, credentials):
+    def provision(self, agent_id, config, credentials, fencing_token=None):
         if self.fail:
             return self._make_error_result(f"{self.tool_name} exploded")
         self.provisioned.append(agent_id)
@@ -101,7 +104,7 @@ class _FakeProvisioner(BaseToolProvisioner):
             actual_permissions=["read", "write"],
         )
 
-    def deprovision(self, agent_id):
+    def deprovision(self, agent_id, fencing_token=None):
         self.deprovisioned.append(agent_id)
         return DeprovisionResult(tool_name=self.tool_name, success=True)
 
@@ -112,7 +115,7 @@ class _FakeProvisioner(BaseToolProvisioner):
     def list_compensations(self, agent_id):
         return list(self._seeded_comps.get(agent_id, []))
 
-    def clear_compensations(self, agent_id):
+    def clear_compensations(self, agent_id, fencing_token=None):
         self._seeded_comps.pop(agent_id, None)
 
     def replay_compensation(self, agent_id, kind, payload):

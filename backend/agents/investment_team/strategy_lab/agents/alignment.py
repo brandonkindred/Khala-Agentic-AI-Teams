@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -36,10 +35,12 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 from strands import Agent
 
+from shared_env_config import env_int
+
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ._llm_budget import DesignBudgetExhausted
 from ._llm_envelope import run_structured_agent
-from ._parse_helpers import extract_json_object
+from ._parse_helpers import coerce_strict_bool, extract_json_object
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import ALIGNMENT_FIX_SCHEMA
 from .model_factory import get_strands_model
@@ -73,10 +74,7 @@ def _alignment_max_attempts() -> int:
 
     Postconditions: returns an int ``>= 1``.
     """
-    try:
-        retries = max(int(os.environ.get("STRATEGY_LAB_ALIGNMENT_RETRIES", "2")), 0)
-    except ValueError:
-        retries = 2
+    retries = env_int("STRATEGY_LAB_ALIGNMENT_RETRIES", 2, floor=0)
     return retries + 1
 
 
@@ -627,12 +625,4 @@ def _parse_legitimate(raw: Any) -> bool:
     correctness boundary — never legitimise without an unambiguous
     yes.
     """
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        normalised = raw.strip().lower()
-        if normalised == "true":
-            return True
-        if normalised == "false":
-            return False
-    return False
+    return coerce_strict_bool(raw)

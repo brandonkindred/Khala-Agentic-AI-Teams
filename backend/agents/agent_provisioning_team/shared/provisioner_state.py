@@ -17,7 +17,9 @@ On-disk schema (legacy flat rows are migrated transparently on load):
         "details": {...},            # what `put(agent_id, details)` stores
         "compensations": [           # LIFO rollback records from run_idempotent
           {"kind": "...", "payload": {...}, "created_at": 1.0}
-        ]
+        ],
+        "fencing_token": 3           # highest fencing token accepted so far;
+                                      # absent/None on rows never written with one
       }
     }
 """
@@ -34,6 +36,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from .fencing import check_fencing_token
 from .path_safety import safe_path_component
 
 DEFAULT_STATE_DIR = (
@@ -84,17 +87,24 @@ def _as_row(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Normalize an on-disk entry into the nested schema.
 
     Legacy rows were flat (``{<details>}``); new rows are
-    ``{"details": {...}, "compensations": [...]}``. We detect legacy rows
-    by the absence of a ``"details"`` key and rewrite on read so every
-    downstream caller sees the nested shape.
+    ``{"details": {...}, "compensations": [...], "fencing_token": int}``
+    (``fencing_token`` is optional/absent on rows written before fencing
+    tokens existed, or never fenced). We detect legacy rows by the absence
+    of a ``"details"`` key and rewrite on read so every downstream caller
+    sees the nested shape.
     """
     if raw is None:
-        return {"details": {}, "compensations": []}
+        return {"details": {}, "compensations": [], "fencing_token": None}
     if "details" in raw and isinstance(raw["details"], dict):
         comps = raw.get("compensations") or []
-        return {"details": raw["details"], "compensations": list(comps)}
+        token = raw.get("fencing_token")
+        return {
+            "details": raw["details"],
+            "compensations": list(comps),
+            "fencing_token": token if isinstance(token, int) else None,
+        }
     # Legacy flat row — treat the whole thing as details.
-    return {"details": dict(raw), "compensations": []}
+    return {"details": dict(raw), "compensations": [], "fencing_token": None}
 
 
 class ProvisionerStateStore:
@@ -184,19 +194,109 @@ class ProvisionerStateStore:
             return None
         return dict(row["details"]) if row["details"] else None
 
-    def put(self, agent_id: str, value: Dict[str, Any]) -> None:
-        """Persist details for ``agent_id``; preserves any existing compensations."""
+    def put(
+        self, agent_id: str, value: Dict[str, Any], *, fencing_token: Optional[int] = None
+    ) -> None:
+        """Persist details for ``agent_id``; preserves any existing compensations.
+
+        When ``fencing_token`` is given and lower than this agent's
+        already-recorded fencing token, raises
+        :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        and leaves the row untouched.
+        """
         with self._locked() as data:
             existing = data.get(agent_id) or {"details": {}, "compensations": []}
+            if fencing_token is not None:
+                prior_token = existing.get("fencing_token")
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource=f"provisioner_state:{self.provisioner_name}",
+                    provided_token=fencing_token,
+                    current_token=prior_token if isinstance(prior_token, int) else None,
+                )
+                existing["fencing_token"] = fencing_token
             existing["details"] = dict(value)
             data[agent_id] = existing
 
-    def delete(self, agent_id: str) -> bool:
+    def delete(self, agent_id: str, *, fencing_token: Optional[int] = None) -> bool:
+        """Clear ``agent_id``'s details and compensations (row itself is kept).
+
+        When ``fencing_token`` is given and lower than this agent's
+        already-recorded fencing token, raises
+        :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        and deletes nothing.
+
+        Postconditions:
+            * The row is never removed outright — only ``details``/
+              ``compensations`` are cleared, and ``fencing_token`` (when
+              given) becomes the row's new high-water mark. Removing the row
+              entirely would reset a later caller's bootstrap comparison
+              (``current_token=None``) to always-accept, letting a stale
+              caller's post-teardown write silently resurrect state a newer
+              owner already tore down. ``get()``/``list_agents()`` already
+              treat an empty ``details`` dict as absent, so this preserves
+              their existing "gone" contract for every caller that doesn't
+              care about the fencing high-water mark.
+            * Returns ``True`` iff ``agent_id`` had non-empty ``details``
+              before this call — i.e. there was a live entry to clear, not
+              merely a row (a tombstone left by an earlier ``delete`` has an
+              empty ``details``, so a repeat call against it returns
+              ``False``, same idempotent-delete contract as before this row
+              stopped being removed outright).
+        """
         with self._locked() as data:
-            if agent_id in data:
-                del data[agent_id]
-                return True
-            return False
+            if agent_id not in data:
+                return False
+            row = data[agent_id]
+            if fencing_token is not None:
+                prior_token = row.get("fencing_token")
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource=f"provisioner_state:{self.provisioner_name}",
+                    provided_token=fencing_token,
+                    current_token=prior_token if isinstance(prior_token, int) else None,
+                )
+            had_content = bool(row.get("details"))
+            data[agent_id] = {
+                "details": {},
+                "compensations": [],
+                "fencing_token": fencing_token
+                if fencing_token is not None
+                else row.get("fencing_token"),
+            }
+            return had_content
+
+    def check_fencing_token(self, agent_id: str, fencing_token: int) -> None:
+        """Reject a stale token before any real infrastructure mutation runs.
+
+        Read-check only — does not persist. Provisioners call this as the
+        first statement in ``provision``/``deprovision`` (before touching
+        Docker/Postgres/Redis/git), so a stale caller is rejected *before*
+        performing a real side effect, not merely before its own bookkeeping
+        write. The caller's own follow-up ``put``/``delete``/
+        ``add_compensation`` call (passed the same ``fencing_token``)
+        performs the actual persisted high-water-mark bump.
+
+        Raises :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        when ``fencing_token`` is lower than this agent's already-recorded
+        fencing token; otherwise returns ``None``.
+
+        Intentionally lock-free (mirrors :meth:`get`): it only *reads* the
+        high-water mark, so it must not enter the read-modify-write path.
+        Using ``self._locked()`` here would re-serialise + fsync + atomically
+        rename the entire store on every preflight — and this runs as the
+        first statement of every provision/deprovision — purely to compare
+        one integer. ``_load`` observes a whole committed snapshot via the
+        mutators' atomic ``os.replace``, which is all this comparison needs.
+        """
+        row = self._load().get(agent_id) or {"details": {}, "compensations": []}
+        prior_token = row.get("fencing_token")
+        check_fencing_token(
+            agent_id=agent_id,
+            resource=f"provisioner_state:{self.provisioner_name}",
+            provided_token=fencing_token,
+            current_token=prior_token if isinstance(prior_token, int) else None,
+        )
 
     def list_agents(self) -> Dict[str, Dict[str, Any]]:
         """Return every agent's flat details dict (legacy shape preserved).
@@ -210,6 +310,8 @@ class ProvisionerStateStore:
         self,
         agent_id: str,
         creator: Callable[[], Dict[str, Any]],
+        *,
+        fencing_token: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Return existing details for agent, or run ``creator`` and store them.
 
@@ -217,22 +319,54 @@ class ProvisionerStateStore:
         is the place where the actual side-effecting resource creation
         happens. If ``creator`` raises, nothing is persisted. Any existing
         compensation records for the agent are preserved across this call.
+
+        When ``fencing_token`` is given and lower than this agent's
+        already-recorded fencing token, raises
+        :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        before invoking ``creator``.
         """
         with self._locked() as data:
             existing = data.get(agent_id)
+            if fencing_token is not None:
+                prior_token = existing.get("fencing_token") if existing else None
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource=f"provisioner_state:{self.provisioner_name}",
+                    provided_token=fencing_token,
+                    current_token=prior_token if isinstance(prior_token, int) else None,
+                )
             if existing is not None and existing["details"]:
                 return dict(existing["details"])
             value = creator()
             row = existing or {"details": {}, "compensations": []}
             row["details"] = dict(value)
+            if fencing_token is not None:
+                row["fencing_token"] = fencing_token
             data[agent_id] = row
             return value
 
     # ---- Compensation records ----
-    def add_compensation(self, agent_id: str, record: CompensationRecord) -> None:
-        """Append a compensation record for ``agent_id`` (write-through)."""
+    def add_compensation(
+        self, agent_id: str, record: CompensationRecord, *, fencing_token: Optional[int] = None
+    ) -> None:
+        """Append a compensation record for ``agent_id`` (write-through).
+
+        When ``fencing_token`` is given and lower than this agent's
+        already-recorded fencing token, raises
+        :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        and appends nothing.
+        """
         with self._locked() as data:
             row = data.get(agent_id) or {"details": {}, "compensations": []}
+            if fencing_token is not None:
+                prior_token = row.get("fencing_token")
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource=f"provisioner_state:{self.provisioner_name}",
+                    provided_token=fencing_token,
+                    current_token=prior_token if isinstance(prior_token, int) else None,
+                )
+                row["fencing_token"] = fencing_token
             comps: List[Dict[str, Any]] = list(row.get("compensations") or [])
             comps.append(record.to_json())
             row["compensations"] = comps
@@ -248,11 +382,26 @@ class ProvisionerStateStore:
             return []
         return [CompensationRecord.from_json(c) for c in row.get("compensations") or []]
 
-    def clear_compensations(self, agent_id: str) -> None:
-        """Remove all compensation records for ``agent_id``; keep details intact."""
+    def clear_compensations(self, agent_id: str, *, fencing_token: Optional[int] = None) -> None:
+        """Remove all compensation records for ``agent_id``; keep details intact.
+
+        When ``fencing_token`` is given and lower than this agent's
+        already-recorded fencing token, raises
+        :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        and leaves the compensation list untouched.
+        """
         with self._locked() as data:
             row = data.get(agent_id)
             if row is None:
                 return
+            if fencing_token is not None:
+                prior_token = row.get("fencing_token")
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource=f"provisioner_state:{self.provisioner_name}",
+                    provided_token=fencing_token,
+                    current_token=prior_token if isinstance(prior_token, int) else None,
+                )
+                row["fencing_token"] = fencing_token
             row["compensations"] = []
             data[agent_id] = row

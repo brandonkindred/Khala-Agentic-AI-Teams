@@ -62,7 +62,7 @@ def test_stale_owner_mutation_rejected_after_reclaim_by_second_owner(
             )
 
     assert exc_info.value.agent_id == agent_id
-    assert exc_info.value.token == first_token
+    assert exc_info.value.provided_token == first_token
     assert exc_info.value.current_token == second_token
 
     [record] = [r for r in caplog.records if r.levelname == "ERROR"]

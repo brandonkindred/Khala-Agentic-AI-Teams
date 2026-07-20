@@ -69,7 +69,7 @@ describe('PhaseStepperComponent', () => {
       expect(steps[3].classList.contains('pending')).toBe(true); // analyzing
 
       const labels = steps.map((s) => s.querySelector('.phase-label')?.textContent?.trim());
-      expect(labels).toEqual(['Ideate', 'Code', 'Backtest', 'Analyze']);
+      expect(labels).toEqual(['Ideate: completed', 'Code: completed', 'Backtest: current step', 'Analyze: not started']);
 
       // Completed phases swap their icon for a checkmark.
       expect(steps[0].querySelector('mat-icon')?.textContent?.trim()).toBe('check');
@@ -85,6 +85,44 @@ describe('PhaseStepperComponent', () => {
       for (const icon of icons) {
         expect(icon.getAttribute('aria-hidden')).toBe('true');
       }
+    });
+
+    it('renders as a semantic list, with aria-current="step" on exactly the active step (WCAG 1.3.1 / 4.1.2)', () => {
+      component.currentPhase = 'coding';
+      fixture.detectChanges();
+
+      const stepper: HTMLElement = fixture.nativeElement.querySelector('.phase-stepper');
+      expect(stepper.getAttribute('role')).toBe('list');
+
+      const steps: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.phase-step'));
+      steps.forEach((step) => expect(step.getAttribute('role')).toBe('listitem'));
+
+      const current = steps.filter((s) => s.getAttribute('aria-current') === 'step');
+      expect(current).toHaveLength(1);
+      expect(current[0].querySelector('.phase-label')?.textContent).toContain('Code');
+      steps.filter((s) => s !== current[0]).forEach((s) => expect(s.hasAttribute('aria-current')).toBe(false));
+    });
+  });
+
+  describe('phaseStateLabel', () => {
+    it('returns "completed" for a phase before the current one', () => {
+      component.currentPhase = 'backtesting';
+      expect(component.phaseStateLabel('ideating')).toBe('completed');
+    });
+
+    it('returns "current step" for the active phase', () => {
+      component.currentPhase = 'backtesting';
+      expect(component.phaseStateLabel('backtesting')).toBe('current step');
+    });
+
+    it('returns "not started" for a phase after the current one', () => {
+      component.currentPhase = 'backtesting';
+      expect(component.phaseStateLabel('analyzing')).toBe('not started');
+    });
+
+    it('returns "not started" for every phase when there is no current phase', () => {
+      component.currentPhase = undefined;
+      expect(component.phaseStateLabel('ideating')).toBe('not started');
     });
   });
 

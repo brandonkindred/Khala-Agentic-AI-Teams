@@ -310,6 +310,18 @@ duplicated per caller. The remaining spec-authoring/reviewing agents (zero-trade
 fix-proposer) are unchanged and still rely solely on the prompt-embedded-schema + `json_object` contract
 described above.
 
+**Observability.** Each of the four structured call sites emits a distinct, greppable outcome line so
+the token/latency win is visible in production logs, not just in a benchmark. A successful
+provider-enforced decode logs `INFO strategy_lab structured_output outcome=succeeded agent=<agent>
+phase=<phase>_structured` — the marker that no parse-correction resend was needed. A `schema_forced`
+starvation degrade logs the existing `WARNING ... decode starved (schema_forced) ...` line before
+falling through to the legacy loop. When the legacy parse-retry loop does fire, each unparseable-JSON
+warning now carries `structured_attempted=<bool>`, distinguishing a correction retry that ran *after* a
+structured degrade (`True`) from one on a provider that never had structured output available
+(`False`, e.g. Bedrock). Grep `structured_output outcome=succeeded` to count how often the pipeline took
+the resend-free path versus fell back. This mirrors the `json_self_correction succeeded/failed` telemetry
+convention in `llm_service/structured.py`.
+
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
 Per-cycle hard cap on the total number of LLM calls the design phase may make within a single
 `run_cycle`, spanning all `MAX_DESIGN_REENTRIES` re-entries (default `120`, sub-1 values floored to

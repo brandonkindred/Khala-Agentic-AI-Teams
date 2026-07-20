@@ -33,6 +33,7 @@ from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
+from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
 from ._prompt_context import spec_prompt_fields
 from ._response_schemas import CRITIQUE_SCHEMA
@@ -110,6 +111,13 @@ def _invoke_structured_critique(
     inspects to decide whether to degrade to the legacy single-shot call.
     This function never falls back itself and never retries.
     """
+    assert _structured_output_available(), (
+        "precondition: caller must verify _structured_output_available() before "
+        "invoking (only that path exposes an adapter with a .client)"
+    )
+    assert agent_key and system_prompt and user_prompt and phase, (
+        "precondition: agent_key, system_prompt, user_prompt, and phase must be non-empty"
+    )
     client = get_strands_model(agent_key).client
 
     def _call(prompt: str) -> str:
@@ -612,6 +620,11 @@ class DesignReviewAgent:
                         "degrading to the legacy single-shot call."
                     )
                     parsed = _invoke_legacy()
+                else:
+                    logger.info(
+                        "strategy_lab structured_output outcome=succeeded "
+                        "agent=strategy_design_review phase=design_review_structured",
+                    )
             else:
                 parsed = _invoke_legacy()
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
@@ -879,15 +892,7 @@ def _coerce_strict_bool(raw: Any) -> bool:
     to ``False`` — fail closed so a stray non-string never advances the
     design loop past a reviewer that did not actually say "ready".
     """
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s == "true":
-            return True
-        if s == "false":
-            return False
-    return False
+    return _shared_coerce_strict_bool(raw)
 
 
 def _fail_closed_critique(exc: Exception, readiness_findings: List[str]) -> SpecCritique:

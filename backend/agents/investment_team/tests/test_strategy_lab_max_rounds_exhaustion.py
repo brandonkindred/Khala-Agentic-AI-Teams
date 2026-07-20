@@ -178,18 +178,23 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
     ``_VALID_CODE`` fails the real ``code_conformance_gate``, which would
     otherwise exhaust the loop at the VALIDATION phase before ever reaching
     evaluation; stub it to a clean pass so this test actually isolates the
-    evaluation path. ``noop_refine`` is fine here (unlike the execution-phase
-    test): the anomaly detector is called fresh every round regardless of
-    ``BacktestCache`` (which only caches the sandbox execution, not anomaly
-    detection), and its ``details`` already vary per round below, so the
-    ``(code, failure_details)`` signature the stall guard tracks changes
-    every round even with unchanged code.
+    evaluation path. ``varying_code_refine`` (not ``noop_refine``) keeps
+    each round's code distinct so ``_cached_run_strategy_code``'s
+    ``BacktestCache`` treats every round as a fresh execution instead of
+    replaying round 0's cached result; the sandbox trades also vary per
+    round (via ``offset``) so each round's ``(metrics, trades)`` genuinely
+    differs. Both are needed so the anomaly-check cache (guarding
+    ``anomaly_detector.check`` against redundant re-runs on an unchanged
+    ledger) doesn't collapse rounds after the first into one cached
+    verdict — the detector is still called fresh every round, and its
+    ``details`` vary too, so the ``(code, failure_details)`` signature the
+    stall guard tracks changes every round.
     """
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
     from investment_team.tests.conftest import (
         empty_market_data,
-        noop_refine,
         stub_design_loop,
+        varying_code_refine,
     )
     from investment_team.tests.test_strategy_lab_alignment import (
         _benign_sandbox_trades,
@@ -214,11 +219,18 @@ def test_evaluation_phase_exhaustion_does_not_mark_winner(
     )
 
     # Sandbox always succeeds with benign trades — execution itself is fine.
+    # The ledger varies per round (via ``offset``) so the anomaly-check
+    # cache sees a fresh ``(metrics, trades)`` signature every round instead
+    # of reusing the first round's cached verdict.
+    trade_round_counter = itertools.count()
+
     def _ok_sandbox(*_a, **_kw):
-        return _code_exec(success=True, raw_trades=_benign_sandbox_trades())
+        return _code_exec(
+            success=True, raw_trades=_benign_sandbox_trades(offset=next(trade_round_counter))
+        )
 
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", _ok_sandbox)
-    monkeypatch.setattr(orch.refinement_agent, "run", noop_refine(_VALID_CODE))
+    monkeypatch.setattr(orch.refinement_agent, "run", varying_code_refine(_VALID_CODE))
 
     # Anomaly detector always reports critical → evaluation-phase exhaustion.
     # ``details`` varies per round so the round-cap path is exercised

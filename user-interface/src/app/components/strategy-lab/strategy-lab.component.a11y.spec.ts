@@ -1733,3 +1733,113 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });
+
+describe('StrategyLabComponent a11y — phase stepper state (WCAG 1.3.1 / 4.1.2)', () => {
+  async function createFixture() {
+    const apiSpy = {
+      runStrategyLab: vi.fn().mockReturnValue(NEVER),
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
+    };
+    const integrationsSpy = {
+      getTradingViewConfig: vi.fn().mockReturnValue(
+        of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+      ),
+    };
+
+    await TestBed.configureTestingModule({
+      imports: [StrategyLabComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        { provide: IntegrationsApiService, useValue: integrationsSpy },
+      ],
+    })
+      .overrideComponent(StrategyLabComponent, {
+        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }] },
+      })
+      .compileComponents();
+
+    const fixture = TestBed.createComponent(StrategyLabComponent);
+    fixture.detectChanges(); // triggers ngOnInit
+    return fixture;
+  }
+
+  /** Drives a running state with the given current phase so the stepper renders. */
+  function renderStepperAtPhase(fixture: ComponentFixture<StrategyLabComponent>, phase: string): void {
+    stubOf(fixture).running.set(true);
+    stubOf(fixture).runStatus.set({
+      run_id: 'run-1',
+      status: 'running',
+      started_at: '2024-06-01T00:00:00Z',
+      total_cycles: 5,
+      completed_cycles: 0,
+      skipped_cycles: 0,
+      completed_record_ids: [],
+      current_cycle: { cycle_index: 1, phase },
+    });
+    fixture.detectChanges();
+  }
+
+  it('renders the stepper as a semantic list with each step a listitem', async () => {
+    const fixture = await createFixture();
+    renderStepperAtPhase(fixture, 'coding');
+
+    const stepper: HTMLElement = fixture.nativeElement.querySelector('.phase-stepper');
+    expect(stepper).toBeTruthy();
+    expect(stepper.getAttribute('role')).toBe('list');
+
+    const steps: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.phase-step'));
+    expect(steps.length).toBe(4); // Ideate, Code, Backtest, Analyze
+    steps.forEach((step) => expect(step.getAttribute('role')).toBe('listitem'));
+
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('marks exactly the active step with aria-current="step"', async () => {
+    const fixture = await createFixture();
+    renderStepperAtPhase(fixture, 'coding'); // second phase
+
+    const steps: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.phase-step'));
+    const current = steps.filter((s) => s.getAttribute('aria-current') === 'step');
+    expect(current.length).toBe(1);
+    // 'coding' is the "Code" step (index 1); every other step omits aria-current entirely.
+    expect(current[0].querySelector('.phase-label')?.textContent).toContain('Code');
+    steps
+      .filter((s) => s !== current[0])
+      .forEach((s) => expect(s.hasAttribute('aria-current')).toBe(false));
+
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+
+  it('announces each step\'s label plus completed/current/not-started state to a screen reader', async () => {
+    const fixture = await createFixture();
+    renderStepperAtPhase(fixture, 'coding');
+
+    const steps: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.phase-step'));
+    // Order: Ideate (completed) → Code (current) → Backtest (not started) → Analyze (not started).
+    const stateText = (i: number) =>
+      steps[i].querySelector('.phase-label .visually-hidden')?.textContent?.trim();
+
+    expect(steps[0].querySelector('.phase-label')?.textContent).toContain('Ideate');
+    expect(stateText(0)).toBe(': completed');
+    expect(stateText(1)).toBe(': current step');
+    expect(stateText(2)).toBe(': not started');
+    expect(stateText(3)).toBe(': not started');
+
+    await expectNoAxeViolations(fixture.nativeElement, {
+      'nested-interactive': { enabled: false },
+    });
+  }, 15000);
+});

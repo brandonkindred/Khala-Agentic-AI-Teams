@@ -245,6 +245,36 @@ def test_credential_store_delete_tool_credentials_removes_emptied_primary_to_exp
     assert store.get_credentials("a1", "pg") is None
 
 
+def test_credential_store_delete_tool_credentials_sentinel_only_primary_preserves_mark(
+    tmp_path: Path,
+) -> None:
+    """Purging the last real tool must KEEP the sentinel-only blob so the fencing
+    high-water mark survives and a later stale write cannot resurrect a secret.
+
+    ``delete_tool_credentials`` does not tombstone, but it must not drop the
+    mark either: when the last real tool is removed from a primary that carries
+    the fencing sentinel, the leftover ``{sentinel}`` blob is retained. Dropping
+    it would let a resumed stale caller's ``store_credentials`` bootstrap-accept
+    (``current_token=None``) and resurrect a secret a newer owner tore down.
+    """
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    key = CredentialStore.generate_key()
+    store = CredentialStore(storage_dir=tmp_path / "store", encryption_key=key)
+    # A newer owner (token 6) has provisioned then purges its only tool.
+    store.store_credentials("a1", "pg", {"password": "current"}, fencing_token=6)
+    assert store.delete_tool_credentials("a1", "pg", fencing_token=6) is True
+
+    # The blob is kept (only the sentinel remains) so it reads as absent to
+    # ordinary callers but still holds the mark...
+    assert store.get_credentials("a1") is None
+    assert store.get_credentials("a1", "pg") is None
+    # ...and a resumed stale worker (token 5) is rejected, not bootstrap-accepted.
+    with pytest.raises(StaleFencingTokenError):
+        store.store_credentials("a1", "pg", {"password": "resurrected"}, fencing_token=5)
+
+
 def test_credential_store_delete_tool_credentials_purges_legacy_when_primary_lacks_tool(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -416,6 +446,52 @@ def test_credential_store_get_credentials_returns_all_when_no_tool(tmp_path: Pat
     store.store_credentials("a1", "redis", {"password": "p2"})
     out = store.get_credentials("a1")
     assert set(out.keys()) == {"pg", "redis"}
+
+
+def test_credential_store_write_methods_reject_stale_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    store = CredentialStore(storage_dir=tmp_path)
+    store.store_credentials("a1", "pg", {"password": "p1"}, fencing_token=5)
+
+    with pytest.raises(StaleFencingTokenError):
+        store.store_credentials("a1", "pg", {"password": "p2"}, fencing_token=4)
+    with pytest.raises(StaleFencingTokenError):
+        store.delete_credentials("a1", fencing_token=4)
+
+    # Neither rejected call mutated the stored credentials.
+    assert store.get_credentials("a1", "pg") == {"password": "p1"}
+
+
+def test_credential_store_write_methods_accept_equal_and_higher_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    store.store_credentials("a1", "pg", {"password": "p1"}, fencing_token=5)
+    store.store_credentials("a1", "redis", {"password": "p2"}, fencing_token=5)
+    store.store_credentials("a1", "git", {"password": "p3"}, fencing_token=6)
+    assert store.delete_credentials("a1", fencing_token=6) is True
+
+
+def test_credential_store_fencing_token_none_is_full_noop(tmp_path: Path) -> None:
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    store.store_credentials("a1", "pg", {"password": "p1"}, fencing_token=5)
+    store.store_credentials("a1", "redis", {"password": "p2"})
+    assert store.delete_credentials("a1") is True
+
+
+def test_credential_store_get_credentials_never_surfaces_fencing_sentinel(tmp_path: Path) -> None:
+    """The reserved fencing-token key must never appear as a fake 'tool' in
+    the whole-dict get_credentials(agent_id) return path."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    store = CredentialStore(storage_dir=tmp_path)
+    store.store_credentials("a1", "pg", {"password": "p1"}, fencing_token=5)
+    out = store.get_credentials("a1")
+    assert set(out.keys()) == {"pg"}
 
 
 def test_credential_store_load_key_with_blank_env(tmp_path: Path, monkeypatch) -> None:

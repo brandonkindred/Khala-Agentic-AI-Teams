@@ -67,6 +67,7 @@ _VALID_CATEGORIES = frozenset(
         "refactor",
         "maintainability",
         "side-effects",
+        "documentation",
         "general",
     }
 )

@@ -32,11 +32,12 @@ class _MinimalProv(BaseToolProvisioner):
     def __init__(self, storage_dir: Path) -> None:
         self._state = ProvisionerStateStore("minimal_prov", storage_dir=storage_dir)
 
-    def provision(self, agent_id, config, credentials):
+    def provision(self, agent_id, config, credentials, fencing_token=None):
         return self.run_idempotent(
             agent_id,
             credentials=credentials,
             create=lambda _r: (["read"], {"x": 1, "permissions": ["read"]}),
+            fencing_token=fencing_token,
         )
 
     def verify_access(self, agent_id):
@@ -182,6 +183,64 @@ def test_run_idempotent_hydrates_extras(tmp_path: Path) -> None:
     assert creds2.extra.get("workspace_path") == "/ws"
 
 
+def test_run_idempotent_rejects_stale_token_before_create_runs(tmp_path: Path) -> None:
+    """The fencing preflight must reject BEFORE create() runs, not after --
+    create() is where the real infrastructure side effect happens."""
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    prov = _MinimalProv(tmp_path)
+    prov._state.put("a", {"x": 1}, fencing_token=5)
+
+    calls: list[int] = []
+
+    class _StaleProv(BaseToolProvisioner):
+        tool_name = "stale"
+
+        def __init__(self) -> None:
+            self._state = prov._state
+
+        def provision(self, agent_id, config, credentials, fencing_token=None):
+            def _create(_r):
+                calls.append(1)
+                return (["read"], {"x": 2})
+
+            return self.run_idempotent(
+                agent_id, credentials=credentials, create=_create, fencing_token=fencing_token
+            )
+
+        def verify_access(self, agent_id):
+            return self._make_verification(passed=True, actual_permissions=[])
+
+        def deprovision(self, agent_id):
+            from agent_provisioning_team.models import DeprovisionResult
+
+            return DeprovisionResult(tool_name=self.tool_name, success=True)
+
+    with pytest.raises(StaleFencingTokenError):
+        _StaleProv().provision("a", {}, GeneratedCredentials(tool_name="x"), fencing_token=4)
+
+    assert calls == []  # create() (the real side effect) must never have run
+
+
+def test_run_idempotent_does_not_swallow_stale_fencing_token_error(tmp_path: Path) -> None:
+    """StaleFencingTokenError must propagate, not be converted into an
+    ordinary success=False ToolProvisionResult by the generic catch-all."""
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    prov = _MinimalProv(tmp_path)
+    prov._state.put("a", {"x": 1}, fencing_token=5)
+
+    with pytest.raises(StaleFencingTokenError):
+        prov.provision("a", {}, GeneratedCredentials(tool_name="x"), fencing_token=4)
+
+
+def test_run_idempotent_accepts_and_stamps_fencing_token(tmp_path: Path) -> None:
+    prov = _MinimalProv(tmp_path)
+    out = prov.provision("a", {}, GeneratedCredentials(tool_name="x"), fencing_token=5)
+    assert out.success is True
+    assert prov._state._load()["a"]["fencing_token"] == 5
+
+
 def test_run_idempotent_calls_on_persist_failure_when_state_put_raises(tmp_path: Path) -> None:
     """A resource `create` returns must not leak when persisting its state fails.
 
@@ -216,7 +275,7 @@ def test_run_idempotent_calls_on_persist_failure_when_state_put_raises(tmp_path:
 
     prov = _PersistFailProv()
 
-    def _boom(agent_id, value):
+    def _boom(agent_id, value, fencing_token=None):
         raise OSError("disk full")
 
     prov._state.put = _boom
@@ -257,7 +316,7 @@ def test_run_idempotent_on_persist_failure_exception_is_swallowed(tmp_path: Path
 
     prov = _PersistFailProv()
 
-    def _boom(agent_id, value):
+    def _boom(agent_id, value, fencing_token=None):
         raise OSError("disk full")
 
     prov._state.put = _boom
@@ -765,6 +824,84 @@ def test_docker_deprovision_handles_exception(tmp_path: Path) -> None:
 
     assert out.success is False
     assert "daemon down" in out.error
+
+
+def test_docker_deprovision_rejects_stale_token_before_touching_docker(tmp_path: Path) -> None:
+    """The preflight check must reject BEFORE the real `docker stop`/`docker
+    rm` subprocess calls -- not just before the final state.delete()."""
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"}, fencing_token=5)
+
+    with patch("subprocess.run") as mock_run:
+        with pytest.raises(StaleFencingTokenError):
+            prov.deprovision("a1", fencing_token=4)
+        mock_run.assert_not_called()
+
+    # The container record must still be present -- nothing was deleted.
+    assert prov._state.get("a1") is not None
+
+
+def test_deprovision_propagates_stale_token_from_trailing_delete(tmp_path: Path) -> None:
+    """A StaleFencingTokenError raised by the FINAL _state.delete (token went
+    stale mid-teardown) must propagate as the non-retryable ownership error, not
+    be swallowed by the broad `except Exception -> success=False` into a soft
+    failure — matching run_idempotent's re-raise and the deprovision contract.
+
+    Covers the generic/git/docker provisioners (redis/postgres early-return in a
+    sandbox without those packages); all five share the identical re-raise guard.
+    """
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+    from agent_provisioning_team.tool_agents.generic_provisioner import GenericProvisionerTool
+    from agent_provisioning_team.tool_agents.git_provisioner import GitProvisionerTool
+
+    def _staled_state(resource: str) -> MagicMock:
+        fake = MagicMock()
+        fake.check_fencing_token.return_value = None  # entry preflight passes
+        fake.get.return_value = {"tool_name": "t", "workspace_path": str(tmp_path / "nope")}
+        fake.delete.side_effect = StaleFencingTokenError("a1", resource, 4, 5)
+        return fake
+
+    generic = GenericProvisionerTool()
+    generic._state = _staled_state("generic_provisioner")
+    with pytest.raises(StaleFencingTokenError):
+        generic.deprovision("a1", fencing_token=4)
+
+    git = GitProvisionerTool()
+    git._state = _staled_state("git_provisioner")
+    with pytest.raises(StaleFencingTokenError):
+        git.deprovision("a1", fencing_token=4)
+
+    docker = DockerProvisionerTool(workspace_base=str(tmp_path))
+    docker._state = _staled_state("docker_provisioner")
+    docker._state.get.return_value = {"container_name": "c1"}
+    with patch(
+        "subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            docker.deprovision("a1", fencing_token=4)
+
+
+def test_docker_deprovision_accepts_current_token(tmp_path: Path) -> None:
+    from agent_provisioning_team.tool_agents.docker_provisioner import DockerProvisionerTool
+
+    prov = DockerProvisionerTool(workspace_base=str(tmp_path))
+    prov._state = ProvisionerStateStore("docker_provisioner", storage_dir=tmp_path)
+    prov._state.put("a1", {"container_name": "c1"}, fencing_token=5)
+
+    with patch(
+        "subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+    ):
+        out = prov.deprovision("a1", fencing_token=5)
+
+    assert out.success is True
+    assert prov._state.get("a1") is None
 
 
 def test_docker_allocate_port_is_deterministic() -> None:

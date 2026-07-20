@@ -762,7 +762,7 @@ describe('StrategyLabComponent — SSE event side effects (events$ wiring)', () 
       // in isolation in phase-stepper.component.spec.ts; this only proves the
       // host wires `[currentPhase]` to the right value.
       const currentStep: HTMLElement = fixture.nativeElement.querySelector('.phase-step.current .phase-label');
-      expect(currentStep?.textContent?.trim()).toBe('Backtest');
+      expect(currentStep?.textContent?.trim()).toBe('Backtest: current step');
       const completedSteps: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.phase-step.completed'));
       expect(completedSteps.length).toBe(2); // Ideate, Code
     });

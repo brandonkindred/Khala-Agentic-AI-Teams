@@ -17,13 +17,13 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:  # avoid circular import: models.py → spec_dsl → (none) but
     # phases.py is imported by orchestrator.py which already imports models.
-    from ..models import StrategySpec
+    from ..models import BacktestResult, StrategySpec, TradeRecord
 
 
 class Phase(str, Enum):
@@ -107,6 +107,42 @@ def hash_code(code: Optional[str]) -> str:
     if not code:
         return _EMPTY_SHA256
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def hash_metrics_and_trades(metrics: "BacktestResult", trades: List["TradeRecord"]) -> str:
+    """SHA-256 of the canonical-JSON serialisation of ``(metrics, trades)``.
+
+    Used to guard the backtest anomaly check (``BacktestAnomalyDetector.check``)
+    against redundant re-evaluation within a single design attempt: the check's
+    other inputs (``dsr_aware``, ``market_data``) are fixed for the attempt's
+    lifetime, and ``diagnostics``/``coverage_report`` are attached onto
+    ``metrics`` before the check runs, so ``(metrics, trades)`` alone
+    determines the check's output.
+
+    Preconditions:
+      - ``metrics`` is a ``BacktestResult``; ``trades`` is a list of
+        ``TradeRecord`` (Pydantic models).
+    Postconditions:
+      - Returns a 64-character lowercase hex digest.
+      - Output is stable across runs for any ``(metrics, trades)`` pair with
+        the same field values: keys sorted, no whitespace, JSON
+        ``mode="json"`` so datetimes/enums serialise canonically. A field that
+        incidentally varies run-to-run (e.g. a timestamp) only causes a false
+        miss, which is always safe — it forgoes a cache hit, never a
+        correctness guarantee.
+    Invariants:
+      - Function is pure: no side effects, no I/O.
+    """
+    payload = json.dumps(
+        {
+            "metrics": metrics.model_dump(mode="json"),
+            "trades": [t.model_dump(mode="json") for t in trades],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class PhaseTransition(BaseModel):

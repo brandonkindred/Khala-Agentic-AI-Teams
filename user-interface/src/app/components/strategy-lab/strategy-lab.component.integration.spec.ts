@@ -105,7 +105,7 @@ describe('StrategyLabComponent — end-to-end OnPush migration regression', () =
     sse.next({ type: 'progress', cycle_index: 0, phase: 'ideating', sub_phase: 'started' });
     await vi.advanceTimersByTimeAsync(1);
     expect(el().querySelector('.activity-log')?.textContent).toContain('Ideating new trading strategy');
-    expect(el().querySelector('.phase-step.current .phase-label')?.textContent).toBe('Ideate');
+    expect(el().querySelector('.phase-step.current .phase-label')?.textContent).toBe('Ideate: current step');
 
     // Step 2: ideation completes, strategy preview appears.
     sse.next({
