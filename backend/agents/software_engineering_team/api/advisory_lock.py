@@ -45,7 +45,7 @@ def advisory_lock(process_lock: threading.Lock, namespace: str, key: str) -> Ite
                 is_postgres_enabled,
             )
         except ImportError:
-            pass
+            logger.debug("shared_postgres not available; advisory lock will be process-local only")
         else:
             if is_postgres_enabled():
                 try:
