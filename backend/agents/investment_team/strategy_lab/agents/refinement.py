@@ -9,8 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from strands import Agent
 
-from llm_service import provider_supports_structured_output
-from llm_service.config import resolve_provider
 from llm_service.interface import LLMSemanticExhaustionError
 
 from ...models import BacktestResult, StrategySpec
@@ -23,6 +21,7 @@ from ._parse_helpers import (
 )
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import REFINEMENT_SCHEMA
+from ._structured_output import structured_output_available as _structured_output_available
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -105,20 +104,6 @@ tightening a risk limit):
   "changes_made": "1-2 sentence summary of what you changed and why"
 }}
 """
-
-
-def _structured_output_available() -> bool:
-    """Whether the active LLM provider supports provider-enforced schema-conformant decoding.
-
-    A dedicated seam (rather than inlining the two-call chain at each use
-    site) so tests can force either branch deterministically without
-    depending on ambient ``LLM_PROVIDER`` env state — see
-    ``test_strategy_lab_refinement_parse_retry.py``'s autouse fixture.
-
-    Preconditions: none.
-    Postconditions: synchronous, no network call, never raises.
-    """
-    return provider_supports_structured_output(resolve_provider())
 
 
 class RefinementAgent:

@@ -7,9 +7,10 @@ phase, gated by ``SpecReadinessGate`` and the design-review loop, so the
 designer cannot soften the spec to fit broken code.
 
 Invariants:
-  * ``run`` and ``revise`` both return a parsed JSON dict whose
-    ``strategy_code`` key (if the LLM emitted one anyway) is stripped
-    with a warning before return.
+  * ``run`` and ``revise`` both return a ``(strategy_dict, rationale)``
+    tuple; ``strategy_dict`` never contains a ``strategy_code`` key —
+    if the LLM emitted one anyway, it is stripped with a warning
+    before return.
   * Both methods raise :class:`StrategySpecParseError` when the LLM
     returns prose / off-shape rules; the orchestrator surfaces this as
     a critical design-phase failure rather than constructing a half-
@@ -26,8 +27,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from strands import Agent
 
-from llm_service import provider_supports_structured_output
-from llm_service.config import resolve_provider
 from llm_service.interface import LLMSemanticExhaustionError
 from shared_env_config import env_int
 
@@ -51,6 +50,7 @@ from ._parse_helpers import (
     validate_structured_rules,
 )
 from ._response_schemas import DESIGN_SPEC_SCHEMA
+from ._structured_output import structured_output_available as _structured_output_available
 from .design_review import (
     _coerce_critique,
     _invoke_structured_critique,
@@ -116,23 +116,6 @@ _SELF_REVIEW_SYSTEM_PROMPT = (
 # the wire shape ``_DesignSpecWire`` documents, on both the initial-generation
 # and revision paths.
 _DESIGN_SPEC_SCHEMA_JSON = json.dumps(DESIGN_SPEC_SCHEMA, indent=2)
-
-
-def _structured_output_available() -> bool:
-    """Whether the active LLM provider supports provider-enforced schema-conformant decoding.
-
-    A dedicated seam (rather than inlining the two-call chain at each use
-    site) so tests can force either branch deterministically without
-    depending on ambient ``LLM_PROVIDER`` env state. Mirrors
-    ``refinement._structured_output_available`` — duplicated per-module
-    (not imported) so each agent's tests can force its own branch
-    independently.
-
-    Preconditions: none.
-    Postconditions: synchronous, no network call, never raises.
-    """
-    return provider_supports_structured_output(resolve_provider())
-
 
 _DESIGN_USER_TEMPLATE = """\
 Design ONE novel swing-style strategy (typical holds ~2-14 days unless the asset class implies shorter).

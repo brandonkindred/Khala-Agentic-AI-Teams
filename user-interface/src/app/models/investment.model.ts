@@ -805,7 +805,7 @@ export interface StrategyLabCycleProgress {
   cycle_index: number;
   /**
    * Not the closed 4-value UI stepper set (`STRATEGY_LAB_PHASES` in
-   * strategy-lab.component.ts): the backend's real phase vocabulary is
+   * phase-stepper.component.ts): the backend's real phase vocabulary is
    * open-ended (`designing`, `aligning`, `telemetry`, paper-trading phases,
    * ...) — same reasoning as `StrategyLabProgressEvent.phase` below, which
    * is this field's sole source.
@@ -950,7 +950,7 @@ export interface StrategyLabSnapshotEvent extends Omit<StrategyLabRunStatus, 'er
  * optional here. `phase` is `string`: the backend's real phase set
  * (`designing`, `design_review`, `aligning`, `telemetry`, `phase_transition`,
  * paper-trading phases, ...) is open-ended, well beyond the 4-value UI
- * stepper set (`STRATEGY_LAB_PHASES` in strategy-lab.component.ts).
+ * stepper set (`STRATEGY_LAB_PHASES` in phase-stepper.component.ts).
  *
  * Deliberately incomplete: some real phases carry fields not modeled here
  * (`phase_transition`: from_phase/to_phase/spec_hash/code_hash/attempt;

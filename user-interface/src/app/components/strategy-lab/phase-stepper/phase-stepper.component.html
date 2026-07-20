@@ -1,0 +1,17 @@
+<div class="phase-stepper" role="list">
+  @for (phase of STRATEGY_LAB_PHASES; track phase.id; let i = $index; let last = $last) {
+    <div class="phase-step"
+         role="listitem"
+         [attr.aria-current]="isCurrentPhase(phase.id) ? 'step' : null"
+         [class.completed]="isPhaseCompleted(phase.id)"
+         [class.current]="isCurrentPhase(phase.id)"
+         [class.pending]="isPhasePending(phase.id)"
+         [class.has-connector]="!last"
+         [class.next-completed]="!last && isPhaseCompleted(STRATEGY_LAB_PHASES[i + 1].id)">
+      <div class="phase-node">
+        <mat-icon aria-hidden="true">{{ isPhaseCompleted(phase.id) ? 'check' : phase.icon }}</mat-icon>
+      </div>
+      <span class="phase-label">{{ phase.label }}<span class="visually-hidden">: {{ phaseStateLabel(phase.id) }}</span></span>
+    </div>
+  }
+</div>

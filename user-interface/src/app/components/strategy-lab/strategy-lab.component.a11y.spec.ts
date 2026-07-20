@@ -372,6 +372,11 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     expect(wrap.getAttribute('role')).toBe('group');
     expect(wrap.getAttribute('aria-label')).toBe('stocks strategy trade history, scrollable');
 
+    // The <table> itself also needs its own accessible name — table-navigation
+    // screen-reader commands read the <table>'s name, not the wrapper's.
+    const table: HTMLElement | null = wrap.querySelector('table.trade-table');
+    expect(table?.getAttribute('aria-label')).toBe('Trade ledger, 1 trades');
+
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
@@ -455,6 +460,14 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     expect(wrap.getAttribute('tabindex')).toBe('0');
     expect(wrap.getAttribute('role')).toBe('group');
     expect(wrap.getAttribute('aria-label')).toBe('stocks strategy backtest vs. paper-trading comparison, scrollable');
+
+    // The <table> itself also needs its own accessible name via <caption> —
+    // table-navigation screen-reader commands read the <table>'s own name,
+    // not the wrapper's aria-label.
+    const caption: HTMLElement | null = wrap.querySelector('table.comparison-table > caption');
+    expect(caption).toBeTruthy();
+    expect(caption?.className).toContain('visually-hidden');
+    expect(caption?.textContent?.trim()).toBe('Backtest vs. paper-trading metric comparison');
 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
@@ -1419,8 +1432,12 @@ describe('StrategyLabComponent template — explicit aria-hidden on every <mat-i
     const openTags = html.match(/<mat-icon\b[^>]*>/g) ?? [];
 
     // Sanity check: fails loudly if the template moved/renamed and the regex
-    // above stopped matching anything, rather than passing vacuously.
-    expect(openTags.length).toBeGreaterThan(30);
+    // above stopped matching anything, rather than passing vacuously. The
+    // threshold dropped from >30 once the phase-stepper and per-record
+    // strategy-card markup (and their own <mat-icon> tags) moved into
+    // PhaseStepperComponent/StrategyCardComponent, each with its own
+    // equivalent source-scan guard.
+    expect(openTags.length).toBeGreaterThan(15);
 
     const isExplicit = (tag: string): boolean => {
       if (/aria-hidden\s*=\s*"true"/.test(tag)) return true;

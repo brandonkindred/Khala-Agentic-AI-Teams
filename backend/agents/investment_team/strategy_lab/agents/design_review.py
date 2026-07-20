@@ -24,8 +24,6 @@ from typing import Any, Dict, List, Literal, Optional, Set
 from pydantic import BaseModel, Field, model_validator
 from strands import Agent
 
-from llm_service import provider_supports_structured_output
-from llm_service.config import resolve_provider
 from llm_service.interface import LLMSemanticExhaustionError
 
 from ...models import StrategySpec
@@ -37,6 +35,7 @@ from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
 from ._prompt_context import spec_prompt_fields
 from ._response_schemas import CRITIQUE_SCHEMA
+from ._structured_output import structured_output_available as _structured_output_available
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -56,22 +55,6 @@ _SYSTEM_PROMPT = (
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
 _CRITIQUE_SCHEMA_JSON = json.dumps(CRITIQUE_SCHEMA, indent=2)
-
-
-def _structured_output_available() -> bool:
-    """Whether the active LLM provider supports provider-enforced schema-conformant decoding.
-
-    A dedicated seam (rather than inlining the two-call chain at each use
-    site) so tests can force either branch deterministically without
-    depending on ambient ``LLM_PROVIDER`` env state. Mirrors
-    ``refinement._structured_output_available`` — duplicated per-module
-    (not imported) so each agent's tests can force its own branch
-    independently.
-
-    Preconditions: none.
-    Postconditions: synchronous, no network call, never raises.
-    """
-    return provider_supports_structured_output(resolve_provider())
 
 
 def _invoke_structured_critique(
