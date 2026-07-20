@@ -248,6 +248,11 @@ def _whole_file_focus(body: str) -> str:
 # round-trips on the review's critical path.
 _HEAD_FETCH_PARALLELISM = 8
 
+# Bounds the small, fixed-size independent-read fan-outs in the review body (PR
+# detail/files/login, and existing-comment lookups) — same bounded-executor idiom
+# as _HEAD_FETCH_PARALLELISM, just sized for these at-most-3-item batches.
+_REVIEW_READ_PARALLELISM = 3
+
 
 def _is_whole_file_reviewable(f: Any) -> bool:
     """True for a changed file eligible for whole-file review.
@@ -733,18 +738,37 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
     Postconditions:
         - Returns ``build_existing_comments(...)`` over the PR's existing
           review comments, resolved-thread ids, and standalone conversation
-          comments. Any failure fetching any of the three (REST error,
-          transport error, or a GraphQL-lookup failure already degraded to an
-          empty set by ``get_resolved_review_thread_comment_ids`` itself) is
-          logged as a warning and degrades to ``[]`` — this lookup must never
-          fail an otherwise-working review; a failure here only means findings
-          are neither dropped nor cross-referenced on this run, same as a PR
-          with no existing comments at all.
+          comments, fetched concurrently (independent GitHub reads, bounded by
+          ``_REVIEW_READ_PARALLELISM``). Any failure fetching any of the three
+          (REST error, transport error, or a GraphQL-lookup failure already
+          degraded to an empty set by ``get_resolved_review_thread_comment_ids``
+          itself) is logged as a warning and degrades the WHOLE result to
+          ``[]`` — same all-or-nothing semantics as the prior serial version —
+          this lookup must never fail an otherwise-working review; a failure
+          here only means findings are neither dropped nor cross-referenced on
+          this run, same as a PR with no existing comments at all.
     """
+
+    def _reviews() -> Any:
+        return client.list_review_comments(owner, repo, pr_number)
+
+    def _resolved() -> Any:
+        return client.get_resolved_review_thread_comment_ids(owner, repo, pr_number)
+
+    def _issues() -> Any:
+        return client.list_issue_comments(owner, repo, pr_number)
+
+    tasks = (_reviews, _resolved, _issues)
+    workers = min(_REVIEW_READ_PARALLELISM, len(tasks))
     try:
-        review_comments = client.list_review_comments(owner, repo, pr_number)
-        resolved_ids = client.get_resolved_review_thread_comment_ids(owner, repo, pr_number)
-        issue_comments = client.list_issue_comments(owner, repo, pr_number)
+        if (
+            workers <= 1
+        ):  # pragma: no cover - unreachable: 3 fixed tasks, kept for idiom parity with _fetch_head_files
+            review_comments, resolved_ids, issue_comments = (t() for t in tasks)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(t) for t in tasks]
+                review_comments, resolved_ids, issue_comments = (f.result() for f in futures)
         return build_existing_comments(review_comments, resolved_ids, issue_comments)
     except GitHubAPIError as e:
         logger.warning("Could not fetch existing comments for PR #%s: %s", pr_number, e)
@@ -818,6 +842,53 @@ def _detect_duplicate_proposals(
         return [{**p, "matched_existing": False} for p in proposals]
 
 
+def _fetch_pr_metadata(
+    client: Any, owner: str, repo: str, pr_number: int
+) -> tuple[Any, List[Any], str]:
+    """Fetch PR detail, PR files, and the authenticated login concurrently.
+
+    Preconditions:
+        - ``client`` is an open ``GitHubClient``.
+    Postconditions:
+        - Returns ``(pr, files, reviewer_login)``. ``get_pull_request`` and
+          ``get_pull_request_files`` are independent GitHub reads with no data
+          dependency between them, and ``get_authenticated_login`` needs only
+          ``client`` too, so all three are dispatched concurrently (bounded by
+          ``_REVIEW_READ_PARALLELISM``). A failure in ``get_pull_request`` or
+          ``get_pull_request_files`` propagates to the caller unchanged (these
+          are NOT best-effort — the review must still fail exactly as it did
+          when the calls were serial). A ``GitHubAPIError`` from
+          ``get_authenticated_login`` is caught internally and degrades
+          ``reviewer_login`` to ``""`` (logged) — it only feeds the self-PR
+          event downgrade and must never fail the review.
+    """
+
+    def _get_pr() -> Any:
+        return client.get_pull_request(owner, repo, pr_number)
+
+    def _get_files() -> List[Any]:
+        return client.get_pull_request_files(owner, repo, pr_number)
+
+    def _get_login() -> str:
+        try:
+            return client.get_authenticated_login()
+        except GitHubAPIError as e:
+            logger.warning("Could not resolve reviewer login for PR #%s: %s", pr_number, e)
+            return ""
+
+    tasks = (_get_pr, _get_files, _get_login)
+    workers = min(_REVIEW_READ_PARALLELISM, len(tasks))
+    if (
+        workers <= 1
+    ):  # pragma: no cover - unreachable: 3 fixed tasks, kept for idiom parity with _fetch_head_files
+        pr, files, reviewer_login = (t() for t in tasks)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(t) for t in tasks]
+            pr, files, reviewer_login = (f.result() for f in futures)
+    return pr, files, reviewer_login
+
+
 def _run_pr_review_body(
     job_id: str,
     request: ReviewPrRequest,
@@ -838,8 +909,7 @@ def _run_pr_review_body(
     """
     try:
         with _main.GitHubClient(token=token) as client:
-            pr = client.get_pull_request(owner, repo, pr_number)
-            files = client.get_pull_request_files(owner, repo, pr_number)
+            pr, files, reviewer_login = _fetch_pr_metadata(client, owner, repo, pr_number)
             if not files:
                 _complete_review_noop(
                     client,
@@ -898,17 +968,6 @@ def _run_pr_review_body(
             if whole_file:
                 files_reviewed = len(head_files)
             repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
-
-            try:
-                reviewer_login = client.get_authenticated_login()
-            except GitHubAPIError as e:
-                # Non-fatal: reviewer_login only feeds choose_event() (the self-PR
-                # REQUEST_CHANGES -> COMMENT downgrade). Log so the degradation is
-                # not silent, then fall back to "" and let the review proceed — a
-                # genuine bad/permission-limited token already surfaces on the PR
-                # fetch above and on review submission below.
-                logger.warning("Could not resolve reviewer login for PR #%s: %s", pr_number, e)
-                reviewer_login = ""
 
             output = _run_reviewer(
                 provider,

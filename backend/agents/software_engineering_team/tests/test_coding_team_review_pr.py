@@ -579,6 +579,13 @@ class _FakeReviewClient:
 
     Configurable failure knobs (all default to "never fail"):
         - ``fail_get_pr``: ``get_pull_request`` raises a 404 ``GitHubAPIError``.
+        - ``fail_get_pr_after_first_call``: ``get_pull_request`` succeeds on its
+          FIRST call (the admission-time pre-check in the route handler) but
+          raises a 404 on every subsequent call (the fetch inside
+          ``_run_pr_review_body``/``_fetch_pr_metadata``) — lets a test fail the
+          body's own PR fetch independently of admission.
+        - ``fail_get_pr_files``: ``get_pull_request_files`` raises a 502
+          ``GitHubAPIError``.
         - ``review_fail_times``: the first N ``create_pull_request_review`` calls
           raise a 422, exercising the submit-degradation retry ladder.
         - ``bad_lines``: any review whose comments include one of these line
@@ -621,6 +628,9 @@ class _FakeReviewClient:
         self.comments: list[tuple[int, str]] = []
         self.reactions: list[tuple[int, str]] = []
         self.fail_get_pr = False
+        self.fail_get_pr_after_first_call = False
+        self.fail_get_pr_files = False
+        self.get_pull_request_calls = 0
         self.review_fail_times = 0  # number of leading create_review calls that fail
         self.review_fail_status = 422  # status raised by review_fail_times / bad_lines
         self.bad_lines: set[int] = set()  # lines whose review 422s (drives bisection)
@@ -662,7 +672,10 @@ class _FakeReviewClient:
         return set(self.existing_resolved_ids)
 
     def get_pull_request(self, _o: str, _r: str, n: int) -> PullRequestDetail:
+        self.get_pull_request_calls += 1
         if self.fail_get_pr:
+            raise GitHubAPIError(404, "missing PR")
+        if self.fail_get_pr_after_first_call and self.get_pull_request_calls > 1:
             raise GitHubAPIError(404, "missing PR")
         return PullRequestDetail(
             number=n,
@@ -680,6 +693,8 @@ class _FakeReviewClient:
         )
 
     def get_pull_request_files(self, _o: str, _r: str, _n: int) -> list[PullRequestFile]:
+        if self.fail_get_pr_files:
+            raise GitHubAPIError(502, "files unavailable")
         return list(self.files)
 
     def get_authenticated_login(self) -> str:
@@ -1106,6 +1121,32 @@ class TestReviewEndpoint:
         review_app["github"]["client"].fail_get_pr = True
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 502
+
+    def test_pr_fetch_failure_inside_body_marks_job_failed(self, review_app) -> None:
+        """The admission-time get_pull_request (route handler) is a SEPARATE call
+        from the one inside _run_pr_review_body/_fetch_pr_metadata — admission can
+        succeed while the body's own fetch still fails, and that failure must still
+        propagate through _fetch_pr_metadata to the outer handler and fail the job,
+        exactly as the prior serial call would have."""
+        gh = review_app["github"]["client"]
+        gh.fail_get_pr_after_first_call = True
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "missing PR" in (job.get("error") or "")
+
+    def test_pr_files_fetch_failure_marks_job_failed(self, review_app) -> None:
+        """get_pull_request_files failing (with get_pull_request succeeding) must
+        still fail the job via the outer handler, unchanged from the prior serial
+        behavior, now that the two calls run concurrently in _fetch_pr_metadata."""
+        gh = review_app["github"]["client"]
+        gh.fail_get_pr_files = True
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "files unavailable" in (job.get("error") or "")
 
     def test_duplicate_review_for_same_pr_returns_409(self, review_app, monkeypatch) -> None:
         """A second review while one is already running for the same PR is rejected 409 —
@@ -2994,6 +3035,213 @@ class TestWholeFileReview:
         assert captured.get("files") is None
         assert captured["pre_numbered"] is True
         assert captured["code"]
+
+
+# ---------------------------------------------------------------------------
+# Parallelized independent GitHub reads on the review fetch path
+# ---------------------------------------------------------------------------
+
+
+class TestParallelReviewReads:
+    """_fetch_pr_metadata and _fetch_existing_comments fan independent GitHub
+    reads out across a bounded thread pool (the same idiom _fetch_head_files
+    proves). These tests confirm the fetches actually run concurrently and that
+    results/error-propagation are unchanged from the prior serial calls."""
+
+    def test_fetch_pr_metadata_concurrent_fetches_do_not_corrupt_results(self, review_app) -> None:
+        import threading
+        import time
+
+        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+
+        seen_threads: set[int] = set()
+        lock = threading.Lock()
+
+        class _C:
+            def get_pull_request(self, o, r, n):
+                with lock:
+                    seen_threads.add(threading.get_ident())
+                time.sleep(0.01)
+                return PullRequestDetail(
+                    number=n,
+                    html_url=f"https://example/pull/{n}",
+                    head="feature",
+                    base="main",
+                    head_sha="sha1",
+                    title="Add feature",
+                    body="body",
+                    draft=False,
+                    author="alice",
+                    state="open",
+                    updated_at="2026-01-01T00:00:00Z",
+                    labels=(),
+                )
+
+            def get_pull_request_files(self, o, r, n):
+                with lock:
+                    seen_threads.add(threading.get_ident())
+                time.sleep(0.01)
+                return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+
+            def get_authenticated_login(self):
+                with lock:
+                    seen_threads.add(threading.get_ident())
+                time.sleep(0.01)
+                return "khala-bot"
+
+        pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        assert pr.number == 7
+        assert [f.filename for f in files] == ["a.py"]
+        assert reviewer_login == "khala-bot"
+        assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
+
+    def test_fetch_pr_metadata_get_pull_request_failure_propagates(self, review_app) -> None:
+        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+
+        class _C:
+            def get_pull_request(self, o, r, n):
+                raise GitHubAPIError(404, "missing PR")
+
+            def get_pull_request_files(self, o, r, n):
+                return []
+
+            def get_authenticated_login(self):
+                return "khala-bot"
+
+        with pytest.raises(GitHubAPIError, match="missing PR"):
+            _fetch_pr_metadata(_C(), "o", "r", 7)
+
+    def test_fetch_pr_metadata_get_pull_request_files_failure_propagates(self, review_app) -> None:
+        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+
+        class _C:
+            def get_pull_request(self, o, r, n):
+                return PullRequestDetail(
+                    number=n,
+                    html_url=f"https://example/pull/{n}",
+                    head="feature",
+                    base="main",
+                    head_sha="sha1",
+                    title="Add feature",
+                    body="body",
+                    draft=False,
+                    author="alice",
+                    state="open",
+                    updated_at="2026-01-01T00:00:00Z",
+                    labels=(),
+                )
+
+            def get_pull_request_files(self, o, r, n):
+                raise GitHubAPIError(502, "files unavailable")
+
+            def get_authenticated_login(self):
+                return "khala-bot"
+
+        with pytest.raises(GitHubAPIError, match="files unavailable"):
+            _fetch_pr_metadata(_C(), "o", "r", 7)
+
+    def test_fetch_pr_metadata_get_authenticated_login_failure_degrades(self, review_app) -> None:
+        """A get_authenticated_login failure must degrade to "" without blocking
+        or failing the (independent) pr/files fetches, unlike get_pull_request and
+        get_pull_request_files, which are not best-effort."""
+        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+
+        class _C:
+            def get_pull_request(self, o, r, n):
+                return PullRequestDetail(
+                    number=n,
+                    html_url=f"https://example/pull/{n}",
+                    head="feature",
+                    base="main",
+                    head_sha="sha1",
+                    title="Add feature",
+                    body="body",
+                    draft=False,
+                    author="alice",
+                    state="open",
+                    updated_at="2026-01-01T00:00:00Z",
+                    labels=(),
+                )
+
+            def get_pull_request_files(self, o, r, n):
+                return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+
+            def get_authenticated_login(self):
+                raise GitHubAPIError(403, "no scope")
+
+        pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        assert pr.number == 7
+        assert [f.filename for f in files] == ["a.py"]
+        assert reviewer_login == ""
+
+    def test_fetch_existing_comments_concurrent_fetches_do_not_corrupt_results(
+        self, review_app
+    ) -> None:
+        import threading
+        import time
+
+        from software_engineering_team.coding_team.api.pr_review import _fetch_existing_comments
+
+        seen_threads: set[int] = set()
+        lock = threading.Lock()
+        review_comment = ReviewComment(
+            id=1, path="a.py", line=2, body="desc", html_url="https://example/comment/1"
+        )
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                with lock:
+                    seen_threads.add(threading.get_ident())
+                time.sleep(0.01)
+                return [review_comment]
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                with lock:
+                    seen_threads.add(threading.get_ident())
+                time.sleep(0.01)
+                return {1}
+
+            def list_issue_comments(self, o, r, n):
+                with lock:
+                    seen_threads.add(threading.get_ident())
+                time.sleep(0.01)
+                return []
+
+        out = _fetch_existing_comments(_C(), "o", "r", 7)
+        assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
+        assert len(out) == 1
+        assert out[0].path == "a.py" and out[0].line == 2
+        assert out[0].resolved is True  # id 1 is in resolved_ids
+
+    @pytest.mark.parametrize(
+        "failing_method",
+        ["list_review_comments", "get_resolved_review_thread_comment_ids", "list_issue_comments"],
+    )
+    def test_fetch_existing_comments_any_failure_degrades_whole_result(
+        self, review_app, failing_method
+    ) -> None:
+        """Any of the three calls failing must degrade the WHOLE result to [] —
+        the same all-or-nothing semantics the prior serial version had — not a
+        partial result from the two calls that succeeded."""
+        from software_engineering_team.coding_team.api.pr_review import _fetch_existing_comments
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                if failing_method == "list_review_comments":
+                    raise GitHubAPIError(500, "boom")
+                return []
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                if failing_method == "get_resolved_review_thread_comment_ids":
+                    raise GitHubAPIError(500, "boom")
+                return set()
+
+            def list_issue_comments(self, o, r, n):
+                if failing_method == "list_issue_comments":
+                    raise GitHubAPIError(500, "boom")
+                return []
+
+        assert _fetch_existing_comments(_C(), "o", "r", 7) == []
 
 
 # ---------------------------------------------------------------------------
