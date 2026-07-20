@@ -66,7 +66,7 @@ def test_run_marks_job_failed_when_dispatch_raises(monkeypatch, bound_client, fa
     assert "Dispatch failed" in (jobs[0].get("error") or "")
 
 
-def test_dispatch_falls_through_to_thread_when_shared.temporal_missing(monkeypatch):
+def test_dispatch_falls_through_to_thread_when_shared_temporal_missing(monkeypatch):
     """If ``shared.temporal`` can't be imported at all, dispatch degrades to the
     thread path rather than erroring."""
     import sys

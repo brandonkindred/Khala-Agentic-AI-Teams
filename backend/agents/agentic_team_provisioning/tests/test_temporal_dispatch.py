@@ -213,7 +213,7 @@ def test_cancel_cancels_workflow_when_temporal_owned(api_main, client, monkeypat
     assert cancelled == {"workflow_id": "agentic-pipeline-run-cancel"}
 
 
-def test_temporal_enabled_false_without_shared.temporal(api_main, monkeypatch):
+def test_temporal_enabled_false_without_shared_temporal(api_main, monkeypatch):
     """_temporal_enabled tolerates shared.temporal being importable and disabled."""
     monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
     assert api_main._temporal_enabled() is False

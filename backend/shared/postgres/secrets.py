@@ -35,7 +35,7 @@ from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-_STORE = "shared.postgres_secrets"
+_STORE = "shared_postgres_secrets"
 _DEFAULT_CACHE_DIR = ".agent_cache"
 
 _LOCK = threading.Lock()

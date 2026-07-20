@@ -4486,6 +4486,7 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
         - A fresh interpreter that imports pr_review_issues before any other
           coding-team api module exits 0.
     """
+    import os
     import subprocess
     import sys
     from pathlib import Path
@@ -4493,6 +4494,13 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     import software_engineering_team
 
     agents_root = Path(software_engineering_team.__file__).resolve().parent.parent
+    backend_root = agents_root.parent
+    # `shared.env` (imported transitively by pr_review_issues) now lives under
+    # backend/shared/, one level above agents_root — mirrors the production
+    # container's `ENV PYTHONPATH=/app:/app/agents` (backend/Dockerfile) rather
+    # than relying on cwd=agents_root alone, which only ever reached shared_*
+    # packages back when they lived directly under agents/.
+    env = dict(os.environ, PYTHONPATH=str(backend_root))
     proc = subprocess.run(
         [
             sys.executable,
@@ -4503,5 +4511,6 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
         capture_output=True,
         text=True,
         timeout=120,
+        env=env,
     )
     assert proc.returncode == 0, proc.stderr
