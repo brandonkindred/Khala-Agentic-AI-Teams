@@ -181,8 +181,11 @@ export class StrategyCardComponent {
    * `record.strategy.strategy_code` on older ones); resolving the fallback
    * here once keeps it out of the template and in one testable place.
    *
-   * Postconditions: returns `record.strategy_code` when set and non-empty,
-   *   else `record.strategy.strategy_code`, else `undefined`.
+   * Postconditions: returns `record.strategy_code` when truthy; otherwise
+   *   `record.strategy.strategy_code` verbatim (which may itself be an empty
+   *   string or `undefined` — not coerced here, since the "Strategy Code"
+   *   panel's own template gate independently re-checks truthiness before
+   *   rendering this value).
    */
   strategyCode(): string | undefined {
     return this.record.strategy_code || this.record.strategy.strategy_code;
