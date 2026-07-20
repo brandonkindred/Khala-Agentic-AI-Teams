@@ -49,4 +49,4 @@ except json.JSONDecodeError:
   tail via continuation instead of accepting a fabricated close (the Ollama client
   uses this — the "don't fabricate a truncated tail" policy lives in the engine,
   which knows the real payload boundaries, not in a caller-side heuristic).
-- Depends on `backend/agents` being on `sys.path` (the `shared_*` convention).
+- Depends on `backend/` being on `sys.path` (the `shared.*` convention).

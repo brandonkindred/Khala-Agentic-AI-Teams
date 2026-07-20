@@ -34,7 +34,7 @@ if not result.success:
 - Tests that stub subprocess behaviour patch the module where the symbol is
   used, e.g. `@patch("shared.command_runner.runner.subprocess.run")` or
   `@patch("shared.command_runner.runner.run_command")`.
-- Depends on `backend/agents` being on `sys.path` (the repo-wide `shared_*`
+- Depends on `backend/` being on `sys.path` (the repo-wide `shared.*`
   convention).
 
 ## Note

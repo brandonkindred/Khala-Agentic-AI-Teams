@@ -26,7 +26,7 @@ briefing = read_repo_code(repo_path, FULL_STACK_EXTENSIONS, exclude_dirs=REPO_IN
 - **Import-safe:** importing the package has no side effects. `truncate_for_context`
   lazily imports `llm_service` (a neutral module) only when passed an LLM handle.
 - `read_repo_code` always excludes `.git` regardless of `exclude_dirs`.
-- Depends on `backend/agents` being on `sys.path` (the `shared_*` convention).
+- Depends on `backend/` being on `sys.path` (the `shared.*` convention).
 
 ## Budgeted scanner
 

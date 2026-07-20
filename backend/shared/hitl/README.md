@@ -43,8 +43,8 @@ changes three previously-observable SE behaviors (each covered by a regression t
 
 ## Layout & conventions
 
-Bare package under `backend/agents/` (no `pyproject.toml`); resolved on `sys.path`
-via `pythonpath = agents` in `backend/pytest.ini`. Design-by-Contract docstrings
+Bare package under `backend/shared/` (no `pyproject.toml`); resolved on `sys.path`
+via `pythonpath = agents .` in `backend/pytest.ini`. Design-by-Contract docstrings
 throughout. `tests/` runs locally via `make test` and stands as the standalone
 "prove the reconciled behavior" suite; in CI the moved code is coverage-gated at 90%
 through the `combine-shared-infra` job (SE + coding_team suites exercise it).

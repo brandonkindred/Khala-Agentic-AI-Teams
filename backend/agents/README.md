@@ -29,9 +29,6 @@ backend/agents/
 ├── plans/                             # Planning artifacts
 ├── road_trip_planning_team/
 ├── sales_team/
-├── shared.observability/              # Shared observability (Prometheus, logging)
-├── shared.postgres/                   # Shared Postgres utilities
-├── shared.temporal/                   # Shared Temporal workflow utilities
 ├── soc2_compliance_team/
 ├── social_media_marketing_team/
 ├── software_engineering_team/
@@ -100,6 +97,13 @@ For team-specific setup and env vars, use each team's README.
 ## Shared integrations
 
 `integrations/` provides provider-neutral integration contracts and routing that can be reused by any team.
+
+## Platform shared packages
+
+Cross-team infra (Postgres, Temporal, agent invoke, observability, …) lives outside this
+tree at `backend/shared/`, imported as `shared.<name>` (e.g. `from shared.postgres import
+TeamSchema`). See [`backend/shared/postgres/README.md`](../shared/postgres/README.md) and
+[`backend/shared/temporal/README.md`](../shared/temporal/README.md).
 
 ## Khala platform
 
