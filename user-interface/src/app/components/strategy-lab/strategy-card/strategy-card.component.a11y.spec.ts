@@ -110,6 +110,57 @@ describe('StrategyCardComponent a11y', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('collapsed: surfaces only the primary metrics (Annual Return, Sharpe, Max DD); secondary metrics stay behind the disclosure', async () => {
+    const fixture = await createFixture();
+
+    const metricsRow: HTMLElement = fixture.nativeElement.querySelector('.metrics-row');
+    const primaryLabels = Array.from(metricsRow.querySelectorAll('.metric-label')).map((el) => el.textContent?.trim());
+    expect(primaryLabels).toEqual(['Annual Return', 'Sharpe', 'Max DD']);
+
+    // Secondary metrics render only once the card is expanded — not present at all while collapsed.
+    expect(fixture.nativeElement.querySelector('.secondary-metrics-row')).toBeNull();
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('expanded: surfaces the secondary metrics (Win Rate, Profit Factor, Volatility) without duplicating the primary row', async () => {
+    const fixture = await createFixture();
+    fixture.componentRef.setInput('expanded', true);
+    fixture.detectChanges();
+
+    const secondaryRow: HTMLElement = fixture.nativeElement.querySelector('.secondary-metrics-row');
+    expect(secondaryRow).toBeTruthy();
+    const secondaryLabels = Array.from(secondaryRow.querySelectorAll('.metric-label')).map((el) => el.textContent?.trim());
+    expect(secondaryLabels).toEqual(['Win Rate', 'Profit Factor', 'Volatility']);
+
+    // The primary row is still present and unchanged, not duplicated into the secondary row.
+    const primaryLabels = Array.from(
+      fixture.nativeElement.querySelector('.metrics-row')!.querySelectorAll('.metric-label'),
+    ).map((el) => el.textContent?.trim());
+    expect(primaryLabels).toEqual(['Annual Return', 'Sharpe', 'Max DD']);
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
+  it('ledger-summary bar is trimmed to Trades/Wins/Losses/Net P&L; Start/End/Capital move into the panel description', async () => {
+    const fixture = await createFixture();
+    fixture.componentRef.setInput('expanded', true);
+    fixture.detectChanges();
+
+    const summary: HTMLElement = fixture.nativeElement.querySelector('.ledger-summary');
+    expect(summary).toBeTruthy();
+    const summaryLabels = Array.from(summary.querySelectorAll('.ls-label')).map((el) => el.textContent?.trim());
+    expect(summaryLabels).toEqual(['Trades', 'Wins', 'Losses', 'Net P&L']);
+
+    // Start/End/Capital are still reachable — relocated into the panel description,
+    // visible even before the panel itself is opened.
+    const description: HTMLElement = fixture.nativeElement.querySelector('.ledger-panel mat-panel-description');
+    expect(description.textContent).toContain('2025-01-01–2025-12-31');
+    expect(description.textContent).toContain('Capital: $100,000');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
   it('every mat-icon in the card carries an explicit aria-hidden or aria-label', async () => {
     const fixture = await createFixture();
     fixture.componentRef.setInput('expanded', true);
