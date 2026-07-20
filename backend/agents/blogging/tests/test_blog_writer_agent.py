@@ -8,8 +8,9 @@ import re
 import pytest
 from _content_plan_test_utils import make_content_plan
 from agents.blogging.blog_research_agent.models import ResearchReference
-from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
+from agents.blogging.blog_writer_agent import WriterInput, WriterOutput
 from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
+from conftest import make_writer_agent
 
 from llm_service import DummyLLMClient
 
@@ -86,7 +87,7 @@ def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
             )
             return {"draft": "# Post title\n\n" + body}
 
-    agent = BlogWriterAgent(
+    agent = make_writer_agent(
         llm_client=H2DraftLLM(),
         writing_style_guide_content="Use clear sentence flow and plain language.",
         brand_spec_content="Brand voice: practical and trustworthy.",
@@ -99,9 +100,7 @@ def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
 
 def test_blog_writer_agent_run() -> None:
     """BlogWriterAgent returns a non-empty draft from research + content plan."""
-    llm = DummyLLMClient()
-    agent = BlogWriterAgent(
-        llm_client=llm,
+    agent = make_writer_agent(
         writing_style_guide_content="Use clear sentence flow and plain language.",
         brand_spec_content="Brand voice: practical and trustworthy.",
     )
@@ -124,9 +123,7 @@ def test_blog_writer_agent_run() -> None:
 
 def test_blog_writer_agent_with_style_guide() -> None:
     """BlogWriterAgent uses writing_style_guide_content passed at init."""
-    llm = DummyLLMClient()
-    agent = BlogWriterAgent(
-        llm_client=llm,
+    agent = make_writer_agent(
         writing_style_guide_content="Write like a mentor. Clear, natural-length sentences. No em dashes.",
         brand_spec_content="Brand voice: practical and clear.",
     )
@@ -142,9 +139,7 @@ def test_blog_writer_agent_with_style_guide() -> None:
 
 def test_blog_writer_agent_run_with_research_references() -> None:
     """BlogWriterAgent runs parallel extraction then draft when research_references is provided."""
-    llm = DummyLLMClient()
-    agent = BlogWriterAgent(
-        llm_client=llm,
+    agent = make_writer_agent(
         writing_style_guide_content="Use clear sentence flow and plain language.",
         brand_spec_content="Brand voice: practical and trustworthy.",
     )
@@ -182,7 +177,7 @@ def test_blog_writer_agent_run_with_research_references() -> None:
 def test_draft_prompt_includes_provided_brand_spec() -> None:
     """When brand_spec_content is provided, the draft prompt includes it in the BRAND AND STYLE section."""
     llm = _PromptCapturingLLM()
-    agent = BlogWriterAgent(
+    agent = make_writer_agent(
         llm_client=llm,
         writing_style_guide_content="Use concise, natural sentences.",
         brand_spec_content="MyBrand: Test brand. Voice: friendly and clear.",
@@ -212,12 +207,7 @@ def test_outline_for_prompt_includes_section_titles() -> None:
 
 def test_draft_run_requires_both_guidelines() -> None:
     """Draft agent rejects run() when brand/writing guidelines are missing."""
-    llm = DummyLLMClient()
-    agent = BlogWriterAgent(
-        llm_client=llm,
-        writing_style_guide_content="",
-        brand_spec_content="",
-    )
+    agent = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     draft_input = WriterInput(
         research_document="Research here.",
         content_plan=_minimal_plan(),
@@ -236,7 +226,7 @@ def test_blog_writer_agent_derives_text_mode_sibling_when_given_llm_client_model
     from llm_service.strands_adapter import LLMClientModel
 
     json_model = LLMClientModel(DummyLLMClient(), agent_key="blog", response_format="json")
-    agent = BlogWriterAgent(
+    agent = make_writer_agent(
         llm_client=json_model,
         writing_style_guide_content="Use clear sentences.",
         brand_spec_content="Brand voice: practical.",
@@ -260,7 +250,7 @@ def test_blog_writer_agent_falls_back_when_llm_client_is_not_strands_model() -> 
     The writer must not crash trying to derive a sibling — fall back to
     using the injected object as both models."""
     raw_client = DummyLLMClient()
-    agent = BlogWriterAgent(
+    agent = make_writer_agent(
         llm_client=raw_client,
         writing_style_guide_content="Use clear sentences.",
         brand_spec_content="Brand voice: practical.",
