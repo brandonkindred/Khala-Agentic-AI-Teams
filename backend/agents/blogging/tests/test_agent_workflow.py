@@ -1,95 +1,17 @@
 from unittest.mock import patch
 
 from agents.blogging.blog_research_agent.agent import ResearchAgent
-from agents.blogging.blog_research_agent.models import (
-    CandidateResult,
-    ResearchBriefInput,
-    SearchQuery,
-    SourceDocument,
-)
-
-from llm_service import DummyLLMClient
-
-
-class StubLLM(DummyLLMClient):
-    """Deterministic LLM stub for tests.
-
-    Extends DummyLLMClient (which implements the Strands Model ABC) so it can
-    be passed to ``strands.Agent(model=StubLLM())``.
-    """
-
-    def complete_json(self, prompt: str, *, temperature: float = 0.0, think=None, **kwargs):
-        lowered = prompt.lower()
-        if "core_topics" in lowered and "angle" in lowered and "constraints" in lowered:
-            return {
-                "core_topics": ["test topic"],
-                "angle": "overview",
-                "constraints": [],
-            }
-        if '"queries"' in lowered and "query_text" in lowered:
-            return {
-                "queries": [
-                    {"query_text": "test overview query", "intent": "overview"},
-                    {"query_text": "test how-to query", "intent": "how-to"},
-                ]
-            }
-        if "relevance_score" in lowered and "type" in lowered:
-            return {
-                "relevance_score": 0.9,
-                "authority_score": 0.8,
-                "accuracy_score": 0.85,
-                "type": "guides",
-                "tags": ["testing"],
-            }
-        if "summary:" in lowered and "key_points" in lowered:
-            return {
-                "summary": "Test summary.",
-                "key_points": ["Key point A", "Key point B"],
-                "is_promotional": False,
-            }
-        if "similar_topics" in lowered and "similarity_score" in lowered:
-            return {
-                "similar_topics": [
-                    {"topic": "Related topic A", "similarity_score": 0.85},
-                    {"topic": "Related topic B", "similarity_score": 0.75},
-                ],
-            }
-        return {
-            "analysis": "Test analysis.",
-            "outline": ["Intro", "Body", "Conclusion"],
-        }
-
-
-class StubSearch:
-    def search(self, query: SearchQuery, *, max_results: int, recency_preference=None):
-        # Return a single deterministic candidate per query
-        return [
-            CandidateResult(
-                title=f"{query.query_text} result",
-                url="https://example.com",
-                snippet="Example snippet",
-                source="stub",
-                rank=1,
-            )
-        ]
-
-
-class StubFetcher:
-    def fetch(self, url):
-        return SourceDocument(
-            url=url,
-            title="Example title",
-            content="Example content about the test topic.",
-            publish_date=None,
-            domain="example.com",
-            language="en",
-            metadata={},
-        )
+from agents.blogging.blog_research_agent.models import ResearchBriefInput
+from conftest import make_stub_fetcher_class, make_stub_llm_class, make_stub_search_class
 
 
 def test_research_agent_run_end_to_end() -> None:
-    llm = StubLLM()
-    agent = ResearchAgent(llm_client=llm, web_search=StubSearch(), web_fetcher=StubFetcher())
+    llm = make_stub_llm_class()()
+    agent = ResearchAgent(
+        llm_client=llm,
+        web_search=make_stub_search_class()(),
+        web_fetcher=make_stub_fetcher_class()(),
+    )
 
     # Avoid real arXiv HTTP calls in tests
     with patch("agents.blogging.blog_research_agent.agent.search_arxiv", return_value=[]):
