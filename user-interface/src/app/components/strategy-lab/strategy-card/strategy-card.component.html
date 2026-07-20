@@ -29,7 +29,7 @@
       [disabled]="deleteDisabled"
     >
       @if (isDeleting) {
-        <mat-spinner diameter="22"></mat-spinner>
+        <mat-spinner diameter="22" aria-hidden="true"></mat-spinner>
       } @else {
         <mat-icon aria-hidden="true">delete_outline</mat-icon>
       }
@@ -393,7 +393,7 @@
             <div class="paper-verdict-row">
               @if (session.status === 'running') {
                 <div class="paper-verdict-badge verdict-running">
-                  <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                  <mat-spinner diameter="16" class="btn-spinner" aria-hidden="true"></mat-spinner>
                   RUNNING
                 </div>
                 <span class="paper-meta">
@@ -414,7 +414,7 @@
                 @if (record.is_publishable) {
                   @if (paperTradingInProgress) {
                     <button mat-stroked-button class="rerun-paper-btn" disabled>
-                      <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                      <mat-spinner diameter="16" class="btn-spinner" aria-hidden="true"></mat-spinner>
                       Re-run
                     </button>
                   } @else {
@@ -501,7 +501,7 @@
               class="paper-trade-btn"
               disabled
             >
-              <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+              <mat-spinner diameter="18" class="btn-spinner" aria-hidden="true"></mat-spinner>
               <span>Running paper trading…</span>
             </button>
           } @else {

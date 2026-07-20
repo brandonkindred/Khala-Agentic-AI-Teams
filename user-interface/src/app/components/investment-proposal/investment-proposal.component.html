@@ -16,7 +16,7 @@
 
       <mat-card-content>
         @if (loading || validating) {
-          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+          <mat-progress-bar mode="indeterminate" aria-label="Loading portfolio proposal"></mat-progress-bar>
         }
 
         @if (error) {

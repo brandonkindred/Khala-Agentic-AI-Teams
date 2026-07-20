@@ -2929,14 +2929,19 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     description="Remove a strategy lab run from the job store and in-memory tracking.",
 )
 def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
-    """Delete a strategy lab run by ID."""
-    with _lock:
-        _active_runs.pop(run_id, None)
+    """Delete a strategy lab run by ID.
 
+    Deletes from the job service before touching in-memory state, so a
+    failed or exceptional job-service delete leaves ``_active_runs``
+    untouched instead of dropping the entry while the persisted record
+    still exists.
+    """
     client = _get_lab_run_job_client()
     deleted = client.delete_job(run_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    with _lock:
+        _active_runs.pop(run_id, None)
     return {"job_id": run_id, "deleted": True}
 
 

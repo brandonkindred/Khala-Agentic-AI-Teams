@@ -40,7 +40,7 @@
           [disabled]="running() || loading() || clearingAll() || deletingLabRecordId() !== null"
         >
           @if (clearingAll()) {
-            <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+            <mat-spinner diameter="18" class="btn-spinner" aria-hidden="true"></mat-spinner>
           } @else {
             <mat-icon aria-hidden="true">delete_sweep</mat-icon>
           }
@@ -81,7 +81,7 @@
         [disabled]="running() || loading() || clearingAll() || !categoriesValid"
       >
         @if (running()) {
-          <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+          <mat-spinner diameter="18" class="btn-spinner" aria-hidden="true"></mat-spinner>
         } @else {
           <mat-icon aria-hidden="true">auto_awesome</mat-icon>
         }
@@ -188,7 +188,9 @@
       </div>
 
       <div class="progress-section">
-        <mat-progress-bar mode="determinate" [value]="progressPercent()"></mat-progress-bar>
+        <!-- aria-hidden: the SR-only role="status" region above already announces this same
+             batch/strategy state via runAnnouncement(); a name here would double-announce it. -->
+        <mat-progress-bar mode="determinate" [value]="progressPercent()" aria-hidden="true"></mat-progress-bar>
         <span class="progress-text">{{ progressPercent() }}%</span>
       </div>
 
@@ -254,7 +256,7 @@
                 <span class="log-time">{{ entry.time }}</span>
                 <span class="log-indicator">
                   @if (entry.status === 'active') {
-                    <mat-spinner diameter="12"></mat-spinner>
+                    <mat-spinner diameter="12" aria-hidden="true"></mat-spinner>
                   } @else if (entry.status === 'done') {
                     <mat-icon aria-hidden="true">check_circle</mat-icon>
                   } @else {
@@ -268,7 +270,7 @@
         }
       } @else {
         <div class="progress-waiting">
-          <mat-spinner diameter="24"></mat-spinner>
+          <mat-spinner diameter="24" aria-hidden="true"></mat-spinner>
           <span>Preparing next strategy...</span>
         </div>
       }
@@ -324,7 +326,7 @@
   <!-- Loading spinner -->
   @if (loading()) {
     <div class="loading-wrap">
-      <mat-spinner diameter="36"></mat-spinner>
+      <mat-spinner diameter="36" aria-label="Loading strategy lab"></mat-spinner>
     </div>
   }
 
