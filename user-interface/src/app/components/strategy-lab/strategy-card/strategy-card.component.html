@@ -127,7 +127,12 @@
               Expert brief for this batch (not financial advice)
             </mat-panel-description>
           </mat-expansion-panel-header>
-          <pre class="signal-json">{{ record.signal_intelligence_brief | json }}</pre>
+          <dl class="rule-fields">
+            @for (row of flattenObjectRows(record.signal_intelligence_brief); track row.label) {
+              <dt>{{ row.label }}</dt>
+              <dd>{{ row.value }}</dd>
+            }
+          </dl>
         </mat-expansion-panel>
       }
 
@@ -156,7 +161,14 @@
           <strong>Entry Rules</strong>
           <ul>
             @for (rule of record.strategy.entry_rules; track $index) {
-              <li><pre class="rule-json">{{ rule | json }}</pre></li>
+              <li>
+                <dl class="rule-fields">
+                  @for (row of flattenObjectRows(rule); track row.label) {
+                    <dt>{{ row.label }}</dt>
+                    <dd>{{ row.value }}</dd>
+                  }
+                </dl>
+              </li>
             }
           </ul>
         </div>
@@ -164,14 +176,26 @@
           <strong>Exit Rules</strong>
           <ul>
             @for (rule of record.strategy.exit_rules; track $index) {
-              <li><pre class="rule-json">{{ rule | json }}</pre></li>
+              <li>
+                <dl class="rule-fields">
+                  @for (row of flattenObjectRows(rule); track row.label) {
+                    <dt>{{ row.label }}</dt>
+                    <dd>{{ row.value }}</dd>
+                  }
+                </dl>
+              </li>
             }
           </ul>
         </div>
         @if (record.strategy.sizing) {
           <div class="detail-section">
             <strong>Sizing</strong>
-            <pre class="rule-json">{{ record.strategy.sizing | json }}</pre>
+            <dl class="rule-fields">
+              @for (row of flattenObjectRows(record.strategy.sizing); track row.label) {
+                <dt>{{ row.label }}</dt>
+                <dd>{{ row.value }}</dd>
+              }
+            </dl>
           </div>
         }
         <div class="detail-section">
@@ -194,6 +218,18 @@
             </mat-panel-title>
             <mat-panel-description>Generated Python backtest script</mat-panel-description>
           </mat-expansion-panel-header>
+          <div class="strategy-code-caption">
+            <span class="strategy-code-caption-text">Generated Python — read only</span>
+            <button
+              mat-icon-button
+              class="strategy-code-copy-btn"
+              (click)="copyStrategyCode(code)"
+              [matTooltip]="strategyCodeCopied ? 'Copied!' : 'Copy code'"
+              aria-label="Copy strategy code"
+            >
+              <mat-icon aria-hidden="true">{{ strategyCodeCopied ? 'check' : 'content_copy' }}</mat-icon>
+            </button>
+          </div>
           <pre class="strategy-code">{{ code }}</pre>
         </mat-expansion-panel>
       }

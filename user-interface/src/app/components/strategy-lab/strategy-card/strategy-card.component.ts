@@ -1,5 +1,5 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
-import { CommonModule, DecimalPipe, DatePipe, JsonPipe } from '@angular/common';
+import { ChangeDetectionStrategy, Component, EventEmitter, Input, OnDestroy, Output } from '@angular/core';
+import { CommonModule, DecimalPipe, DatePipe } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -22,6 +22,7 @@ import {
   gateIcon as pureGateIcon,
   gateSeverityClass as pureGateSeverityClass,
   type GateViewModel,
+  flattenObjectRows,
 } from '../strategy-lab.formatters';
 import type {
   PaperTradingSession,
@@ -61,7 +62,6 @@ interface ComparisonRow {
     CommonModule,
     DecimalPipe,
     DatePipe,
-    JsonPipe,
     DateOnlyPipe,
     MatCardModule,
     MatButtonModule,
@@ -76,7 +76,7 @@ interface ComparisonRow {
   templateUrl: './strategy-card.component.html',
   styleUrl: './strategy-card.component.scss',
 })
-export class StrategyCardComponent {
+export class StrategyCardComponent implements OnDestroy {
   /** The lab record this card renders. */
   @Input({ required: true }) record!: StrategyLabRecord;
   /** Whether the card title renders as an `<h3>` (dashboard-tab context) or `<h2>` (standalone route). */
@@ -110,6 +110,41 @@ export class StrategyCardComponent {
   readonly verdictLabel = verdictLabel;
   readonly verdictColor = verdictColor;
   readonly publishabilitySkipLabel = publishabilitySkipLabel;
+  readonly flattenObjectRows = flattenObjectRows;
+
+  /** True for ~1.5s after `copyStrategyCode()` runs, flashing a confirmation icon on the copy button. */
+  strategyCodeCopied = false;
+  private copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+  ngOnDestroy(): void {
+    if (this.copyResetTimer) {
+      clearTimeout(this.copyResetTimer);
+      this.copyResetTimer = null;
+    }
+  }
+
+  /**
+   * Copy the generated strategy code to the clipboard, flashing a confirmation icon.
+   * Mirrors `CodingTeamPageComponent.copyJobId()`'s pattern.
+   *
+   * Preconditions: `code` is the non-empty string currently rendered in the panel.
+   * Postconditions: when the Clipboard API is available, `code` is written to the
+   *   clipboard and `strategyCodeCopied` is true for ~1.5s (the reset timer is
+   *   tracked so it is cancelled on destroy and never fires twice); a rejected
+   *   clipboard write is swallowed so it cannot surface as an unhandled rejection.
+   */
+  copyStrategyCode(code: string): void {
+    navigator.clipboard?.writeText(code).catch(() => {
+      // Clipboard write can reject (permission denied, insecure context); ignore — the user can
+      // still read/select the code manually.
+    });
+    this.strategyCodeCopied = true;
+    if (this.copyResetTimer) clearTimeout(this.copyResetTimer);
+    this.copyResetTimer = setTimeout(() => {
+      this.strategyCodeCopied = false;
+      this.copyResetTimer = null;
+    }, 1500);
+  }
 
   /** Delete-button click handler. Postconditions: `deleteRequested` emits exactly once; no local state changes (the host owns delete-in-flight tracking). */
   onDelete(): void {
@@ -180,8 +215,11 @@ export class StrategyCardComponent {
    * `record.strategy.strategy_code` on older ones); resolving the fallback
    * here once keeps it out of the template and in one testable place.
    *
-   * Postconditions: returns `record.strategy_code` when set and non-empty,
-   *   else `record.strategy.strategy_code`, else `undefined`.
+   * Postconditions: returns `record.strategy_code` when truthy; otherwise
+   *   `record.strategy.strategy_code` verbatim (which may itself be an empty
+   *   string or `undefined` — not coerced here, since the "Strategy Code"
+   *   panel's own template gate independently re-checks truthiness before
+   *   rendering this value).
    */
   strategyCode(): string | undefined {
     return this.record.strategy_code || this.record.strategy.strategy_code;
