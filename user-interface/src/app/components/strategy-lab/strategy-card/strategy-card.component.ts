@@ -34,8 +34,10 @@ import type {
  * paper-trading section. Owns no cross-record state (expand/collapse
  * tracking, delete-in-flight, pagination, paper-trading-in-flight all live on
  * the host, which passes the derived value for *this* record down as
- * `@Input()`s) and performs no side effects itself — every user action is
- * reported up via the `@Output()`s below for the host to act on.
+ * `@Input()`s) and performs no externally-observable side effects beyond a
+ * clipboard write (`copyStrategyCode()`) and internal memoization caches
+ * (`gateViewModels()`) — every user action that matters to the host is
+ * reported up via the `@Output()`s below.
  *
  * Preconditions: `record` is set before the first render (required input).
  * Postconditions: renders identically for the same `record`/inputs regardless
@@ -114,10 +116,11 @@ export class StrategyCardComponent implements OnDestroy {
    * Mirrors `CodingTeamPageComponent.copyJobId()`'s pattern.
    *
    * Preconditions: `code` is the non-empty string currently rendered in the panel.
-   * Postconditions: when the Clipboard API is available, `code` is written to the
-   *   clipboard and `strategyCodeCopied` is true for ~1.5s (the reset timer is
-   *   tracked so it is cancelled on destroy and never fires twice); a rejected
-   *   clipboard write is swallowed so it cannot surface as an unhandled rejection.
+   * Postconditions: `strategyCodeCopied` is true for ~1.5s regardless of clipboard
+   *   availability (the reset timer is tracked so it is cancelled on destroy and
+   *   never fires twice); `code` is written to the clipboard only when the
+   *   Clipboard API is available, and a rejected clipboard write is swallowed so
+   *   it cannot surface as an unhandled rejection.
    */
   copyStrategyCode(code: string): void {
     navigator.clipboard?.writeText(code).catch(() => {

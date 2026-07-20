@@ -24,9 +24,9 @@ interface ComparisonRow {
  * session state, the backtest-vs-paper comparison table, and the
  * not-publishable skip notice. Owns no external state of its own (the host
  * tracks paper-trading-in-flight and the session map); keeps only an
- * internal memoization cache for `comparisonMetrics`. Performs no side
- * effects — the user's "run"/"re-run" action is reported up via
- * `paperTradeRequested` for the host to act on.
+ * internal memoization cache for `comparisonMetrics`. Performs no
+ * externally-observable side effects — the user's "run"/"re-run" action is
+ * reported up via `paperTradeRequested` for the host to act on.
  *
  * Preconditions: `record` is set before the first render (required input).
  * Postconditions: renders identically for the same inputs regardless of how
