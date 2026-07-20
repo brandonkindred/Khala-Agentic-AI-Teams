@@ -93,8 +93,10 @@ def call_json_with_retry(
           transient or unexpected error never consumes an attempt (it exits
           the loop immediately).
     """
-    assert max_attempts >= 1, "max_attempts must be >= 1"
-    assert prompt, "prompt must be non-empty"
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+    if not prompt:
+        raise ValueError("prompt must be non-empty")
     log = logger or _logger
     keys = frozenset(expected_keys) if expected_keys is not None else None
 

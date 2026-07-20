@@ -42,6 +42,20 @@ class _FakeAgentFactory:
         return agent
 
 
+def test_invalid_max_attempts_raises_value_error():
+    """max_attempts < 1 raises ValueError, not a bypassable assert."""
+    factory = _FakeAgentFactory([])
+    with pytest.raises(ValueError):
+        call_json_with_retry(factory, "prompt", max_attempts=0)
+
+
+def test_empty_prompt_raises_value_error():
+    """An empty prompt raises ValueError, not a bypassable assert."""
+    factory = _FakeAgentFactory([])
+    with pytest.raises(ValueError):
+        call_json_with_retry(factory, "")
+
+
 def test_success_on_first_attempt():
     """A well-formed JSON response returns immediately, consuming one call."""
     factory = _FakeAgentFactory(['{"ok": true}'])
