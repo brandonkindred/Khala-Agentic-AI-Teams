@@ -9,34 +9,22 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatExpansionModule } from '@angular/material/expansion';
 import type { PageEvent } from '@angular/material/paginator';
 
-import { DateOnlyPipe } from '../../../shared/date-only.pipe';
-import { formatPct, formatRatio } from '../../../shared/number-format';
 import { TradeLedgerComponent } from '../trade-ledger/trade-ledger.component';
 import { QualityGateListComponent } from '../quality-gate-list/quality-gate-list.component';
+import { PaperTradingPanelComponent } from '../paper-trading-panel/paper-trading-panel.component';
 import {
   returnColor,
   returnColorLabel,
-  verdictLabel,
   verdictColor,
-  publishabilitySkipLabel,
   gateIcon as pureGateIcon,
   gateSeverityClass as pureGateSeverityClass,
   type GateViewModel,
 } from '../strategy-lab.formatters';
 import type {
   PaperTradingSession,
-  PaperTradingComparison,
   QualityGateResult,
   StrategyLabRecord,
 } from '../../../models';
-
-/** Precomputed comparison-table row — see `comparisonMetrics`. */
-interface ComparisonRow {
-  label: string;
-  backtest: string;
-  paper: string;
-  aligned: boolean;
-}
 
 /**
  * Presentational strategy-lab result card. Renders one record's summary
@@ -62,7 +50,6 @@ interface ComparisonRow {
     DecimalPipe,
     DatePipe,
     JsonPipe,
-    DateOnlyPipe,
     MatCardModule,
     MatButtonModule,
     MatIconModule,
@@ -72,6 +59,7 @@ interface ComparisonRow {
     MatExpansionModule,
     TradeLedgerComponent,
     QualityGateListComponent,
+    PaperTradingPanelComponent,
   ],
   templateUrl: './strategy-card.component.html',
   styleUrl: './strategy-card.component.scss',
@@ -107,9 +95,7 @@ export class StrategyCardComponent {
 
   readonly returnColor = returnColor;
   readonly returnColorLabel = returnColorLabel;
-  readonly verdictLabel = verdictLabel;
   readonly verdictColor = verdictColor;
-  readonly publishabilitySkipLabel = publishabilitySkipLabel;
 
   /** Delete-button click handler. Postconditions: `deleteRequested` emits exactly once; no local state changes (the host owns delete-in-flight tracking). */
   onDelete(): void {
@@ -185,11 +171,6 @@ export class StrategyCardComponent {
    */
   strategyCode(): string | undefined {
     return this.record.strategy_code || this.record.strategy.strategy_code;
-  }
-
-  /** Accessible name for the paper-trading comparison table's scrollable wrapper (same rationale as the trade-ledger's own equivalent in `TradeLedgerComponent`). */
-  comparisonTableRegionLabel(): string {
-    return `${this.record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
   }
 
   /**
@@ -286,23 +267,5 @@ export class StrategyCardComponent {
     });
     this.gateViewModelsCache = { record: this.record, viewModels };
     return viewModels;
-  }
-
-  // Same reference-identity caveat as `gateViewModelsCache` above, keyed on
-  // the paper-trading comparison object instead of the record.
-  private comparisonMetricsCache: { comparison: PaperTradingComparison; rows: ComparisonRow[] } | null = null;
-
-  comparisonMetrics(c: PaperTradingComparison): ComparisonRow[] {
-    const cached = this.comparisonMetricsCache;
-    if (cached && cached.comparison === c) return cached.rows;
-    const rows: ComparisonRow[] = [
-      { label: 'Win Rate', backtest: formatPct(c.backtest_win_rate_pct), paper: formatPct(c.paper_win_rate_pct), aligned: c.win_rate_aligned },
-      { label: 'Annual Return', backtest: formatPct(c.backtest_annualized_return_pct), paper: formatPct(c.paper_annualized_return_pct), aligned: c.return_aligned },
-      { label: 'Sharpe', backtest: formatRatio(c.backtest_sharpe_ratio), paper: formatRatio(c.paper_sharpe_ratio), aligned: c.sharpe_aligned },
-      { label: 'Max Drawdown', backtest: formatPct(c.backtest_max_drawdown_pct), paper: formatPct(c.paper_max_drawdown_pct), aligned: c.drawdown_aligned },
-      { label: 'Profit Factor', backtest: formatRatio(c.backtest_profit_factor), paper: formatRatio(c.paper_profit_factor), aligned: c.profit_factor_aligned },
-    ];
-    this.comparisonMetricsCache = { comparison: c, rows };
-    return rows;
   }
 }

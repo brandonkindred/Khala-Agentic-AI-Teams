@@ -181,8 +181,11 @@ describe('StrategyCardComponent a11y', () => {
     const openTags = html.match(/<mat-icon\b[^>]*>/g) ?? [];
 
     // Sanity check: fails loudly if the template moved/renamed and the regex
-    // above stopped matching anything, rather than passing vacuously.
-    expect(openTags.length).toBeGreaterThan(15);
+    // above stopped matching anything, rather than passing vacuously. Lower
+    // than before extraction — the paper-trading section's icons moved to
+    // PaperTradingPanelComponent's own template (and its own equivalent
+    // check), see paper-trading-panel.component.a11y.spec.ts.
+    expect(openTags.length).toBeGreaterThan(5);
 
     const isExplicit = (tag: string): boolean => {
       if (/aria-hidden\s*=\s*"true"/.test(tag)) return true;
