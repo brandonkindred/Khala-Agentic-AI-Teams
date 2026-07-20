@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from cryptography.fernet import Fernet
 
-from software_engineering_team.coding_team import token_crypto
+from software_engineering_team import token_crypto
 
 
 def _set_key(monkeypatch) -> str:

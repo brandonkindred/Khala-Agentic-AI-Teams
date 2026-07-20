@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from software_engineering_team.coding_team.graph_persist import GraphPersistCoordinator
+from software_engineering_team.graph_persist import GraphPersistCoordinator
 
 
 def _make_coord(writes: List[Dict[str, Any]]) -> GraphPersistCoordinator:

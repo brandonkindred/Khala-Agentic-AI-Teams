@@ -460,7 +460,7 @@ def test_execute_coding_team_activity_passes_band_and_default_llm_getter(
     def fake_orchestrator(job_id, repo_path, plan_input, **kwargs):
         captured.update(kwargs, job_id=job_id)
 
-    import software_engineering_team.coding_team.orchestrator as coding_orch
+    import software_engineering_team.coding_team_orchestrator as coding_orch
 
     monkeypatch.setattr(coding_orch, "run_coding_team_orchestrator", fake_orchestrator)
 

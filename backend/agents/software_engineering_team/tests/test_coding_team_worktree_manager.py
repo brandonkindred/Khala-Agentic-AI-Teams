@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from shared_git.git_utils import DEVELOPMENT_BRANCH, initialize_new_repo
-from software_engineering_team.coding_team.worktree_manager import (
+from software_engineering_team.worktree_manager import (
     WorktreeManager,
     WorktreePrepareError,
 )
@@ -147,7 +147,7 @@ def test_path_for_fails_closed_for_unknown_agent_id(repo: Path) -> None:
 
 
 def test_prepare_raises_worktree_prepare_error_on_git_failure(repo: Path, monkeypatch) -> None:
-    import software_engineering_team.coding_team.worktree_manager as wm_mod
+    import software_engineering_team.worktree_manager as wm_mod
 
     monkeypatch.setattr(wm_mod, "add_worktree", lambda *a, **k: (False, "boom"))
     manager = WorktreeManager(repo, ["backend_v2"])
@@ -200,7 +200,7 @@ def test_prepare_records_partial_worktrees_for_cleanup_on_mid_loop_failure(
     """If the first agent's worktree is created successfully but a later agent's fails, the
     first one must still be tracked so cleanup() can remove it — not silently left behind as an
     orphaned worktree + admin-area entry."""
-    import software_engineering_team.coding_team.worktree_manager as wm_mod
+    import software_engineering_team.worktree_manager as wm_mod
 
     real_add_worktree = wm_mod.add_worktree
     calls = {"n": 0}
@@ -227,7 +227,7 @@ def test_prepare_records_partial_worktrees_for_cleanup_on_mid_loop_failure(
 
 
 def test_prepare_raises_when_root_repo_initialization_fails(tmp_path: Path, monkeypatch) -> None:
-    import software_engineering_team.coding_team.worktree_manager as wm_mod
+    import software_engineering_team.worktree_manager as wm_mod
 
     fresh_path = tmp_path / "uninitializable"
     fresh_path.mkdir()
@@ -239,7 +239,7 @@ def test_prepare_raises_when_root_repo_initialization_fails(tmp_path: Path, monk
 
 
 def test_prepare_raises_when_development_branch_cannot_be_ensured(repo: Path, monkeypatch) -> None:
-    import software_engineering_team.coding_team.worktree_manager as wm_mod
+    import software_engineering_team.worktree_manager as wm_mod
 
     monkeypatch.setattr(wm_mod, "development_branch_exists", lambda *a, **k: False)
     monkeypatch.setattr(wm_mod, "ensure_development_branch", lambda *a, **k: (False, "locked"))
@@ -250,7 +250,7 @@ def test_prepare_raises_when_development_branch_cannot_be_ensured(repo: Path, mo
 
 
 def test_cleanup_logs_but_does_not_raise_when_remove_fails(repo: Path, monkeypatch) -> None:
-    import software_engineering_team.coding_team.worktree_manager as wm_mod
+    import software_engineering_team.worktree_manager as wm_mod
 
     manager = WorktreeManager(repo, ["backend_v2"])
     manager.prepare()

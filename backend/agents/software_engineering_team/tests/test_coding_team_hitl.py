@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 import httpx
 import pytest
 
-from software_engineering_team.coding_team import hitl, job_store
+from software_engineering_team import hitl, job_store
 
 # --------------------------------------------------------------------------- convert / normalize
 

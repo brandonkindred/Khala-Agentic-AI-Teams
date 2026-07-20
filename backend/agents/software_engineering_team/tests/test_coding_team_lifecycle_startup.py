@@ -9,7 +9,7 @@ a worker that never booted. These tests pin the backstop.
 
 from __future__ import annotations
 
-from software_engineering_team.coding_team.api import lifecycle
+from software_engineering_team.api import coding_team_lifecycle as lifecycle
 
 
 def test_startup_runs_provider_probe_and_worker_backstop(monkeypatch):
@@ -25,7 +25,7 @@ def test_startup_runs_provider_probe_and_worker_backstop(monkeypatch):
 
 
 def test_worker_backstop_starts_worker(monkeypatch):
-    import software_engineering_team.coding_team.temporal.worker as worker_mod
+    import software_engineering_team.temporal.coding_team_worker as worker_mod
 
     started: list = []
     monkeypatch.setattr(
@@ -39,7 +39,7 @@ def test_worker_backstop_starts_worker(monkeypatch):
 
 def test_worker_backstop_swallows_errors(monkeypatch):
     """A broken worker must not block the app from serving traffic."""
-    import software_engineering_team.coding_team.temporal.worker as worker_mod
+    import software_engineering_team.temporal.coding_team_worker as worker_mod
 
     def _boom():
         raise RuntimeError("temporal unreachable")
