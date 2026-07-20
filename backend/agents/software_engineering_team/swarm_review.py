@@ -298,8 +298,11 @@ class _ReviewMixin:
             - ``review`` is the value ``_compute_review`` returned for ``task``; ``diff`` is the diff
               it collected (empty string on an error review).
         Postconditions:
-            - ``error`` → task FAILED once (no revision loop); ``approved`` → branch merged and task
-              MERGED; otherwise → task sent back to its engineer for revision. Exactly one of these.
+            - ``error`` → task FAILED once (no revision loop); ``approved`` and merge succeeds →
+              branch merged and task MERGED; ``approved`` but merge fails without raising → task
+              sent back for revision (same as an unapproved review, via ``_request_revision``) with
+              the merge failure recorded as feedback; any other unapproved review → task sent back
+              for revision. Exactly one of these.
         """
         if review.get("error"):
             # The review itself could not run (e.g. evidence exceeded the model context window). Do
@@ -311,14 +314,30 @@ class _ReviewMixin:
             from software_engineering_team import coding_team_orchestrator as _orch
 
             try:
-                ok, _ = merge_branch(
+                ok, merge_msg = merge_branch(
                     self.path, _orch._feature_branch_name(task), DEVELOPMENT_BRANCH
                 )
-                if ok:
-                    self.graph.mark_branch_merged(task.id)
             except Exception as e:
                 logger.warning("Merge failed for %s: %s; marking merged anyway", task.id, e)
                 self.graph.mark_branch_merged(task.id)
+                return
+            if ok:
+                self.graph.mark_branch_merged(task.id)
+                return
+            # Non-exception merge failure (e.g. conflict): do NOT leave the task silently stuck
+            # IN_REVIEW — route it through the same revision-cap-bounded bounce every other
+            # stuck-review path uses, with the merge failure recorded as feedback.
+            logger.warning(
+                "Merge rejected for %s: %s; sending back for revision", task.id, merge_msg
+            )
+            self._request_revision(
+                task,
+                {
+                    "reason": f"Approved branch failed to merge: {merge_msg}",
+                    "requested_changes": [],
+                },
+                diff=diff,
+            )
         else:
             # Pass the diff already collected for the reviewer so the no-change check reuses it
             # rather than re-shelling out to git for the same branch.
