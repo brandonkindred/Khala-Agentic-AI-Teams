@@ -37,13 +37,13 @@ def _se_startup() -> None:  # pragma: no cover - integration-only ASGI startup h
         logger.warning("Could not start SE Temporal worker: %s", e)
     try:
         from software_engineering_team.coding_engine_provider import SECodeEngineProvider
-        from software_engineering_team.coding_team.engine_provider import set_engine_provider
+        from software_engineering_team.engine_provider import set_engine_provider
 
         set_engine_provider(SECodeEngineProvider())
     except Exception as e:
         logger.warning("Could not install SE-backed CodeEngineProvider for coding_team: %s", e)
     try:
-        from software_engineering_team.coding_team.temporal.worker import (
+        from software_engineering_team.temporal.coding_team_worker import (
             start_coding_team_temporal_worker_thread,
         )
 

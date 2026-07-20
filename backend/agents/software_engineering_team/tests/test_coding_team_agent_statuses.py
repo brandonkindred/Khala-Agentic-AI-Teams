@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from software_engineering_team.coding_team.agent_status import (
+from software_engineering_team.agent_status import (
     TECH_LEAD_AGENT_ID,
     _coerce_fraction,
     build_agent_statuses,

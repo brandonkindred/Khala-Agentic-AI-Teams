@@ -115,7 +115,7 @@ Execution stays in agent code (e.g. `agent_git_tools` + `GitToolContext`); these
 
 - **`TeamConfig.parent_team_key`:** Optional link to a parent team for documentation and tooling (e.g. **Coding Team** → **Software Engineering**).
 - **`enabled=False`:** Team is not mounted; used for **logical** entries (e.g. **Investment Strategy Lab** metadata) whose HTTP routes still live on the parent prefix (`/api/investment/strategy-lab/*`).
-- **Coding Team** is a different `parent_team_key` shape than Investment Strategy Lab: it keeps its own `enabled=True` entry and distinct `/api/coding-team` prefix (routes unchanged), but is now served *by* the Software Engineering process (`backend/agents/software_engineering_team/coding_team/`, mounted unprefixed in SE's own `api/main.py`) instead of a standalone container — only the upstream URL (`CODING_TEAM_SERVICE_URL`) changed, from its own container to `se-service`.
+- **Coding Team** is a different `parent_team_key` shape than Investment Strategy Lab: it keeps its own `enabled=True` entry and distinct `/api/coding-team` prefix (routes unchanged), but is now served *by* the Software Engineering process (the coding-team execution engine — Tech Lead, `github_source`, Temporal definitions, API routers — lives as direct children of `backend/agents/software_engineering_team/`, mounted unprefixed in SE's own `api/main.py`) instead of a standalone container — only the upstream URL (`CODING_TEAM_SERVICE_URL`) changed, from its own container to `se-service`.
 - **Investment** entry describes **two tracks** (advisor / IPS vs strategy lab) on one mounted API.
 - See `TEAM_CONFIGS` in `unified_api/config.py` and tests in `unified_api/tests/test_config.py`.
 

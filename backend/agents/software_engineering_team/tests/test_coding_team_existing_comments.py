@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from software_engineering_team.coding_team.github_source.client import (
+from software_engineering_team.github_source.client import (
     KHALA_COMMENT_MARKER,
     IssueComment,
     ReviewComment,
 )
-from software_engineering_team.coding_team.github_source.existing_comments import (
+from software_engineering_team.github_source.existing_comments import (
     ExistingComment,
     build_existing_comments,
     match_existing_comment,

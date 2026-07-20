@@ -214,8 +214,7 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 <summary><strong>Per-team READMEs (click to expand)</strong></summary>
 
 ### Core Dev
-- [`backend/agents/software_engineering_team/`](backend/agents/software_engineering_team/README.md) — the flagship SE pipeline (planning, coding, review, release)
-- [`backend/agents/software_engineering_team/coding_team/`](backend/agents/software_engineering_team/coding_team/) — tech lead + specialists wired to a task graph; no README yet
+- [`backend/agents/software_engineering_team/`](backend/agents/software_engineering_team/README.md) — the flagship SE pipeline (planning, coding, review, release); see its "Coding Team" section for the Tech Lead + Task Graph execution engine
 - [`backend/agents/planning_team/`](backend/agents/planning_team/README.md)
 - [`backend/agents/ai_systems_team/`](backend/agents/ai_systems_team/README.md)
 - [`backend/agents/agent_provisioning_team/`](backend/agents/agent_provisioning_team/README.md)

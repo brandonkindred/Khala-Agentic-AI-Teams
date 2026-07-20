@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from job_service_client import JobServiceClient
-from software_engineering_team.coding_team import job_store
+from software_engineering_team import job_store
 
 
 @pytest.mark.integration

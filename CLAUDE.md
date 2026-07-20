@@ -14,8 +14,9 @@ One directory per agent team under `backend/agents/`. Load-bearing entries:
 backend/
   agents/
     software_engineering_team/  # Primary team — full dev pipeline; contains the backend/frontend
-                                # code-v2, devops, coding_team (routed at /api/coding-team),
-                                # planning, integration, and QA sub-teams
+                                # code-v2, devops, coding-team execution engine (Tech Lead +
+                                # Task Graph, routed at /api/coding-team), planning, integration,
+                                # and QA sub-teams
     planning_team/           # Client-facing discovery/PRD team (/api/planning)
     product_delivery/        # Persistent Product Delivery Loop (/api/product-delivery)
     llm_service/             # Centralized LLM client (Ollama, Claude)
