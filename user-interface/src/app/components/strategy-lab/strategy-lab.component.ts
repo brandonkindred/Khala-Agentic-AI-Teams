@@ -361,6 +361,19 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return `${record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
   }
 
+  /**
+   * Accessible name for the trade-ledger `<table>` itself — distinct from
+   * `tradeTableRegionLabel`, which names the scrollable wrapper div: a
+   * screen reader's table-navigation commands read the `<table>`'s own
+   * accessible name, not the wrapper's.
+   *
+   * Preconditions: `record.backtest.trades` is defined (may be empty).
+   * Postconditions: returns a non-empty, state-independent label.
+   */
+  tradeTableAccessibleName(record: StrategyLabRecord): string {
+    return `Trade ledger, ${this.tradeCount(record)} trades`;
+  }
+
   // Per-card trade ledger state
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
   readonly PAGE_SIZE = 20;
