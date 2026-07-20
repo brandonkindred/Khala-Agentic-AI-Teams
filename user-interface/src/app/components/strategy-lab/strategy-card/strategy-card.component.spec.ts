@@ -472,5 +472,51 @@ describe('StrategyCardComponent', () => {
       expect(caption?.className).toContain('visually-hidden');
       expect(caption?.textContent?.trim()).toBe('Backtest vs. paper-trading metric comparison');
     });
+
+    it('renders entry/exit rules, sizing, and the signal brief as labeled rows, with no raw JSON dump remaining', () => {
+      component.record = makeRecord({
+        strategy: {
+          strategy_id: 'strat-1',
+          authored_by: 'design-agent',
+          asset_class: 'stocks',
+          hypothesis: 'Stocks with rising volume tend to continue trending.',
+          signal_definition: 'volume_zscore > 2',
+          timeframe: 'daily',
+          entry_rules: [{ indicator: 'volume_zscore', operator: '>', value: 2 }],
+          exit_rules: [{ indicator: 'days_held', operator: '>', value: 10 }],
+          sizing: { method: 'fixed_fraction', value: 0.1 },
+          target_symbols: ['AAPL'],
+          risk_limits: {},
+          speculative: false,
+          requires_redesign: false,
+          unparsed_rules: [],
+          audit: {},
+        } as unknown as StrategyLabRecord['strategy'],
+        signal_intelligence_brief: {
+          summary: 'Momentum confirmed by volume.',
+        } as unknown as StrategyLabRecord['signal_intelligence_brief'],
+      });
+      component.expanded = true;
+      fixture.detectChanges();
+
+      // No raw JSON dump remains anywhere in the rules/sizing/signal-brief sections.
+      expect(fixture.nativeElement.querySelector('.rule-json')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.signal-json')).toBeNull();
+
+      const allText = (el: Element) =>
+        Array.from(el.querySelectorAll('dt, dd')).map((n) => n.textContent?.trim());
+
+      const detailSections: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.detail-section'));
+      const entrySection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Entry Rules')!;
+      const exitSection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Exit Rules')!;
+      const sizingSection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Sizing')!;
+
+      expect(allText(entrySection)).toEqual(['Indicator', 'volume_zscore', 'Operator', '>', 'Value', '2']);
+      expect(allText(exitSection)).toEqual(['Indicator', 'days_held', 'Operator', '>', 'Value', '10']);
+      expect(allText(sizingSection)).toEqual(['Method', 'fixed_fraction', 'Value', '0.1']);
+
+      const signalPanel: HTMLElement = fixture.nativeElement.querySelector('.signal-panel');
+      expect(allText(signalPanel)).toEqual(['Summary', 'Momentum confirmed by volume.']);
+    });
   });
 });
