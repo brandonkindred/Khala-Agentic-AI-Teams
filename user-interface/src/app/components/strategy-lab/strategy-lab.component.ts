@@ -963,10 +963,26 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // Trade ledger helpers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Current trade-ledger paginator page for a record's `StrategyCardComponent`.
+   *
+   * Preconditions: `id` is a non-empty `lab_record_id`.
+   * Postconditions: returns the zero-based page index last set via
+   *   `onPageChange` for `id`, or `0` if the record's ledger has never been paged.
+   */
   getPageIndex(id: string): number {
     return this.tradeLedgerPages[id] ?? 0;
   }
 
+  /**
+   * Handles a `pageChanged` output from a `StrategyCardComponent`'s trade-ledger
+   * paginator, persisting the new page so it survives the card re-rendering
+   * (e.g. on the next results poll).
+   *
+   * Preconditions: `id` is a non-empty `lab_record_id`; `event` is the
+   *   Material paginator's `PageEvent` for that record's ledger.
+   * Postconditions: `getPageIndex(id)` returns `event.pageIndex` on the next call.
+   */
   onPageChange(id: string, event: PageEvent): void {
     this.tradeLedgerPages[id] = event.pageIndex;
   }
