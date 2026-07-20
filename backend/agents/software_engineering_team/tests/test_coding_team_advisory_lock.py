@@ -53,6 +53,44 @@ def test_advisory_lock_takes_pg_advisory_lock_when_postgres_enabled(monkeypatch)
     )
 
 
+def test_advisory_lock_releases_pg_connection_when_body_raises(monkeypatch) -> None:
+    """When Postgres acquisition succeeds but the body raises, the connection's
+    context manager is still exited (via the ExitStack) — the advisory-lock
+    transaction is not leaked — and the body's exception propagates unchanged."""
+    import shared_postgres
+
+    conn = MagicMock()
+
+    class _RecordingConnCtx:
+        def __init__(self, target: MagicMock) -> None:
+            self._target = target
+            self.exited = False
+            self.exit_exc_type: type[BaseException] | None = None
+
+        def __enter__(self) -> MagicMock:
+            return self._target
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            self.exited = True
+            self.exit_exc_type = exc_type
+            return False
+
+    conn_ctx = _RecordingConnCtx(conn)
+    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared_postgres, "get_conn", lambda: conn_ctx)
+
+    with pytest.raises(ValueError, match="boom"):
+        with advisory_lock(threading.Lock(), "ns", "key"):
+            raise ValueError("boom")
+
+    conn.execute.assert_called_once_with(
+        "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+        ("ns", "key"),
+    )
+    assert conn_ctx.exited
+    assert conn_ctx.exit_exc_type is ValueError
+
+
 def test_advisory_lock_degrades_when_postgres_unavailable(monkeypatch) -> None:
     """A failing advisory-lock acquisition degrades to the process-local lock
     alone (logged) — must never raise or block the caller."""

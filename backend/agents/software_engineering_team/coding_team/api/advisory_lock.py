@@ -1,8 +1,9 @@
 """coding_team API — shared cross-worker admission-lock primitive.
 
-Extracted from the identical process-lock + best-effort Postgres advisory
-lock shape that ``pr_review._pr_review_admission`` and
-``pr_review_issues._issue_creation_lock`` each implemented independently.
+Combines a process-local lock with a best-effort Postgres transaction-scoped
+advisory lock, degrading to the process lock alone when Postgres is
+unavailable. For any caller that needs cross-worker mutual exclusion keyed
+on a namespace/key pair.
 """
 
 from __future__ import annotations
