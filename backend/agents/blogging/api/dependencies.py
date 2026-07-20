@@ -107,8 +107,7 @@ def get_job(
         job = get_job_or_404(job_id)
         if waiting_for is not None:
             flag_name, state_detail = waiting_for
-            if not job.get(flag_name):
-                raise HTTPException(status_code=400, detail=state_detail)
+            job = require_job_waiting_for(flag_name, state_detail)(job)
         return job
 
     return _dependency
