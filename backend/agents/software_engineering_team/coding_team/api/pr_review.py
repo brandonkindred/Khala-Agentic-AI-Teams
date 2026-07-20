@@ -18,6 +18,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from software_engineering_team.coding_team.activity import ActivityBridge
 from software_engineering_team.coding_team.api import main as _main
+from software_engineering_team.coding_team.api.advisory_lock import advisory_lock
 from software_engineering_team.coding_team.api.models import (
     ReviewPrRequest,
 )
@@ -392,29 +393,11 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
     Invariants: the process lock is always taken before (and released after) the advisory
         lock's transaction, so lock ordering is fixed and deadlock-free.
     """
-    with _REVIEW_ADMISSION_LOCK, contextlib.ExitStack() as stack:
-        try:
-            from shared_postgres import (  # noqa: PLC0415 - optional dep path
-                get_conn,
-                is_postgres_enabled,
-            )
-
-            if is_postgres_enabled():
-                conn = stack.enter_context(get_conn())
-                conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                    ("coding_team_review_pr", f"{owner}/{repo}#{pr_number}".casefold()),
-                )
-        except Exception:  # noqa: BLE001 - degrade to process-local admission, never block reviews
-            stack.pop_all().close()
-            logger.warning(
-                "could not take cross-worker review admission lock for %s/%s#%s; "
-                "falling back to process-local admission only",
-                owner,
-                repo,
-                pr_number,
-                exc_info=True,
-            )
+    with advisory_lock(
+        _REVIEW_ADMISSION_LOCK,
+        "coding_team_review_pr",
+        f"{owner}/{repo}#{pr_number}".casefold(),
+    ):
         yield
 
 

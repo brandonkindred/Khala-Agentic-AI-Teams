@@ -21,6 +21,7 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, NamedTuple, Optional
 
+from software_engineering_team.coding_team.api.advisory_lock import advisory_lock
 from software_engineering_team.coding_team.github_source import (
     GitHubAPIError,
     build_issue_from_proposal,
@@ -135,27 +136,7 @@ def _issue_creation_lock(job_id: str):
         single-worker serialization stays intact, and the residual cross-worker
         window is the pre-lock behavior, never worse.
     """
-    with _issue_creation_process_lock(job_id), contextlib.ExitStack() as stack:
-        try:
-            from shared_postgres import (  # noqa: PLC0415 - optional dep path
-                get_conn,
-                is_postgres_enabled,
-            )
-
-            if is_postgres_enabled():
-                conn = stack.enter_context(get_conn())
-                conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
-                    ("coding_team_issue_creation", job_id),
-                )
-        except Exception:  # noqa: BLE001 - degrade to process-local locking, never block issue filing
-            stack.pop_all().close()
-            logger.warning(
-                "could not take cross-worker issue-creation lock for job %s; "
-                "falling back to process-local locking only",
-                job_id,
-                exc_info=True,
-            )
+    with advisory_lock(_issue_creation_process_lock(job_id), "coding_team_issue_creation", job_id):
         yield
 
 
