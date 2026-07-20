@@ -397,6 +397,27 @@ def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
 
 
 # ---------------------------------------------------------------------------
+# _job_progress_percent
+# ---------------------------------------------------------------------------
+
+
+def test_job_progress_percent_guards_non_positive_total() -> None:
+    from investment_team.api import main as api_main
+
+    assert api_main._job_progress_percent(0, 0) == 0
+    assert api_main._job_progress_percent(5, 0) == 0
+    assert api_main._job_progress_percent(5, -1) == 0
+
+
+def test_job_progress_percent_computes_normal_ratio() -> None:
+    from investment_team.api import main as api_main
+
+    assert api_main._job_progress_percent(0, 4) == 0
+    assert api_main._job_progress_percent(1, 4) == 25
+    assert api_main._job_progress_percent(4, 4) == 100
+
+
+# ---------------------------------------------------------------------------
 # list_strategy_lab_jobs — persisted merge + running filter
 # ---------------------------------------------------------------------------
 
@@ -441,6 +462,47 @@ def test_list_strategy_lab_jobs_merges_persisted_completed_runs(
     ids2 = {j["job_id"] for j in body2["jobs"]}
     assert "mem-r" in ids2
     assert "persisted-c" not in ids2
+
+
+def test_list_strategy_lab_jobs_handles_explicit_zero_total_cycles(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted ``total_cycles: 0`` must not raise ``ZeroDivisionError``.
+
+    Covers both the in-memory ``_active_runs`` branch and the persisted
+    job-service branch of ``list_strategy_lab_jobs``.
+    """
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["mem-zero"] = {
+        "run_id": "mem-zero",
+        "status": "running",
+        "total_cycles": 0,
+        "completed_cycles": 0,
+        "started_at": "2024-01-01T00:00:00Z",
+    }
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "persisted-zero",
+                "status": "completed",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 0,
+                    "completed_cycles": 0,
+                },
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+
+    resp = api_client.get("/strategy-lab/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    by_id = {j["job_id"]: j for j in body["jobs"]}
+    assert by_id["mem-zero"]["progress"] == 0
+    assert by_id["persisted-zero"]["progress"] == 0
 
 
 def test_list_strategy_lab_jobs_survives_concurrent_cleanup(
