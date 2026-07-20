@@ -913,6 +913,25 @@ class _SynthesisEvaluateResult:
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def _round_demoted_conformance(round_gate_results: List[QualityGateResult]) -> bool:
+    """Whether a single round's predicate-conformance check was demoted.
+
+    Pre: ``round_gate_results`` are the gate results for one synthesis round.
+    Post: returns ``True`` iff the round contains a ``predicate_conformance``
+    result that did not pass and is a *demotion* warning (``severity ==
+    "warning"``, excluding the ``"Fixture unsynthesizable:"`` "could-not-check"
+    warning). Evaluated per round so the caller can attribute the verdict to the
+    round whose backtest is persisted, rather than to any historical round.
+    """
+    return any(
+        g.gate_name == "predicate_conformance"
+        and not g.passed
+        and g.severity == "warning"
+        and not (g.details or "").startswith("Fixture unsynthesizable:")
+        for g in round_gate_results
+    )
+
+
 def _maybe_attach_coverage_report(
     *,
     metrics: BacktestResult,
