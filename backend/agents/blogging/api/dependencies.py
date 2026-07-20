@@ -1,8 +1,8 @@
-"""Shared FastAPI dependencies for blogging API routers.
+"""Shared FastAPI dependencies for the blogging API routers.
 
-Consolidates the guard sequence repeated across ``routers/interactive.py``,
-``routers/jobs.py``, and ``routers/artifacts.py``: job-store-available check
-(501) -> job-found check (404) -> optional job-in-expected-state check (400).
+Consolidates the guard sequence repeated across those routers' route handlers:
+job-store-available check (501) -> job-found check (404) -> optional
+job-in-expected-state check (400).
 
 Every dependency here re-imports ``agents.blogging.api.main`` at call time
 rather than capturing a reference at declaration time. Route handlers rely on
@@ -47,8 +47,11 @@ def get_job_or_404(job_id: str) -> Dict[str, Any]:
 
     Preconditions:
         - ``job_id`` is the path parameter; ``agents.blogging.api.main.get_blog_job``
-          must be callable (not ``None`` — pair with ``require_job_store`` when
-          store availability isn't already guaranteed).
+          must be callable (not ``None``). This is NOT enforced here — calling
+          this standalone while ``get_blog_job`` is ``None`` raises an unhelpful
+          ``TypeError``, not an ``HTTPException``. Always pair with
+          ``require_job_store("get_blog_job", ...)`` (or use ``get_job``, which
+          does this for you) unless store availability is already guaranteed.
     Postconditions:
         - Returns the job dict when found; raises ``HTTPException(404, detail=f"Job {job_id} not found")``
           otherwise.
