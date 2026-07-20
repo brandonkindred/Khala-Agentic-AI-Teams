@@ -39,29 +39,22 @@ describe('CodingTeamMonitorComponent a11y', () => {
     };
   }
 
-  // Pre-existing gap: every `.ct-monitor` render includes the overall `mat-progress-bar`, which
-  // carries no aria-label/aria-labelledby, so axe's aria-progressbar-name rule fires on every
-  // state below. This predates this spec (mirrors the same known gap already disabled in
-  // strategy-lab.component.a11y.spec.ts) and is out of scope for this issue (test-only coverage);
-  // tracked separately for a production fix.
-  const KNOWN_GAPS = { 'aria-progressbar-name': { enabled: false } };
-
   it('has no axe violations for a running job with a determinate progress bar', async () => {
     const el = await render({ job_id: 'j1', status: 'running', phase: 'coding', progress: 47 });
     expect(el.querySelector('.ct-monitor')).not.toBeNull();
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations for a pending job with an indeterminate progress bar', async () => {
     const el = await render({ job_id: 'j1', status: 'pending' });
     expect(el.querySelector('.ct-monitor')).not.toBeNull();
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations for a completed job with a fully-completed stepper', async () => {
     const el = await render({ job_id: 'j1', status: 'completed' });
     expect(el.querySelectorAll('.ct-step.completed').length).toBeGreaterThan(0);
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations for a failed job with a failed stepper step', async () => {
@@ -72,13 +65,13 @@ describe('CodingTeamMonitorComponent a11y', () => {
       task_graph_snapshot: [{ id: 't1', title: 'x', status: 'in_progress' }],
     });
     expect(el.querySelector('.ct-step.failed')).not.toBeNull();
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations for a job waiting on the user', async () => {
     const el = await render({ job_id: 'j1', status: 'waiting_for_user', phase: 'paused' });
     expect(el.querySelector('.ct-monitor')).not.toBeNull();
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 
   it('has no axe violations with the agent roster and current-activity sub-bar rendered', async () => {
@@ -104,6 +97,6 @@ describe('CodingTeamMonitorComponent a11y', () => {
     });
     expect(el.querySelectorAll('.ct-agent').length).toBe(3);
     expect(el.querySelector('.ct-monitor__activity-bar')).not.toBeNull();
-    await expectNoAxeViolations(el, KNOWN_GAPS);
+    await expectNoAxeViolations(el);
   }, 15000);
 });

@@ -23,6 +23,7 @@
           mode="determinate"
           [value]="status.progress"
           [color]="status.status === 'failed' ? 'warn' : 'primary'"
+          aria-label="Frontend code job progress"
         ></mat-progress-bar>
         <span class="progress-label">{{ status.progress }}%</span>
       </div>
