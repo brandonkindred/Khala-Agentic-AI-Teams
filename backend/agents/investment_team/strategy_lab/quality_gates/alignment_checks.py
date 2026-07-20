@@ -52,6 +52,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from shared_concurrency import parallel_map
+from shared_env_config import env_int
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict, Severity
 from ..executor.predicate_evaluator import (
@@ -173,18 +174,11 @@ def _adjudication_concurrency() -> int:
     run in parallel, so this knob trades cloud concurrency for wall time
     without changing the gate's output.
     """
-    raw = os.environ.get("STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY")
-    if not raw:
-        return _DEFAULT_ADJUDICATION_CONCURRENCY
-    try:
-        return max(int(raw), 1)
-    except ValueError:
-        logger.warning(
-            "Invalid STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY=%r; using default %d",
-            raw,
-            _DEFAULT_ADJUDICATION_CONCURRENCY,
-        )
-        return _DEFAULT_ADJUDICATION_CONCURRENCY
+    return env_int(
+        "STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY",
+        _DEFAULT_ADJUDICATION_CONCURRENCY,
+        floor=1,
+    )
 
 
 @dataclass

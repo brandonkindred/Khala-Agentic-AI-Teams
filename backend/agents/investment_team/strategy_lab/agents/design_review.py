@@ -33,6 +33,7 @@ from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
+from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
 from ._prompt_context import spec_prompt_fields
 from ._response_schemas import CRITIQUE_SCHEMA
@@ -879,15 +880,7 @@ def _coerce_strict_bool(raw: Any) -> bool:
     to ``False`` — fail closed so a stray non-string never advances the
     design loop past a reviewer that did not actually say "ready".
     """
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s == "true":
-            return True
-        if s == "false":
-            return False
-    return False
+    return _shared_coerce_strict_bool(raw)
 
 
 def _fail_closed_critique(exc: Exception, readiness_findings: List[str]) -> SpecCritique:
