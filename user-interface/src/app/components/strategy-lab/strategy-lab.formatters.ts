@@ -109,7 +109,10 @@ export function humanizeKey(key: string): string {
  *   `{ label: 'Value', value: String(obj) }` row for a non-object (primitive
  *   or array) input; otherwise one row per own-enumerable key whose value is
  *   not null/undefined, with the key humanized and a nested-object value
- *   JSON.stringify'd (never recurses, never throws).
+ *   JSON.stringify'd (never recurses; never throws for realistic, JSON-derived
+ *   input — a hand-built object containing a circular reference, which cannot
+ *   arise from an actual JSON API response, would still throw via
+ *   `JSON.stringify`).
  */
 export function flattenObjectRows(obj: unknown): { label: string; value: string }[] {
   if (obj == null) return [];
