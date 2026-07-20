@@ -39,4 +39,10 @@ describe('formatUsd', () => {
   it('honors an explicit decimals count', () => {
     expect(formatUsd(150000.5, 2)).toBe('$150,000.50');
   });
+
+  it('formats zero and negative values, with the sign before the $', () => {
+    expect(formatUsd(0)).toBe('$0');
+    expect(formatUsd(-150000)).toBe('-$150,000');
+    expect(formatUsd(-1234.5, 2)).toBe('-$1,234.50');
+  });
 });
