@@ -52,6 +52,8 @@ def advisory_lock(process_lock: threading.Lock, namespace: str, key: str) -> Ite
                     (namespace, key),
                 )
         except Exception:  # noqa: BLE001 - degrade to process-local lock, never block the caller
+            # Release the Postgres connection (and its transaction) immediately; the
+            # advisory lock, if acquired, is now released.
             stack.pop_all().close()
             logger.warning(
                 "could not take cross-worker advisory lock (namespace=%s, key=%s); "
