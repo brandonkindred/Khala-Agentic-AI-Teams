@@ -364,6 +364,12 @@ describe('StrategyCardComponent', () => {
       expect(component.codeCopied()).toBe(false);
     });
 
+    it('is a safe no-op for a falsy code, without touching the clipboard', () => {
+      component.onCopyCode('');
+      expect(clipboardCopySpy).not.toHaveBeenCalled();
+      expect(component.codeCopied()).toBe(false);
+    });
+
     it('cancels a prior pending revert when copying again before it fires', () => {
       vi.useFakeTimers();
       component.onCopyCode('first');

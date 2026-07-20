@@ -250,32 +250,29 @@ export function entryRuleRows(rule: EntryRule): LabelValueRow[] {
  */
 export function exitRuleRows(rule: ExitRule): LabelValueRow[] {
   if (!rule) return flattenToRows(rule);
+  let rows: LabelValueRow[];
   switch (rule.kind) {
-    case 'stop_loss': {
-      const rows: LabelValueRow[] = [
+    case 'stop_loss':
+      rows = [
         { label: 'Type', value: 'Stop Loss' },
         { label: 'Stop Distance', value: formatPct(rule.pct * 100) },
         { label: 'Basis', value: STOP_LOSS_BASIS_LABELS[rule.basis ?? 'entry_price'] },
       ];
-      if (rule.note) rows.push({ label: 'Note', value: rule.note });
-      return rows;
-    }
-    case 'take_profit': {
-      const rows: LabelValueRow[] = [
+      break;
+    case 'take_profit':
+      rows = [
         { label: 'Type', value: 'Take Profit' },
         { label: 'Target', value: formatPct(rule.pct * 100) },
       ];
-      if (rule.note) rows.push({ label: 'Note', value: rule.note });
-      return rows;
-    }
-    case 'signal_exit': {
-      const rows: LabelValueRow[] = [{ label: 'Type', value: 'Signal Exit' }, ...predicateRows(rule.when)];
-      if (rule.note) rows.push({ label: 'Note', value: rule.note });
-      return rows;
-    }
+      break;
+    case 'signal_exit':
+      rows = [{ label: 'Type', value: 'Signal Exit' }, ...predicateRows(rule.when)];
+      break;
     default:
       return flattenToRows(rule);
   }
+  if (rule.note) rows.push({ label: 'Note', value: rule.note });
+  return rows;
 }
 
 /**
@@ -287,34 +284,31 @@ export function exitRuleRows(rule: ExitRule): LabelValueRow[] {
  */
 export function sizingRows(sizing: SizingRule): LabelValueRow[] {
   if (!sizing) return flattenToRows(sizing);
+  let rows: LabelValueRow[];
   switch (sizing.kind) {
-    case 'fixed_fraction': {
-      const rows: LabelValueRow[] = [
+    case 'fixed_fraction':
+      rows = [
         { label: 'Method', value: 'Fixed Fraction' },
         { label: 'Position Size', value: formatPct(sizing.fraction * 100) },
       ];
-      if (sizing.note) rows.push({ label: 'Note', value: sizing.note });
-      return rows;
-    }
-    case 'volatility_target': {
-      const rows: LabelValueRow[] = [
+      break;
+    case 'volatility_target':
+      rows = [
         { label: 'Method', value: 'Volatility Target' },
         { label: 'Target Annual Volatility', value: formatPct(sizing.target_annual_vol * 100) },
       ];
-      if (sizing.note) rows.push({ label: 'Note', value: sizing.note });
-      return rows;
-    }
-    case 'fixed_notional': {
-      const rows: LabelValueRow[] = [
+      break;
+    case 'fixed_notional':
+      rows = [
         { label: 'Method', value: 'Fixed Notional' },
         { label: 'Notional (USD)', value: formatUsd(sizing.notional_usd) },
       ];
-      if (sizing.note) rows.push({ label: 'Note', value: sizing.note });
-      return rows;
-    }
+      break;
     default:
       return flattenToRows(sizing);
   }
+  if (sizing.note) rows.push({ label: 'Note', value: sizing.note });
+  return rows;
 }
 
 function formatFallbackValue(value: unknown): string {

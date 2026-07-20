@@ -185,6 +185,11 @@ describe('StrategyCardComponent a11y', () => {
     }
   });
 
+  // Reads the template source directly (node:fs/node:path) rather than the
+  // rendered DOM, so it also catches tags gated behind an @if/@for branch
+  // that isn't exercised by the fixture above. This relies on Vitest's
+  // default Node-based test environment — it would need reworking if this
+  // suite ever moved to a pure-browser test runner (e.g. @web/test-runner).
   it('every <mat-icon> opening tag in the template source is explicit about aria-hidden', () => {
     const templatePath = resolve(dirname(fileURLToPath(import.meta.url)), 'strategy-card.component.html');
     const html = readFileSync(templatePath, 'utf8');

@@ -58,8 +58,10 @@ interface ComparisonRow {
  * paper-trading section. Owns no cross-record state (expand/collapse
  * tracking, delete-in-flight, pagination, paper-trading-in-flight all live on
  * the host, which passes the derived value for *this* record down as
- * `@Input()`s) and performs no side effects itself — every user action is
- * reported up via the `@Output()`s below for the host to act on.
+ * `@Input()`s) and performs no cross-record side effects — user actions that
+ * affect shared state are reported up via the `@Output()`s below for the
+ * host to act on; the only local side effect is the clipboard copy in
+ * `onCopyCode`.
  *
  * Preconditions: `record` is set before the first render (required input).
  * Postconditions: renders identically for the same `record`/inputs regardless
@@ -227,14 +229,17 @@ export class StrategyCardComponent {
    * Copies the generated strategy code to the clipboard and shows a brief
    * "copied" confirmation.
    *
-   * Preconditions: `code` is the resolved strategy-code string (only invoked
-   *   from the template's `@if (strategyCode(); as code)` guard).
-   * Postconditions: `clipboard.copy(code)` is invoked exactly once. On
-   *   success, `codeCopied()` becomes `true` and reverts to `false` after
-   *   ~2s (a prior pending revert is cancelled first). On failure,
-   *   `codeCopied()` is left unchanged.
+   * Preconditions: none — a falsy `code` (e.g. if ever invoked outside the
+   *   template's `@if (strategyCode(); as code)` guard) is a safe no-op
+   *   rather than a caller contract violation.
+   * Postconditions: when `code` is non-empty, `clipboard.copy(code)` is
+   *   invoked exactly once. On success, `codeCopied()` becomes `true` and
+   *   reverts to `false` after ~2s (a prior pending revert is cancelled
+   *   first). On failure, or when `code` is falsy, `codeCopied()` is left
+   *   unchanged.
    */
   onCopyCode(code: string): void {
+    if (!code) return;
     const succeeded = this.clipboard.copy(code);
     if (!succeeded) return;
     this.codeCopied.set(true);
