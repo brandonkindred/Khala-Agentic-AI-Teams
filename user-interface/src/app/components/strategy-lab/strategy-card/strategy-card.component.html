@@ -218,6 +218,18 @@
             </mat-panel-title>
             <mat-panel-description>Generated Python backtest script</mat-panel-description>
           </mat-expansion-panel-header>
+          <div class="strategy-code-caption">
+            <span class="strategy-code-caption-text">Generated Python — read only</span>
+            <button
+              mat-icon-button
+              class="strategy-code-copy-btn"
+              (click)="copyStrategyCode(code)"
+              [matTooltip]="strategyCodeCopied ? 'Copied!' : 'Copy code'"
+              aria-label="Copy strategy code"
+            >
+              <mat-icon aria-hidden="true">{{ strategyCodeCopied ? 'check' : 'content_copy' }}</mat-icon>
+            </button>
+          </div>
           <pre class="strategy-code">{{ code }}</pre>
         </mat-expansion-panel>
       }

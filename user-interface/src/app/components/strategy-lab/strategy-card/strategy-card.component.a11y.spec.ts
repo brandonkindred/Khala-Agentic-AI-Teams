@@ -110,6 +110,22 @@ describe('StrategyCardComponent a11y', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('strategy-code panel: shows a "read only" caption and an accessibly-named copy button, axe-clean', async () => {
+    const fixture = await createFixture();
+    fixture.componentRef.setInput('record', { ...RECORD, strategy_code: 'print("hello")' });
+    fixture.componentRef.setInput('expanded', true);
+    fixture.detectChanges();
+
+    const caption: HTMLElement | null = fixture.nativeElement.querySelector('.strategy-code-caption-text');
+    expect(caption?.textContent?.trim()).toBe('Generated Python — read only');
+
+    const copyBtn: HTMLButtonElement | null = fixture.nativeElement.querySelector('.strategy-code-copy-btn');
+    expect(copyBtn).toBeTruthy();
+    expect(copyBtn?.getAttribute('aria-label')).toBe('Copy strategy code');
+
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
   it('collapsed: surfaces only the primary metrics (Annual Return, Sharpe, Max DD); secondary metrics stay behind the disclosure', async () => {
     const fixture = await createFixture();
 
