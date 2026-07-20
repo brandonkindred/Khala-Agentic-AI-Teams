@@ -121,14 +121,15 @@ def make_stub_editor_class(
     """Build a BlogCopyEditorAgent stand-in class with configurable approval behavior.
 
     Preconditions:
-        - None.
+        - ``feedback_items`` is ``None`` or a list of ``FeedbackItem``-compatible values.
     Postconditions:
         - Returns a class (not an instance) suitable for monkeypatching a module's
-          ``BlogCopyEditorAgent`` reference; its ``run`` always returns
-          ``CopyEditorOutput(approved=approved, summary=summary,
-          feedback_items=feedback_items or [])``. Defaults reproduce the original
-          always-approves-on-first-pass behavior; pass ``approved=False`` (optionally with
-          ``summary``/``feedback_items``) for a stub that never approves.
+          ``BlogCopyEditorAgent`` reference; its ``run`` always returns a
+          ``CopyEditorOutput`` built from ``approved``, ``summary``, and
+          ``feedback_items`` (an empty list when ``feedback_items`` is ``None``). Defaults
+          reproduce the original always-approves-on-first-pass behavior; pass
+          ``approved=False`` (optionally with ``summary``/``feedback_items``) for a stub
+          that never approves.
     """
     from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
 
@@ -147,17 +148,18 @@ def make_stub_editor_class(
 
 
 def make_stub_llm_class() -> type:
-    """Build a DummyLLMClient subclass returning deterministic canned JSON per prompt shape.
+    """Build a DummyLLMClient subclass whose ``complete_json`` returns canned, deterministic JSON.
 
     Preconditions:
         - None.
     Postconditions:
         - Returns a class (not an instance) implementing the Strands Model ABC (via
           ``DummyLLMClient``), suitable for use as ``ResearchAgent(llm_client=...)`` or
-          ``strands.Agent(model=...)``. ``complete_json`` inspects the prompt text and returns
-          canned responses shaped for the blog research pipeline's topic-analysis, query-plan,
-          candidate-scoring, summarization, and similar-topics stages, falling back to a generic
-          analysis/outline response otherwise.
+          ``strands.Agent(model=...)``. ``complete_json`` inspects the prompt text for
+          keywords distinguishing the blog research pipeline's topic-analysis, query-plan,
+          candidate-scoring, summarization, and similar-topics stages, and returns the
+          matching canned response; prompts matching none of those keyword sets get a
+          generic analysis/outline response.
     """
     from llm_service import DummyLLMClient
 
@@ -320,8 +322,9 @@ def patched_client(patched_blog_client, monkeypatch, fake_job_client) -> Any:
           implementation. Imports the shared app module lazily so test modules that never use
           this fixture do not pay the ``api/main`` import cost.
     """
-    from _api_test_utils import api_main
     from agents.blogging.shared import blog_job_store as bjs
+
+    from ._api_test_utils import api_main
 
     for name in _BLOG_JOB_HELPERS:
         helper = getattr(bjs, name, None)
@@ -333,7 +336,8 @@ def patched_client(patched_blog_client, monkeypatch, fake_job_client) -> Any:
 @pytest.fixture
 def client(patched_client) -> Any:
     """A ``TestClient`` for the blogging app, backed by the fake job store."""
-    from _api_test_utils import app
     from fastapi.testclient import TestClient
+
+    from ._api_test_utils import app
 
     return TestClient(app)

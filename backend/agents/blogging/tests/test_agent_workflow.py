@@ -2,7 +2,8 @@ from unittest.mock import patch
 
 from agents.blogging.blog_research_agent.agent import ResearchAgent
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
-from conftest import make_stub_fetcher_class, make_stub_llm_class, make_stub_search_class
+
+from .conftest import make_stub_fetcher_class, make_stub_llm_class, make_stub_search_class
 
 
 def test_research_agent_run_end_to_end() -> None:

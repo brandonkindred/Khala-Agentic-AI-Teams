@@ -3,7 +3,6 @@
 Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 """
 
-from _content_plan_test_utils import make_content_plan
 from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -11,6 +10,8 @@ from agents.blogging.shared.content_plan import (
     TitleCandidate,
     content_plan_summary_text,
 )
+
+from ._content_plan_test_utils import make_content_plan
 
 
 def test_requirements_analysis_json_round_trip() -> None:

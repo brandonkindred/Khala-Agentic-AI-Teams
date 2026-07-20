@@ -11,8 +11,9 @@ import pytest
 
 
 def _plan(target_reader: str | None = None):
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     plan_kwargs = dict(
         overarching_topic="My Topic",
