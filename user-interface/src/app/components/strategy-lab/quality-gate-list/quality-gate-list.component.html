@@ -1,0 +1,30 @@
+@if (gateViewModels.length > 0) {
+  <mat-expansion-panel>
+    <mat-expansion-panel-header>
+      <mat-panel-title>
+        <mat-icon class="panel-icon" aria-hidden="true">verified</mat-icon>
+        Quality Gates
+      </mat-panel-title>
+      <mat-panel-description>
+        {{ gateViewModels.length }} check(s)
+        @if (refinementRounds) {
+          &middot; {{ refinementRounds }} refinement round(s)
+        }
+      </mat-panel-description>
+    </mat-expansion-panel-header>
+    <div class="gate-results">
+      @for (vm of gateViewModels; track vm.gate.gate_name + ':' + (vm.gate.refinement_round ?? -1)) {
+        <div class="gate-result" [class]="vm.severityClass">
+          <mat-icon class="gate-icon" aria-hidden="true">{{ vm.icon }}</mat-icon>
+          <span class="gate-name">{{ vm.gate.gate_name }}</span>
+          <span class="gate-detail">
+            {{ vm.gate.details }}
+            @if (vm.isRemedied) {
+              <span class="gate-remedied-label">(remedied in round {{ (vm.gate.refinement_round ?? 0) + 1 }})</span>
+            }
+          </span>
+        </div>
+      }
+    </div>
+  </mat-expansion-panel>
+}
