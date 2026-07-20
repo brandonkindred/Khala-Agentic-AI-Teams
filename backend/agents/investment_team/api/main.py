@@ -2723,7 +2723,24 @@ class InvestmentJobsListResponse(BaseModel):
     summary="List strategy lab runs as jobs",
 )
 def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResponse:
-    """Return strategy lab runs in a format compatible with the central Jobs Dashboard."""
+    """Return strategy lab runs in a format compatible with the central Jobs Dashboard.
+
+    Preconditions:
+        - None. ``running_only`` is an optional filter flag.
+
+    Postconditions:
+        - Returns a read-only snapshot; never mutates ``_active_runs``.
+        - Merges in-memory ``_active_runs`` with persisted job-service records,
+          deduplicated by run/job id (in-memory entries take precedence).
+        - When ``running_only`` is ``True``, the result is filtered to
+          ``status in ("running", "pending")``.
+        - Entries are sorted by ``created_at`` descending.
+
+    Raises:
+        - None. Job-service merge failures are caught and logged, and the
+          response falls back to the in-memory-only list; this endpoint always
+          returns 200.
+    """
     jobs: List[InvestmentJobSummary] = []
 
     # Active in-memory runs
@@ -2798,16 +2815,30 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     """Resume a strategy lab run at the cycle it was interrupted.
 
     Preconditions:
-        ``run_id`` identifies a run whose persisted status is in
-        ``RESUMABLE_STATUSES`` (pending/running/failed/interrupted/agent_crash);
-        otherwise a 404 (unknown run) or 400 (not resumable) is raised.
+        - ``run_id`` identifies a run whose persisted status (via
+          ``_get_run_state``) is in ``RESUMABLE_STATUSES`` (pending/running/
+          failed/interrupted/agent_crash).
+        - The run's persisted ``request_payload`` is present and is a dict
+          (the original ``RunStrategyLabRequest`` payload).
+        - No other run currently has status ``"running"``.
+
     Postconditions:
-        Re-seeds ``_active_runs[run_id]`` carrying forward all prior progress —
-        ``completed_record_ids``/``errored_cycles``/``errored_details``/
-        ``skipped_cycles``/``tracker_merge_error_count`` — and dispatches the
-        worker from the first not-yet-contiguously-completed cycle, so no
-        already-persisted cycle is re-run (and thus never duplicated). Returns
-        the run's start response with its total cycle count.
+        - Re-seeds ``_active_runs[run_id]`` carrying forward all prior
+          progress — ``completed_record_ids``/``errored_cycles``/
+          ``errored_details``/``skipped_cycles``/``tracker_merge_error_count``
+          — and persists the new state.
+        - Dispatches the worker (Temporal or a daemon thread) from the first
+          not-yet-contiguously-completed cycle, so no already-persisted cycle
+          is re-run (and thus never duplicated).
+        - Returns the run's start response with the resume offset and total
+          cycle count.
+
+    Raises:
+        - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
+        - ``HTTPException`` 400: the run's status is not in
+          ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
+          dict.
+        - ``HTTPException`` 409: another run is already ``"running"``.
     """
     state = _get_run_state(run_id)
     try:
@@ -2875,7 +2906,30 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     description="Reset the run and re-execute the full batch with the same inputs.",
 )
 def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
-    """Restart a strategy lab run from the beginning."""
+    """Restart a strategy lab run from the beginning.
+
+    Preconditions:
+        - ``run_id`` identifies a run whose persisted status (via
+          ``_get_run_state``) is in ``RESTARTABLE_STATUSES | {"completed_with_errors"}``
+          (completed/failed/cancelled/interrupted/agent_crash/completed_with_errors).
+        - The run's persisted ``request_payload`` is present and is a dict.
+        - No other run currently has status ``"running"``.
+
+    Postconditions:
+        - Rebuilds ``_active_runs[run_id]`` as a full reset — ``contiguous_cycles``
+          is set to ``0`` and ``started_at`` is refreshed; unlike resume, prior
+          ``completed_cycles``/``errored_*``/``completed_record_ids`` are NOT
+          carried forward — and persists the new state.
+        - Dispatches the worker (Temporal or a daemon thread) starting at
+          cycle 0.
+        - Returns the run's start response with the full total cycle count.
+
+    Raises:
+        - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
+        - ``HTTPException`` 400: the run's status is not restartable, or its
+          ``request_payload`` is missing/not a dict.
+        - ``HTTPException`` 409: another run is already ``"running"``.
+    """
     state = _get_run_state(run_id)
     # "completed_with_errors" is a terminal outcome of the same workflow as
     # "completed" and must be restartable. Extend the shared set locally
@@ -2935,6 +2989,26 @@ def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
     failed or exceptional job-service delete leaves ``_active_runs``
     untouched instead of dropping the entry while the persisted record
     still exists.
+
+    Preconditions:
+        - None on run status — any run can be deleted regardless of its
+          current status.
+        - The job service must have a record for ``run_id`` for the delete
+          to succeed.
+
+    Postconditions:
+        - The job-service record for ``run_id`` is deleted before
+          ``_active_runs.pop(run_id, None)`` is attempted, so
+          ``_active_runs`` is only mutated once the job-service delete has
+          succeeded.
+        - Returns ``{"job_id": run_id, "deleted": True}``.
+
+    Raises:
+        - ``HTTPException`` 404: ``client.delete_job(run_id)`` returns a
+          falsy result (no such run in the job service).
+        - An exception raised by ``client.delete_job`` itself is not caught
+          and propagates uncaught (surfaces as a 500) — ``_active_runs`` is
+          left untouched in that case.
     """
     client = _get_lab_run_job_client()
     deleted = client.delete_job(run_id)
@@ -2959,6 +3033,24 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
     has it as terminal (cancelled/failed/completed), the in-memory state is
     updated to match — this handles external cancellation via the generic
     job proxy or the Jobs Dashboard.
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Returns an ``ActiveRunsResponse`` merging in-memory ``_active_runs``
+          with persisted job-service ``"running"``/``"pending"`` jobs not
+          already tracked in-memory (those are added to the response only,
+          not written back to ``_active_runs``).
+        - Side effect: for each in-memory run whose status is not in
+          ``STRATEGY_LAB_TERMINAL_STATUSES``, if the job service reports a
+          terminal status for it, ``_active_runs[rid]["status"]`` and
+          ``["error"]`` are mutated in place to match.
+
+    Raises:
+        - None. Job-service lookup/reconciliation failures are caught and
+          logged (``logger.debug``), and the endpoint falls back to the
+          in-memory-only snapshot; this endpoint always returns 200.
     """
     _TERMINAL = STRATEGY_LAB_TERMINAL_STATUSES
 
@@ -3014,7 +3106,25 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
     summary="Get strategy lab run status (polling fallback)",
 )
 def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
-    """Snapshot of a single run's progress. Use for polling when SSE is unavailable."""
+    """Snapshot of a single run's progress. Use for polling when SSE is unavailable.
+
+    Preconditions:
+        - ``run_id`` must resolve to a state via ``_active_runs`` or the
+          job-service fallback (``_load_run_from_job_service``).
+
+    Postconditions:
+        - Side effect: if the in-memory state's status is not in
+          ``STRATEGY_LAB_TERMINAL_STATUSES`` and the job service reports a
+          terminal status for it, ``_active_runs[run_id]["status"]`` and
+          ``["error"]`` are mutated in place to match (same reconciliation
+          as ``list_strategy_lab_runs``, scoped to this one run).
+        - Returns a ``StrategyLabRunStatusResponse`` via
+          ``_run_state_to_response(state)``.
+
+    Raises:
+        - ``HTTPException`` 404: no state found in either ``_active_runs`` or
+          the job-service fallback.
+    """
     _TERMINAL = STRATEGY_LAB_TERMINAL_STATUSES
 
     with _lock:
