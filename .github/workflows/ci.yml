@@ -37,8 +37,8 @@ jobs:
       lint_python: ${{ steps.filter.outputs.lint_python }}
       lint_frontend: ${{ steps.filter.outputs.lint_frontend }}
       ui: ${{ steps.filter.outputs.ui }}
-      shared.postgres: ${{ steps.filter.outputs.shared.postgres }}
-      shared.neo4j: ${{ steps.filter.outputs.shared.neo4j }}
+      shared_postgres: ${{ steps.filter.outputs.shared_postgres }}
+      shared_neo4j: ${{ steps.filter.outputs.shared_neo4j }}
       shared_backend: ${{ steps.filter.outputs.shared_backend }}
       branding: ${{ steps.filter.outputs.branding }}
       software_engineering: ${{ steps.filter.outputs.software_engineering }}
@@ -121,15 +121,15 @@ jobs:
             backend_any:
               - 'backend/**'
               - '.github/workflows/ci.yml'
-            # shared.postgres triggers test-shared-postgres which calls
+            # shared_postgres triggers test-shared-postgres which calls
             # register_all_team_schemas(). That imports each team's
             # `team.postgres` module, which forces Python to evaluate the
             # team's package __init__ first — so a non-postgres change in
             # any of those teams can break schema registration. Trigger
             # paths therefore include every team listed in
-            # shared.postgres/registry.py:TEAM_POSTGRES_MODULES (root)
+            # shared/postgres/registry.py:TEAM_POSTGRES_MODULES (root)
             # plus the postgres/dependency-related files.
-            shared.postgres:
+            shared_postgres:
               - 'backend/shared/postgres/**'
               - 'backend/agents/**/postgres/**'
               - 'backend/agents/branding_team/**'
@@ -143,9 +143,9 @@ jobs:
               - 'backend/unified_api/postgres.py'
               - 'backend/job_service/postgres.py'
               - '.github/workflows/ci.yml'
-            # shared.neo4j: env-gated Graphiti client; its tests fake graphiti_core
+            # shared_neo4j: env-gated Graphiti client; its tests fake graphiti_core
             # and need no live backend, but transitively import llm_service.
-            shared.neo4j:
+            shared_neo4j:
               - 'backend/shared/neo4j/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/requirements.txt'
@@ -522,7 +522,7 @@ jobs:
     needs: changes
     if: >-
       needs.changes.outputs.is_pull_request == 'true' &&
-      needs.changes.outputs.shared.postgres == 'true'
+      needs.changes.outputs.shared_postgres == 'true'
     defaults:
       run:
         working-directory: backend/agents
@@ -568,7 +568,7 @@ jobs:
           --cov-report=term-missing
           --cov-fail-under=90
 
-  # shared.neo4j: the env-gated Graphiti client. Its tests fake graphiti_core and
+  # shared_neo4j: the env-gated Graphiti client. Its tests fake graphiti_core and
   # need no live Neo4j or Postgres, so this job carries no service container.
   test-shared-neo4j:
     name: Test – shared.neo4j
@@ -576,7 +576,7 @@ jobs:
     needs: changes
     if: >-
       needs.changes.outputs.is_pull_request == 'true' &&
-      needs.changes.outputs.shared.neo4j == 'true'
+      needs.changes.outputs.shared_neo4j == 'true'
     defaults:
       run:
         working-directory: backend/agents
