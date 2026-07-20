@@ -372,6 +372,11 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     expect(wrap.getAttribute('role')).toBe('group');
     expect(wrap.getAttribute('aria-label')).toBe('stocks strategy trade history, scrollable');
 
+    // The <table> itself also needs its own accessible name — table-navigation
+    // screen-reader commands read the <table>'s name, not the wrapper's.
+    const table: HTMLElement | null = wrap.querySelector('table.trade-table');
+    expect(table?.getAttribute('aria-label')).toBe('Trade ledger, 1 trades');
+
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
@@ -455,6 +460,14 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
     expect(wrap.getAttribute('tabindex')).toBe('0');
     expect(wrap.getAttribute('role')).toBe('group');
     expect(wrap.getAttribute('aria-label')).toBe('stocks strategy backtest vs. paper-trading comparison, scrollable');
+
+    // The <table> itself also needs its own accessible name via <caption> —
+    // table-navigation screen-reader commands read the <table>'s own name,
+    // not the wrapper's aria-label.
+    const caption: HTMLElement | null = wrap.querySelector('table.comparison-table > caption');
+    expect(caption).toBeTruthy();
+    expect(caption?.className).toContain('visually-hidden');
+    expect(caption?.textContent?.trim()).toBe('Backtest vs. paper-trading metric comparison');
 
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
