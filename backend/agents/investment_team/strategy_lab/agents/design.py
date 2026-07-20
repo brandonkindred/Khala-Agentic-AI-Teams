@@ -29,6 +29,7 @@ from strands import Agent
 from llm_service import provider_supports_structured_output
 from llm_service.config import resolve_provider
 from llm_service.interface import LLMSemanticExhaustionError
+from shared_env_config import env_int
 
 from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
@@ -814,10 +815,7 @@ def _design_self_revision_rounds() -> int:
     Pre: none.
     Post: returns an ``int >= 0``.
     """
-    try:
-        return max(int(os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", "1")), 0)
-    except ValueError:
-        return 1
+    return env_int("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", 1, floor=0)
 
 
 _CORRECTION_PREAMBLE = """\

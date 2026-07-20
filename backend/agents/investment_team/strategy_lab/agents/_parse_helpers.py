@@ -16,11 +16,11 @@ message that names the offending field and quotes the failing payload.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Dict, Iterable
 
 from pydantic import ValidationError
 
+from shared_env_config import env_int
 from shared_llm_recovery import extract_json_object as _shared_extract_json_object
 
 from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
@@ -64,10 +64,31 @@ def parse_retry_budget(env_name: str, default: int = 2) -> int:
     Preconditions: ``env_name`` is an env var name; ``default >= 0``.
     Postconditions: returns a non-negative int; never raises.
     """
-    try:
-        return max(int(os.environ.get(env_name, str(default))), 0)
-    except ValueError:
-        return default
+    return env_int(env_name, default, floor=0)
+
+
+def coerce_strict_bool(raw: Any) -> bool:
+    """Strict-mode boolean coercion for LLM JSON payload fields.
+
+    Plain ``bool(raw)`` would treat ``"false"`` (the string) as truthy and
+    wave through a value the caller meant to be negative. Accept only real
+    ``bool``s and the case-insensitive string literals ``"true"`` /
+    ``"false"``; anything else (unexpected ints, ``None``, malformed JSON
+    types) falls closed to ``False``.
+
+    Preconditions: ``raw`` is any value extracted from a parsed LLM JSON
+    payload.
+    Postconditions: returns a real ``bool``; never raises.
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        normalised = raw.strip().lower()
+        if normalised == "true":
+            return True
+        if normalised == "false":
+            return False
+    return False
 
 
 _JSON_CORRECTION_PREAMBLE = """\
@@ -183,6 +204,7 @@ def _snippet(value: Any, limit: int = 200) -> str:
 __all__: Iterable[str] = (
     "StrategySpecParseError",
     "build_json_correction_prompt",
+    "coerce_strict_bool",
     "extract_json_object",
     "parse_retry_budget",
     "validate_structured_rules",
