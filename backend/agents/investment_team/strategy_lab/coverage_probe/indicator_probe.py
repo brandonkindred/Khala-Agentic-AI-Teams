@@ -99,8 +99,9 @@ def run_indicator_probe(
         OHLCV columns. Index is treated opaquely; ``last_true_bar``
         is rendered with ``str(...)``.
     warmup_bars_required:
-        When the total recognised bars is below this value the probe
-        short-circuits with :data:`CoverageCategory.INSUFFICIENT_BARS`.
+        When the longest per-symbol recognised bar count is below this
+        value the probe short-circuits with
+        :data:`CoverageCategory.INSUFFICIENT_BARS`.
 
     The probe is deterministic and never raises.
     """
