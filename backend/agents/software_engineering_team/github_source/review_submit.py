@@ -7,6 +7,8 @@ relies on to never silently drop a finding when that happens:
 
 - ``_post_file_comments`` — post file-level review comments (mapped +
   re-anchored leftovers), demoting only 422-rejected anchors to standalone.
+- ``_post_review`` — the shared ``create_pull_request_review`` call
+  construction, with no error-handling policy of its own.
 - ``_try_review`` — submit one PR review, reporting a recoverable 422 rather
   than raising for it.
 - ``_post_summary_only`` — post the summary body alone across candidate
@@ -89,6 +91,39 @@ def _post_file_comments(
     return file_comment_count, standalone
 
 
+def _post_review(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    body: str,
+    event: str,
+    comments: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Submit one PR review via the Reviews API, with no error-handling policy of its own.
+
+    The single ``client.create_pull_request_review`` call construction shared by
+    ``_try_review``, ``_post_summary_only``, and ``_submit_review``'s bisect
+    fallback. Each caller wraps this in its own ``try``/``except`` to apply its
+    distinct recovery policy (422-only re-raise, tolerate-until-events-exhausted,
+    swallow-and-log); this function does not catch anything.
+
+    Postconditions:
+        - Returns whatever ``client.create_pull_request_review`` returns.
+          Propagates any ``GitHubAPIError`` unchanged.
+    """
+    return client.create_pull_request_review(
+        owner=owner,
+        repo=repo,
+        number=pr_number,
+        commit_id=head_sha,
+        body=body,
+        event=event,
+        comments=comments,
+    )
+
+
 def _try_review(
     client: GitHubClient,
     owner: str,
@@ -113,15 +148,7 @@ def _try_review(
           422. Raises ``GitHubAPIError`` for any non-422 status.
     """
     try:
-        client.create_pull_request_review(
-            owner=owner,
-            repo=repo,
-            number=pr_number,
-            commit_id=head_sha,
-            body=body,
-            event=event,
-            comments=comments,
-        )
+        _post_review(client, owner, repo, pr_number, head_sha, body, event, comments)
         return True
     except GitHubAPIError as e:
         if e.status != _HTTP_UNPROCESSABLE:
@@ -158,15 +185,7 @@ def _post_summary_only(
     last_exc: Optional[GitHubAPIError] = None
     for ev in events:
         try:
-            client.create_pull_request_review(
-                owner=owner,
-                repo=repo,
-                number=pr_number,
-                commit_id=head_sha,
-                body=body,
-                event=ev,
-                comments=[],
-            )
+            _post_review(client, owner, repo, pr_number, head_sha, body, ev, [])
             return []
         except GitHubAPIError as e:
             logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
@@ -245,15 +264,7 @@ def _submit_review(
     # The full batch was rejected by a bad line. Post the summary on its own so it
     # is not lost, then bisect the comments to drop only the offending ones.
     try:
-        client.create_pull_request_review(
-            owner=owner,
-            repo=repo,
-            number=pr_number,
-            commit_id=head_sha,
-            body=body,
-            event="COMMENT",
-            comments=[],
-        )
+        _post_review(client, owner, repo, pr_number, head_sha, body, "COMMENT", [])
     except GitHubAPIError as e:
         # Best effort — the bisected comments below still carry the findings.
         logger.warning("PR review summary-only submit failed: %s", e)
