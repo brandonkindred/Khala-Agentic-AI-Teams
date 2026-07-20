@@ -1,3 +1,5 @@
+@use '../card-shared';
+
 .strategy-card {
   border-left: 4px solid transparent;
   background: var(--kh-surface-2);
@@ -155,12 +157,7 @@
   margin-bottom: 0.75rem;
 }
 
-// ── Card divider & narrative ──────────────────────────────────────────────────
-
-.card-divider {
-  margin: 0.75rem 0;
-  border-color: var(--kh-border);
-}
+// ── Card divider & narrative (.card-divider, .narrative-icon: see ../_card-shared.scss) ──
 
 .hypothesis {
   display: flex;
@@ -190,15 +187,6 @@
   line-height: 1.6;
   color: var(--kh-text-secondary);
   margin-bottom: 0.75rem;
-}
-
-.narrative-icon {
-  flex-shrink: 0;
-  color: var(--kh-info);
-  font-size: 1.1rem;
-  width: 1.1rem;
-  height: 1.1rem;
-  margin-top: 0.1rem;
 }
 
 // ── Accordion / expansion panels ─────────────────────────────────────────────

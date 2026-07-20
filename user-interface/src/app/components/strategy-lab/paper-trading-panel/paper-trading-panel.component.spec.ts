@@ -131,6 +131,22 @@ describe('PaperTradingPanelComponent', () => {
     ).toBe('realism_failed');
   });
 
+  it('publishabilitySkipLabel falls back to paper_trading_skipped_reason when publishability_skip_reason is unset', () => {
+    expect(
+      component.publishabilitySkipLabel(
+        makeRecord({ publishability_skip_reason: undefined, paper_trading_skipped_reason: 'alignment_unresolved' }),
+      ),
+    ).toBe('alignment_unresolved');
+  });
+
+  it('publishabilitySkipLabel returns null when neither reason is set', () => {
+    expect(
+      component.publishabilitySkipLabel(
+        makeRecord({ publishability_skip_reason: undefined, paper_trading_skipped_reason: undefined }),
+      ),
+    ).toBeNull();
+  });
+
   it('comparisonTableRegionLabel names the scrollable wrapper by asset class', () => {
     expect(component.comparisonTableRegionLabel()).toBe('stocks strategy backtest vs. paper-trading comparison, scrollable');
   });

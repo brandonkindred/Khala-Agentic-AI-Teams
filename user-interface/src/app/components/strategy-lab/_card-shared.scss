@@ -1,0 +1,20 @@
+// Shared between StrategyCardComponent and PaperTradingPanelComponent:
+// both render a divider using .card-divider, and PaperTradingPanelComponent's
+// divergence-analysis icon reuses .narrative-icon from the card's own
+// hypothesis/narrative sections. `@use`d (not just imported for variables) so
+// each component's own view-encapsulated stylesheet still gets the compiled
+// rules, from a single source instead of two copies.
+
+.card-divider {
+  margin: 0.75rem 0;
+  border-color: var(--kh-border);
+}
+
+.narrative-icon {
+  flex-shrink: 0;
+  color: var(--kh-info);
+  font-size: 1.1rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-top: 0.1rem;
+}

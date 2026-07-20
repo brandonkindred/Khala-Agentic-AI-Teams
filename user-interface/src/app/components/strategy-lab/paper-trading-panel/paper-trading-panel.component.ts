@@ -22,8 +22,9 @@ interface ComparisonRow {
  * Presentational paper-trading panel for a single strategy-lab record.
  * Renders the "run paper trading" call to action, the running/completed
  * session state, the backtest-vs-paper comparison table, and the
- * not-publishable skip notice. Owns no state of its own (the host tracks
- * paper-trading-in-flight and the session map) and performs no side
+ * not-publishable skip notice. Owns no external state of its own (the host
+ * tracks paper-trading-in-flight and the session map); keeps only an
+ * internal memoization cache for `comparisonMetrics`. Performs no side
  * effects — the user's "run"/"re-run" action is reported up via
  * `paperTradeRequested` for the host to act on.
  *

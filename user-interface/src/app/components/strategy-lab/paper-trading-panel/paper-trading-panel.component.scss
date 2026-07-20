@@ -1,20 +1,7 @@
-// ── Card divider & narrative icon (copied from strategy-card.component.scss;
-// the divider/icon rules themselves also stay there since StrategyCardComponent's
-// own remaining template reuses both classes) ──────────────────────────────
+@use '../card-shared';
 
-.card-divider {
-  margin: 0.75rem 0;
-  border-color: var(--kh-border);
-}
-
-.narrative-icon {
-  flex-shrink: 0;
-  color: var(--kh-info);
-  font-size: 1.1rem;
-  width: 1.1rem;
-  height: 1.1rem;
-  margin-top: 0.1rem;
-}
+// .card-divider and .narrative-icon come from ../_card-shared.scss (also
+// used by StrategyCardComponent's own remaining template).
 
 // ── Paper Trade button ──────────────────────────────────────────────────────
 
