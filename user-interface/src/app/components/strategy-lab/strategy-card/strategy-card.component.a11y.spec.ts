@@ -161,6 +161,16 @@ describe('StrategyCardComponent a11y', () => {
     await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
+  it('renders rule/sizing details as readable rows, not raw JSON, and stays axe-clean', async () => {
+    const fixture = await createFixture();
+    fixture.componentRef.setInput('expanded', true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.rule-json')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.signal-json')).toBeNull();
+    expect(fixture.nativeElement.querySelectorAll('dl.rule-def-list').length).toBeGreaterThan(0);
+    await expectNoAxeViolations(fixture.nativeElement);
+  }, 15000);
+
   it('every mat-icon in the card carries an explicit aria-hidden or aria-label', async () => {
     const fixture = await createFixture();
     fixture.componentRef.setInput('expanded', true);

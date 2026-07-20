@@ -1,5 +1,6 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
-import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
+import { ChangeDetectionStrategy, Component, DestroyRef, EventEmitter, inject, Input, Output, signal } from '@angular/core';
+import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe } from '@angular/common';
+import { Clipboard } from '@angular/cdk/clipboard';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -20,6 +21,11 @@ import {
   publishabilitySkipLabel,
   gateIcon as pureGateIcon,
   gateSeverityClass as pureGateSeverityClass,
+  entryRuleRows,
+  exitRuleRows,
+  sizingRows,
+  signalBriefRows as pureSignalBriefRows,
+  type LabelValueRow,
 } from '../strategy-lab.formatters';
 import type {
   PaperTradingSession,
@@ -69,7 +75,6 @@ interface ComparisonRow {
     DecimalPipe,
     DatePipe,
     CurrencyPipe,
-    JsonPipe,
     DateOnlyPipe,
     MatCardModule,
     MatButtonModule,
@@ -118,6 +123,22 @@ export class StrategyCardComponent {
   readonly verdictLabel = verdictLabel;
   readonly verdictColor = verdictColor;
   readonly publishabilitySkipLabel = publishabilitySkipLabel;
+  readonly entryRuleRows = entryRuleRows;
+  readonly exitRuleRows = exitRuleRows;
+  readonly sizingRows = sizingRows;
+
+  private readonly clipboard = inject(Clipboard);
+  private readonly destroyRef = inject(DestroyRef);
+
+  /** True for ~2s after a successful strategy-code copy, to swap the copy icon for a checkmark. */
+  readonly codeCopied = signal(false);
+  private codeCopiedTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  constructor() {
+    this.destroyRef.onDestroy(() => {
+      if (this.codeCopiedTimeoutId !== null) clearTimeout(this.codeCopiedTimeoutId);
+    });
+  }
 
   readonly PAGE_SIZE = 20;
   readonly TRADE_COLUMNS = [
@@ -203,6 +224,28 @@ export class StrategyCardComponent {
   }
 
   /**
+   * Copies the generated strategy code to the clipboard and shows a brief
+   * "copied" confirmation.
+   *
+   * Preconditions: `code` is the resolved strategy-code string (only invoked
+   *   from the template's `@if (strategyCode(); as code)` guard).
+   * Postconditions: `clipboard.copy(code)` is invoked exactly once. On
+   *   success, `codeCopied()` becomes `true` and reverts to `false` after
+   *   ~2s (a prior pending revert is cancelled first). On failure,
+   *   `codeCopied()` is left unchanged.
+   */
+  onCopyCode(code: string): void {
+    const succeeded = this.clipboard.copy(code);
+    if (!succeeded) return;
+    this.codeCopied.set(true);
+    if (this.codeCopiedTimeoutId !== null) clearTimeout(this.codeCopiedTimeoutId);
+    this.codeCopiedTimeoutId = setTimeout(() => {
+      this.codeCopiedTimeoutId = null;
+      this.codeCopied.set(false);
+    }, 2000);
+  }
+
+  /**
    * Accessible name for the trade-table's scrollable wrapper (WCAG 2.4.7 —
    * the wrapper, not the table, must be focusable since the global outline
    * would otherwise be clipped by `overflow-x: auto`).
@@ -239,6 +282,11 @@ export class StrategyCardComponent {
    */
   hasSignalBrief(): boolean {
     return this.record.signal_intelligence_brief != null && Object.keys(this.record.signal_intelligence_brief).length > 0;
+  }
+
+  /** Label/value rows for the signal-intelligence panel — see `strategy-lab.formatters.ts`'s `signalBriefRows` for the row-shaping rules. */
+  signalBriefRows(): LabelValueRow[] {
+    return pureSignalBriefRows(this.record.signal_intelligence_brief ?? null);
   }
 
   // A `StrategyCardComponent` instance is reused (per the `@for track

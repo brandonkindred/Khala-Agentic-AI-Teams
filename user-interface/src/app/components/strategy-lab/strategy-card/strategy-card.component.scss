@@ -456,18 +456,69 @@
   overflow-y: auto;
 }
 
-.signal-json {
-  margin: 0;
-  padding: 0.75rem 1rem;
+.strategy-code-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.strategy-code-caption {
   font-size: 0.75rem;
-  line-height: 1.45;
-  overflow-x: auto;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kh-text-muted);
+}
+
+.copy-code-btn {
+  flex-shrink: 0;
+  color: var(--kh-text-muted);
+
+  &:hover:not(:disabled) {
+    color: var(--kh-text-primary);
+  }
+}
+
+// ── Rule / sizing / signal-brief definition lists ───────────────────────────
+// Replaces the old raw-JSON <pre> dumps for entry/exit rules, sizing, and the
+// signal-intelligence brief (see strategy-lab.formatters.ts's row-flattening
+// helpers) with labeled key/value rows.
+
+.detail-section .rule-list {
+  padding-left: 0;
+  list-style: none;
+}
+
+.detail-section .rule-item {
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 0.75rem;
   background: var(--kh-surface-3);
   border: 1px solid var(--kh-border-subtle);
   border-radius: var(--kh-radius-sm);
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--kh-text-secondary);
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.rule-def-list {
+  display: grid;
+  grid-template-columns: minmax(110px, max-content) 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 0.85rem;
+
+  dt {
+    color: var(--kh-text-muted);
+    font-weight: 500;
+  }
+
+  dd {
+    margin: 0;
+    color: var(--kh-text-secondary);
+    word-break: break-word;
+  }
 }
 
 // ── Paper Trade button ──────────────────────────────────────────────────────

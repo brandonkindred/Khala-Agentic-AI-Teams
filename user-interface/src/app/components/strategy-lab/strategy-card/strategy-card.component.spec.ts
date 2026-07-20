@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { Clipboard } from '@angular/cdk/clipboard';
 import { vi } from 'vitest';
 import type { PaperTradingComparison, PaperTradingSession, QualityGateResult, StrategyLabRecord, TradeRecord } from '../../../models';
 import { StrategyCardComponent } from './strategy-card.component';
@@ -85,10 +86,13 @@ function makeTrade(overrides: Partial<TradeRecord> = {}): TradeRecord {
 describe('StrategyCardComponent', () => {
   let fixture: ComponentFixture<StrategyCardComponent>;
   let component: StrategyCardComponent;
+  let clipboardCopySpy: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
+    clipboardCopySpy = vi.fn().mockReturnValue(true);
     await TestBed.configureTestingModule({
       imports: [StrategyCardComponent, NoopAnimationsModule],
+      providers: [{ provide: Clipboard, useValue: { copy: clipboardCopySpy } }],
     }).compileComponents();
     fixture = TestBed.createComponent(StrategyCardComponent);
     component = fixture.componentInstance;
@@ -340,6 +344,41 @@ describe('StrategyCardComponent', () => {
     });
   });
 
+  describe('onCopyCode', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('copies the code and shows a temporary confirmation that reverts after ~2s', () => {
+      vi.useFakeTimers();
+      component.onCopyCode('print(1)');
+      expect(clipboardCopySpy).toHaveBeenCalledWith('print(1)');
+      expect(component.codeCopied()).toBe(true);
+      vi.advanceTimersByTime(2000);
+      expect(component.codeCopied()).toBe(false);
+    });
+
+    it('does not show a confirmation when the copy fails', () => {
+      clipboardCopySpy.mockReturnValue(false);
+      component.onCopyCode('print(1)');
+      expect(component.codeCopied()).toBe(false);
+    });
+
+    it('cancels a prior pending revert when copying again before it fires', () => {
+      vi.useFakeTimers();
+      component.onCopyCode('first');
+      vi.advanceTimersByTime(1000);
+      component.onCopyCode('second');
+      vi.advanceTimersByTime(1000);
+      // Only 2s have passed since the second copy started 1s in — the first
+      // copy's revert (which would have fired at the 2s mark) must not have
+      // fired early and left codeCopied() false at this halfway point.
+      expect(component.codeCopied()).toBe(true);
+      vi.advanceTimersByTime(1000);
+      expect(component.codeCopied()).toBe(false);
+    });
+  });
+
   it('verdictLabel/verdictColor cover ready_for_live, not_performant, and inconclusive', () => {
     expect(component.verdictLabel('ready_for_live')).toBe('READY FOR LIVE');
     expect(component.verdictColor('ready_for_live')).toBe('winning');
@@ -490,6 +529,25 @@ describe('StrategyCardComponent', () => {
       }));
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('.signal-panel')).toBeTruthy();
+    });
+
+    it('renders entry/exit rules, sizing, and the signal brief as definition lists, not raw JSON', () => {
+      component.record = makeRecord({
+        strategy: {
+          ...makeRecord().strategy,
+          entry_rules: [{ kind: 'entry', side: 'long', when: { lhs: { name: 'rsi', params: { period: 14 } }, op: '<', rhs: 30 } }],
+          exit_rules: [{ kind: 'stop_loss', pct: 0.05 }],
+          sizing: { kind: 'fixed_fraction', fraction: 0.02 },
+        } as unknown as StrategyLabRecord['strategy'],
+        signal_intelligence_brief: { summary: 'Momentum confirmed by volume.' } as unknown as StrategyLabRecord['signal_intelligence_brief'],
+      });
+      component.expanded = true;
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('.rule-json')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.signal-json')).toBeNull();
+      expect(fixture.nativeElement.querySelectorAll('dl.rule-def-list').length).toBeGreaterThan(0);
+      expect(fixture.nativeElement.textContent).toContain('RSI(Period: 14)');
     });
 
     it('gives the comparison table its own accessible name via a visually-hidden caption', () => {

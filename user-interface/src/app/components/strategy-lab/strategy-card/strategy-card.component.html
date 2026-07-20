@@ -127,7 +127,12 @@
               Expert brief for this batch (not financial advice)
             </mat-panel-description>
           </mat-expansion-panel-header>
-          <pre class="signal-json">{{ record.signal_intelligence_brief | json }}</pre>
+          <dl class="rule-def-list">
+            @for (row of signalBriefRows(); track row.label) {
+              <dt>{{ row.label }}</dt>
+              <dd>{{ row.value }}</dd>
+            }
+          </dl>
         </mat-expansion-panel>
       }
 
@@ -303,24 +308,43 @@
         </div>
         <div class="detail-section">
           <strong>Entry Rules</strong>
-          <ul>
+          <ul class="rule-list">
             @for (rule of record.strategy.entry_rules; track $index) {
-              <li><pre class="rule-json">{{ rule | json }}</pre></li>
+              <li class="rule-item">
+                <dl class="rule-def-list">
+                  @for (row of entryRuleRows(rule); track row.label) {
+                    <dt>{{ row.label }}</dt>
+                    <dd>{{ row.value }}</dd>
+                  }
+                </dl>
+              </li>
             }
           </ul>
         </div>
         <div class="detail-section">
           <strong>Exit Rules</strong>
-          <ul>
+          <ul class="rule-list">
             @for (rule of record.strategy.exit_rules; track $index) {
-              <li><pre class="rule-json">{{ rule | json }}</pre></li>
+              <li class="rule-item">
+                <dl class="rule-def-list">
+                  @for (row of exitRuleRows(rule); track row.label) {
+                    <dt>{{ row.label }}</dt>
+                    <dd>{{ row.value }}</dd>
+                  }
+                </dl>
+              </li>
             }
           </ul>
         </div>
         @if (record.strategy.sizing) {
           <div class="detail-section">
             <strong>Sizing</strong>
-            <pre class="rule-json">{{ record.strategy.sizing | json }}</pre>
+            <dl class="rule-def-list">
+              @for (row of sizingRows(record.strategy.sizing); track row.label) {
+                <dt>{{ row.label }}</dt>
+                <dd>{{ row.value }}</dd>
+              }
+            </dl>
           </div>
         }
         <div class="detail-section">
@@ -372,6 +396,19 @@
             </mat-panel-title>
             <mat-panel-description>Generated Python backtest script</mat-panel-description>
           </mat-expansion-panel-header>
+          <div class="strategy-code-toolbar">
+            <span class="strategy-code-caption">Generated Python — read only</span>
+            <button
+              mat-icon-button
+              type="button"
+              class="copy-code-btn"
+              [attr.aria-label]="codeCopied() ? 'Strategy code copied' : 'Copy strategy code'"
+              [matTooltip]="codeCopied() ? 'Copied!' : 'Copy code'"
+              (click)="onCopyCode(code)"
+            >
+              <mat-icon aria-hidden="true">{{ codeCopied() ? 'check' : 'content_copy' }}</mat-icon>
+            </button>
+          </div>
           <pre class="strategy-code">{{ code }}</pre>
         </mat-expansion-panel>
       }
