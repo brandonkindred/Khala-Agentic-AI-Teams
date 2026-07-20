@@ -83,11 +83,14 @@ def _run_build_verification(
         run_python_syntax_check,
     )
 
-    if agent_type in ("backend_code_v2", "frontend_code_v2"):
-        agent_type = agent_type.removesuffix("_code_v2")
+    base_agent_type = (
+        agent_type.removesuffix("_code_v2")
+        if agent_type in ("backend_code_v2", "frontend_code_v2")
+        else agent_type
+    )
 
     if (
-        agent_type == "frontend"
+        base_agent_type == "frontend"
     ):  # pragma: no cover  # integration-only: invokes ng build and downstream LLM fix loop
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
         frontend_dir = (
@@ -104,7 +107,7 @@ def _run_build_verification(
                 # Environment (e.g. Node version) - caller should fail task, not retry
                 return False, "ENV:" + result.error_summary
             # Try tool-agent build fix (review all issues, fix one at a time)
-            fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
+            fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, base_agent_type, task_id)
             if fixed:
                 logger.info(
                     "Build verification passed for frontend task %s after tool-agent fix", task_id
@@ -131,7 +134,7 @@ def _run_build_verification(
         logger.info("Build verification passed for frontend task %s", task_id)
         return True, ""
 
-    elif agent_type == "backend":
+    elif base_agent_type == "backend":
         # repo_path may be backend repo root (py files here) or work path (backend/ subdir)
         backend_dir = repo_path if any(repo_path.rglob("*.py")) else (repo_path / "backend")
         if not backend_dir.exists() or not any(backend_dir.rglob("*.py")):
@@ -140,7 +143,7 @@ def _run_build_verification(
         result = run_python_syntax_check(backend_dir)
         if not result.success:  # pragma: no cover  # integration-only: syntax-check + LLM fix loop
             logger.warning("Syntax check failed for task %s: %s", task_id, result.error_summary)
-            fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
+            fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, base_agent_type, task_id)
             if fixed:
                 logger.info(
                     "Build verification passed for backend task %s after tool-agent fix", task_id
@@ -191,7 +194,7 @@ def _run_build_verification(
                         "\n\nFIX: Preserve the /test-generic-error route in app/main.py and "
                         "ensure the exception handler returns JSONResponse; do not re-raise."
                     )
-                fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
+                fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, base_agent_type, task_id)
                 if fixed:
                     logger.info(
                         "Build verification passed for backend task %s after tool-agent fix",
@@ -203,7 +206,7 @@ def _run_build_verification(
         return True, ""
 
     elif (
-        agent_type == "devops"
+        base_agent_type == "devops"
     ):  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
@@ -274,6 +277,11 @@ def _try_build_fix_one_at_a_time(
     """
     Use a tool-agent style flow to identify all build issues, then fix them one at a time.
     Returns (True, "") if build passes after fixes; otherwise (False, error_summary).
+
+    Preconditions:
+        ``agent_type`` is already normalized to the base type (``"backend"`` or
+        ``"frontend"``) by the caller (:func:`_run_build_verification`) — this
+        function never receives a ``_code_v2``-suffixed value.
     """
     from shared_command_runner.runner import (
         run_command,

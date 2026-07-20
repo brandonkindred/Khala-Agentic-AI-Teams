@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import AgentReviewCache
+from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.gate_outcomes import record_gate_outcome
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import (
@@ -383,11 +384,7 @@ def _run_general_microtask_impl(
     data = parse_files_and_summary(raw)
     files = data.get("files") or {}
 
-    from software_engineering_team.shared.phases.problem_solving import (
-        _reject_invalid_python,
-    )
-
-    files, rejected_files = _reject_invalid_python(files)
+    files, rejected_files = reject_invalid_python(files)
     if rejected_files:
         logger.warning(
             "Microtask %s: codegen returned unparsable Python for %d file(s); "

@@ -17,11 +17,11 @@ phase-specific fix functions (which interlock with the out-of-scope backend
 
 from __future__ import annotations
 
-import ast
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
+from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
@@ -74,34 +74,6 @@ def _format_issues_for_batch(issues: List[Any]) -> str:
         lines.append(f"- **Recommendation:** {issue.recommendation or 'Fix the issue.'}")
         lines.append("")
     return "\n".join(lines)
-
-
-def _reject_invalid_python(files: Dict[str, str]) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Split ``files`` into syntactically valid and invalid Python entries.
-
-    An LLM full-file rewrite can stop mid-file (e.g. abandon a class body)
-    while still returning a response the API considers complete, so
-    ``stop_reason``/``finish_reason`` truncation checks in the LLM client
-    can't catch it. This is the last line of defense before a rewritten file
-    is merged into the working file set.
-
-    Preconditions:
-        ``files`` maps repo-relative paths to full file content.
-    Postconditions:
-        Returns ``(valid, rejected)``; ``rejected`` maps path to the parse
-        error message. Non-``.py`` paths are always considered valid. Pure.
-    """
-    valid: Dict[str, str] = {}
-    rejected: Dict[str, str] = {}
-    for path, content in files.items():
-        if path.endswith(".py"):
-            try:
-                ast.parse(content)
-            except SyntaxError as exc:
-                rejected[path] = f"{exc.__class__.__name__}: {exc}"
-                continue
-        valid[path] = content
-    return valid, rejected
 
 
 def _relevant_code_for_issue(issue: Any, current_files: Dict[str, str]) -> str:
@@ -213,7 +185,7 @@ def run_batch_coding_fixes_impl(
     issues_addressed = parsed.get("issues_addressed") or []
     summary = parsed.get("summary") or f"Batch fixed {len(fixed_files)} file(s)"
 
-    fixed_files, rejected_files = _reject_invalid_python(fixed_files)
+    fixed_files, rejected_files = reject_invalid_python(fixed_files)
     if rejected_files:
         logger.warning(
             "[%s] Microtask %s: batch fix returned unparsable Python for %d file(s); "
@@ -383,7 +355,7 @@ def _fix_issues_one_at_a_time_impl(
                     resolved_this = True
                 break
 
-            fixed_files, rejected_files = _reject_invalid_python(fixed_files)
+            fixed_files, rejected_files = reject_invalid_python(fixed_files)
             if rejected_files:
                 logger.warning(
                     "[%s] %s%sfix (issue %d, attempt %d) returned unparsable Python for "
@@ -454,7 +426,7 @@ def _apply_tool_agents_problem_solve(
         try:
             out = agent.problem_solve(phase_inp)
             if out.files:
-                valid_files, rejected_files = _reject_invalid_python(out.files)
+                valid_files, rejected_files = reject_invalid_python(out.files)
                 if rejected_files:
                     logger.warning(
                         "[%s] %stool agent %s returned unparsable Python for %d file(s); "
