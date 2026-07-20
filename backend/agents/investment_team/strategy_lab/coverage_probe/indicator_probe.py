@@ -2320,7 +2320,7 @@ def _constructor_param_defaults(func: ast.AST) -> Dict[str, ast.Constant]:
     a literal ``Constant``) drops the symbol gate and lets the
     indicator condition silently evaluate against every fetched
     DataFrame. By looking up the parameter's default in this table,
-    :func:`_iter_unconditional_constructor_assigns` can resolve the
+    :func:`_collect_unconditional_constructor_assigns` can resolve the
     guard the same way it resolves a literal ``if True:``.
 
     Only parameters with a *constant* default are recorded — anything
@@ -2351,11 +2351,11 @@ def _constructor_param_defaults(func: ast.AST) -> Dict[str, ast.Constant]:
     return defaults
 
 
-def _iter_unconditional_constructor_assigns(
+def _collect_unconditional_constructor_assigns(
     stmts: List[ast.stmt],
     param_defaults: Optional[Dict[str, ast.Constant]] = None,
 ) -> List[Union[ast.Assign, ast.AnnAssign]]:
-    """Yield ``Assign`` / ``AnnAssign`` nodes guaranteed to execute on
+    """Return ``Assign`` / ``AnnAssign`` nodes guaranteed to execute on
     every constructor invocation.
 
     A blanket ``ast.walk(child)`` over ``__init__`` records nested
@@ -2371,17 +2371,17 @@ def _iter_unconditional_constructor_assigns(
     to run while still skipping branches whose predicate isn't a
     constant we can resolve:
 
-    - ``Assign`` / ``AnnAssign`` at the current level → yield
-    - ``if <Constant>: body else: orelse`` → yield from the branch
+    - ``Assign`` / ``AnnAssign`` at the current level → collected
+    - ``if <Constant>: body else: orelse`` → collect from the branch
       Python's truthiness on ``Constant.value`` selects (the other is
       dead code at runtime)
     - ``if <Name>:`` where ``Name`` is a constructor parameter with a
-      ``Constant`` default → resolve via ``param_defaults`` and yield
+      ``Constant`` default → resolve via ``param_defaults`` and collect
       from the live branch. Strategies routinely use this shape
       (``def __init__(self, enabled=True): if enabled: ...``); the
       default-construction path is guaranteed.
     - ``if <unknown>: ...`` → skip both branches conservatively
-    - ``with <ctx>: body`` / ``async with`` → yield from ``body``
+    - ``with <ctx>: body`` / ``async with`` → collect from ``body``
       (the context manager unconditionally executes the body unless
       ``__enter__`` raises, which we treat as a runtime error path
       not relevant to static binding)
@@ -2404,11 +2404,11 @@ def _iter_unconditional_constructor_assigns(
                 # Literal-or-default-resolved predicate — only the live
                 # branch contributes.
                 branch = stmt.body if resolved else stmt.orelse
-                out.extend(_iter_unconditional_constructor_assigns(branch, param_defaults))
+                out.extend(_collect_unconditional_constructor_assigns(branch, param_defaults))
             # Unknown predicate — skip both branches; the class-body
             # binding (already recorded) acts as the runtime fallback.
         elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-            out.extend(_iter_unconditional_constructor_assigns(stmt.body, param_defaults))
+            out.extend(_collect_unconditional_constructor_assigns(stmt.body, param_defaults))
         # For / While / Try / etc.: conservatively skip — execution
         # isn't statically guaranteed.
     return out
@@ -2660,12 +2660,12 @@ def _collect_name_bindings(
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name in _CONSTRUCTOR_NAMES:
                         param_defaults = _constructor_param_defaults(child)
-                        for sub in _iter_unconditional_constructor_assigns(
+                        for sub in _collect_unconditional_constructor_assigns(
                             child.body, param_defaults
                         ):
                             _dispatch(sub, "record_constructor")
                     continue
-                for sub in _iter_unconditional_constructor_assigns([child], class_param_defaults):
+                for sub in _collect_unconditional_constructor_assigns([child], class_param_defaults):
                     _dispatch(sub, "record_class_body")
             return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
