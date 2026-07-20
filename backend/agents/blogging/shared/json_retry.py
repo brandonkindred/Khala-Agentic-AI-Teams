@@ -14,13 +14,9 @@ the copy-editor's extra step of unwrapping a wrapped exception before
 classifying its cause) so that callers CAN configure it via parameters
 instead of duplicating the loop.
 
-No call site has been migrated onto this helper yet — that migration is
-tracked separately; this module only makes the shared helper available.
-
 Invariants:
-    - Once a call site adopts this helper, exactly one JSON-parse retry
-      policy and one transient-error classification rule governs it here
-      instead of a duplicated inline loop.
+    - Exactly one JSON-parse retry policy and one transient-error
+      classification rule is defined here.
 """
 
 from __future__ import annotations
@@ -63,10 +59,14 @@ def call_json_with_retry(
     """
     Invoke an agent and parse a JSON dict from its response, retrying on parse failure.
 
-    On the first ``LLMJsonParseError``, the prompt is resent with
-    ``strict_json_suffix`` appended. Once ``max_attempts`` is exhausted,
-    ``on_exhausted`` (if given) is called with the last error to produce a
-    fallback dict; otherwise the last ``LLMJsonParseError`` is re-raised.
+    On each ``LLMJsonParseError`` with attempts remaining, the prompt is
+    resent with ``strict_json_suffix`` appended (this repeats on every
+    subsequent failed attempt, not just the first). Once ``max_attempts`` is
+    exhausted, ``on_exhausted`` (if given) is called with the last error to
+    produce a fallback dict; otherwise the last ``LLMJsonParseError`` is
+    re-raised. ``backoff_seconds``, if given, is a callback taking the
+    zero-based attempt index and returning the number of seconds to sleep
+    before that retry; omit it to skip sleeping between retries.
 
     Any other exception ``e`` is first passed through ``unwrap_exception``
     (identity by default; pass a hook to unwrap a framework wrapper such as
@@ -100,12 +100,12 @@ def call_json_with_retry(
     log = logger or _logger
     keys = frozenset(expected_keys) if expected_keys is not None else None
 
-    invoke = agent_factory()
+    invoke: Optional[AgentInvoker] = None
     last_json_error: Optional[LLMJsonParseError] = None
     working_prompt = prompt
 
     for attempt in range(max_attempts):
-        if fresh_agent_per_attempt and attempt > 0:
+        if invoke is None or fresh_agent_per_attempt:
             invoke = agent_factory()
         try:
             result = invoke(working_prompt)
