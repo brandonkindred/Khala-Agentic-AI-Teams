@@ -253,11 +253,12 @@ def acquire_agent_lock_activity(job_id: str, agent_id: str) -> int:
         * ``job_id`` (a provisioning ``job_id`` or a deprovisioning workflow
           id) and ``agent_id`` are non-empty.
     Postconditions:
-        * On return, ``agent_id``'s lock record is owned by ``job_id``.
-        * Returns the fencing token ``AgentLockStore.acquire`` assigned this
-          acquisition (see its own docstring for how the value is derived),
-          so the calling workflow can carry it into resource-mutating
-          activity calls without a second store read.
+        * On return, ``agent_id``'s lock record is owned by ``job_id``, and
+          the fencing token now associated with ``agent_id`` (see
+          ``AgentLockStore.acquire``) is returned. The calling workflow must
+          present this token (or the value of its most recent renewal,
+          whichever is more recent) on every subsequent mutating activity
+          call and on ``release_agent_lock_activity``.
         * Raises ``RuntimeError`` when a different, non-expired owner
           currently holds the lock — deliberately a plain (retryable)
           exception rather than a non-retryable one, so Temporal's retry
@@ -277,14 +278,20 @@ def acquire_agent_lock_activity(job_id: str, agent_id: str) -> int:
 
 
 @activity.defn(name="agent_provisioning_release_lock")
-def release_agent_lock_activity(job_id: str, agent_id: str) -> None:
+def release_agent_lock_activity(
+    job_id: str, agent_id: str, fencing_token: Optional[int] = None
+) -> None:
     """Release this workflow's ownership of ``agent_id`` (best-effort, idempotent).
 
     Preconditions:
         * ``job_id`` and ``agent_id`` are non-empty.
     Postconditions:
-        * Releases the lock only if ``job_id`` is still the current owner; a
-          no-op otherwise (already released, or owned by someone else).
+        * Releases the lock only if ``job_id`` is still the current owner and
+          ``fencing_token`` (when given) is not stale; a no-op otherwise
+          (already released, owned by someone else, or a stale token —
+          defense-in-depth, not load-bearing: the owner check alone already
+          rejects a stale caller since owner and token always advance
+          together).
         * May raise on a transient I/O failure so Temporal retries — the
           calling workflow wraps this activity in its own try/except so a
           persistent release failure is logged, not fatal to the workflow's
@@ -296,7 +303,9 @@ def release_agent_lock_activity(job_id: str, agent_id: str) -> None:
 
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
-    AgentLockStore(ttl_seconds=LOCK_TTL_S).release(agent_id, owner=job_id)
+    AgentLockStore(ttl_seconds=LOCK_TTL_S).release(
+        agent_id, owner=job_id, fencing_token=fencing_token
+    )
 
 
 def _reject_stale_fencing_token(agent_id: str, fencing_token: Optional[int]) -> None:
@@ -336,12 +345,14 @@ def setup_activity(
           acceptable to ``restore_setup``.
         * ``fencing_token``, when given, is the calling workflow's current
           lease token on ``agent_id`` (from ``acquire_agent_lock_activity``).
-          Checked via ``_reject_stale_fencing_token`` before anything else
-          runs: raises ``StaleFencingTokenError`` (non-retryable) when a
-          later acquirer has since reclaimed ``agent_id``'s lease. A no-op
-          when ``fencing_token`` is ``None`` (legacy/replay call sites).
+          Checked twice, both before any mutation: first via
+          ``_reject_stale_fencing_token`` (``AgentLockStore``'s own record)
+          as this activity's first statement, then again inside
+          ``run_setup`` against ``EnvironmentStore``/``ProvisionerStateStore``'s
+          own high-water marks. A no-op both times when ``fencing_token`` is
+          ``None`` (legacy/replay call sites).
     Postconditions:
-        * Raises ``StaleFencingTokenError`` before any other side effect
+        * Raises a stale-fencing-token error before any other side effect
           (including restoring from ``prior_setup``) when ``fencing_token``
           is stale.
         * Returns ``{"success": True, "environment": <dump|None>}`` reflecting
@@ -374,6 +385,12 @@ def setup_activity(
           attempt even if the local idempotency state that would otherwise
           prove it never gets written.
         * Raises ``RuntimeError`` when a fresh setup fails.
+        * When ``fencing_token`` is given and stale, raises either
+          :class:`~agent_provisioning_team.shared.agent_lock.StaleFencingTokenError`
+          (from the early ``_reject_stale_fencing_token`` check) or
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (from ``run_setup``'s deeper store checks) — both propagated, not
+          converted to ``RuntimeError``.
     """
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
@@ -425,6 +442,7 @@ def setup_activity(
         docker_provisioner=orch.tool_agents.get("docker_provisioner"),
         on_registered=_checkpoint_on_register,
         job_id=job_id,
+        fencing_token=fencing_token,
     )
     if not result.success:
         raise RuntimeError(f"setup failed: {result.error}")
@@ -486,13 +504,14 @@ def credentials_activity(
         * When ``tool_specs`` is set (fresh generate path), each entry has a
           non-empty ``name`` — the same frozen snapshot used for tool fan-out.
         * ``fencing_token``, when given, is the calling workflow's current
-          lease token on ``agent_id``. Checked via
-          ``_reject_stale_fencing_token`` before anything else runs: raises
-          ``StaleFencingTokenError`` (non-retryable) when a later acquirer
-          has since reclaimed ``agent_id``'s lease. A no-op when
+          lease token on ``agent_id``. Checked twice, both before any
+          mutation: first via ``_reject_stale_fencing_token``
+          (``AgentLockStore``'s own record) as this activity's first
+          statement, then again inside ``run_credential_generation`` against
+          ``CredentialStore``'s own high-water mark. A no-op both times when
           ``fencing_token`` is ``None`` (legacy/replay call sites).
     Postconditions:
-        * Raises ``StaleFencingTokenError`` before any other side effect
+        * Raises a stale-fencing-token error before any other side effect
           (including restoring from ``prior_credentials``) when
           ``fencing_token`` is stale.
         * Returns ``{"success": True, "credentials": {tool_name: dump, ...}}``.
@@ -529,7 +548,9 @@ def credentials_activity(
             )
 
             for name, cred in snap.credentials.items():
-                store_credentials_payload(agent_id, name, cred.model_dump())
+                store_credentials_payload(
+                    agent_id, name, cred.model_dump(), fencing_token=fencing_token
+                )
             tool_names = sorted(snap.credentials.keys()) or list(snap.tool_names)
             _js.add_completed_phase(
                 job_id,
@@ -573,6 +594,7 @@ def credentials_activity(
         manifest=manifest,
         credential_store=orch.credential_store,
         tool_names=frozen_names,
+        fencing_token=fencing_token,
     )
     if not result.success:
         raise RuntimeError(f"credential generation failed: {result.error}")
@@ -612,13 +634,15 @@ def provision_tool_activity(
           for this tool.
         * ``tools_total`` must be ``> 0``.
         * ``fencing_token``, when given, is the calling workflow's current
-          lease token on ``agent_id``. Checked via
-          ``_reject_stale_fencing_token`` before anything else runs: raises
-          ``StaleFencingTokenError`` (non-retryable) when a later acquirer
-          has since reclaimed ``agent_id``'s lease. A no-op when
-          ``fencing_token`` is ``None`` (legacy/replay call sites).
+          lease token on ``agent_id``. Checked twice, both before any
+          mutation: first via ``_reject_stale_fencing_token``
+          (``AgentLockStore``'s own record) as this activity's first
+          statement, then again inside ``agent.provision(...)`` against
+          this tool's ``ProvisionerStateStore`` high-water mark. A no-op
+          both times when ``fencing_token`` is ``None`` (legacy/replay call
+          sites).
     Postconditions:
-        * Raises ``StaleFencingTokenError`` before any other side effect
+        * Raises a stale-fencing-token error before any other side effect
           when ``fencing_token`` is stale.
         * Returns ``ToolProvisionResult.model_dump()`` from the provisioner
           with ``provisioner_key`` set to the registry key (needed by
@@ -643,6 +667,12 @@ def provision_tool_activity(
           (``credentials.extra``/``details``), which is not redacted for an
           unrecognized key like this one; injecting unconditionally would
           leak this internal id into checkpoints and API responses.
+        * When ``fencing_token`` is given and stale, raises either
+          :class:`~agent_provisioning_team.shared.agent_lock.StaleFencingTokenError`
+          or :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (see the two check points above) — both registered as
+          non-retryable (``TOOL_RETRY_POLICY``) so Temporal does not keep
+          retrying a doomed-to-fail-again fan-out call.
     """
     from agent_provisioning_team.models import GeneratedCredentials
     from agent_provisioning_team.shared.tool_agent_registry import build_default_tool_agents
@@ -677,6 +707,7 @@ def provision_tool_activity(
         agent_id=agent_id,
         config=tool_config_dict,
         credentials=creds,
+        fencing_token=fencing_token,
     )
     # Mirror run_account_provisioning: stamp the registry key so compensate()
     # can look the provisioner back up (built-ins leave provisioner_key=None).
@@ -812,6 +843,7 @@ def deliver_activity(
     tool_results_dump: List[Dict[str, Any]],
     audit_dump: Optional[Dict[str, Any]],
     onboarding_dump: Optional[Dict[str, Any]],
+    fencing_token: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Finalize provisioning and mark the job completed or failed.
 
@@ -823,9 +855,23 @@ def deliver_activity(
         * Marks the job completed (redacted result) or failed in ``job_store``.
         * Raises when the terminal job-store write fails so Temporal retries
           (status must not stay running after a successful deliver).
+        * ``fencing_token``, when given, is checked twice, both before any
+          mutation: first via ``_reject_stale_fencing_token``
+          (``AgentLockStore``'s own record) as this activity's first
+          statement — closing the window where the ``EnvironmentStore``
+          high-water mark has not yet been bumped by a reclaiming owner's
+          setup, so ``run_deliver``'s own ``update_status`` check alone could
+          still accept a stale caller — then again inside ``run_deliver``
+          against ``EnvironmentStore``'s high-water mark. A no-op both times
+          when ``fencing_token`` is ``None`` (legacy/replay call sites).
+        * When ``fencing_token`` is given and stale, raises either
+          :class:`~agent_provisioning_team.shared.agent_lock.StaleFencingTokenError`
+          or :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (see the two check points above).
     """
     assert job_id, "job_id must be non-empty"
     assert agent_id, "agent_id must be non-empty"
+    _reject_stale_fencing_token(agent_id, fencing_token)
     from agent_provisioning_team.models import (
         AccessAuditResult,
         EnvironmentInfo,
@@ -863,6 +909,7 @@ def deliver_activity(
         access_audit=audit,
         onboarding=onboarding,
         environment_store=EnvironmentStore(),
+        fencing_token=fencing_token,
     )
 
     final = build_final_result(
@@ -898,13 +945,15 @@ def record_account_provisioning_activity(
         * ``tool_results_dump`` is the serializable per-tool result list.
         * ``agent_id`` is non-empty when environment tool recording is required.
         * ``fencing_token``, when given, is the calling workflow's current
-          lease token on ``agent_id``. Checked via
-          ``_reject_stale_fencing_token`` before anything else runs: raises
-          ``StaleFencingTokenError`` (non-retryable) when a later acquirer
-          has since reclaimed ``agent_id``'s lease. A no-op when
-          ``fencing_token`` is ``None`` (legacy/replay call sites).
+          lease token on ``agent_id``. Checked twice, both before any
+          mutation: first via ``_reject_stale_fencing_token``
+          (``AgentLockStore``'s own record) as this activity's first
+          statement, then again inside ``store_credentials_payload`` and
+          ``EnvironmentStore.add_tools`` against their own high-water marks.
+          A no-op both times when ``fencing_token`` is ``None``
+          (legacy/replay call sites).
     Postconditions:
-        * Raises ``StaleFencingTokenError`` before any other side effect
+        * Raises a stale-fencing-token error before any other side effect
           when ``fencing_token`` is stale.
         * ``completed_phases`` includes ``account_provisioning`` and
           ``phase_results`` carries sanitized tool results (no plaintext
@@ -919,6 +968,10 @@ def record_account_provisioning_activity(
           ``EnvironmentStore.add_tools`` (safe after parallel fan-out).
         * Raises when job-store / credential-store writes fail so Temporal
           retries the checkpoint before later phases run.
+        * When ``fencing_token`` is given and stale, raises either
+          :class:`~agent_provisioning_team.shared.agent_lock.StaleFencingTokenError`
+          or :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (see the two check points above).
     """
     assert job_id, "job_id must be non-empty"
     _reject_stale_fencing_token(agent_id, fencing_token)
@@ -941,14 +994,16 @@ def record_account_provisioning_activity(
             tool_name = raw.get("tool_name")
             creds = raw.get("credentials")
             if isinstance(tool_name, str) and tool_name and isinstance(creds, dict):
-                store_credentials_payload(agent_id, tool_name, creds)
+                store_credentials_payload(agent_id, tool_name, creds, fencing_token=fencing_token)
 
         names = [
             r.get("tool_name")
             for r in results
             if isinstance(r, dict) and r.get("success") and r.get("tool_name")
         ]
-        EnvironmentStore().add_tools(agent_id, [n for n in names if isinstance(n, str)])
+        EnvironmentStore().add_tools(
+            agent_id, [n for n in names if isinstance(n, str)], fencing_token=fencing_token
+        )
 
     # Job-store checkpoint must not retain plaintext credentials / connection strings.
     sanitized = sanitize_tool_results_for_checkpoint(results)
@@ -978,11 +1033,12 @@ def compensate_activity(
     Preconditions:
         * ``agent_id`` identifies the agent whose tools should be rolled back.
         * ``fencing_token``, when given, is the calling workflow's current
-          lease token on ``agent_id``. Checked via
-          ``_reject_stale_fencing_token`` before anything else runs (before
-          constructing ``ProvisioningOrchestrator``): raises
-          ``StaleFencingTokenError`` (non-retryable) when a later acquirer
-          has since reclaimed ``agent_id``'s lease. A no-op when
+          lease token on ``agent_id``. Checked twice, both before any
+          mutation: first via ``_reject_stale_fencing_token``
+          (``AgentLockStore``'s own record) as this activity's first
+          statement (before constructing ``ProvisioningOrchestrator``), then
+          again inside ``ProvisioningOrchestrator.compensate``, per-resource,
+          against each store's own high-water mark. A no-op both times when
           ``fencing_token`` is ``None`` (legacy/replay call sites).
         * ``succeeded_tools`` entries are dicts with ``tool_name`` and
           ``provisioner_key`` (registry key, e.g. ``"postgres_provisioner"``).
@@ -1007,7 +1063,11 @@ def compensate_activity(
           ``tear_down_environment`` through. Failures inside compensation are
           absorbed by the orchestrator (best effort) — every step there,
           including the Docker teardown, is individually try/except-wrapped
-          so one failing step doesn't block the others.
+          so one failing step doesn't block the others — including a stale
+          ``fencing_token`` for any individual resource, which is logged and
+          skipped rather than raised (see
+          ``ProvisioningOrchestrator.compensate``'s per-resource fencing
+          contract).
         * When ``job_id`` is set: clears ``completed_phases`` / ``phase_results``
           immediately after ``compensate`` returns — BEFORE the docker
           verification below, which can raise — so a later ``/resume`` can
@@ -1078,7 +1138,9 @@ def compensate_activity(
         )
         for t in succeeded_tools
     ]
-    orch.compensate(agent_id, shims, tear_down_environment=tear_down_environment)
+    orch.compensate(
+        agent_id, shims, tear_down_environment=tear_down_environment, fencing_token=fencing_token
+    )
 
     if job_id:
         # Compensate tears down Docker, env, and CredentialStore — no prior
@@ -1165,11 +1227,12 @@ def deprovision_activity(
         * Runs inside a Temporal activity worker for the Agent Provisioning
           task queue.
         * ``fencing_token``, when given, is the calling workflow's current
-          lease token on ``agent_id``. Checked via
-          ``_reject_stale_fencing_token`` before anything else runs (before
-          constructing ``ProvisioningOrchestrator``): raises
-          ``StaleFencingTokenError`` (non-retryable) when a later acquirer
-          has since reclaimed ``agent_id``'s lease. A no-op when
+          lease token on ``agent_id``. Checked twice, both before any
+          mutation: first via ``_reject_stale_fencing_token``
+          (``AgentLockStore``'s own record) as this activity's first
+          statement (before constructing ``ProvisioningOrchestrator``), then
+          again inside ``ProvisioningOrchestrator.deprovision`` against each
+          resource's own high-water mark. A no-op both times when
           ``fencing_token`` is ``None`` (legacy/replay call sites).
     Postconditions:
         * Raises ``StaleFencingTokenError`` before any other side effect
@@ -1178,9 +1241,21 @@ def deprovision_activity(
         * Returns ``DeprovisionResponse.model_dump()`` — a JSON-serializable dict
           with ``agent_id``/``success``/``details``/``error``. Cleanup is
           best-effort: ``success`` is ``True`` when no tool errored or ``force``
-          was set. The activity does not raise on partial-cleanup failure (the
-          response carries the error), so Temporal does not retry a run that was
-          intentionally reported as a soft failure.
+          was set. The activity does not raise on ordinary partial-cleanup
+          failure (the response carries the error), so Temporal does not retry
+          a run that was intentionally reported as a soft failure.
+        * Exception to the above: when ``fencing_token`` is given and the
+          Docker/credential/environment teardown rejects it as stale, this
+          activity DOES raise
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (registered non-retryable) rather than folding it into a soft
+          ``success=False`` response — a resumed-but-stale caller must get a
+          clean, non-retryable failure, not an infinite retry into the same
+          rejection. Tool-provisioner-level rejections (via
+          ``deprovision_tools``) remain folded into the per-provisioner
+          ``details["tools"]`` map, unchanged — each provisioner tracks its
+          own fencing high-water mark independently, so one's rejection must
+          not abort teardown of the others.
         * Heartbeats (and checks ``activity.is_cancelled()``) between each
           per-tool teardown call via a checkpoint passed into the orchestrator.
           If cancellation is observed, ``DeprovisionCancelledError`` propagates
@@ -1198,6 +1273,9 @@ def deprovision_activity(
         return activity.is_cancelled()
 
     response = ProvisioningOrchestrator().deprovision(
-        agent_id, force=force, cancellation_checkpoint=_cancellation_checkpoint
+        agent_id,
+        force=force,
+        cancellation_checkpoint=_cancellation_checkpoint,
+        fencing_token=fencing_token,
     )
     return response.model_dump()

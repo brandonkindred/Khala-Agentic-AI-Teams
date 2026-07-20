@@ -12,6 +12,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.fencing import StaleFencingTokenError
 from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
 
@@ -42,6 +43,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Provision access for the agent (generic implementation).
 
@@ -53,6 +55,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
             credentials=credentials,
             create=lambda _register: self._do_provision(config, credentials),
             hydrate_extras=("tool_name", "config"),
+            fencing_token=fencing_token,
         )
 
     def _do_provision(
@@ -93,8 +96,11 @@ class GenericProvisionerTool(BaseToolProvisioner):
             actual_permissions=prov_info.get("permissions", []),
         )
 
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
         """Remove agent access (generic implementation)."""
+        if fencing_token is not None:
+            self._state.check_fencing_token(agent_id, fencing_token)
+
         prov_info = self._state.get(agent_id)
 
         if not prov_info:
@@ -105,7 +111,7 @@ class GenericProvisionerTool(BaseToolProvisioner):
             )
 
         try:
-            self._state.delete(agent_id)
+            self._state.delete(agent_id, fencing_token=fencing_token)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,
@@ -113,6 +119,11 @@ class GenericProvisionerTool(BaseToolProvisioner):
                 details={"agent_id": agent_id, "deprovisioned": True},
             )
 
+        except StaleFencingTokenError:
+            # A stale-token rejection from the fenced _state.delete is an
+            # ownership error, not an infra failure: propagate it (non-retryable)
+            # instead of folding it into a soft success=False result.
+            raise
         except Exception as e:
             return DeprovisionResult(
                 tool_name=self.tool_name,

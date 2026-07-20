@@ -20,6 +20,7 @@ def run_credential_generation(
     credential_store: Optional[CredentialStore] = None,
     progress_callback: Optional[Callable[[str, int, int], None]] = None,
     tool_names: Optional[List[str]] = None,
+    fencing_token: Optional[int] = None,
 ) -> CredentialGenerationResult:
     """
     Execute the credential generation phase.
@@ -33,6 +34,8 @@ def run_credential_generation(
         credential_store: Store for persisting credentials
         progress_callback: Callback(tool_name, done, total) for progress updates
         tool_names: Optional frozen name list; when set, overrides ``manifest.tools``
+        fencing_token: Caller's fencing token (see ``shared.fencing``);
+            ``None`` skips enforcement.
 
     Returns:
         CredentialGenerationResult with generated credentials per tool
@@ -81,6 +84,7 @@ def run_credential_generation(
                 "password": password,
                 "token": token,
             },
+            fencing_token=fencing_token,
         )
 
         credentials[tool_name] = cred
@@ -182,6 +186,7 @@ def store_credentials_payload(
     credentials: Dict[str, Any],
     *,
     credential_store: Optional[CredentialStore] = None,
+    fencing_token: Optional[int] = None,
 ) -> None:
     """Persist a full credentials dump (including enriched fields) to the store.
 
@@ -190,6 +195,8 @@ def store_credentials_payload(
         * ``credentials`` is a mapping (may include connection_string / SSH / extra).
     Postconditions:
         * ``CredentialStore`` holds the durable fields for ``tool_name`` under ``agent_id``.
+        * When ``fencing_token`` is given and stale, raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`.
     """
     assert agent_id, "agent_id must be non-empty"
     assert tool_name, "tool_name must be non-empty"
@@ -206,4 +213,5 @@ def store_credentials_payload(
             "connection_string": credentials.get("connection_string"),
             "extra": dict(credentials.get("extra") or {}),
         },
+        fencing_token=fencing_token,
     )

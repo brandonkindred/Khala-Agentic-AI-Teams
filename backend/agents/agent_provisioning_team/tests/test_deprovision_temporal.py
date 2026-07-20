@@ -98,10 +98,34 @@ def test_deprovision_activity_calls_orchestrator() -> None:
     ):
         payload = activities.deprovision_activity("a", force=True)
 
-    fake_orch.deprovision.assert_called_once_with("a", force=True, cancellation_checkpoint=ANY)
+    fake_orch.deprovision.assert_called_once_with(
+        "a", force=True, cancellation_checkpoint=ANY, fencing_token=None
+    )
     assert payload["agent_id"] == "a"
     assert payload["success"] is True
     assert payload["details"] == {"tools": {"pg": True}}
+
+
+def test_deprovision_activity_threads_fencing_token() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    fake_orch.deprovision.return_value = DeprovisionResponse(
+        agent_id="a", success=True, details={}, error=None
+    )
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        activities.deprovision_activity("a", force=False, fencing_token=8)
+
+    fake_orch.deprovision.assert_called_once_with(
+        "a", force=False, cancellation_checkpoint=ANY, fencing_token=8
+    )
 
 
 def test_deprovision_activity_rejects_blank_agent() -> None:
@@ -121,7 +145,7 @@ def test_deprovision_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -143,7 +167,7 @@ def test_deprovision_activity_checkpoint_heartbeats_and_checks_cancellation() ->
 
     captured_checkpoint = {}
 
-    def fake_deprovision(agent_id, force=False, cancellation_checkpoint=None):
+    def fake_deprovision(agent_id, force=False, cancellation_checkpoint=None, fencing_token=None):
         captured_checkpoint["fn"] = cancellation_checkpoint
         raise DeprovisionCancelledError(agent_id, {"tools": {}})
 

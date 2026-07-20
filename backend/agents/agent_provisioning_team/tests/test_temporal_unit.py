@@ -607,32 +607,9 @@ def test_acquire_agent_lock_activity_uses_configured_ttl() -> None:
     assert captured["acquire_args"] == ("agent-1", "job-1")
 
 
-def test_release_agent_lock_activity_uses_configured_ttl() -> None:
-    """P1 regression: same TTL-wiring requirement as acquire, for release."""
-    from agent_provisioning_team.temporal import activities
-
-    captured: dict = {}
-
-    class _FakeStore:
-        def __init__(self, ttl_seconds=None):
-            captured["ttl_seconds"] = ttl_seconds
-
-        def release(self, agent_id, owner):
-            captured["release_args"] = (agent_id, owner)
-
-    with (
-        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
-        patch("agent_provisioning_team.temporal.constants.LOCK_TTL_S", 321),
-    ):
-        activities.release_agent_lock_activity("job-1", "agent-1")
-
-    assert captured["ttl_seconds"] == 321
-    assert captured["release_args"] == ("agent-1", "job-1")
-
-
 def test_acquire_agent_lock_activity_returns_fencing_token() -> None:
-    """The activity must pass AgentLockStore.acquire's fencing token straight
-    through to its own caller, not swallow it."""
+    """The workflow needs the minted token to thread into every subsequent
+    mutating activity call."""
     from agent_provisioning_team.temporal import activities
 
     class _FakeStore:
@@ -646,7 +623,50 @@ def test_acquire_agent_lock_activity_returns_fencing_token() -> None:
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
         patch("temporalio.activity.heartbeat"),
     ):
-        assert activities.acquire_agent_lock_activity("job-1", "agent-1") == 42
+        token = activities.acquire_agent_lock_activity("job-1", "agent-1")
+
+    assert token == 42
+
+
+def test_release_agent_lock_activity_forwards_fencing_token() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    captured: dict = {}
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def release(self, agent_id, owner, fencing_token=None):
+            captured["fencing_token"] = fencing_token
+
+    with patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore):
+        activities.release_agent_lock_activity("job-1", "agent-1", fencing_token=7)
+
+    assert captured["fencing_token"] == 7
+
+
+def test_release_agent_lock_activity_uses_configured_ttl() -> None:
+    """P1 regression: same TTL-wiring requirement as acquire, for release."""
+    from agent_provisioning_team.temporal import activities
+
+    captured: dict = {}
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            captured["ttl_seconds"] = ttl_seconds
+
+        def release(self, agent_id, owner, fencing_token=None):
+            captured["release_args"] = (agent_id, owner)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch("agent_provisioning_team.temporal.constants.LOCK_TTL_S", 321),
+    ):
+        activities.release_agent_lock_activity("job-1", "agent-1")
+
+    assert captured["ttl_seconds"] == 321
+    assert captured["release_args"] == ("agent-1", "job-1")
 
 
 def test_acquire_agent_lock_activity_translates_busy_error() -> None:
@@ -750,7 +770,7 @@ def test_credentials_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -762,6 +782,32 @@ def test_credentials_activity_rejects_stale_fencing_token() -> None:
         with pytest.raises(StaleFencingTokenError):
             activities.credentials_activity("j", "a", "default.yaml", fencing_token=1)
 
+    fake_run.assert_not_called()
+
+
+def test_deliver_activity_rejects_stale_fencing_token() -> None:
+    """deliver_activity must reject a stale token up front via the lock-store
+    preflight, before run_deliver's own EnvironmentStore check — closing the
+    window where a reclaiming owner has bumped the lock but not yet the env."""
+    from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
+    from agent_provisioning_team.temporal import activities
+
+    class _FakeStore:
+        def __init__(self, ttl_seconds=None):
+            pass
+
+        def check_fencing_token(self, agent_id, token):
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
+
+    with (
+        patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
+        patch.object(activities, "_best_effort_job_store"),
+        patch("agent_provisioning_team.phases.deliver.run_deliver") as fake_run,
+    ):
+        with pytest.raises(StaleFencingTokenError):
+            activities.deliver_activity("j", "a", None, {}, [], None, None, fencing_token=1)
+
+    # Rejected before any deliver-phase mutation ran.
     fake_run.assert_not_called()
 
 
@@ -797,6 +843,38 @@ def test_provision_tool_activity_calls_provisioner() -> None:
     assert payload["tool_name"] == "api_token"
     assert payload["provisioner_key"] == "generic_provisioner"
     fake_provisioner.provision.assert_called_once()
+
+
+def test_provision_tool_activity_threads_fencing_token() -> None:
+    from agent_provisioning_team.models import GeneratedCredentials, ToolProvisionResult
+    from agent_provisioning_team.temporal import activities
+
+    fake_provisioner = MagicMock()
+    fake_provisioner.provision.return_value = ToolProvisionResult(
+        tool_name="generic", success=True, provisioner_key=None
+    )
+
+    with (
+        patch.object(activities, "_best_effort_job_store"),
+        patch(
+            "agent_provisioning_team.shared.tool_agent_registry.build_default_tool_agents",
+            return_value={"generic_provisioner": fake_provisioner},
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        creds = GeneratedCredentials(tool_name="api_token", username="u", password="p")
+        activities.provision_tool_activity(
+            "j",
+            "a",
+            "api_token",
+            credentials_dump=creds.model_dump(),
+            tools_total=1,
+            provisioner="generic_provisioner",
+            tool_config={},
+            fencing_token=13,
+        )
+
+    assert fake_provisioner.provision.call_args.kwargs["fencing_token"] == 13
 
 
 def test_provision_tool_activity_injects_job_id_for_docker_provisioner() -> None:
@@ -911,7 +989,7 @@ def test_provision_tool_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -1068,6 +1146,46 @@ def test_deliver_activity_success_path() -> None:
     mock_completed.assert_called_once()
 
 
+def test_deliver_activity_threads_fencing_token() -> None:
+    from agent_provisioning_team.models import (
+        DeliverResult,
+        EnvironmentInfo,
+        ProvisioningResult,
+    )
+    from agent_provisioning_team.temporal import activities
+
+    env = EnvironmentInfo(container_id="c1", container_name="c1")
+    fake_deliver = DeliverResult(success=True)
+    final = ProvisioningResult(agent_id="a", success=True, environment=env)
+
+    with (
+        patch.object(activities, "_best_effort_job_store"),
+        patch.object(activities._js, "mark_job_completed"),
+        patch(
+            "agent_provisioning_team.phases.deliver.run_deliver", return_value=fake_deliver
+        ) as mock_run_deliver,
+        patch("agent_provisioning_team.phases.deliver.build_final_result", return_value=final),
+        patch(
+            "agent_provisioning_team.phases.deliver.redact_credentials_for_response",
+            return_value=final,
+        ),
+        patch("agent_provisioning_team.shared.environment_store.EnvironmentStore"),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        activities.deliver_activity(
+            "j",
+            "a",
+            environment_dump=env.model_dump(),
+            credentials_dump={},
+            tool_results_dump=[],
+            audit_dump=None,
+            onboarding_dump=None,
+            fencing_token=17,
+        )
+
+    assert mock_run_deliver.call_args.kwargs["fencing_token"] == 17
+
+
 def test_deliver_activity_failure_path() -> None:
     from agent_provisioning_team.models import (
         DeliverResult,
@@ -1174,6 +1292,21 @@ def test_compensate_activity_invokes_orchestrator() -> None:
     )
 
 
+def test_compensate_activity_threads_fencing_token() -> None:
+    from agent_provisioning_team.temporal import activities
+
+    fake_orch = MagicMock()
+    with patch(
+        "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+        return_value=fake_orch,
+    ):
+        activities.compensate_activity("agent-1", [], fencing_token=5)
+
+    fake_orch.compensate.assert_called_once_with(
+        "agent-1", [], tear_down_environment=True, fencing_token=5
+    )
+
+
 def test_compensate_activity_rejects_stale_fencing_token() -> None:
     from agent_provisioning_team.shared.agent_lock import StaleFencingTokenError
     from agent_provisioning_team.temporal import activities
@@ -1183,7 +1316,7 @@ def test_compensate_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -1501,7 +1634,7 @@ def test_record_account_provisioning_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     with (
         patch("agent_provisioning_team.shared.agent_lock.AgentLockStore", _FakeStore),
@@ -1567,7 +1700,9 @@ def test_record_account_provisioning_sets_tool_counts() -> None:
         tools_completed=2,
         tools_total=2,
     )
-    fake_env.add_tools.assert_called_once_with("agent-1", ["postgresql", "redis"])
+    fake_env.add_tools.assert_called_once_with(
+        "agent-1", ["postgresql", "redis"], fencing_token=None
+    )
 
 
 def test_record_account_provisioning_strips_plaintext_secrets() -> None:
@@ -1979,6 +2114,34 @@ def test_setup_activity_progress_path() -> None:
     mock_phase.assert_called_once()
 
 
+def test_setup_activity_threads_fencing_token() -> None:
+    from agent_provisioning_team.models import EnvironmentInfo, SetupResult
+    from agent_provisioning_team.temporal import activities as t_acts
+
+    fake_setup_result = SetupResult(
+        success=True,
+        environment=EnvironmentInfo(container_id="c1", container_name="c1"),
+    )
+    fake_orch = MagicMock()
+    fake_orch.environment_store = MagicMock()
+    fake_orch.tool_agents = {"docker_provisioner": MagicMock()}
+    fake_manifest = MagicMock()
+
+    with (
+        patch.object(t_acts, "_best_effort_job_store"),
+        patch.object(t_acts._js, "add_completed_phase"),
+        patch.object(t_acts, "_load_ctx", return_value=(fake_orch, fake_manifest)),
+        patch(
+            "agent_provisioning_team.phases.setup.run_setup",
+            return_value=fake_setup_result,
+        ) as mock_run_setup,
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t_acts.setup_activity("j", "a", "default.yaml", fencing_token=21)
+
+    assert mock_run_setup.call_args.kwargs["fencing_token"] == 21
+
+
 def test_setup_activity_passes_its_own_job_id_to_run_setup() -> None:
     """setup_activity must forward its own job_id into run_setup, or the
     khala.job_id label never reaches the real environment container -- the
@@ -2240,7 +2403,7 @@ def test_setup_activity_rejects_stale_fencing_token() -> None:
             pass
 
         def check_fencing_token(self, agent_id, token):
-            raise StaleFencingTokenError(agent_id, token, current_token=token + 1)
+            raise StaleFencingTokenError(agent_id, "agent_lock", token, token + 1)
 
     prior = {"success": True, "environment": None}
     with (

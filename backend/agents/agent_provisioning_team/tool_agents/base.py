@@ -15,6 +15,7 @@ from ..models import (
     GeneratedCredentials,
     ToolProvisionResult,
 )
+from ..shared.fencing import StaleFencingTokenError
 from ..shared.provisioner_state import CompensationRecord
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class ToolProvisionerInterface(Protocol):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Provision resources for the agent in this tool.
 
@@ -43,6 +45,8 @@ class ToolProvisionerInterface(Protocol):
             agent_id: Unique identifier for the agent
             config: Tool-specific configuration from manifest
             credentials: Pre-generated credentials to use
+            fencing_token: Caller's fencing token (see
+                ``shared.fencing``); ``None`` skips enforcement.
 
         Returns:
             ToolProvisionResult with success status and details
@@ -63,11 +67,13 @@ class ToolProvisionerInterface(Protocol):
         """
         ...
 
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
         """Remove agent's access and clean up resources.
 
         Args:
             agent_id: Agent to deprovision
+            fencing_token: Caller's fencing token (see
+                ``shared.fencing``); ``None`` skips enforcement.
 
         Returns:
             DeprovisionResult with success status
@@ -98,6 +104,7 @@ class BaseToolProvisioner(ABC):
         agent_id: str,
         config: Dict[str, Any],
         credentials: GeneratedCredentials,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Provision resources for the agent."""
         pass
@@ -111,7 +118,7 @@ class BaseToolProvisioner(ABC):
         pass
 
     @abstractmethod
-    def deprovision(self, agent_id: str) -> DeprovisionResult:
+    def deprovision(self, agent_id: str, fencing_token: Optional[int] = None) -> DeprovisionResult:
         """Remove agent access and resources."""
         pass
 
@@ -147,6 +154,7 @@ class BaseToolProvisioner(ABC):
         hydrate_extras: Tuple[str, ...] = (),
         reuse: Optional[Callable[[Dict[str, Any]], List[str]]] = None,
         on_persist_failure: Optional[Callable[[Dict[str, Any]], None]] = None,
+        fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Run ``create`` once per (provisioner, agent_id); reuse stored state on subsequent calls.
 
@@ -198,16 +206,54 @@ class BaseToolProvisioner(ABC):
           path has nothing to find. Exceptions from ``on_persist_failure`` are
           logged and swallowed so cleanup can never mask the original
           persistence failure, which still propagates to the error-result
-          translation below.
+          translation below. Not invoked when ``state.put`` raises
+          ``StaleFencingTokenError`` (see below) — that failure always
+          propagates immediately, since auto-removing the resource this call
+          just created could race a legitimate new owner discovering and
+          adopting the very same resource.
+        * ``fencing_token``, when given, is checked against ``self._state``
+          *before* ``create`` runs — i.e. before any real infrastructure
+          mutation, not just before the final state persist — so a stale
+          caller's write is rejected before it can touch live infrastructure.
+          A rejection raises
+          :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+          (propagated, not converted to an error result: this is a
+          programming/ownership error, not an infrastructure failure). The
+          same rejection can also surface later, from the final
+          ``state.put`` — ``create`` may run for a long time (e.g. a slow
+          ``docker run``), long enough for a legitimate new owner to reclaim
+          ``agent_id`` in the interim — and propagates identically either way.
+          On the reuse path (``existing is not None``), which otherwise never
+          calls ``state.put``, ``fencing_token`` is still persisted as the
+          new high-water mark — a reuse is a real, validated touch by this
+          caller, and skipping the persist would let a later call presenting
+          a token between the old mark and this one wrongly pass as current
+          against state this caller never actually validated against.
         """
         state = self._state
 
         def _register(kind: str, payload: Dict[str, Any]) -> None:
-            state.add_compensation(agent_id, CompensationRecord(kind=kind, payload=payload))
+            state.add_compensation(
+                agent_id,
+                CompensationRecord(kind=kind, payload=payload),
+                fencing_token=fencing_token,
+            )
 
         try:
+            if fencing_token is not None:
+                state.check_fencing_token(agent_id, fencing_token)
+
             existing = state.get(agent_id)
             if existing is not None:
+                if fencing_token is not None:
+                    # The preflight above only checked the token; the reuse
+                    # path returns without ever calling state.put(), so
+                    # without this the stored high-water mark would stay at
+                    # whatever it was before this call. A later call
+                    # presenting a token between the old mark and this one
+                    # would then wrongly pass as "not stale" against state
+                    # this caller never actually validated against.
+                    state.put(agent_id, existing, fencing_token=fencing_token)
                 for key in hydrate_extras:
                     if key in existing:
                         credentials.extra.setdefault(key, existing[key])
@@ -223,7 +269,9 @@ class BaseToolProvisioner(ABC):
 
             permissions, details = create(_register)
             try:
-                state.put(agent_id, details)
+                state.put(agent_id, details, fencing_token=fencing_token)
+            except StaleFencingTokenError:
+                raise
             except Exception:
                 if on_persist_failure is not None:
                     try:
@@ -240,6 +288,8 @@ class BaseToolProvisioner(ABC):
                 permissions=permissions,
                 details=details,
             )
+        except StaleFencingTokenError:
+            raise
         except FileNotFoundError as e:
             return self._make_error_result(f"{self.tool_name}: required binary not found: {e}")
         except subprocess.TimeoutExpired:
@@ -254,9 +304,9 @@ class BaseToolProvisioner(ABC):
         """Return compensation records registered for ``agent_id``."""
         return self._state.list_compensations(agent_id)
 
-    def clear_compensations(self, agent_id: str) -> None:
+    def clear_compensations(self, agent_id: str, fencing_token: Optional[int] = None) -> None:
         """Clear compensation records for ``agent_id`` (leaves details intact)."""
-        self._state.clear_compensations(agent_id)
+        self._state.clear_compensations(agent_id, fencing_token=fencing_token)
 
     def replay_compensation(
         self,

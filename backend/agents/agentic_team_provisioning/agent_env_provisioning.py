@@ -123,13 +123,14 @@ def _spawn_provision_thread(
     ).start()
 
 
-def _acquire_lock_blocking(lock_store, agent_id: str, owner: str, timeout_s: float) -> None:
+def _acquire_lock_blocking(lock_store, agent_id: str, owner: str, timeout_s: float) -> int:
     """Retry ``lock_store.acquire`` with capped backoff until ``timeout_s`` elapses.
 
     Preconditions:
         * ``timeout_s`` is positive.
     Postconditions:
-        * Returns once ``owner`` holds ``agent_id``'s lock.
+        * Returns the fencing token ``owner`` now holds for ``agent_id`` (see
+          ``AgentLockStore.acquire``) once acquired.
         * Raises the last ``AgentLockBusyError`` once ``timeout_s`` elapses
           without acquiring it.
     """
@@ -140,8 +141,7 @@ def _acquire_lock_blocking(lock_store, agent_id: str, owner: str, timeout_s: flo
     delay = _LOCK_RETRY_INITIAL_S
     while True:
         try:
-            lock_store.acquire(agent_id, owner)
-            return
+            return lock_store.acquire(agent_id, owner)
         except AgentLockBusyError:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -170,8 +170,15 @@ def _provision_one(
     Postconditions:
         * ``store.mark_agent_env_provision_finished`` is called exactly once
           for ``(team_id, stable_key)``.
-        * The ``AgentLockStore`` record for ``provisioning_agent_id`` is not
-          held by this run's owner token when this function returns.
+        * This function always attempts ``lock_store.release(...)`` for
+          ``provisioning_agent_id`` under this run's owner token before
+          returning; on the common path that succeeds and the record is no
+          longer held by this run. A release failure (e.g. an unreadable
+          lock record) is logged and swallowed rather than re-raised —
+          matching this package's convention that cleanup/release paths
+          never mask the original provisioning result — so in that rare
+          case the record can remain held under this run's owner token
+          until its lease naturally expires.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.shared.agent_lock import AgentLockBusyError, AgentLockStore
@@ -180,7 +187,9 @@ def _provision_one(
     owner = f"agentic-team-provision-{uuid.uuid4().hex}"
     lock_store = AgentLockStore(ttl_seconds=LOCK_TTL_S)
     try:
-        _acquire_lock_blocking(lock_store, provisioning_agent_id, owner, LOCK_ACQUIRE_TIMEOUT_S)
+        fencing_token = _acquire_lock_blocking(
+            lock_store, provisioning_agent_id, owner, LOCK_ACQUIRE_TIMEOUT_S
+        )
     except AgentLockBusyError as e:
         logger.error(
             "Agent lock busy for team=%s key=%s agent_id=%s: %s",
@@ -200,6 +209,7 @@ def _provision_one(
             agent_id=provisioning_agent_id,
             manifest_path=_MANIFEST,
             job_updater=None,
+            fencing_token=fencing_token,
         )
         if result.success:
             store.mark_agent_env_provision_finished(
@@ -224,7 +234,7 @@ def _provision_one(
         )
     finally:
         try:
-            lock_store.release(provisioning_agent_id, owner)
+            lock_store.release(provisioning_agent_id, owner, fencing_token=fencing_token)
         except Exception:
             logger.exception(
                 "Failed to release agent lock for agent_id=%s owner=%s",

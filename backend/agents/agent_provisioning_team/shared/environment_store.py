@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .fencing import check_fencing_token
 from .path_safety import candidate_paths, safe_path_component
 
 
@@ -265,6 +266,33 @@ class EnvironmentStore:
             return data, path
         return None, None
 
+    def _read_raw_fencing_token(self, agent_id: str) -> Optional[int]:
+        """Read a lingering fencing token from a tombstone :meth:`remove` left behind.
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Bypasses ``_read_env_data``'s required-fields check — a
+              tombstone deliberately omits ``container_id``/
+              ``container_name`` so ordinary readers (``get``/``list_all``/
+              ``exists``) treat it as absent, but the fencing high-water
+              mark it carries must still be found here by :meth:`register`'s
+              own prior-token lookup, or a stale caller's write would read
+              ``current_token=None`` (bootstrap) and be wrongly accepted.
+            * Returns the first existing candidate's ``fencing_token`` when
+              it is an ``int``, else ``None``. Never raises.
+        """
+        for path in self._env_file_candidates(agent_id):
+            try:
+                if not path.exists():
+                    continue
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                continue
+            token = data.get("fencing_token") if isinstance(data, dict) else None
+            return token if isinstance(token, int) else None
+        return None
+
     def _write_env_data(
         self, agent_id: str, data: Dict[str, Any], source: Optional[Path] = None
     ) -> None:
@@ -301,7 +329,7 @@ class EnvironmentStore:
         if source is not None and source != primary and source.exists():
             source.unlink()
 
-    def register(self, env_info: EnvironmentInfo) -> None:
+    def register(self, env_info: EnvironmentInfo, *, fencing_token: Optional[int] = None) -> None:
         """Register (or overwrite) an environment record.
 
         Preconditions:
@@ -314,13 +342,41 @@ class EnvironmentStore:
               (or the absence of one) is preserved unchanged — a failed register
               never leaves a truncated or partial record behind.
             * Returns ``None``.
+            * When ``fencing_token`` is given and a prior record for this
+              ``agent_id`` already recorded a higher fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and leaves the record untouched. Otherwise the given token (or,
+              when ``fencing_token`` is ``None``, whichever token — if any —
+              the prior record already carried) becomes the new record's
+              recorded token. The prior-token lookup also finds a fencing
+              tombstone :meth:`remove` left behind (no valid record exists,
+              but the high-water mark survives) — this is the only write
+              method here that creates a record unconditionally rather than
+              modifying an existing one, so it is the one place a stale
+              caller could otherwise resurrect a torn-down environment by
+              reading a bootstrap ``current_token=None``.
         """
         if env_info is None:
             raise ValueError("env_info must not be None")
         if not env_info.agent_id:
             raise ValueError("agent_id must not be empty")
         with _lock:
-            self._write_env_data(env_info.agent_id, env_info.to_dict())
+            existing_data, _src = self._read_env_data(env_info.agent_id)
+            if existing_data is not None:
+                prior_token = existing_data.get("fencing_token")
+            else:
+                prior_token = self._read_raw_fencing_token(env_info.agent_id)
+            prior_token = prior_token if isinstance(prior_token, int) else None
+            if fencing_token is not None:
+                check_fencing_token(
+                    agent_id=env_info.agent_id,
+                    resource="environment_store",
+                    provided_token=fencing_token,
+                    current_token=prior_token,
+                )
+            data = env_info.to_dict()
+            data["fencing_token"] = fencing_token if fencing_token is not None else prior_token
+            self._write_env_data(env_info.agent_id, data)
 
     def readable(self, agent_id: str) -> bool:
         """Report whether ``agent_id``'s record location(s) can be examined now.
@@ -404,7 +460,9 @@ class EnvironmentStore:
                 # Malformed / partial legacy records are treated as absent.
                 return None
 
-    def update_status(self, agent_id: str, status: str) -> bool:
+    def update_status(
+        self, agent_id: str, status: str, *, fencing_token: Optional[int] = None
+    ) -> bool:
         """Update the status of an environment.
 
         Preconditions:
@@ -415,21 +473,38 @@ class EnvironmentStore:
               rewrites the record to the primary store, and returns ``True``.
             * Returns ``False`` when the env is missing or its file is corrupt
               (including a well-formed record with an invalid field value).
+            * When ``fencing_token`` is given and lower than this record's
+              already-recorded fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and leaves the record untouched.
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
+            prior_token = data.get("fencing_token")
+            prior_token = prior_token if isinstance(prior_token, int) else None
+            if fencing_token is not None:
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource="environment_store",
+                    provided_token=fencing_token,
+                    current_token=prior_token,
+                )
             try:
                 info = EnvironmentInfo.from_dict(data)
             except (KeyError, TypeError, ValueError):
                 return False
             info.status = status
             info.updated_at = datetime.now(timezone.utc).isoformat()
-            self._write_env_data(agent_id, info.to_dict(), source=src)
+            new_data = info.to_dict()
+            new_data["fencing_token"] = fencing_token if fencing_token is not None else prior_token
+            self._write_env_data(agent_id, new_data, source=src)
             return True
 
-    def add_tool(self, agent_id: str, tool_name: str) -> bool:
+    def add_tool(
+        self, agent_id: str, tool_name: str, *, fencing_token: Optional[int] = None
+    ) -> bool:
         """Add a single tool to the environment's provisioned tools list.
 
         Preconditions:
@@ -437,15 +512,18 @@ class EnvironmentStore:
             * ``tool_name`` is the tool to record (empty is a no-op via
               ``add_tools``).
         Postconditions:
-            * Delegates to ``add_tools([tool_name])``; when the env exists and
-              ``tool_name`` is non-empty, ``tool_name`` is present in
-              ``tools_provisioned`` (an empty ``tool_name`` is a no-op).
+            * Delegates to ``add_tools([tool_name], fencing_token=fencing_token)``;
+              when the env exists and ``tool_name`` is non-empty, ``tool_name``
+              is present in ``tools_provisioned`` (an empty ``tool_name`` is a
+              no-op).
             * Returns ``True`` on success, ``False`` when the env is missing or
               corrupt (per ``add_tools``).
         """
-        return self.add_tools(agent_id, [tool_name])
+        return self.add_tools(agent_id, [tool_name], fencing_token=fencing_token)
 
-    def add_tools(self, agent_id: str, tool_names: List[str]) -> bool:
+    def add_tools(
+        self, agent_id: str, tool_names: List[str], *, fencing_token: Optional[int] = None
+    ) -> bool:
         """Add zero or more tools in one read/modify/write under the store lock.
 
         Preconditions:
@@ -458,11 +536,24 @@ class EnvironmentStore:
               refreshed.
             * Returns ``False`` when the env is missing or the file is corrupt
               (including a well-formed record with an invalid field value).
+            * When ``fencing_token`` is given and lower than this record's
+              already-recorded fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and leaves the record untouched.
         """
         with _lock:
             data, src = self._read_env_data(agent_id)
             if data is None:
                 return False
+            prior_token = data.get("fencing_token")
+            prior_token = prior_token if isinstance(prior_token, int) else None
+            if fencing_token is not None:
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource="environment_store",
+                    provided_token=fencing_token,
+                    current_token=prior_token,
+                )
             try:
                 info = EnvironmentInfo.from_dict(data)
             except (KeyError, TypeError, ValueError):
@@ -473,10 +564,12 @@ class EnvironmentStore:
                     tools.append(tool_name)
             info.tools_provisioned = tools
             info.updated_at = datetime.now(timezone.utc).isoformat()
-            self._write_env_data(agent_id, info.to_dict(), source=src)
+            new_data = info.to_dict()
+            new_data["fencing_token"] = fencing_token if fencing_token is not None else prior_token
+            self._write_env_data(agent_id, new_data, source=src)
             return True
 
-    def remove(self, agent_id: str) -> bool:
+    def remove(self, agent_id: str, *, fencing_token: Optional[int] = None) -> bool:
         """Remove an environment from the registry.
 
         Preconditions:
@@ -485,13 +578,42 @@ class EnvironmentStore:
             * Deletes the primary env file and any legacy copies for ``agent_id``.
             * Returns ``True`` iff at least one file was removed; idempotent —
               returns ``False`` when no record existed.
+            * When ``fencing_token`` is given and lower than this record's
+              already-recorded fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and removes nothing.
+            * When ``fencing_token`` is given, a tombstone carrying just that
+              token is written to the primary path afterward — deleting every
+              file outright would reset a later caller's prior-token lookup
+              to ``current_token=None`` (bootstrap), letting a stale caller's
+              ``register`` call silently recreate an environment a newer
+              owner already tore down. The tombstone deliberately omits
+              ``container_id``/``container_name``, so ``get``/``list_all``/
+              ``exists`` all still correctly treat it as absent — only
+              ``register``'s own prior-token lookup (via
+              ``_read_raw_fencing_token``) reads it. When ``fencing_token``
+              is ``None``, behavior is unchanged: no tombstone is written.
         """
         with _lock:
+            if fencing_token is not None:
+                data, _src = self._read_env_data(agent_id)
+                if data is not None:
+                    prior_token = data.get("fencing_token")
+                else:
+                    prior_token = self._read_raw_fencing_token(agent_id)
+                check_fencing_token(
+                    agent_id=agent_id,
+                    resource="environment_store",
+                    provided_token=fencing_token,
+                    current_token=prior_token if isinstance(prior_token, int) else None,
+                )
             removed = False
             for path in self._env_file_candidates(agent_id):
                 if path.exists():
                     path.unlink()
                     removed = True
+            if fencing_token is not None:
+                self._write_env_data(agent_id, {"fencing_token": fencing_token})
             return removed
 
     def list_all(self, status: Optional[str] = None) -> List[EnvironmentInfo]:

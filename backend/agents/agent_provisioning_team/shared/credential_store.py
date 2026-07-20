@@ -30,7 +30,16 @@ from typing import Any, Dict, List, Optional
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
+from .fencing import check_fencing_token
 from .path_safety import candidate_paths, safe_path_component
+
+# Reserved key inside the per-agent decrypted blob (which is otherwise
+# ``{tool_name: {...credentials...}}``) used to persist the store's
+# fencing-token high-water mark. Deliberately not a value any real
+# ``tool_name`` could collide with, and filtered out of
+# ``get_credentials``'s whole-dict return path so it never surfaces as a
+# fake "tool".
+_FENCING_TOKEN_KEY = "__khala_fencing_token__"
 
 
 def default_credentials_dir() -> Path:
@@ -355,8 +364,22 @@ class CredentialStore:
         agent_id: str,
         tool_name: str,
         credentials: Dict[str, Any],
+        *,
+        fencing_token: Optional[int] = None,
     ) -> None:
-        """Store credentials for a tool, encrypted at rest."""
+        """Store credentials for a tool, encrypted at rest.
+
+        Preconditions:
+            * ``agent_id``, ``tool_name`` are non-empty.
+        Postconditions:
+            * ``credentials`` is stored under ``tool_name`` in the encrypted
+              per-agent blob.
+            * When ``fencing_token`` is given and lower than this agent's
+              already-recorded fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and leaves the stored blob untouched. Otherwise the given
+              token becomes the new recorded high-water mark.
+        """
         path = self._agent_file(agent_id)
 
         existing: Dict[str, Dict[str, Any]] = {}
@@ -367,6 +390,16 @@ class CredentialStore:
                 existing = json.loads(decrypted.decode())
             except (InvalidToken, ValueError, OSError):
                 existing = {}
+
+        if fencing_token is not None:
+            prior_token = existing.get(_FENCING_TOKEN_KEY)
+            check_fencing_token(
+                agent_id=agent_id,
+                resource="credential_store",
+                provided_token=fencing_token,
+                current_token=prior_token if isinstance(prior_token, int) else None,
+            )
+            existing[_FENCING_TOKEN_KEY] = fencing_token
 
         existing[tool_name] = credentials
 
@@ -379,13 +412,48 @@ class CredentialStore:
         agent_id: str,
         tool_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Retrieve credentials for an agent (all or specific tool)."""
-        all_creds, _src = self._read_agent_credentials(agent_id)
-        if all_creds is None:
-            return None
-        if tool_name:
-            return all_creds.get(tool_name)
-        return all_creds
+        """Retrieve credentials for an agent (all or specific tool).
+
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Scans every candidate independently (primary, then legacy —
+              same order as :meth:`list_tool_names`), not just whichever one
+              ``_read_agent_credentials`` would stop at first. A candidate
+              that decrypts to nothing but the fencing-token sentinel (left
+              behind by :meth:`delete_credentials`'s tombstone, or by
+              :meth:`delete_tool_credentials` purging a primary's last real
+              tool) is treated as having no visible data and skipped, so a
+              sentinel-only primary can never shadow a legacy candidate that
+              still holds a real tool's credentials — unlike a naive
+              single-candidate read, which would stop at the sentinel-only
+              primary and report the tool as absent even though it is still
+              recoverable from the legacy candidate.
+            * The whole-dict form (``tool_name`` omitted) never surfaces the
+              sentinel key; returns the first candidate's visible data once
+              any candidate has some, or ``None`` if every candidate is
+              missing, unreadable, or sentinel-only.
+            * The per-tool form returns that tool's entry from the first
+              candidate that has it, or ``None`` if no candidate does.
+        """
+        assert agent_id, "agent_id must be non-empty"
+        for path in self._agent_file_candidates(agent_id):
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(self.multifernet.decrypt(path.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            if tool_name:
+                if tool_name in data:
+                    return data[tool_name]
+                continue
+            visible = {k: v for k, v in data.items() if k != _FENCING_TOKEN_KEY}
+            if visible:
+                return visible
+        return None
 
     def list_tool_names(self, agent_id: str) -> set[str]:
         """Return every tool name stored for ``agent_id`` across ALL candidates.
@@ -405,6 +473,7 @@ class CredentialStore:
             * An unreadable or corrupt candidate contributes nothing to the
               result (same tolerance as ``_read_agent_credentials``) rather
               than raising.
+            * Never includes the internal fencing-token sentinel key.
         """
         assert agent_id, "agent_id must be non-empty"
         names: set[str] = set()
@@ -416,7 +485,7 @@ class CredentialStore:
             except (InvalidToken, ValueError, OSError):
                 continue
             if isinstance(data, dict):
-                names.update(data.keys())
+                names.update(k for k in data.keys() if k != _FENCING_TOKEN_KEY)
         return names
 
     def rotate_key(self, new_key: str) -> int:
@@ -455,21 +524,67 @@ class CredentialStore:
                 continue
         return rotated
 
-    def delete_credentials(self, agent_id: str) -> bool:
-        """Delete all credentials for an agent (primary and legacy paths)."""
+    def delete_credentials(self, agent_id: str, *, fencing_token: Optional[int] = None) -> bool:
+        """Delete all credentials for an agent (primary and legacy paths).
+
+        When ``fencing_token`` is given and lower than this agent's
+        already-recorded fencing token, raises
+        :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+        and deletes nothing.
+
+        Postconditions:
+            * When ``fencing_token`` is given, the primary path is not left
+              absent: every candidate (primary and legacy) is removed as
+              before, then the primary is rewritten as a tombstone blob
+              holding only the fencing-token sentinel. Leaving no file at
+              all would reset a later caller's bootstrap comparison
+              (``current_token=None``) to always-accept, letting a stale
+              caller's post-teardown ``store_credentials`` call silently
+              resurrect a secret a newer owner already tore down.
+              ``get_credentials``/``list_tool_names`` both already treat
+              this tombstone as indistinguishable from no credentials at
+              all, so this is invisible to every caller that doesn't care
+              about the fencing high-water mark.
+            * When ``fencing_token`` is ``None``, behavior is unchanged: no
+              tombstone is written.
+        """
+        if fencing_token is not None:
+            existing, _src = self._read_agent_credentials(agent_id)
+            prior_token = existing.get(_FENCING_TOKEN_KEY) if existing else None
+            check_fencing_token(
+                agent_id=agent_id,
+                resource="credential_store",
+                provided_token=fencing_token,
+                current_token=prior_token if isinstance(prior_token, int) else None,
+            )
         deleted = False
         for path in self._agent_file_candidates(agent_id):
             if path.exists():
                 path.unlink()
                 deleted = True
+        if fencing_token is not None:
+            tombstone = self.multifernet.encrypt(
+                json.dumps({_FENCING_TOKEN_KEY: fencing_token}).encode()
+            )
+            primary = self._agent_file(agent_id)
+            primary.write_bytes(tombstone)
+            primary.chmod(0o600)
         return deleted
 
-    def delete_tool_credentials(self, agent_id: str, tool_name: str) -> bool:
+    def delete_tool_credentials(
+        self, agent_id: str, tool_name: str, *, fencing_token: Optional[int] = None
+    ) -> bool:
         """Remove one tool's credential entry, preserving the agent's others.
 
         Preconditions:
             * ``agent_id`` / ``tool_name`` are non-empty.
         Postconditions:
+            * When ``fencing_token`` is given and lower than this agent's
+              already-recorded fencing token, raises
+              :class:`~agent_provisioning_team.shared.fencing.StaleFencingTokenError`
+              and removes nothing — a stale rollback must not purge a tool
+              credential a newer owner may have already regenerated under
+              the same name.
             * When ``agent_id`` has no stored credentials anywhere (primary or
               legacy), or none of them contain ``tool_name``, returns
               ``False`` and nothing is written.
@@ -504,6 +619,15 @@ class CredentialStore:
         """
         assert agent_id, "agent_id must be non-empty"
         assert tool_name, "tool_name must be non-empty"
+        if fencing_token is not None:
+            existing, _src = self._read_agent_credentials(agent_id)
+            prior_token = existing.get(_FENCING_TOKEN_KEY) if existing else None
+            check_fencing_token(
+                agent_id=agent_id,
+                resource="credential_store",
+                provided_token=fencing_token,
+                current_token=prior_token if isinstance(prior_token, int) else None,
+            )
         removed_any = False
         primary = self._agent_file(agent_id)
         if primary.exists():
@@ -513,6 +637,16 @@ class CredentialStore:
                 data = None
             if isinstance(data, dict) and tool_name in data:
                 del data[tool_name]
+                # A blob still holding the fencing-token sentinel is kept, not
+                # unlinked: the sentinel is this store's high-water mark, and
+                # dropping it would let a resumed stale caller's later
+                # store_credentials bootstrap-accept (current_token=None) and
+                # resurrect a secret a newer owner tore down — the exact
+                # resurrection the mark exists to block. A primary reduced to
+                # sentinel-only no longer shadows a legacy file's OTHER tools:
+                # get_credentials/list_tool_names both scan every candidate
+                # independently and skip a sentinel-only blob rather than
+                # stopping at it.
                 if data:
                     primary.write_bytes(self.multifernet.encrypt(json.dumps(data).encode()))
                     primary.chmod(0o600)

@@ -147,6 +147,38 @@ def test_provision_one_success_acquires_and_releases_lock(fake_pg: dict):
     )
 
 
+def test_provision_one_threads_fencing_token(fake_pg: dict):
+    """The token minted by acquire() must reach both run_workflow() and the
+    final release() -- this path has no renewal loop (single synchronous
+    run_workflow call under one lease), so the one captured value is used
+    throughout."""
+    store = MagicMock()
+    fake_orch = MagicMock()
+    fake_orch.run_workflow.return_value = _FakeResult(success=True)
+    fake_lock_store = MagicMock()
+    fake_lock_store.acquire.return_value = 7
+
+    with (
+        patch(
+            "agent_provisioning_team.orchestrator.ProvisioningOrchestrator",
+            return_value=fake_orch,
+        ),
+        patch(
+            "agent_provisioning_team.shared.agent_lock.AgentLockStore",
+            return_value=fake_lock_store,
+        ),
+    ):
+        _provision_one(
+            team_id="t1",
+            stable_key="p1:s1:A1",
+            provisioning_agent_id="at-test-id",
+            store=store,
+        )
+
+    assert fake_orch.run_workflow.call_args.kwargs["fencing_token"] == 7
+    assert fake_lock_store.release.call_args.kwargs["fencing_token"] == 7
+
+
 def test_provision_one_releases_lock_when_orchestrator_raises(fake_pg: dict):
     store = MagicMock()
     fake_orch = MagicMock()
@@ -218,6 +250,15 @@ def test_acquire_lock_blocking_returns_once_acquired():
     _acquire_lock_blocking(lock_store, "agent-1", "owner-1", timeout_s=5)
 
     lock_store.acquire.assert_called_once_with("agent-1", "owner-1")
+
+
+def test_acquire_lock_blocking_returns_fencing_token():
+    lock_store = MagicMock()
+    lock_store.acquire.return_value = 3
+
+    token = _acquire_lock_blocking(lock_store, "agent-1", "owner-1", timeout_s=5)
+
+    assert token == 3
 
 
 def test_acquire_lock_blocking_raises_after_timeout():

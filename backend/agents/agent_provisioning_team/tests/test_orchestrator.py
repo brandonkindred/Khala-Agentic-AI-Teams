@@ -4,9 +4,10 @@ resume-with-skip, deprovisioning, and the smaller status helpers."""
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -14,6 +15,7 @@ from agent_provisioning_team.models import (
     AccessAuditResult,
     AccountProvisioningResult,
     CredentialGenerationResult,
+    DeliverResult,
     DeprovisionResult,
     DocumentationResult,
     EnvironmentInfo,
@@ -238,6 +240,63 @@ def test_run_workflow_with_job_updater_callback(tmp_path: Path, monkeypatch) -> 
     assert any(u.get("progress") == 100 for u in updates)
 
 
+def test_run_workflow_threads_fencing_token_to_every_phase(tmp_path: Path, monkeypatch) -> None:
+    from agent_provisioning_team import orchestrator as orch_mod
+
+    captured: Dict[str, Any] = {}
+
+    def _capturing(name):
+        def _fake(**kw):
+            captured[name] = kw
+            return {
+                "run_setup": SetupResult(
+                    success=True,
+                    environment=EnvironmentInfo(
+                        container_id="c1", container_name="c1", workspace_path="/tmp/ws"
+                    ),
+                ),
+                "run_credential_generation": CredentialGenerationResult(
+                    success=True, credentials={}
+                ),
+                "run_account_provisioning": AccountProvisioningResult(
+                    success=True, tool_results=[]
+                ),
+                "run_access_audit": AccessAuditResult(passed=True, verifications=[]),
+                "run_documentation": DocumentationResult(
+                    success=True,
+                    onboarding=OnboardingPacket(summary="s", tools=[], environment_variables={}),
+                ),
+                "run_deliver": DeliverResult(success=True, finalized_at=datetime.now(timezone.utc)),
+            }[name]
+
+        return _fake
+
+    for name in (
+        "run_setup",
+        "run_credential_generation",
+        "run_account_provisioning",
+        "run_access_audit",
+        "run_documentation",
+        "run_deliver",
+    ):
+        monkeypatch.setattr(orch_mod, name, _capturing(name))
+
+    orch = ProvisioningOrchestrator(
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs")
+    )
+    manifest = _make_manifest(tmp_path)
+    result = orch.run_workflow(agent_id="a1", manifest_path=manifest, fencing_token=11)
+
+    assert result.success is True
+    for name in (
+        "run_setup",
+        "run_credential_generation",
+        "run_account_provisioning",
+        "run_deliver",
+    ):
+        assert captured[name]["fencing_token"] == 11, f"{name} did not receive fencing_token"
+
+
 def test_run_workflow_resume_restores_all_phases(tmp_path: Path, monkeypatch) -> None:
     """skip_phases for every prior phase; only DELIVER runs."""
     from agent_provisioning_team import orchestrator as orch_mod
@@ -352,8 +411,8 @@ def test_run_workflow_account_provisioning_failure_compensates(tmp_path: Path, m
     assert result.success is False
     assert result.current_phase == Phase.ACCOUNT_PROVISIONING
     # Generic was deprovisioned (legacy path); docker too.
-    fake_generic.deprovision.assert_called_once_with("a1")
-    fake_docker.deprovision.assert_called_once_with("a1")
+    fake_generic.deprovision.assert_called_once_with("a1", fencing_token=None)
+    fake_docker.deprovision.assert_called_once_with("a1", fencing_token=None)
 
 
 def test_compensate_swallows_docker_failure(tmp_path: Path) -> None:
@@ -412,7 +471,7 @@ def test_compensate_skips_when_provisioner_unregistered(tmp_path: Path) -> None:
     success_unknown_key = ToolProvisionResult(tool_name="t", success=True, provisioner_key="ghost")
     orch.compensate("a1", [success_unknown_key])
     # Unknown registry key skips per-tool rollback; docker/env teardown still runs.
-    fake_docker.deprovision.assert_called_once_with("a1")
+    fake_docker.deprovision.assert_called_once_with("a1", fencing_token=None)
 
 
 def test_compensate_list_compensations_failure_falls_to_deprovision(tmp_path: Path) -> None:
@@ -538,8 +597,8 @@ def test_compensate_purges_credentials_for_rolled_back_tool(tmp_path: Path) -> N
     # tear_down_environment=False: the whole-agent credential file is NOT
     # wiped, so the per-tool purge below must run independently of that flag.
     orch.compensate("a1", [fresh], tear_down_environment=False)
-    fake_prov.deprovision.assert_called_once_with("a1")
-    cred_store.delete_tool_credentials.assert_called_once_with("a1", "t")
+    fake_prov.deprovision.assert_called_once_with("a1", fencing_token=None)
+    cred_store.delete_tool_credentials.assert_called_once_with("a1", "t", fencing_token=None)
 
 
 def test_compensate_preserves_credentials_when_deprovision_reports_failure(
@@ -568,7 +627,7 @@ def test_compensate_preserves_credentials_when_deprovision_reports_failure(
 
     fresh = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
     orch.compensate("a1", [fresh], tear_down_environment=False)
-    fake_prov.deprovision.assert_called_once_with("a1")
+    fake_prov.deprovision.assert_called_once_with("a1", fencing_token=None)
     cred_store.delete_tool_credentials.assert_not_called()
 
 
@@ -727,6 +786,88 @@ def test_compensate_post_replay_state_cleanup_failure(tmp_path: Path) -> None:
     orch.compensate("a1", [success])
 
 
+def test_compensate_skips_resource_with_stale_fencing_token(tmp_path: Path) -> None:
+    """The preflight check must run BEFORE replay_compensation -- a real,
+    destructive SQL/API call with no fencing check of its own -- not just
+    before the final clear_compensations()/_state.delete()."""
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+    from agent_provisioning_team.shared.provisioner_state import CompensationRecord
+
+    fake_prov = MagicMock()
+    fake_prov._state.check_fencing_token.side_effect = StaleFencingTokenError("a1", "x", 4, 5)
+    fake_prov.list_compensations.return_value = [CompensationRecord(kind="k1", payload={})]
+
+    orch = ProvisioningOrchestrator(
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+    success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    orch.compensate("a1", [success], fencing_token=4)
+
+    fake_prov.replay_compensation.assert_not_called()
+    fake_prov.deprovision.assert_not_called()
+
+
+def test_compensate_preserves_credential_of_stale_skipped_tool(tmp_path: Path) -> None:
+    """A tool skipped as stale must have its credential PRESERVED, not purged.
+
+    Skipping the rollback means a newer owner already reclaimed the resource and
+    its account may still be live; the tail credential cleanup must therefore
+    not delete that tool's credential (the only remaining way to reach the
+    account). The stale-skip must add the tool to preserved_credentials, exactly
+    like every other skip path (no provisioner / reused)."""
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    fake_prov = MagicMock()
+    fake_prov._state.check_fencing_token.side_effect = StaleFencingTokenError("a1", "x", 4, 5)
+    cred_store = MagicMock()
+    cred_store.list_tool_names.return_value = {"t"}
+
+    orch = ProvisioningOrchestrator(
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        credential_store=cred_store,
+        tool_agents={"x": fake_prov, "docker_provisioner": MagicMock()},
+    )
+    success = ToolProvisionResult(tool_name="t", success=True, provisioner_key="x")
+    orch.compensate("a1", [success], fencing_token=4)
+
+    # The stale-skipped tool "t" is preserved: neither the blanket
+    # delete_credentials nor a per-tool delete for "t" runs.
+    cred_store.delete_credentials.assert_not_called()
+    for purge_call in cred_store.delete_tool_credentials.call_args_list:
+        assert purge_call.args[1] != "t", "stale-skipped tool's credential must be preserved"
+
+
+def test_compensate_threads_fencing_token_through_replay_and_deprovision_paths(
+    tmp_path: Path,
+) -> None:
+    from agent_provisioning_team.shared.provisioner_state import CompensationRecord
+
+    replaying = MagicMock()
+    replaying.list_compensations.return_value = [CompensationRecord(kind="k1", payload={})]
+    legacy = MagicMock()
+    legacy.list_compensations.return_value = []
+    docker = MagicMock()
+
+    orch = ProvisioningOrchestrator(
+        credential_store=MagicMock(),
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"replaying": replaying, "legacy": legacy, "docker_provisioner": docker},
+    )
+    tool_results = [
+        ToolProvisionResult(tool_name="a", success=True, provisioner_key="replaying"),
+        ToolProvisionResult(tool_name="b", success=True, provisioner_key="legacy"),
+    ]
+    orch.compensate("a1", tool_results, fencing_token=7)
+
+    replaying._state.check_fencing_token.assert_called_once_with("a1", 7)
+    replaying.clear_compensations.assert_called_once_with("a1", fencing_token=7)
+    replaying._state.delete.assert_called_once_with("a1", fencing_token=7)
+    legacy.deprovision.assert_called_once_with("a1", fencing_token=7)
+    docker.deprovision.assert_called_once_with("a1", fencing_token=7)
+    orch.credential_store.delete_credentials.assert_called_once_with("a1", fencing_token=7)
+
+
 # ---------------------------------------------------------------------------
 # deprovision / status / list
 # ---------------------------------------------------------------------------
@@ -750,6 +891,52 @@ def test_deprovision_success_returns_response(tmp_path: Path) -> None:
 
     resp = orch.deprovision("a1")
     assert resp.success is True
+
+
+def test_deprovision_threads_fencing_token(tmp_path: Path) -> None:
+    fake_pg = MagicMock()
+    fake_pg.deprovision.return_value = DeprovisionResult(tool_name="pg", success=True)
+    fake_docker = MagicMock()
+    fake_docker.deprovision.return_value = DeprovisionResult(tool_name="docker", success=True)
+    cred_store = MagicMock()
+    cred_store.delete_credentials.return_value = True
+
+    orch = ProvisioningOrchestrator(
+        credential_store=cred_store,
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"postgres_provisioner": fake_pg, "docker_provisioner": fake_docker},
+    )
+
+    orch.deprovision("a1", fencing_token=9)
+
+    fake_pg.deprovision.assert_called_once_with("a1", fencing_token=9)
+    # docker_provisioner is reachable both via deprovision_tools()'s generic
+    # loop over self.tool_agents and via the explicit docker-teardown call
+    # below it (pre-existing, unrelated to fencing) -- assert every call it
+    # got still carried the token, rather than asserting an exact count.
+    assert all(c == call("a1", fencing_token=9) for c in fake_docker.deprovision.call_args_list)
+    cred_store.delete_credentials.assert_called_once_with("a1", fencing_token=9)
+
+
+def test_deprovision_propagates_stale_fencing_token_from_docker(tmp_path: Path) -> None:
+    """Unlike compensate(), deprovision()'s docker/credential/environment
+    calls are NOT wrapped in try/except (this predates fencing tokens) --
+    a stale-token rejection propagates exactly as any other exception
+    already would, giving the Temporal activity boundary a genuine,
+    non-retryable failure to work with."""
+    from agent_provisioning_team.shared.fencing import StaleFencingTokenError
+
+    fake_docker = MagicMock()
+    fake_docker.deprovision.side_effect = StaleFencingTokenError("a1", "docker_provisioner", 4, 5)
+
+    orch = ProvisioningOrchestrator(
+        credential_store=MagicMock(),
+        environment_store=EnvironmentStore(storage_dir=tmp_path / "envs"),
+        tool_agents={"docker_provisioner": fake_docker},
+    )
+
+    with pytest.raises(StaleFencingTokenError):
+        orch.deprovision("a1", fencing_token=4)
 
 
 def test_deprovision_collects_errors_unless_forced(tmp_path: Path) -> None:
@@ -848,7 +1035,7 @@ def test_deprovision_stops_at_checkpoint_before_explicit_docker_call(tmp_path: P
     with pytest.raises(DeprovisionCancelledError) as exc_info:
         orch.deprovision("a1", cancellation_checkpoint=checkpoint)
 
-    fake_docker.deprovision.assert_called_once_with("a1")
+    fake_docker.deprovision.assert_called_once_with("a1", fencing_token=None)
     cred_store.delete_credentials.assert_not_called()
     env_store.remove.assert_not_called()
     assert exc_info.value.completed["tools"] == {"docker_provisioner": True}
