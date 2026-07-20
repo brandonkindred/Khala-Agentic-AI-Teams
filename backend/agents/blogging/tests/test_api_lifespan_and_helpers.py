@@ -8,8 +8,11 @@ import sys
 from pathlib import Path
 
 _blogging_root = Path(__file__).resolve().parent.parent
+_backend_root = _blogging_root.parent.parent
+if str(_backend_root) not in sys.path:
+    sys.path.insert(0, str(_backend_root))
 if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
+    sys.path.append(str(_blogging_root))
 
 _spec = importlib.util.spec_from_file_location(
     "blogging_api_main_lifespan",

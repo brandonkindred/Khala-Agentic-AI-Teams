@@ -7,10 +7,18 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Platform ``shared.*`` lives under ``backend/shared/``. ``blogging/shared`` is a
+# different package; if ``blogging/`` is prepended first, ``import shared`` binds
+# to blogging and ``from shared.concurrency import …`` (via job_service_client)
+# circular-imports. Keep backend ahead of blogging on sys.path.
+BACKEND_ROOT = ROOT.parent
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
 # Add blogging directory so blog_research_agent tools are importable
 BLOGGING_DIR = ROOT / "blogging"
 if str(BLOGGING_DIR) not in sys.path:
-    sys.path.insert(0, str(BLOGGING_DIR))
+    sys.path.append(str(BLOGGING_DIR))
 
 from social_media_marketing_team.api import main as api_main  # noqa: E402
 from social_media_marketing_team.models import BrandGoals  # noqa: E402
