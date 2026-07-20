@@ -196,6 +196,11 @@ function formatComparisonOp(op: ComparisonOp | null | undefined): string {
   return COMPARISON_OP_OPTIONS.find((option) => option.value === op)?.label ?? String(op);
 }
 
+/** Formats `value` with `formatter` when it's a real number, else the same em-dash fallback used for missing predicate data. */
+function formatNumericField(value: number | null | undefined, formatter: (value: number) => string): string {
+  return typeof value === 'number' ? formatter(value) : '—';
+}
+
 function predicateRows(predicate: Predicate | null | undefined): { label: string; value: string }[] {
   if (!predicate || typeof predicate !== 'object') return flattenObjectRows(predicate);
   const lhsLabel = isIndicatorRef(predicate.lhs) ? 'Indicator' : 'Price Field';
@@ -246,14 +251,14 @@ export function exitRuleRows(rule: ExitRule): { label: string; value: string }[]
     case 'stop_loss':
       rows = [
         { label: 'Type', value: 'Stop Loss' },
-        { label: 'Stop Distance', value: formatPct(rule.pct * 100) },
+        { label: 'Stop Distance', value: formatNumericField(rule.pct, (pct) => formatPct(pct * 100)) },
         { label: 'Basis', value: STOP_LOSS_BASIS_LABELS[rule.basis ?? 'entry_price'] },
       ];
       break;
     case 'take_profit':
       rows = [
         { label: 'Type', value: 'Take Profit' },
-        { label: 'Target', value: formatPct(rule.pct * 100) },
+        { label: 'Target', value: formatNumericField(rule.pct, (pct) => formatPct(pct * 100)) },
       ];
       break;
     case 'signal_exit':
@@ -282,19 +287,22 @@ export function sizingRows(sizing: SizingRule): { label: string; value: string }
     case 'fixed_fraction':
       rows = [
         { label: 'Method', value: 'Fixed Fraction' },
-        { label: 'Position Size', value: formatPct(sizing.fraction * 100) },
+        { label: 'Position Size', value: formatNumericField(sizing.fraction, (fraction) => formatPct(fraction * 100)) },
       ];
       break;
     case 'volatility_target':
       rows = [
         { label: 'Method', value: 'Volatility Target' },
-        { label: 'Target Annual Volatility', value: formatPct(sizing.target_annual_vol * 100) },
+        {
+          label: 'Target Annual Volatility',
+          value: formatNumericField(sizing.target_annual_vol, (vol) => formatPct(vol * 100)),
+        },
       ];
       break;
     case 'fixed_notional':
       rows = [
         { label: 'Method', value: 'Fixed Notional' },
-        { label: 'Notional (USD)', value: formatUsd(sizing.notional_usd) },
+        { label: 'Notional (USD)', value: formatNumericField(sizing.notional_usd, formatUsd) },
       ];
       break;
     default:

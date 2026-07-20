@@ -326,6 +326,23 @@ describe('exitRuleRows', () => {
   it('returns an empty array for null/undefined', () => {
     expect(exitRuleRows(null as unknown as ExitRule)).toEqual([]);
   });
+
+  it('falls back to an em-dash instead of throwing or showing NaN% for a stop_loss with a missing pct', () => {
+    const rule = { kind: 'stop_loss' } as unknown as ExitRule;
+    expect(exitRuleRows(rule)).toEqual([
+      { label: 'Type', value: 'Stop Loss' },
+      { label: 'Stop Distance', value: '—' },
+      { label: 'Basis', value: 'Entry Price' },
+    ]);
+  });
+
+  it('falls back to an em-dash instead of throwing or showing NaN% for a take_profit with a missing pct', () => {
+    const rule = { kind: 'take_profit' } as unknown as ExitRule;
+    expect(exitRuleRows(rule)).toEqual([
+      { label: 'Type', value: 'Take Profit' },
+      { label: 'Target', value: '—' },
+    ]);
+  });
 });
 
 describe('sizingRows', () => {
@@ -369,5 +386,39 @@ describe('sizingRows', () => {
 
   it('returns an empty array for null/undefined', () => {
     expect(sizingRows(null as unknown as SizingRule)).toEqual([]);
+  });
+
+  it('falls back to an em-dash instead of showing NaN% for a fixed_fraction with a missing fraction', () => {
+    const sizing = { kind: 'fixed_fraction' } as unknown as SizingRule;
+    expect(sizingRows(sizing)).toEqual([
+      { label: 'Method', value: 'Fixed Fraction' },
+      { label: 'Position Size', value: '—' },
+    ]);
+  });
+
+  it('falls back to an em-dash instead of showing NaN% for a volatility_target with a missing target_annual_vol', () => {
+    const sizing = { kind: 'volatility_target' } as unknown as SizingRule;
+    expect(sizingRows(sizing)).toEqual([
+      { label: 'Method', value: 'Volatility Target' },
+      { label: 'Target Annual Volatility', value: '—' },
+    ]);
+  });
+
+  it('falls back to an em-dash instead of throwing for a fixed_notional with a missing notional_usd', () => {
+    const sizing = { kind: 'fixed_notional' } as unknown as SizingRule;
+    expect(() => sizingRows(sizing)).not.toThrow();
+    expect(sizingRows(sizing)).toEqual([
+      { label: 'Method', value: 'Fixed Notional' },
+      { label: 'Notional (USD)', value: '—' },
+    ]);
+  });
+
+  it('falls back to an em-dash instead of throwing for a fixed_notional with a non-numeric notional_usd', () => {
+    const sizing = { kind: 'fixed_notional', notional_usd: '15000' } as unknown as SizingRule;
+    expect(() => sizingRows(sizing)).not.toThrow();
+    expect(sizingRows(sizing)).toEqual([
+      { label: 'Method', value: 'Fixed Notional' },
+      { label: 'Notional (USD)', value: '—' },
+    ]);
   });
 });
