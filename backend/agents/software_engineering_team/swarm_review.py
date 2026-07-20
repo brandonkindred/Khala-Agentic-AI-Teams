@@ -301,8 +301,10 @@ class _ReviewMixin:
             - ``error`` → task FAILED once (no revision loop); ``approved`` and merge succeeds →
               branch merged and task MERGED; ``approved`` but merge fails without raising → task
               sent back for revision (same as an unapproved review, via ``_request_revision``) with
-              the merge failure recorded as feedback; any other unapproved review → task sent back
-              for revision. Exactly one of these.
+              the merge failure recorded as feedback; ``approved`` but ``merge_branch`` raises →
+              task marked MERGED anyway (best-effort, with a warning logged, so an unexpected git
+              failure doesn't crash the swarm); any other unapproved review → task sent back for
+              revision. Exactly one of these.
         """
         if review.get("error"):
             # The review itself could not run (e.g. evidence exceeded the model context window). Do
@@ -431,8 +433,11 @@ class _ReviewMixin:
         Preconditions:
             - task is currently IN_REVIEW and assigned to a worker.
         Postconditions:
-            - task.status is IN_PROGRESS (revision pending) or FAILED (exhausted); never left
-              IN_REVIEW with no state change, so the swarm loop cannot deadlock on it.
+            - task.status is IN_PROGRESS (revision pending) or FAILED (exhausted); if the
+              no-change cap is reached first, control passes to ``_escalate_to_tech_lead``
+              instead, which may also leave the task MERGED (a "done" verdict) — see that
+              method's Postconditions. Never left IN_REVIEW with no state change, so the swarm
+              loop cannot deadlock on it.
         """
         from software_engineering_team import coding_team_orchestrator as _orch
 

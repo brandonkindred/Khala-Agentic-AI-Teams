@@ -199,7 +199,8 @@ class _ImplementationMixin:
               empty branch means the work already landed elsewhere); ``resolved_without_changes=
               False`` when the branch has real changes and they merge successfully. If a non-empty
               branch fails to merge, the task is FAILED instead (not merged) — see below.
-            - "fail": task is FAILED and its dependents cascade-failed.
+            - "fail" (or any unexpected verdict — ``run_revision_adjudication`` fails closed to
+              "fail"): task is FAILED and its dependents cascade-failed.
             - "continue": ``no_change_revisits`` is reset to 0 (a fresh window) and the task returns
               to its engineer IN_PROGRESS; the 20-revision cap still ultimately bounds it.
         """
