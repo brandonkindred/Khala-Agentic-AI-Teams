@@ -126,18 +126,22 @@ export class StrategyCardComponent {
     'net_pnl', 'cumulative_pnl', 'outcome',
   ];
 
+  /** Delete-button click handler. Postconditions: `deleteRequested` emits exactly once; no local state changes (the host owns delete-in-flight tracking). */
   onDelete(): void {
     this.deleteRequested.emit();
   }
 
+  /** Disclosure-button click handler. Postconditions: `expandToggled` emits exactly once; `this.expanded` is unchanged (the host owns expand/collapse tracking and feeds the new value back in via the input). */
   onToggleExpand(): void {
     this.expandToggled.emit();
   }
 
+  /** Trade-ledger paginator page-change handler. Postconditions: `pageChanged` emits `event` unchanged exactly once; `this.pageIndex` is unchanged (the host owns pagination state and feeds the new page back in via the input). */
   onPageChange(event: PageEvent): void {
     this.pageChanged.emit(event);
   }
 
+  /** Paper-trade / re-run button click handler. Postconditions: `paperTradeRequested` emits exactly once; no local state changes (the host owns paper-trading-in-flight tracking). */
   onRunPaperTrading(): void {
     this.paperTradeRequested.emit();
   }
@@ -212,6 +216,15 @@ export class StrategyCardComponent {
     return `${this.record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
   }
 
+  /**
+   * Whether the Signal Intelligence panel should render. `signal_intelligence_brief`
+   * is a legacy-optional field (older records predate the feature) and the
+   * backend can also send an empty object rather than omitting the field, so
+   * both must be checked to avoid rendering an empty panel.
+   *
+   * Postconditions: returns `true` only when `record.signal_intelligence_brief`
+   *   is set and has at least one key.
+   */
   hasSignalBrief(): boolean {
     return this.record.signal_intelligence_brief != null && Object.keys(this.record.signal_intelligence_brief).length > 0;
   }
@@ -224,6 +237,16 @@ export class StrategyCardComponent {
   private pagedTradesCache: { record: StrategyLabRecord; page: number; trades: TradeRecord[] } | null = null;
   private winCountCache: { record: StrategyLabRecord; count: number } | null = null;
 
+  /**
+   * Trade-ledger rows for the current paginator page. Cached per
+   * (record, page) so the mat-table `dataSource` gets a stable array
+   * reference across change-detection cycles that don't change either,
+   * letting it diff instead of re-rendering every row.
+   *
+   * Postconditions: returns `PAGE_SIZE` trades starting at `pageIndex *
+   *   PAGE_SIZE` (fewer on the last page); same array reference as the
+   *   previous call when `record` and `pageIndex` are both unchanged.
+   */
   pagedTrades(): TradeRecord[] {
     const page = this.pageIndex;
     const cached = this.pagedTradesCache;
@@ -238,10 +261,17 @@ export class StrategyCardComponent {
     return trades;
   }
 
+  /** Postconditions: returns the total number of trades in `record.backtest.trades`, independent of pagination. */
   tradeCount(): number {
     return this.record.backtest.trades.length;
   }
 
+  /**
+   * Count of trades with `outcome === 'win'`, cached per record (see the
+   * cache-invalidation note above `pagedTradesCache`).
+   *
+   * Postconditions: returns a value in `[0, tradeCount()]`.
+   */
   winCount(): number {
     const cached = this.winCountCache;
     if (cached && cached.record === this.record) {
@@ -252,15 +282,33 @@ export class StrategyCardComponent {
     return count;
   }
 
+  /**
+   * Net P&L across the whole trade history. `cumulative_pnl` on each trade
+   * is already a running total, so the last trade's value is the total —
+   * no need to sum every trade's `net_pnl` here.
+   *
+   * Postconditions: returns `0` when there are no trades, else the last
+   *   trade's `cumulative_pnl`.
+   */
   totalNetPnl(): number {
     const trades = this.record.backtest.trades;
     return trades.length ? trades[trades.length - 1].cumulative_pnl : 0;
   }
 
+  /** Postconditions: returns `'win-cell'` when `t.outcome === 'win'`, else `'loss-cell'`. */
   tradeReturnColor(t: TradeRecord): string {
     return t.outcome === 'win' ? 'win-cell' : 'loss-cell';
   }
 
+  /**
+   * Precision tiering for the trade-ledger entry/exit price columns: fewer
+   * decimals for large prices (where sub-dollar precision is noise) and more
+   * for sub-$1 prices (where it's signal).
+   *
+   * Preconditions: `price` is finite (not `NaN`/`Infinity`).
+   * Postconditions: returns `price` formatted with 0 decimals when `>= 1000`,
+   *   2 decimals when in `[1, 1000)`, 4 decimals when `< 1`.
+   */
   formatPrice(price: number): string {
     if (price >= 1000) return price.toFixed(0);
     if (price >= 1) return price.toFixed(2);
@@ -312,10 +360,12 @@ export class StrategyCardComponent {
     return gateRound < maxRound;
   }
 
+  /** Icon for a quality-gate result, accounting for `isRemedied` (see `strategy-lab.formatters.ts`'s `gateIcon` for the icon-selection rules). */
   gateIcon(gate: QualityGateResult): string {
     return pureGateIcon(gate, this.isRemedied(gate));
   }
 
+  /** CSS severity class for a quality-gate result, accounting for `isRemedied` (see `strategy-lab.formatters.ts`'s `gateSeverityClass` for the class-selection rules). */
   gateSeverityClass(gate: QualityGateResult): string {
     return pureGateSeverityClass(gate, this.isRemedied(gate));
   }
