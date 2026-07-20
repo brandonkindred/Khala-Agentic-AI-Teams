@@ -242,6 +242,25 @@
   }
 }
 
+.rule-fields {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
+  font-size: 0.85rem;
+
+  dt {
+    font-weight: 600;
+    color: var(--kh-text-muted);
+  }
+
+  dd {
+    margin: 0;
+    color: var(--kh-text-secondary);
+    word-break: break-word;
+  }
+}
+
 .rationale-text {
   font-style: italic;
   color: var(--kh-text-tertiary);
@@ -264,18 +283,4 @@
   color: var(--kh-text-secondary);
   max-height: 500px;
   overflow-y: auto;
-}
-
-.signal-json {
-  margin: 0;
-  padding: 0.75rem 1rem;
-  font-size: 0.75rem;
-  line-height: 1.45;
-  overflow-x: auto;
-  background: var(--kh-surface-3);
-  border: 1px solid var(--kh-border-subtle);
-  border-radius: var(--kh-radius-sm);
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--kh-text-secondary);
 }

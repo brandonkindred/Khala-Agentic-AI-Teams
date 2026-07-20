@@ -3008,7 +3008,9 @@ class TestWholeFileReview:
 
         assert WHOLE_FILE_FOCUS_NOTE_PREFIX in captured["task_requirements"]
 
-    def test_partial_head_fetch_falls_back_to_hunks(self, review_app, monkeypatch) -> None:
+    def test_partial_head_fetch_reviews_fetched_subset_whole_and_missing_subset_via_hunks(
+        self, review_app, monkeypatch
+    ) -> None:
         gh = review_app["github"]["client"]
         # Two reviewable files; only one fetches whole content.
         gh.files = [
@@ -3018,11 +3020,11 @@ class TestWholeFileReview:
         gh.get_file_contents = lambda o, r, path, ref: "whole a\n" if path == "a.py" else None
         gh.get_repository_tree = lambda o, r, ref, recursive=True: []
 
-        captured: dict[str, Any] = {}
+        calls: list[dict[str, Any]] = []
 
         class _CapProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                captured.update(kw)
+                calls.append(dict(kw))
                 return _FakeOutput(issues=[])
 
         monkeypatch.setattr(
@@ -3030,11 +3032,146 @@ class TestWholeFileReview:
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Only 1 of 2 reviewable files fetched -> must NOT silently drop b.py.
-        # Falls back to hunk mode (covers every changed file).
-        assert captured.get("files") is None
-        assert captured["pre_numbered"] is True
-        assert captured["code"]
+        # Only 1 of 2 reviewable files fetched whole -> a.py must NOT silently
+        # revert to hunk mode, and b.py must NOT be silently dropped: two
+        # calls, one whole-file (a.py only), one hunk (b.py only).
+        assert len(calls) == 2
+        whole_call = next(c for c in calls if c.get("files"))
+        hunk_call = next(c for c in calls if c.get("code"))
+        assert whole_call["files"] == {"a.py": "whole a\n"}
+        assert whole_call["pre_numbered"] is False
+
+        from software_engineering_team.coding_team.api.pr_review import (
+            WHOLE_FILE_FOCUS_NOTE_PREFIX,
+        )
+
+        assert WHOLE_FILE_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
+        assert not hunk_call.get("files")
+        assert hunk_call["pre_numbered"] is True
+        assert "b.py" in hunk_call["code"]
+        assert "a.py" not in hunk_call["code"]
+
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["files_reviewed"] == 2  # 1 whole + 1 hunk
+
+    def test_partial_head_fetch_posts_findings_from_both_whole_file_and_hunk_subsets(
+        self, review_app, monkeypatch
+    ) -> None:
+        gh = review_app["github"]["client"]
+        gh.files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1,1 +1,2 @@\n x\n+y", 1, 0, None),
+        ]
+        gh.get_file_contents = lambda o, r, path, ref: "whole a\n" if path == "a.py" else None
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: []
+
+        class _SplitProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                if kw.get("files"):
+                    return _FakeOutput(
+                        issues=[
+                            _FakeReviewIssue(
+                                "high",
+                                line=2,
+                                file_path="a.py",
+                                description="whole-file finding",
+                            )
+                        ],
+                        summary="",  # blank: must not blank out the merged narrative
+                        spec="",
+                    )
+                return _FakeOutput(
+                    issues=[
+                        _FakeReviewIssue(
+                            "high", line=2, file_path="b.py", description="hunk finding"
+                        )
+                    ],
+                    summary="Hunk summary text",
+                    spec="",
+                )
+
+        monkeypatch.setattr(
+            "software_engineering_team.coding_team.engine_provider._provider", _SplitProvider()
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+
+        # Both findings actually made it onto the PR -- neither subset silently
+        # vanished.
+        posted_bodies = (
+            [c["body"] for r in gh.reviews for c in (r.get("comments") or [])]
+            + [c["body"] for c in gh.review_comments]
+            + [b for _n, b in gh.comments]
+        )
+        assert any("whole-file finding" in b for b in posted_bodies)
+        assert any("hunk finding" in b for b in posted_bodies)
+        assert job["review_summary"]["total_issues"] == 2
+
+        # The merged narrative drops the blank whole-file summary and keeps
+        # the hunk-fallback summary -- proves _MergedReviewerOutput ran.
+        assert "Hunk summary text" in gh.reviews[-1]["body"]
+
+    def test_endpoint_noop_when_nothing_whole_file_reviewable(
+        self, review_app, monkeypatch
+    ) -> None:
+        gh = review_app["github"]["client"]
+        # Only a removed file and a binary (no-patch) file -- nothing is
+        # reviewable, so the gate must fire BEFORE any head-file fetch or
+        # reviewer call, exactly as the old `if not code` gate did.
+        gh.files = [
+            PullRequestFile("gone.py", "removed", "@@ -1 +0 @@\n-x", 0, 1, None),
+            PullRequestFile("img.png", "added", "", 0, 0, None),
+        ]
+        fetch_calls = 0
+
+        def _get_file_contents(o, r, path, ref):
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return "should never be reached"
+
+        gh.get_file_contents = _get_file_contents
+
+        provider_calls = 0
+
+        class _CountingProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                nonlocal provider_calls
+                provider_calls += 1
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr(
+            "software_engineering_team.coding_team.engine_provider._provider",
+            _CountingProvider(),
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["status_text"] == "No reviewable file content"
+        assert any("no reviewable file content" in b.lower() for _n, b in gh.comments)
+        assert fetch_calls == 0  # gate fires before any head-file fetch
+        assert provider_calls == 0  # ...and before any reviewer call
+
+    def test_endpoint_noop_when_reviewable_but_pure_removal_hunk_and_fetch_fails(
+        self, review_app
+    ) -> None:
+        gh = review_app["github"]["client"]
+        # "modified" + non-empty patch => _is_whole_file_reviewable is True, but
+        # the patch is pure removal (no +/context lines), so render_annotated_hunks
+        # -> "" and _build_review_code skips it. Default gh has no
+        # get_file_contents, so the whole-file fetch also fails -> must still
+        # land on the exact same noop as before this change.
+        gh.files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,0 @@\n-a\n-b", 0, 2, None),
+        ]
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["status_text"] == "No reviewable file content"
 
 
 # ---------------------------------------------------------------------------
