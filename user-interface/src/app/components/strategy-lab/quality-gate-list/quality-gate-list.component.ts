@@ -12,8 +12,8 @@ import type { GateViewModel } from '../strategy-lab.formatters';
  * is genuine cross-gate business logic and stays on that component; this
  * component only renders what it's handed.
  *
- * Preconditions: `gateViewModels` is set before the first render (required
- *   input); the panel itself only renders (`@if`) when non-empty.
+ * Preconditions: the panel itself only renders (`@if`) when `gateViewModels`
+ *   is non-empty.
  * Postconditions: renders identically for the same `gateViewModels`/
  *   `refinementRounds` regardless of how many times change detection runs
  *   (OnPush; purely a function of the inputs).

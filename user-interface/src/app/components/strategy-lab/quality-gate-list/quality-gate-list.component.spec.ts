@@ -78,6 +78,14 @@ describe('QualityGateListComponent', () => {
       expect(description.textContent).toContain('3 refinement round(s)');
     });
 
+    it('treats refinementRounds = 0 as "not set" (0 rounds means no refinement ran)', () => {
+      fixture.componentRef.setInput('refinementRounds', 0);
+      fixture.detectChanges();
+      const description = fixture.nativeElement.querySelector('mat-panel-description');
+      expect(description.textContent).toContain('1 check(s)');
+      expect(description.textContent).not.toContain('refinement round');
+    });
+
     it('renders correctly with two view models sharing a gate_name across different refinement rounds (track-key regression)', () => {
       component.gateViewModels = [
         makeViewModel({

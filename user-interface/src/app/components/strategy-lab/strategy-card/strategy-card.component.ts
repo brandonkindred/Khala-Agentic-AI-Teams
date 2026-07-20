@@ -260,6 +260,10 @@ export class StrategyCardComponent {
     return pureGateSeverityClass(gate, this.isRemedied(gate));
   }
 
+  // Invalidates on `record` reference identity, not deep equality — relies on
+  // the host always replacing the record with a new object on change (never
+  // mutating one in place), same as `pagedTradesCache`/`winCountCache` in
+  // `TradeLedgerComponent`.
   private gateViewModelsCache: { record: StrategyLabRecord; viewModels: GateViewModel[] } | null = null;
 
   /**
@@ -284,6 +288,8 @@ export class StrategyCardComponent {
     return viewModels;
   }
 
+  // Same reference-identity caveat as `gateViewModelsCache` above, keyed on
+  // the paper-trading comparison object instead of the record.
   private comparisonMetricsCache: { comparison: PaperTradingComparison; rows: ComparisonRow[] } | null = null;
 
   comparisonMetrics(c: PaperTradingComparison): ComparisonRow[] {

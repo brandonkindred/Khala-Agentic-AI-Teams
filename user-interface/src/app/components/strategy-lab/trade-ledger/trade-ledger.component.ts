@@ -54,9 +54,27 @@ export class TradeLedgerComponent {
   // record.lab_record_id`) across status polls for the same record — a poll
   // replaces `record` with a brand-new object, so every cache below is keyed
   // on `this.record` identity (not just derived inputs like `pageIndex`) to
-  // invalidate correctly when that happens.
-  private pagedTradesCache: { record: StrategyLabRecord; page: number; trades: TradeRecord[] } | null = null;
-  private winCountCache: { record: StrategyLabRecord; count: number } | null = null;
+  // invalidate correctly when that happens. Assumes the host always replaces
+  // the record by reference rather than mutating one in place.
+  private pagedTradesCache: { key: [StrategyLabRecord, number]; value: TradeRecord[] } | null = null;
+  private winCountCache: { key: StrategyLabRecord; value: number } | null = null;
+
+  /**
+   * Generic "check cache key → return cached value, else recompute and
+   * store" helper shared by `pagedTrades`/`winCount` below, so the two
+   * caches (one keyed on `[record, page]`, the other on `record` alone)
+   * don't each re-implement the same match-or-recompute shape.
+   */
+  private memoize<K, V>(
+    cache: { key: K; value: V } | null,
+    key: K,
+    keyEquals: (a: K, b: K) => boolean,
+    compute: () => V,
+  ): { cache: { key: K; value: V }; value: V } {
+    if (cache && keyEquals(cache.key, key)) return { cache, value: cache.value };
+    const value = compute();
+    return { cache: { key, value }, value };
+  }
 
   /**
    * Trade-ledger rows for the current paginator page. Cached per
@@ -69,17 +87,19 @@ export class TradeLedgerComponent {
    *   previous call when `record` and `pageIndex` are both unchanged.
    */
   pagedTrades(): TradeRecord[] {
-    const page = this.pageIndex;
-    const cached = this.pagedTradesCache;
     // Returning a stable array reference for the same (record, page) lets the
     // mat-table dataSource diff instead of re-rendering every row each CD cycle.
-    if (cached && cached.record === this.record && cached.page === page) {
-      return cached.trades;
-    }
-    const start = page * this.PAGE_SIZE;
-    const trades = this.record.backtest.trades.slice(start, start + this.PAGE_SIZE);
-    this.pagedTradesCache = { record: this.record, page, trades };
-    return trades;
+    const { cache, value } = this.memoize(
+      this.pagedTradesCache,
+      [this.record, this.pageIndex],
+      (a, b) => a[0] === b[0] && a[1] === b[1],
+      () => {
+        const start = this.pageIndex * this.PAGE_SIZE;
+        return this.record.backtest.trades.slice(start, start + this.PAGE_SIZE);
+      },
+    );
+    this.pagedTradesCache = cache;
+    return value;
   }
 
   /** Postconditions: returns the total number of trades in `record.backtest.trades`, independent of pagination. */
@@ -94,13 +114,14 @@ export class TradeLedgerComponent {
    * Postconditions: returns a value in `[0, tradeCount()]`.
    */
   winCount(): number {
-    const cached = this.winCountCache;
-    if (cached && cached.record === this.record) {
-      return cached.count;
-    }
-    const count = this.record.backtest.trades.filter((t) => t.outcome === 'win').length;
-    this.winCountCache = { record: this.record, count };
-    return count;
+    const { cache, value } = this.memoize(
+      this.winCountCache,
+      this.record,
+      (a, b) => a === b,
+      () => this.record.backtest.trades.filter((t) => t.outcome === 'win').length,
+    );
+    this.winCountCache = cache;
+    return value;
   }
 
   /**
@@ -126,7 +147,9 @@ export class TradeLedgerComponent {
    * decimals for large prices (where sub-dollar precision is noise) and more
    * for sub-$1 prices (where it's signal).
    *
-   * Preconditions: `price` is finite (not `NaN`/`Infinity`).
+   * Preconditions: `price` is finite (not `NaN`/`Infinity`) and non-negative
+   *   (trade entry/exit prices are always positive; the tiering below isn't
+   *   meaningful for negative input).
    * Postconditions: returns `price` formatted with 0 decimals when `>= 1000`,
    *   2 decimals when in `[1, 1000)`, 4 decimals when `< 1`.
    */
