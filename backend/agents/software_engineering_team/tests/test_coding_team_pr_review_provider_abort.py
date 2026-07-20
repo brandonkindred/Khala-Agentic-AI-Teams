@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-import software_engineering_team.coding_team.api.main as main
-from software_engineering_team.coding_team.api.main import ReviewPrRequest, _run_pr_review
+import software_engineering_team.api.coding_team_main as main
+from software_engineering_team.api.coding_team_main import ReviewPrRequest, _run_pr_review
 
 
 def test_provider_abort_posts_pr_comment_and_fails_job(monkeypatch) -> None:
