@@ -1,0 +1,656 @@
+.strategy-card {
+  border-left: 4px solid transparent;
+  background: var(--kh-surface-2);
+  transition: box-shadow var(--kh-transition);
+
+  &.is-winning {
+    border-left-color: var(--kh-success);
+  }
+
+  &.is-losing {
+    border-left-color: var(--kh-error);
+  }
+
+  &:hover {
+    box-shadow: var(--kh-shadow-md);
+  }
+
+  // Keep avatar + title block + delete button on one row (MDC card header defaults to column).
+  ::ng-deep .mat-mdc-card-header {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.25rem;
+  }
+}
+
+.strategy-card-header-text {
+  flex: 1;
+  min-width: 0;
+
+  ::ng-deep .mat-mdc-card-title {
+    color: var(--kh-text-primary);
+  }
+
+  ::ng-deep .mat-mdc-card-subtitle {
+    color: var(--kh-text-muted);
+  }
+}
+
+.delete-strategy-btn {
+  flex-shrink: 0;
+  margin: -4px -4px 0 0;
+  color: var(--kh-text-muted);
+
+  &:hover:not(:disabled) {
+    color: var(--kh-error);
+  }
+}
+
+// ── Card avatar ────────────────────────────────────────────────────────────────
+
+.strategy-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--kh-radius-md);
+
+  mat-icon {
+    font-size: 1.4rem;
+    width: 1.4rem;
+    height: 1.4rem;
+    color: var(--kh-text-on-accent);
+  }
+
+  &.winning-avatar { background: var(--kh-success); }
+  &.losing-avatar  { background: var(--kh-error); }
+}
+
+// ── Card expand/collapse disclosure ───────────────────────────────────────────
+
+.expand-chevron-btn {
+  display: block;
+  margin: 0.25rem auto 0;
+  color: var(--kh-text-muted);
+
+  &:hover {
+    color: var(--kh-text-primary);
+  }
+}
+
+.expand-chevron {
+  font-size: 1.4rem;
+}
+
+// ── Metrics row ───────────────────────────────────────────────────────────────
+
+.metrics-row {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin: 1rem 0 0.75rem;
+}
+
+.outcome-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: var(--kh-radius-sm);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+
+  mat-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+  }
+
+  &.winning-badge {
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
+  }
+
+  &.losing-badge {
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
+  }
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.metric-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--kh-text-primary);
+
+  &.winning { color: var(--kh-success); }
+  &.neutral  { color: var(--kh-info); }
+  &.losing   { color: var(--kh-error); }
+}
+
+.metric-label {
+  font-size: 0.7rem;
+  color: var(--kh-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+// ── Card divider & narrative ──────────────────────────────────────────────────
+
+.card-divider {
+  margin: 0.75rem 0;
+  border-color: var(--kh-border);
+}
+
+.hypothesis {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  font-size: 0.92rem;
+  font-style: italic;
+  line-height: 1.6;
+  color: var(--kh-text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.hypothesis-icon {
+  flex-shrink: 0;
+  color: var(--kh-warning);
+  font-size: 1.1rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-top: 0.1rem;
+}
+
+.narrative {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: var(--kh-text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.narrative-icon {
+  flex-shrink: 0;
+  color: var(--kh-info);
+  font-size: 1.1rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  margin-top: 0.1rem;
+}
+
+// ── Accordion / expansion panels ─────────────────────────────────────────────
+
+.card-accordion {
+  margin-top: 0.5rem;
+
+  ::ng-deep .mat-expansion-panel {
+    box-shadow: none;
+    border: 1px solid var(--kh-border);
+    border-radius: var(--kh-radius-sm) !important;
+    margin-bottom: 0.5rem;
+    background: var(--kh-surface-3);
+  }
+}
+
+.panel-icon {
+  font-size: 1.1rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  vertical-align: middle;
+  margin-right: 0.4rem;
+  color: var(--kh-text-muted);
+}
+
+.pnl-pos { color: var(--kh-success); font-weight: 600; }
+.pnl-neg { color: var(--kh-error); font-weight: 600; }
+
+// ── Ledger summary bar ────────────────────────────────────────────────────────
+
+.ledger-summary {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 0 1rem;
+  border-bottom: 1px solid var(--kh-border-subtle);
+  margin-bottom: 0.75rem;
+}
+
+.ledger-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.ls-value {
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--kh-text-primary);
+
+  &.winning { color: var(--kh-success); }
+  &.losing  { color: var(--kh-error); }
+}
+
+.ls-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kh-text-muted);
+}
+
+// ── Trade table ────────────────────────────────────────────────────────────────
+
+.trade-table-wrap {
+  overflow-x: auto;
+  border-radius: var(--kh-radius-sm);
+  border: 1px solid var(--kh-border);
+
+  &:focus-visible {
+    // Transparent outline shows in forced-colors / High Contrast Mode,
+    // where the inset box-shadow ring is dropped (WCAG 2.4.7).
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 2px var(--kh-focus-ring);
+  }
+}
+
+.trade-table {
+  width: 100%;
+  font-size: 0.82rem;
+
+  // Sticky header
+  ::ng-deep .mat-mdc-header-row {
+    background: var(--kh-surface-3);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  ::ng-deep th.mat-mdc-header-cell {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--kh-text-tertiary);
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+
+  ::ng-deep td.mat-mdc-cell {
+    padding: 0 8px;
+    line-height: 2rem;
+    white-space: nowrap;
+    color: var(--kh-text-secondary);
+  }
+
+  ::ng-deep tr.win-row td {
+    background: var(--kh-success-subtle);
+  }
+
+  ::ng-deep tr.loss-row td {
+    background: var(--kh-error-subtle);
+  }
+}
+
+.num-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.win-cell  { color: var(--kh-success); font-weight: 600; }
+.loss-cell { color: var(--kh-error); font-weight: 600; }
+
+.symbol-badge {
+  display: inline-block;
+  background: var(--kh-accent-subtle);
+  color: var(--kh-accent-text);
+  border-radius: var(--kh-radius-sm);
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.outcome-pip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: 700;
+
+  &.win-pip  { background: var(--kh-success-subtle); color: var(--kh-success); }
+  &.loss-pip { background: var(--kh-error-subtle); color: var(--kh-error); }
+}
+
+.trade-paginator {
+  border-top: 1px solid var(--kh-border);
+}
+
+// ── Strategy details ──────────────────────────────────────────────────────────
+
+.detail-section {
+  margin-bottom: 0.875rem;
+
+  strong {
+    display: block;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--kh-text-muted);
+    margin-bottom: 0.2rem;
+  }
+
+  p {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--kh-text-secondary);
+  }
+
+  ul {
+    margin: 0;
+    padding-left: 1.25rem;
+    font-size: 0.9rem;
+    color: var(--kh-text-secondary);
+
+    li { margin-bottom: 0.2rem; }
+  }
+}
+
+.rationale-text {
+  font-style: italic;
+  color: var(--kh-text-tertiary);
+}
+
+// ── Quality Gates ──────────────────────────────────────────────────────────
+
+.gate-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gate-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--kh-radius-sm);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+
+  .gate-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .gate-name {
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 140px;
+    color: var(--kh-text-primary);
+  }
+
+  .gate-detail {
+    color: var(--kh-text-tertiary);
+  }
+
+  &.gate-info .gate-icon { color: var(--kh-success); }
+  &.gate-warning .gate-icon { color: var(--kh-warning); }
+  &.gate-critical .gate-icon { color: var(--kh-error); }
+  &.gate-remedied .gate-icon { color: var(--kh-warning); }
+  &.gate-warning { background: var(--kh-warning-subtle); }
+  &.gate-critical { background: var(--kh-error-subtle); }
+  &.gate-remedied { background: var(--kh-warning-subtle); opacity: 0.75; }
+}
+
+.gate-remedied-label {
+  font-style: italic;
+  color: var(--kh-warning);
+  font-size: 0.75rem;
+  margin-left: 0.25rem;
+}
+
+// ── Strategy Code ──────────────────────────────────────────────────────────
+
+.strategy-code {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  background: var(--kh-surface-3);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--kh-font-mono);
+  color: var(--kh-text-secondary);
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.signal-json {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-x: auto;
+  background: var(--kh-surface-3);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--kh-text-secondary);
+}
+
+// ── Paper Trade button ──────────────────────────────────────────────────────
+
+.paper-trade-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 38px;
+  flex-shrink: 0;
+  margin: -4px 0 0 0;
+  color: var(--kh-accent-text);
+
+  &:hover:not(:disabled) {
+    color: var(--kh-accent);
+  }
+}
+
+// ── Paper Trading ─────────────────────────────────────────────────────────────
+
+.paper-trading-section {
+  margin-top: 0.5rem;
+}
+
+.paper-trading-skipped {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.75rem;
+  color: var(--kh-text-muted);
+}
+
+.paper-trading-skipped-inline {
+  margin-top: 0.75rem;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.paper-skip-icon {
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.paper-skip-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.paper-skip-title {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--kh-text);
+}
+
+.paper-skip-reason {
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+
+.rerun-paper-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 32px;
+  font-size: 0.8rem;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.paper-trading-result {
+  margin-top: 0.25rem;
+}
+
+.paper-verdict-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.paper-verdict-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+
+  mat-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+  }
+
+  &.verdict-ready {
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
+  }
+
+  &.verdict-not-performant {
+    background: var(--kh-warning-subtle);
+    color: var(--kh-warning);
+  }
+
+  &.verdict-inconclusive {
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
+  }
+
+  &.verdict-running {
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
+  }
+}
+
+.paper-meta {
+  font-size: 0.8rem;
+  color: var(--kh-text-tertiary);
+}
+
+.comparison-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--kh-border);
+
+  &:focus-visible {
+    // Transparent outline shows in forced-colors / High Contrast Mode,
+    // where the inset box-shadow ring is dropped (WCAG 2.4.7).
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 2px var(--kh-focus-ring);
+  }
+}
+
+.comparison-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+
+  th {
+    background: var(--kh-surface-3);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--kh-text-secondary);
+    padding: 6px 12px;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 5px 12px;
+    border-top: 1px solid var(--kh-border);
+    white-space: nowrap;
+  }
+}
+
+.cmp-label {
+  font-weight: 500;
+}
+
+.cmp-aligned {
+  text-align: center;
+
+  mat-icon {
+    font-size: 1.1rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    vertical-align: middle;
+  }
+
+  .aligned-yes { color: var(--kh-success); }
+  .aligned-no  { color: var(--kh-error); }
+}
+
+.divergence-analysis {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--kh-text-secondary);
+  padding: 0.75rem;
+  background: var(--kh-warning-subtle);
+  border-radius: 6px;
+  border: 1px solid var(--kh-warning-subtle);
+
+  p {
+    margin: 0;
+  }
+}

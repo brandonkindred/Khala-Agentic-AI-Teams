@@ -1,9 +1,10 @@
-import type { QualityGateResult } from '../../models';
+import type { QualityGateResult, StrategyLabRecord } from '../../models';
 import {
   ASSET_CLASS_ICONS,
   gateIcon,
   gateSeverityClass,
   getAssetClassIcon,
+  publishabilitySkipLabel,
   returnColor,
   returnColorLabel,
   verdictColor,
@@ -12,6 +13,20 @@ import {
 
 function makeGate(overrides: Partial<QualityGateResult> = {}): QualityGateResult {
   return { gate_name: 'g', passed: false, details: '', severity: 'warning', ...overrides };
+}
+
+function makeRecord(overrides: Partial<StrategyLabRecord> = {}): StrategyLabRecord {
+  return {
+    lab_record_id: 'lab-1',
+    is_winning: true,
+    is_publishable: false,
+    strategy_rationale: '',
+    analysis_narrative: '',
+    created_at: '',
+    strategy: {} as never,
+    backtest: {} as never,
+    ...overrides,
+  };
 }
 
 describe('returnColor', () => {
@@ -92,5 +107,33 @@ describe('gateIcon / gateSeverityClass', () => {
   it('derives the severity class from the gate when not remedied', () => {
     expect(gateSeverityClass(makeGate({ severity: 'info' }), false)).toBe('gate-info');
     expect(gateSeverityClass(makeGate({ severity: 'warning' }), false)).toBe('gate-warning');
+  });
+});
+
+describe('publishabilitySkipLabel', () => {
+  it('prefers publishability_skip_reason over paper_trading_skipped_reason', () => {
+    expect(
+      publishabilitySkipLabel(
+        makeRecord({
+          publishability_skip_reason: 'realism_failed',
+          paper_trading_skipped_reason: 'realism_failed,alignment_unresolved',
+        }),
+      ),
+    ).toBe('realism_failed');
+  });
+
+  it('falls back to paper_trading_skipped_reason when no publishability_skip_reason is set', () => {
+    expect(
+      publishabilitySkipLabel(makeRecord({ paper_trading_skipped_reason: 'alignment_unresolved' })),
+    ).toBe('alignment_unresolved');
+  });
+
+  it('treats the not_winning/disabled reasons as non-answers, returning null', () => {
+    expect(publishabilitySkipLabel(makeRecord({ paper_trading_skipped_reason: 'not_winning' }))).toBeNull();
+    expect(publishabilitySkipLabel(makeRecord({ paper_trading_skipped_reason: 'disabled' }))).toBeNull();
+  });
+
+  it('returns null when neither reason is present', () => {
+    expect(publishabilitySkipLabel(makeRecord())).toBeNull();
   });
 });

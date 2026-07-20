@@ -13,9 +13,8 @@ import {
   signal,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
+import { CommonModule, DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -24,12 +23,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { MatDividerModule } from '@angular/material/divider';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
-import { MatExpansionModule } from '@angular/material/expansion';
-import { MatTableModule } from '@angular/material/table';
-import { MatSortModule } from '@angular/material/sort';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import type { PageEvent } from '@angular/material/paginator';
 import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
 import { of } from 'rxjs';
@@ -41,8 +36,6 @@ import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { NotificationService } from '../../core/notification.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
-import { formatPct, formatRatio } from '../../shared/number-format';
-import { DateOnlyPipe } from '../../shared/date-only.pipe';
 import {
   ConfirmDialogComponent,
   type ConfirmDialogData,
@@ -52,62 +45,26 @@ import {
   returnColor,
   returnColorLabel,
   getAssetClassIcon,
-  verdictLabel,
-  verdictColor,
-  gateIcon as pureGateIcon,
-  gateSeverityClass as pureGateSeverityClass,
+  publishabilitySkipLabel,
 } from './strategy-lab.formatters';
+import { PhaseStepperComponent } from './phase-stepper/phase-stepper.component';
+import { StrategyCardComponent } from './strategy-card/strategy-card.component';
 import type {
   PaperTradingSession,
-  PaperTradingComparison,
-  QualityGateResult,
   StrategyLabRecord,
   StrategyLabResultsResponse,
   StrategyLabRunStatus,
   StrategyLabStreamEvent,
   StrategyLabProgressEvent,
-  TradeRecord,
 } from '../../models';
 
 type FilterMode = 'all' | 'winning' | 'losing';
-
-interface PhaseDefinition {
-  id: string;
-  label: string;
-  icon: string;
-}
 
 interface ActivityLogEntry {
   time: string;
   status: 'active' | 'done' | 'error';
   message: string;
 }
-
-/** Precomputed per-gate template data — see `gateViewModels`. */
-interface GateViewModel {
-  gate: QualityGateResult;
-  icon: string;
-  severityClass: string;
-  isRemedied: boolean;
-}
-
-/** Precomputed comparison-table row — see `comparisonMetrics`. */
-interface ComparisonRow {
-  label: string;
-  backtest: string;
-  paper: string;
-  aligned: boolean;
-}
-
-const STRATEGY_LAB_PHASES: PhaseDefinition[] = [
-  { id: 'ideating',     label: 'Ideate',    icon: 'psychology' },
-  { id: 'coding',       label: 'Code',      icon: 'code' },
-  { id: 'backtesting',  label: 'Backtest',  icon: 'play_circle' },
-  { id: 'analyzing',    label: 'Analyze',   icon: 'summarize' },
-];
-
-/** Ordered phase IDs for determining completed/pending state. */
-const PHASE_ORDER = STRATEGY_LAB_PHASES.map(p => p.id);
 
 interface AssetCategoryOption {
   value: string;
@@ -145,7 +102,8 @@ function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
  * paint / on a config failure. Keep this list in sync with the backend's
  * `PROMPT_ASSET_CLASSES`; `options` is omitted because it is never a valid
  * ideation target. Module-level constants in this file use SCREAMING_SNAKE_CASE
- * (see STRATEGY_LAB_PHASES; ASSET_CLASS_ICONS lives in `./strategy-lab.formatters`).
+ * (ASSET_CLASS_ICONS lives in `./strategy-lab.formatters`; STRATEGY_LAB_PHASES
+ * lives in `./phase-stepper/phase-stepper.component`).
  */
 const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOptions([
   'stocks',
@@ -163,12 +121,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   imports: [
     CommonModule,
     DecimalPipe,
-    DatePipe,
-    CurrencyPipe,
-    JsonPipe,
-    DateOnlyPipe,
     FormsModule,
-    MatCardModule,
     MatButtonModule,
     MatIconModule,
     MatFormFieldModule,
@@ -177,14 +130,11 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
     MatProgressBarModule,
     MatChipsModule,
     MatTooltipModule,
-    MatDividerModule,
     MatButtonToggleModule,
-    MatExpansionModule,
-    MatTableModule,
-    MatSortModule,
-    MatPaginatorModule,
     RouterLink,
     InlineBannerComponent,
+    PhaseStepperComponent,
+    StrategyCardComponent,
   ],
   templateUrl: './strategy-lab.component.html',
   styleUrl: './strategy-lab.component.scss',
@@ -302,86 +252,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return this.expandedCards.has(id);
   }
 
-  /**
-   * DOM id for a card's disclosure region, shared by the toggle button's
-   * `aria-controls` and the region's `id` so the two can't drift apart.
-   *
-   * Preconditions: `id` is a non-empty `lab_record_id`.
-   * Postconditions: returns a non-empty string unique per `id`, stable across
-   *   change-detection cycles for the same `id`.
-   */
-  cardBodyId(id: string): string {
-    return 'card-body-' + id;
-  }
-
-  /**
-   * Accessible name for a card's disclosure button. States the action
-   * available (Show/Hide) rather than the current state, per standard
-   * toggle-button ARIA labeling convention.
-   *
-   * Preconditions: `record.strategy.asset_class` is a non-empty string.
-   * Postconditions: returns "Show details for {asset_class} strategy" when
-   *   collapsed, "Hide details for {asset_class} strategy" when expanded.
-   */
-  cardToggleLabel(record: StrategyLabRecord): string {
-    const verb = this.isCardExpanded(record.lab_record_id) ? 'Hide' : 'Show';
-    return `${verb} details for ${record.strategy.asset_class} strategy`;
-  }
-
-  /**
-   * Accessible name for a card's disclosure region (`role="region"`).
-   *
-   * Preconditions: `record.strategy.asset_class` is a non-empty string.
-   * Postconditions: returns a non-empty, state-independent label.
-   */
-  cardRegionLabel(record: StrategyLabRecord): string {
-    return `${record.strategy.asset_class} strategy details`;
-  }
-
-  /**
-   * Accessible name for the trade-table's scrollable wrapper (WCAG 2.4.7 —
-   * the wrapper, not the table, must be focusable since the global outline
-   * would otherwise be clipped by `overflow-x: auto`).
-   *
-   * Preconditions: `record.strategy.asset_class` is a non-empty string.
-   * Postconditions: returns a non-empty, state-independent label.
-   */
-  tradeTableRegionLabel(record: StrategyLabRecord): string {
-    return `${record.strategy.asset_class} strategy trade history, scrollable`;
-  }
-
-  /**
-   * Accessible name for the paper-trading comparison table's scrollable
-   * wrapper (same rationale as `tradeTableRegionLabel`).
-   *
-   * Preconditions: `record.strategy.asset_class` is a non-empty string.
-   * Postconditions: returns a non-empty, state-independent label.
-   */
-  comparisonTableRegionLabel(record: StrategyLabRecord): string {
-    return `${record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
-  }
-
-  /**
-   * Accessible name for the trade-ledger `<table>` itself — distinct from
-   * `tradeTableRegionLabel`, which names the scrollable wrapper div: a
-   * screen reader's table-navigation commands read the `<table>`'s own
-   * accessible name, not the wrapper's.
-   *
-   * Preconditions: `record.backtest.trades` is defined (may be empty).
-   * Postconditions: returns a non-empty, state-independent label.
-   */
-  tradeTableAccessibleName(record: StrategyLabRecord): string {
-    return `Trade ledger, ${this.tradeCount(record)} trades`;
-  }
-
-  // Per-card trade ledger state
+  // Per-card trade ledger state (pagination index only — rendering lives in StrategyCardComponent)
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
-  readonly PAGE_SIZE = 20;
-  readonly TRADE_COLUMNS = [
-    'trade_num', 'entry_date', 'exit_date', 'symbol',
-    'entry_price', 'exit_price', 'shares', 'return_pct',
-    'net_pnl', 'cumulative_pnl', 'outcome',
-  ];
 
   // Paper trading state
   /** True while a "run paper trading" POST is in flight for this record, before runService takes over. */
@@ -391,8 +263,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     () => this.startingPaperTrade() ?? this.runService.paperTradingLabRecordId(),
   );
 
-  // Phase stepper + activity log
-  readonly STRATEGY_LAB_PHASES = STRATEGY_LAB_PHASES;
+  // Activity log
   readonly activityLog = signal<ActivityLogEntry[]>([]);
   private lastCycleIndex = -1;
 
@@ -877,45 +748,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   readonly returnColor = returnColor;
   readonly returnColorLabel = returnColorLabel;
-
-  // ---------------------------------------------------------------------------
-  // Phase stepper state
-  // ---------------------------------------------------------------------------
-
-  isPhaseCompleted(phaseId: string): boolean {
-    const current = this.runService.runStatus()?.current_cycle?.phase;
-    if (!current) return false;
-    const currentIdx = PHASE_ORDER.indexOf(current);
-    const phaseIdx = PHASE_ORDER.indexOf(phaseId);
-    if (currentIdx < 0 || phaseIdx < 0) return false;
-    return phaseIdx < currentIdx;
-  }
-
-  isCurrentPhase(phaseId: string): boolean {
-    return this.runService.runStatus()?.current_cycle?.phase === phaseId;
-  }
-
-  isPhasePending(phaseId: string): boolean {
-    return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId);
-  }
-
-  /**
-   * Screen-reader state text for a phase-stepper step, mirroring the visual
-   * completed/current/pending cue that sighted users get from CSS classes and
-   * the icon swap.
-   *
-   * Preconditions: `phaseId` is one of the STRATEGY_LAB_PHASES ids; called only
-   *   while a run is active (the stepper renders under `runStatus.current_cycle`).
-   * Postconditions: returns exactly one of `'completed'`, `'current step'`, or
-   *   `'not started'`, derived solely from `isPhaseCompleted`/`isCurrentPhase`
-   *   (no independent ordering logic), so it never disagrees with the visual state.
-   */
-  phaseStateLabel(phaseId: string): string {
-    if (this.isPhaseCompleted(phaseId)) return 'completed';
-    if (this.isCurrentPhase(phaseId)) return 'current step';
-    return 'not started';
-  }
-
   readonly getAssetClassIcon = getAssetClassIcon;
 
   // ---------------------------------------------------------------------------
@@ -1131,137 +963,28 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // Trade ledger helpers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Current trade-ledger paginator page for a record's `StrategyCardComponent`.
+   *
+   * Preconditions: `id` is a non-empty `lab_record_id`.
+   * Postconditions: returns the zero-based page index last set via
+   *   `onPageChange` for `id`, or `0` if the record's ledger has never been paged.
+   */
   getPageIndex(id: string): number {
     return this.tradeLedgerPages[id] ?? 0;
   }
 
+  /**
+   * Handles a `pageChanged` output from a `StrategyCardComponent`'s trade-ledger
+   * paginator, persisting the new page so it survives the card re-rendering
+   * (e.g. on the next results poll).
+   *
+   * Preconditions: `id` is a non-empty `lab_record_id`; `event` is the
+   *   Material paginator's `PageEvent` for that record's ledger.
+   * Postconditions: `getPageIndex(id)` returns `event.pageIndex` on the next call.
+   */
   onPageChange(id: string, event: PageEvent): void {
     this.tradeLedgerPages[id] = event.pageIndex;
-  }
-
-  // Per-record caches keyed by the record object. A status poll replaces records
-  // with new objects, so the WeakMap entries fall away naturally; within a poll
-  // cycle these are called per change-detection tick for every visible card.
-  private readonly _pagedTradesCache = new WeakMap<StrategyLabRecord, { page: number; trades: TradeRecord[] }>();
-  private readonly _winCountCache = new WeakMap<StrategyLabRecord, number>();
-
-  pagedTrades(record: StrategyLabRecord): TradeRecord[] {
-    const page = this.getPageIndex(record.lab_record_id);
-    const cached = this._pagedTradesCache.get(record);
-    // Returning a stable array reference for the same (record, page) lets the
-    // mat-table dataSource diff instead of re-rendering every row each CD cycle.
-    if (cached && cached.page === page) {
-      return cached.trades;
-    }
-    const start = page * this.PAGE_SIZE;
-    const trades = record.backtest.trades.slice(start, start + this.PAGE_SIZE);
-    this._pagedTradesCache.set(record, { page, trades });
-    return trades;
-  }
-
-  tradeCount(record: StrategyLabRecord): number {
-    return record.backtest.trades.length;
-  }
-
-  winCount(record: StrategyLabRecord): number {
-    let count = this._winCountCache.get(record);
-    if (count === undefined) {
-      count = record.backtest.trades.filter((t) => t.outcome === 'win').length;
-      this._winCountCache.set(record, count);
-    }
-    return count;
-  }
-
-  totalNetPnl(record: StrategyLabRecord): number {
-    const trades = record.backtest.trades;
-    return trades.length ? trades[trades.length - 1].cumulative_pnl : 0;
-  }
-
-  tradeReturnColor(t: TradeRecord): string {
-    return t.outcome === 'win' ? 'win-cell' : 'loss-cell';
-  }
-
-  formatPrice(price: number): string {
-    if (price >= 1000) return price.toFixed(0);
-    if (price >= 1) return price.toFixed(2);
-    return price.toFixed(4);
-  }
-
-  hasSignalBrief(record: StrategyLabRecord): boolean {
-    return record.signal_intelligence_brief != null && Object.keys(record.signal_intelligence_brief).length > 0;
-  }
-
-  /**
-   * A failed gate is "remedied" if a later run of the same logical
-   * validator produced a passing result. Two channels:
-   *
-   * - Standard refinement-loop gates (refinement_round >= 0): remedied
-   *   when the gate's round is earlier than the cycle's last round
-   *   (the existing same-round-as-failure rule).
-   * - Pre-synthesis gates (refinement_round = -1): refinement itself is
-   *   code-only and cannot fix them, but the zero-trade repair path
-   *   re-runs the spec validator after committing whitelisted spec
-   *   updates and emits gates with gate_name `zero_trade_repair_<original>`.
-   *   If any such later validator pass produced a passing result for the
-   *   same logical check, the original pre-synthesis warning is remedied.
-   */
-  isRemedied(gate: QualityGateResult, record: StrategyLabRecord): boolean {
-    if (gate.passed) return false;
-
-    const gateRound = gate.refinement_round ?? 0;
-    if (gateRound < 0) {
-      // Pre-synthesis gate. Remedied only if a later validator pass for
-      // the same logical check returned a passing result.
-      const gates = record.quality_gate_results ?? [];
-      const baseName = gate.gate_name;
-      const repairName = `zero_trade_repair_${baseName}`;
-      return gates.some(
-        (g) =>
-          g.passed &&
-          (g.refinement_round ?? -1) >= 0 &&
-          (g.gate_name === baseName || g.gate_name === repairName),
-      );
-    }
-
-    const maxRound = record.refinement_rounds ?? 0;
-    if (maxRound === 0) return false;
-    // Gate failed in an earlier round — the strategy continued past it
-    return gateRound < maxRound;
-  }
-
-  gateIcon(gate: QualityGateResult, record: StrategyLabRecord): string {
-    return pureGateIcon(gate, this.isRemedied(gate, record));
-  }
-
-  gateSeverityClass(gate: QualityGateResult, record: StrategyLabRecord): string {
-    return pureGateSeverityClass(gate, this.isRemedied(gate, record));
-  }
-
-  // record.quality_gate_results is replaced wholesale (a new array/objects)
-  // whenever loadResults() re-polls, so the WeakMap entry falls away
-  // naturally — same lifecycle as _pagedTradesCache/_winCountCache above.
-  private readonly _gateViewModelsCache = new WeakMap<StrategyLabRecord, GateViewModel[]>();
-
-  /**
-   * Per-gate template data (icon, severity class, remedied flag), computed
-   * once per record on first access and cached — the template iterates this
-   * instead of calling `gateIcon`/`gateSeverityClass`/`isRemedied` directly
-   * per gate on every change-detection pass.
-   */
-  gateViewModels(record: StrategyLabRecord): GateViewModel[] {
-    const cached = this._gateViewModelsCache.get(record);
-    if (cached) return cached;
-    const viewModels = (record.quality_gate_results ?? []).map((gate) => {
-      const isRemedied = this.isRemedied(gate, record);
-      return {
-        gate,
-        icon: pureGateIcon(gate, isRemedied),
-        severityClass: pureGateSeverityClass(gate, isRemedied),
-        isRemedied,
-      };
-    });
-    this._gateViewModelsCache.set(record, viewModels);
-    return viewModels;
   }
 
   /**
@@ -1448,49 +1171,9 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     });
   }
 
-  /**
-   * Human-readable publishability skip reason for a winning-but-blocked record.
-   *
-   * Preconditions: ``record`` is a loaded lab row.
-   * Postconditions: returns the persisted skip reason when present, else null.
-   */
-  publishabilitySkipLabel(record: StrategyLabRecord): string | null {
-    const reason =
-      record.publishability_skip_reason ||
-      (record.paper_trading_skipped_reason &&
-      record.paper_trading_skipped_reason !== 'not_winning' &&
-      record.paper_trading_skipped_reason !== 'disabled'
-        ? record.paper_trading_skipped_reason
-        : null);
-    return reason || null;
-  }
+  readonly publishabilitySkipLabel = publishabilitySkipLabel;
 
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
     return this.runService.paperTradingSessions()[record.lab_record_id] ?? null;
-  }
-
-  readonly verdictLabel = verdictLabel;
-
-  readonly verdictColor = verdictColor;
-
-  // Keyed by the PaperTradingComparison object itself: a poll tick replaces
-  // the whole PaperTradingSession (and its nested `comparison`) with a fresh
-  // object, so this cache naturally invalidates on real data changes while
-  // giving repeat calls for the same object a stable array — same lifecycle
-  // as _pagedTradesCache/_winCountCache/_gateViewModelsCache above.
-  private readonly _comparisonMetricsCache = new WeakMap<PaperTradingComparison, ComparisonRow[]>();
-
-  comparisonMetrics(c: PaperTradingComparison): ComparisonRow[] {
-    const cached = this._comparisonMetricsCache.get(c);
-    if (cached) return cached;
-    const rows: ComparisonRow[] = [
-      { label: 'Win Rate', backtest: formatPct(c.backtest_win_rate_pct), paper: formatPct(c.paper_win_rate_pct), aligned: c.win_rate_aligned },
-      { label: 'Annual Return', backtest: formatPct(c.backtest_annualized_return_pct), paper: formatPct(c.paper_annualized_return_pct), aligned: c.return_aligned },
-      { label: 'Sharpe', backtest: formatRatio(c.backtest_sharpe_ratio), paper: formatRatio(c.paper_sharpe_ratio), aligned: c.sharpe_aligned },
-      { label: 'Max Drawdown', backtest: formatPct(c.backtest_max_drawdown_pct), paper: formatPct(c.paper_max_drawdown_pct), aligned: c.drawdown_aligned },
-      { label: 'Profit Factor', backtest: formatRatio(c.backtest_profit_factor), paper: formatRatio(c.paper_profit_factor), aligned: c.profit_factor_aligned },
-    ];
-    this._comparisonMetricsCache.set(c, rows);
-    return rows;
   }
 }

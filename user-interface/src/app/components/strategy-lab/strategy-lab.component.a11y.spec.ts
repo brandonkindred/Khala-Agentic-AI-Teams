@@ -1432,8 +1432,12 @@ describe('StrategyLabComponent template — explicit aria-hidden on every <mat-i
     const openTags = html.match(/<mat-icon\b[^>]*>/g) ?? [];
 
     // Sanity check: fails loudly if the template moved/renamed and the regex
-    // above stopped matching anything, rather than passing vacuously.
-    expect(openTags.length).toBeGreaterThan(30);
+    // above stopped matching anything, rather than passing vacuously. The
+    // threshold dropped from >30 once the phase-stepper and per-record
+    // strategy-card markup (and their own <mat-icon> tags) moved into
+    // PhaseStepperComponent/StrategyCardComponent, each with its own
+    // equivalent source-scan guard.
+    expect(openTags.length).toBeGreaterThan(15);
 
     const isExplicit = (tag: string): boolean => {
       if (/aria-hidden\s*=\s*"true"/.test(tag)) return true;
