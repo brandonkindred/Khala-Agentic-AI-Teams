@@ -833,10 +833,14 @@ rest of the repository (the same `read_file`/`list_files`/`search_codebase`/
 use, plus a new `search_repository` tool that searches the REST of the
 repository — beyond the submission — for a substring, capped well below the
 GitHub PR-review path's shared per-review fetch budget since three passes draw
-from the same budget and this one runs last). It can only ADD findings, in one
-category: `side-effects` — the current implementation's behavior (return
-value, exceptions, side effects, ordering/timing) breaking a tool-verified
-caller, or not matching what the function's own docstring/comments claim.
+from the same budget and this one runs last). It can only ADD findings, in two
+categories: `side-effects` — a genuine side effect with an unintended logical
+consequence, where the current implementation's behavior (return value,
+exceptions, mutation of shared/passed-in state, I/O, ordering/timing) breaks a
+tool-verified caller elsewhere in the system — and `documentation` — a
+docstring/comment that no longer matches the implementation (a
+documentation-accuracy problem, not a side effect, reported under its own
+category rather than mislabeled as `side-effects`).
 This pass is only ever given CURRENT file content, never a prior revision, so
 it judges behavior as written now rather than comparing against history. It
 never removes or alters any finding the map phase, the false-positive filter,

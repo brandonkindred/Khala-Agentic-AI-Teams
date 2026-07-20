@@ -37,7 +37,7 @@ from llm_service.clients.dummy import DummyLLMClient
 # Unique anchor in this pass's user prompt (never the system prompt), distinct
 # from architecture_consistency_pass's own anchor so a DummyLLMClient subclass
 # can route between the two passes' calls without collision.
-_SIDE_EFFECT_PASS_ANCHOR = '"side-effects" findings array'
+_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
 
 
 def _input(files: Optional[Dict[str, str]] = None) -> CodeReviewInput:
@@ -410,6 +410,24 @@ def test_coerce_finding_accepts_side_effects_category() -> None:
     assert finding.severity == "high"
 
 
+def test_coerce_finding_accepts_documentation_category() -> None:
+    """A docstring/comment-vs-implementation mismatch is a documentation-accuracy
+    finding, not a side effect: the pass emits it under the ``documentation``
+    category and ``_coerce_finding`` accepts it alongside ``side-effects``."""
+    finding = _coerce_finding(
+        {
+            "severity": "medium",
+            "category": "documentation",
+            "file_path": "app/main.py",
+            "description": "bar()'s docstring says it returns a list, but it returns a dict",
+            "suggestion": "update bar()'s docstring to describe the dict it actually returns",
+        }
+    )
+    assert finding is not None
+    assert finding.category == "documentation"
+    assert finding.severity == "medium"
+
+
 def test_coerce_finding_carries_through_pre_existing_tag() -> None:
     """The model's optional pre_existing tag (used by the PR-review whole-file
     path to route a doc/impl-mismatch finding in untouched code to a
@@ -672,6 +690,10 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
 
 
 def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
+    """A genuine caller-breaking side effect surfaces under ``side-effects`` and a
+    docstring/implementation mismatch surfaces under ``documentation`` -- both fold
+    into the final output, and neither blocks approval on its own at medium/low."""
+
     class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if _SIDE_EFFECT_PASS_ANCHOR in prompt:
@@ -681,20 +703,32 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
                             "severity": "medium",
                             "category": "side-effects",
                             "file_path": "app/main.py",
-                            "description": "bar()'s new retry side effect is undocumented",
-                            "suggestion": "document the retry behavior in bar()'s docstring",
-                        }
+                            "description": (
+                                "bar() now returns None instead of an int; "
+                                "app/caller.py line 4 does `bar() + 1` and will raise TypeError"
+                            ),
+                            "suggestion": "update app/caller.py to handle bar()'s new return value",
+                        },
+                        {
+                            "severity": "low",
+                            "category": "documentation",
+                            "file_path": "app/main.py",
+                            "description": "bar()'s docstring claims it returns an int, but it "
+                            "returns None",
+                            "suggestion": "correct bar()'s docstring to match its implementation",
+                        },
                     ]
                 }
             return {"approved": True, "issues": [], "summary": "ok"}
 
     result = run_coordinator(
         _FindingsClient(),
-        CodeReviewInput(files={"app/main.py": "def bar():\n    return 1\n"}),
+        CodeReviewInput(files={"app/main.py": "def bar():\n    return None\n"}),
     )
-    assert result.approved  # a medium side-effects finding never blocks approval alone
+    assert result.approved  # medium/low findings never block approval alone
+    assert any(i.category == "side-effects" and "TypeError" in i.description for i in result.issues)
     assert any(
-        i.category == "side-effects" and "undocumented" in i.description for i in result.issues
+        i.category == "documentation" and "docstring" in i.description for i in result.issues
     )
 
 

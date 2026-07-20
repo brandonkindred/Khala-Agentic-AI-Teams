@@ -23,10 +23,16 @@ via the same tools the false-positive filter and architecture pass use
 submission) for a substring — the capability actually needed to find a
 changed function's callers outside the diff, which no existing tool provides
 (``search_codebase`` is explicitly submission-only). It emits new findings in
-exactly one category, ``"side-effects"``: a behavior change (return value,
-exceptions, side effects, ordering/timing) whose new behavior breaks a
-tool-verified caller, or a real behavior change that ships with no
-documentation update.
+two categories:
+
+    - ``"side-effects"`` — a genuine side effect with an unintended logical
+      consequence: a changed function's current behavior (return value,
+      exceptions, mutation of shared/passed-in state, I/O, ordering/timing)
+      breaks a tool-verified caller elsewhere in the system.
+    - ``"documentation"`` — a docstring/comment that no longer matches the
+      implementation. A stale docstring is a documentation-accuracy problem,
+      NOT a side effect; it is reported under its own category rather than
+      being mislabeled as ``"side-effects"``.
 
 Invariants:
 
@@ -74,7 +80,7 @@ logger = logging.getLogger(__name__)
 # disables the pass (see docs/ENV_VARS.md). Any other value (or unset) leaves it enabled.
 _PASS_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
 
-_ALLOWED_CATEGORIES = frozenset({"side-effects"})
+_ALLOWED_CATEGORIES = frozenset({"side-effects", "documentation"})
 _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
 # Cap on substring matches ``search_repository`` returns, mirroring
@@ -313,8 +319,8 @@ def _build_prompt(index: CodebaseIndex, max_inline_chars: int) -> str:
         "search_repository reaches the rest of the repository."
     )
     parts.append(
-        'Return a single JSON object with a "side-effects" findings array, per the output format '
-        'above. Return {"findings": []} if you find nothing.'
+        'Return a single JSON object with a "side-effects"/"documentation" findings array, per the '
+        'output format above. Return {"findings": []} if you find nothing.'
     )
     return "\n".join(parts)
 
@@ -324,8 +330,9 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
 
     Postconditions:
         - Returns None for a non-dict item, an unrecognized/missing
-          ``category`` (only ``"side-effects"`` is accepted -- this pass's
-          whole purpose is that one axis), a blank ``description`` (an
+          ``category`` (only ``"side-effects"`` and ``"documentation"`` are
+          accepted -- this pass's two axes: a caller-breaking side effect, or
+          a docstring/implementation mismatch), a blank ``description`` (an
           unactionable finding is worse than none), or a ``suggestion`` that
           is, in its entirety, a no-op phrasing (e.g. "No changes needed.")
           -- see ``is_no_op_suggestion``. An unrecognized ``severity``
@@ -517,10 +524,12 @@ def find_side_effect_impact_issues(
           on code the pass never actually saw in full), or when the
           submission has no readable files.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
-          ``"side-effects"`` only, each with its cited ``line`` bounds-checked
-          against the real file (a hallucinated out-of-range line is nulled to
-          a file-wide finding, never trusted verbatim); never mutates or
-          removes any issue the caller already has.
+          ``"side-effects"`` (a caller-breaking side effect) or
+          ``"documentation"`` (a docstring/implementation mismatch) only, each
+          with its cited ``line`` bounds-checked against the real file (a
+          hallucinated out-of-range line is nulled to a file-wide finding,
+          never trusted verbatim); never mutates or removes any issue the
+          caller already has.
         - Never raises: any setup or LLM failure is logged at warning level
           and yields ``[]`` -- this pass can only ever add findings, so a
           failure here must never affect the review already computed by the
@@ -583,7 +592,7 @@ def _run_pass(
     if findings:
         findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)
         logger.info(
-            "SideEffectImpactPass: found %s new finding(s) (side-effects)",
+            "SideEffectImpactPass: found %s new finding(s) (side-effects/documentation)",
             len(findings),
         )
     return findings

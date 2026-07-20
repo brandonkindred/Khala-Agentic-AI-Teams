@@ -340,7 +340,9 @@ def find_side_effect_impact_activity(
 
     Postconditions:
         - Returns zero or more NEW ``CodeReviewIssue`` dicts (category
-          ``"side-effects"``); never mutates or removes any finding from the
+          ``"side-effects"`` for a caller-breaking side effect, or
+          ``"documentation"`` for a docstring/implementation mismatch); never
+          mutates or removes any finding from the
           caller's perspective — this activity is purely additive, mirroring
           ``find_side_effect_impact_issues``'s own contract. When
           ``review_input.repo_root`` names a disk checkout reachable by this

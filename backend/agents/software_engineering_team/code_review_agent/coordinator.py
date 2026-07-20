@@ -610,12 +610,15 @@ def run_coordinator(
         verified = [*verified, *architecture_findings]
 
     # Side-effect / blast-radius pass: a separate, additive, once-per-submission check
-    # for whether a changed function/method's new behavior breaks a caller elsewhere in
-    # the codebase, or ships with no documentation update -- something the per-chunk map
-    # phase cannot verify (it has no tools to find callers) and neither the false-positive
-    # filter nor the architecture pass checks. Runs after the architecture pass and folds
-    # into the same dedupe/severity-gate/merge machinery below. (Restricted internally to
-    # the default CODE_REVIEW profile -- see that function's own docstring for why.)
+    # for whether a changed function/method's new behavior produces an unintended logical
+    # consequence -- a genuine side effect that breaks a caller elsewhere in the codebase
+    # (category "side-effects") -- and, separately, whether a docstring/comment no longer
+    # matches the implementation (category "documentation", not a side effect). Both are
+    # something the per-chunk map phase cannot verify (it has no tools to find callers) and
+    # neither the false-positive filter nor the architecture pass checks. Runs after the
+    # architecture pass and folds into the same dedupe/severity-gate/merge machinery below.
+    # (Restricted internally to the default CODE_REVIEW profile -- see that function's own
+    # docstring for why.)
     side_effect_findings = find_side_effect_impact_issues(
         llm, input_data, repo_reader=repo_reader, index=shared_index
     )
