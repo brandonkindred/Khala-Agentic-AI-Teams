@@ -1279,6 +1279,28 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       );
   }
 
+  /**
+   * Deletes a strategy lab record after user confirmation.
+   *
+   * Opens a destructive-action confirmation dialog describing the record's
+   * hypothesis; if the user cancels or dismisses it, no request is sent and
+   * state is left untouched. On confirmation, calls the API to delete the
+   * record (and its backtest and paper-trading sessions), tracks the
+   * in-flight deletion via `deletingLabRecordId`, and on success clears the
+   * error state, refreshes the results list, and shows a success toast. On
+   * failure, clears the in-flight marker and surfaces the error via
+   * `error`.
+   *
+   * Preconditions:
+   *   `record` must be a valid `StrategyLabRecord` with a populated
+   *   `lab_record_id` and `strategy.hypothesis`.
+   *
+   * Postconditions:
+   *   Either no observable change occurs (cancelled), or the record is
+   *   deleted server-side, `deletingLabRecordId` returns to `null`, and
+   *   either the results are refreshed with a success notification or
+   *   `error` reflects the failure.
+   */
   deleteRecord(record: StrategyLabRecord): void {
     const id = record.lab_record_id;
     const shortHyp = record.strategy.hypothesis.slice(0, 60) + (record.strategy.hypothesis.length > 60 ? '…' : '');
