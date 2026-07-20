@@ -264,6 +264,46 @@ describe('StrategyCardComponent', () => {
     });
   });
 
+  describe('truncatedHypothesis', () => {
+    it('returns the hypothesis unchanged when 70 characters or fewer', () => {
+      component.record = makeRecord({
+        strategy: { ...makeRecord().strategy, hypothesis: 'Short hypothesis.' },
+      });
+      expect(component.truncatedHypothesis()).toBe('Short hypothesis.');
+    });
+
+    it('truncates to 70 characters with an ellipsis when longer', () => {
+      const hypothesis = 'A'.repeat(80);
+      component.record = makeRecord({
+        strategy: { ...makeRecord().strategy, hypothesis },
+      });
+      expect(component.truncatedHypothesis()).toBe('A'.repeat(70) + '…');
+    });
+  });
+
+  describe('strategyCode', () => {
+    it('prefers the top-level strategy_code field', () => {
+      component.record = makeRecord({
+        strategy_code: 'top-level code',
+        strategy: { ...makeRecord().strategy, strategy_code: 'nested code' },
+      });
+      expect(component.strategyCode()).toBe('top-level code');
+    });
+
+    it('falls back to strategy.strategy_code when the top-level field is unset', () => {
+      component.record = makeRecord({
+        strategy_code: undefined,
+        strategy: { ...makeRecord().strategy, strategy_code: 'nested code' },
+      });
+      expect(component.strategyCode()).toBe('nested code');
+    });
+
+    it('returns undefined when neither location has strategy code', () => {
+      component.record = makeRecord({ strategy_code: undefined });
+      expect(component.strategyCode()).toBeUndefined();
+    });
+  });
+
   it('verdictLabel/verdictColor cover ready_for_live, not_performant, and inconclusive', () => {
     expect(component.verdictLabel('ready_for_live')).toBe('READY FOR LIVE');
     expect(component.verdictColor('ready_for_live')).toBe('winning');

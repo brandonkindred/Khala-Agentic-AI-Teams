@@ -172,6 +172,33 @@ export class StrategyCardComponent {
   }
 
   /**
+   * Truncated hypothesis for the card title, shared by both the `showTitle`
+   * `h3` and `h2` template branches so they can't drift out of sync.
+   *
+   * Preconditions: `record.strategy.hypothesis` is a string.
+   * Postconditions: returns the hypothesis unchanged when 70 characters or
+   *   fewer; otherwise the first 70 characters followed by an ellipsis.
+   */
+  truncatedHypothesis(): string {
+    const hypothesis = this.record.strategy.hypothesis;
+    return hypothesis.length > 70 ? `${hypothesis.slice(0, 70)}…` : hypothesis;
+  }
+
+  /**
+   * Resolved strategy code for the "Strategy Code" panel. The backend has
+   * populated this field under two different locations across schema
+   * versions (top-level `record.strategy_code` on newer records,
+   * `record.strategy.strategy_code` on older ones); resolving the fallback
+   * here once keeps it out of the template and in one testable place.
+   *
+   * Postconditions: returns `record.strategy_code` when set and non-empty,
+   *   else `record.strategy.strategy_code`, else `undefined`.
+   */
+  strategyCode(): string | undefined {
+    return this.record.strategy_code || this.record.strategy.strategy_code;
+  }
+
+  /**
    * Accessible name for the trade-table's scrollable wrapper (WCAG 2.4.7 —
    * the wrapper, not the table, must be focusable since the global outline
    * would otherwise be clipped by `overflow-x: auto`).

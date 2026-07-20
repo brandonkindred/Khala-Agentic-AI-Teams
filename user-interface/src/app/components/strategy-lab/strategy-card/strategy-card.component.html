@@ -8,11 +8,11 @@
     <div class="strategy-card-header-text">
       @if (showTitle) {
         <h3 mat-card-title>
-          {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+          {{ record.strategy.asset_class | titlecase }} — {{ truncatedHypothesis() }}
         </h3>
       } @else {
         <h2 mat-card-title>
-          {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+          {{ record.strategy.asset_class | titlecase }} — {{ truncatedHypothesis() }}
         </h2>
       }
       <mat-card-subtitle>
@@ -365,7 +365,7 @@
       }
 
       <!-- Strategy Code panel -->
-      @if (record.strategy_code || record.strategy.strategy_code) {
+      @if (strategyCode(); as code) {
         <mat-expansion-panel>
           <mat-expansion-panel-header>
             <mat-panel-title>
@@ -374,7 +374,7 @@
             </mat-panel-title>
             <mat-panel-description>Generated Python backtest script</mat-panel-description>
           </mat-expansion-panel-header>
-          <pre class="strategy-code">{{ record.strategy_code || record.strategy.strategy_code }}</pre>
+          <pre class="strategy-code">{{ code }}</pre>
         </mat-expansion-panel>
       }
 
