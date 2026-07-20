@@ -6,16 +6,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl libpq-dev 
 WORKDIR /app
 
 # NOTE: build context must be ../backend (i.e. the parent of job_service/),
-# so the Dockerfile can COPY from shared/postgres and shared/env.
+# so the Dockerfile can COPY from the shared/ package tree.
 COPY job_service/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Shared env-var parser (leaf, stdlib-only). shared.postgres.client imports it,
-# so it must be on the image or the app fails to import at startup.
-COPY shared/env /app/shared.env
-
-# Shared Postgres client + schema registry
-COPY shared/postgres /app/shared.postgres
+# Shared package tree, as an importable `shared` package (PYTHONPATH=/app
+# below). Only the leaves this service actually needs are copied:
+#   - shared/env: leaf, stdlib-only env-var parser; shared.postgres.client
+#     imports it, so it must be on the image or the app fails to import.
+#   - shared/postgres: Postgres client + schema registry.
+# `shared/__init__.py` must come along too so `import shared.postgres`
+# resolves — copying into /app/shared/<name> (not /app/shared.<name>)
+# preserves the package structure the code imports as `shared.postgres`.
+COPY shared/__init__.py /app/shared/__init__.py
+COPY shared/env /app/shared/env
+COPY shared/postgres /app/shared/postgres
 
 # Job service source
 COPY job_service /app/

@@ -76,6 +76,10 @@ jobs:
             # team_service is the generic wrapper that can run any team, so
             # changes there ripple to every team's runtime path.
             shared_backend:
+              # Catch-all so any package added under backend/shared/ later
+              # fans out to every team even before it gets its own entry
+              # below — keeps this filter from silently missing new packages.
+              - 'backend/shared/**'
               - 'backend/shared/postgres/**'
               - 'backend/shared/temporal/**'
               - 'backend/shared/agent_invoke/**'
@@ -510,7 +514,7 @@ jobs:
           restore-keys: |
             ruff-${{ runner.os }}-${{ hashFiles('backend/pyproject.toml') }}-
       - run: pip install ruff
-      - run: ruff check agents/ unified_api/ blogging_service/ team_service/
+      - run: ruff check agents/ shared/ unified_api/ blogging_service/ team_service/
 
   # ── Tests ───────────────────────────────────────────────────────────────────
   # Test jobs run in parallel with lint — lint failures are surfaced via the
@@ -562,8 +566,11 @@ jobs:
           PYTHONPATH: ..
         run: python -c "from shared.postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
+      # ../shared/postgres/tests/ is a filesystem path (backend/shared/ is one
+      # level up from backend/agents/); --cov=shared.postgres is the dotted
+      # module name, resolved via PYTHONPATH=.. above.
       - run: >-
-          pytest shared.postgres/tests/ -v --tb=short -n 4
+          pytest ../shared/postgres/tests/ -v --tb=short -n 4
           --cov=shared.postgres
           --cov-report=term-missing
           --cov-fail-under=90
@@ -590,11 +597,15 @@ jobs:
           cache: pip
           cache-dependency-path: backend/agents/requirements.txt
       - run: pip install -r requirements.txt
+      # PYTHONPATH=.. adds backend/ to sys.path so `shared.neo4j` resolves;
+      # ../shared/neo4j/tests/ is the filesystem path from backend/agents/.
       - run: >-
-          pytest shared.neo4j/tests/ -v --tb=short -n 4
+          pytest ../shared/neo4j/tests/ -v --tb=short -n 4
           --cov=shared.neo4j
           --cov-report=term-missing
           --cov-fail-under=90
+        env:
+          PYTHONPATH: ..
 
   # shared-infra: the neutral packages extracted from software_engineering_team
   # (command runner + error parsing, repo context, LLM recovery, dev models,
@@ -646,8 +657,10 @@ jobs:
       # is required: shared/infra.coveragerc's omit does not drop SE
       # application files, so without it the shared gate would be diluted. omit
       # still wins over --include, so shared.git/git_utils.py stays excluded.
+      # rcfile is a filesystem path; backend/shared/ is one level up from
+      # backend/agents/ (this job's cwd), hence ../shared/infra.coveragerc.
       - run: >-
-          coverage report --rcfile=shared/infra.coveragerc
+          coverage report --rcfile=../shared/infra.coveragerc
           --include='*/shared/command_runner/*,*/shared/repo_context/*,*/shared/llm_recovery/*,*/shared/dev_models/*,*/shared/git/*,*/shared/hitl/*,*/shared/run_thread_registry/*'
           --show-missing
           --fail-under=90
@@ -947,11 +960,13 @@ jobs:
           pip install -r ../job_service/requirements.txt
       # Boot the job-service sidecar AND run pytest in a single step so the
       # background process is guaranteed to be alive when pytest collects.
-      # PYTHONPATH=../agents is required because job_service/postgres.py
-      # imports `shared.postgres`, which lives under backend/agents/.
+      # PYTHONPATH=..:../agents is required: `..` lets the job-service
+      # process (cwd backend/job_service) import `shared.postgres`, which
+      # now lives under backend/shared/; `../agents` keeps backend/agents/
+      # on the path for team-module imports.
       - name: Start job-service + run integration tests
         env:
-          PYTHONPATH: ../agents
+          PYTHONPATH: ..:../agents
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres
@@ -1045,11 +1060,13 @@ jobs:
           pip install -r ../job_service/requirements.txt
       # Boot the job-service sidecar AND run pytest in a single step so the
       # background process is guaranteed to be alive when pytest collects.
-      # PYTHONPATH=../agents is required because job_service/postgres.py
-      # imports `shared.postgres`, which lives under backend/agents/.
+      # PYTHONPATH=..:../agents is required: `..` lets the job-service
+      # process (cwd backend/job_service) import `shared.postgres`, which
+      # now lives under backend/shared/; `../agents` keeps backend/agents/
+      # on the path for team-module imports.
       - name: Start job-service + run branding suite with coverage
         env:
-          PYTHONPATH: ../agents
+          PYTHONPATH: ..:../agents
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres
