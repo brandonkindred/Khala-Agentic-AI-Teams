@@ -37,22 +37,27 @@ def patch_job_event_bus_publish(monkeypatch, publish_fn: Callable[..., Any]) -> 
 
 
 def make_writer_agent(
-    *, writing_style_guide_content: str = "Style", brand_spec_content: str = "Brand"
+    *,
+    llm_client: Any | None = None,
+    writing_style_guide_content: str = "Style",
+    brand_spec_content: str = "Brand",
 ) -> Any:
     """Build a BlogWriterAgent wired to DummyLLMClient with minimal style/brand guidelines.
 
     Preconditions:
         - None.
     Postconditions:
-        - Returns a ``BlogWriterAgent`` constructed with ``DummyLLMClient()`` and the given
-          (or default) style/brand content.
+        - Returns a ``BlogWriterAgent`` constructed with the given (or default) style/brand
+          content. When ``llm_client`` is ``None``, a fresh ``DummyLLMClient()`` is used;
+          otherwise the given ``llm_client`` is passed through unchanged, letting callers
+          inject a custom LLM client (e.g. one that captures prompts or asserts identity).
     """
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import DummyLLMClient
 
     return BlogWriterAgent(
-        llm_client=DummyLLMClient(),
+        llm_client=llm_client if llm_client is not None else DummyLLMClient(),
         writing_style_guide_content=writing_style_guide_content,
         brand_spec_content=brand_spec_content,
     )

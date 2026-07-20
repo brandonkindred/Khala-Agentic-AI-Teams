@@ -813,6 +813,25 @@ def test_approved_merge_failure_marks_merged_anyway(tmp_path, monkeypatch):
     assert graph.get_task("t1").status == TaskStatus.MERGED
 
 
+def test_approved_merge_conflict_sends_back_for_revision(tmp_path, monkeypatch):
+    """An approved task whose merge_branch call returns (False, ...) without raising (e.g. a
+    conflict) must not be left silently stuck IN_REVIEW — it should bounce through the same
+    _request_revision path an unapproved review takes, with the merge failure recorded."""
+    _patch_git(monkeypatch, merge=(False, "merge conflict"))
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", feature_branch="feature/t1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.IN_PROGRESS  # bounced, not stuck IN_REVIEW
+    assert task.revision_count == 1
+    assert "merge conflict" in task.revision_feedback[-1]["reason"]
+
+
 def test_full_evidence_reaches_reviewer(tmp_path, monkeypatch):
     """The reviewer gets the real summary + the full diff — no placeholder, no truncation.
 

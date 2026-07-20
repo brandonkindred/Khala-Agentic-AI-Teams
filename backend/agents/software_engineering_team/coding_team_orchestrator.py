@@ -74,6 +74,7 @@ from software_engineering_team.reasoning_capture import (
 from software_engineering_team.swarm_assignment import _AssignmentMixin
 from software_engineering_team.swarm_implementation import _ImplementationMixin
 from software_engineering_team.swarm_review import _ReviewMixin
+from software_engineering_team.swarm_revision_cap import _RevisionCapMixin
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
     _ensure_target_team_stack_specs,
@@ -582,7 +583,7 @@ def run_coding_team_orchestrator(
         coord.stop()
 
 
-class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
+class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin, _RevisionCapMixin):
     """Coordinator (Tech Lead) + frontend/backend v2 implementation-worker swarm pattern.
 
     The coordinator assigns ready tasks to free workers. Each worker implements
@@ -590,9 +591,10 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
     coordinator reviews (the swarm's sole code-review pass) and merges approved
     tasks.
 
-    Behavior is spread across three mixins by responsibility (assignment,
-    implementation, review) — see coding_team/swarm_assignment.py,
-    swarm_implementation.py, swarm_review.py.
+    Behavior is spread across four mixins by responsibility (assignment,
+    implementation, review, revision-cap bookkeeping) — see
+    coding_team/swarm_assignment.py, swarm_implementation.py, swarm_review.py,
+    swarm_revision_cap.py.
     """
 
     def __init__(
