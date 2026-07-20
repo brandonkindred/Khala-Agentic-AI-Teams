@@ -36,8 +36,10 @@ from ..market_data_service import MarketDataService, OHLCVBar
 from ..models import (
     WINNING_THRESHOLD,
     BacktestConfig,
+    BacktestExecutionDiagnostics,
     BacktestRecord,
     BacktestResult,
+    CoverageReport,
     DataProvenance,
     GateEvent,
     StrategyLabRecord,
@@ -73,7 +75,7 @@ from .coverage_probe import format_coverage_report
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .orchestrator_design import DesignMixin
-from .phases import Phase, hash_code
+from .phases import Phase, hash_code, hash_metrics_and_trades
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.alignment_checks import DeterministicAlignmentChecker
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
@@ -518,6 +520,61 @@ class StrategyLabOrchestrator(DesignMixin):
             details=details,
             refinement_round=refinement_round,
         )
+
+    def _check_anomalies_cached(
+        self,
+        metrics: BacktestResult,
+        trades: List[TradeRecord],
+        *,
+        dsr_aware: bool,
+        diagnostics: Optional[BacktestExecutionDiagnostics],
+        coverage_report: Optional[CoverageReport],
+        market_data: Optional[Dict[str, List[OHLCVBar]]],
+        phase: StrategyLabPhase,
+    ) -> List[QualityGateResult]:
+        """Run ``anomaly_detector.check``, reusing the last result in this
+        design attempt when ``(metrics, trades)`` is unchanged.
+
+        Mirrors the pre-backtest reachability probe's signature guard
+        (``reachability_sig`` in ``_run_synthesis_loop``), but the cache must
+        outlive a single loop: the synthesis loop and the trade-alignment
+        loop both call this within the same design attempt, so the memo is
+        an attempt-scoped instance attribute (``self._last_anomaly_check``,
+        reset in ``_run_design_attempt``) rather than a local variable.
+        ``dsr_aware`` and ``market_data`` are fixed for the attempt's
+        lifetime and ``diagnostics``/``coverage_report`` are attached onto
+        ``metrics`` by the caller before this runs, so ``(metrics, trades)``
+        alone determines whether ``check()``'s output would differ.
+
+        Pre: none beyond the type constraints above — ``_run_design_attempt``
+        resets ``self._last_anomaly_check`` to ``None`` at the start of every
+        attempt, and a lazy ``getattr`` default handles any caller that
+        invokes this before an attempt has run (e.g. a test exercising a
+        round/proposal-evaluation helper directly).
+        Post: returns a list of ``QualityGateResult`` objects distinct from
+        (never a shared reference with) whatever is cached or was returned
+        to any earlier caller — safe for the caller's ``record_gates`` to
+        mutate in place (stamp ``refinement_round``, prefix ``gate_name``)
+        without corrupting the cache or any already-recorded result. The
+        returned gates' ``phase`` matches this call's ``phase`` regardless
+        of which call originally computed them, so verdicts and metadata
+        are identical to always calling ``anomaly_detector.check`` directly.
+        """
+        signature = hash_metrics_and_trades(metrics, trades)
+        cached = getattr(self, "_last_anomaly_check", None)
+        if cached is not None and cached[0] == signature:
+            return [g.model_copy(update={"phase": phase}) for g in cached[1]]
+        results = self.anomaly_detector.check(
+            metrics,
+            trades,
+            dsr_aware=dsr_aware,
+            diagnostics=diagnostics,
+            coverage_report=coverage_report,
+            phase=phase,
+            market_data=market_data,
+        )
+        self._last_anomaly_check = (signature, [g.model_copy() for g in results])
+        return results
 
     def run_cycle(
         self,
@@ -1316,13 +1373,14 @@ class StrategyLabOrchestrator(DesignMixin):
             exec_result=exec_result,
         )
 
-        anomaly_gates = self.anomaly_detector.check(
+        anomaly_gates = self._check_anomalies_cached(
             metrics,
             trades,
             dsr_aware=config.walk_forward_enabled,
             diagnostics=exec_result.execution_diagnostics,
             coverage_report=metrics.coverage_report,
             market_data=market_data,
+            phase="synthesis",
         )
         self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
 
@@ -2132,7 +2190,7 @@ class StrategyLabOrchestrator(DesignMixin):
             exec_result=align_exec,
         )
 
-        anomaly_gates = self.anomaly_detector.check(
+        anomaly_gates = self._check_anomalies_cached(
             new_metrics,
             new_trades,
             dsr_aware=config.walk_forward_enabled,

@@ -1102,6 +1102,11 @@ class DesignMixin:
         # ``_backtest_cache`` above, so a re-entry never reuses a benchmark
         # fetch across attempts.
         self._benchmark_bars_cache = {}
+        # Fresh, attempt-scoped anomaly-check memo (see
+        # ``_check_anomalies_cached``) — reused across the synthesis loop and
+        # the subsequent alignment loop within this attempt, discarded on
+        # re-entry so a re-entry never reuses a verdict across attempts.
+        self._last_anomaly_check: Optional[Tuple[str, List[QualityGateResult]]] = None
 
         all_gate_results: List[QualityGateResult] = (
             cumulative_gate_results if cumulative_gate_results is not None else []
