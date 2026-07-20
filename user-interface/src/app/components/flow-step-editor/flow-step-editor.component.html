@@ -81,7 +81,7 @@
     </h4>
 
     @if (recommendationsLoading()) {
-      <mat-progress-bar mode="indeterminate" class="search-progress"></mat-progress-bar>
+      <mat-progress-bar mode="indeterminate" class="search-progress" aria-label="Analyzing step requirements"></mat-progress-bar>
       <p class="loading-text">Analyzing step requirements...</p>
     } @else if (recommendations().length === 0) {
       <p class="empty-text">No recommendations available for this step.</p>

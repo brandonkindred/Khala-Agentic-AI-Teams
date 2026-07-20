@@ -117,6 +117,7 @@
               mode="determinate"
               [value]="bantPercent(p.icp_match_score * 10)"
               [color]="p.icp_match_score >= 0.75 ? 'primary' : p.icp_match_score >= 0.5 ? 'accent' : 'warn'"
+              [attr.aria-label]="p.company_name + ' ICP match score'"
             />
           </div>
         }
@@ -263,22 +264,22 @@
             <div class="bant-scores">
               <div class="bant-row">
                 <span class="bant-label">Budget</span>
-                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.budget)" [color]="bantBarColor(q.bant.budget)" />
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.budget)" [color]="bantBarColor(q.bant.budget)" [attr.aria-label]="q.prospect.company_name + ' budget score'" />
                 <span class="bant-val">{{ q.bant.budget }}/10</span>
               </div>
               <div class="bant-row">
                 <span class="bant-label">Authority</span>
-                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.authority)" [color]="bantBarColor(q.bant.authority)" />
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.authority)" [color]="bantBarColor(q.bant.authority)" [attr.aria-label]="q.prospect.company_name + ' authority score'" />
                 <span class="bant-val">{{ q.bant.authority }}/10</span>
               </div>
               <div class="bant-row">
                 <span class="bant-label">Need</span>
-                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.need)" [color]="bantBarColor(q.bant.need)" />
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.need)" [color]="bantBarColor(q.bant.need)" [attr.aria-label]="q.prospect.company_name + ' need score'" />
                 <span class="bant-val">{{ q.bant.need }}/10</span>
               </div>
               <div class="bant-row">
                 <span class="bant-label">Timeline</span>
-                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.timeline)" [color]="bantBarColor(q.bant.timeline)" />
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.timeline)" [color]="bantBarColor(q.bant.timeline)" [attr.aria-label]="q.prospect.company_name + ' timeline score'" />
                 <span class="bant-val">{{ q.bant.timeline }}/10</span>
               </div>
             </div>
