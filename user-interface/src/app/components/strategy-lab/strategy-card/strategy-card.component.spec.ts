@@ -150,6 +150,26 @@ describe('StrategyCardComponent', () => {
       expect(component.gateSeverityClass(gate)).toBe('gate-critical');
     });
 
+    // Boundary coverage for the gateRound < maxRound comparison. Backend
+    // semantics: refinement_rounds is the 0-indexed round the refinement loop
+    // actually reached (len(refinement_attempts) — an entry is only appended
+    // once the loop advances past a round with an applied fix), not a count
+    // with valid indices 0..refinement_rounds-1. So a gate whose round is
+    // strictly less than refinement_rounds had a later round genuinely run
+    // after it; a gate whose round equals refinement_rounds failed in the
+    // last round the loop reached, with nothing after it.
+    it('a gate failing strictly before the last-reached round is remedied', () => {
+      const gate: QualityGateResult = { gate_name: 'g', passed: false, details: '', severity: 'critical', refinement_round: 1 };
+      component.record = makeRecord({ refinement_rounds: 2, quality_gate_results: [] });
+      expect(component.isRemedied(gate)).toBe(true);
+    });
+
+    it('a gate failing in the last-reached round itself (gateRound === maxRound) is not remedied', () => {
+      const gate: QualityGateResult = { gate_name: 'g', passed: false, details: '', severity: 'critical', refinement_round: 1 };
+      component.record = makeRecord({ refinement_rounds: 1, quality_gate_results: [] });
+      expect(component.isRemedied(gate)).toBe(false);
+    });
+
     it('a non-critical failed, non-remedied gate reports "warning"', () => {
       const gate: QualityGateResult = { gate_name: 'g', passed: false, details: '', severity: 'warning', refinement_round: 0 };
       component.record = makeRecord({ refinement_rounds: 0, quality_gate_results: [] });

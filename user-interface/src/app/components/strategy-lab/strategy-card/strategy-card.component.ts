@@ -245,8 +245,15 @@ export class StrategyCardComponent {
    * validator produced a passing result. Two channels:
    *
    * - Standard refinement-loop gates (refinement_round >= 0): remedied
-   *   when the gate's round is earlier than the cycle's last round
-   *   (the existing same-round-as-failure rule).
+   *   when `gate.refinement_round < record.refinement_rounds`. Backend
+   *   semantics: `refinement_rounds` is not a count of rounds run with
+   *   valid indices `0..refinement_rounds-1` — it's the 0-indexed round
+   *   number of the last round the refinement loop actually reached (a
+   *   round only counts once the loop advances past it with an applied
+   *   fix). So `gateRound < maxRound` means a later round genuinely ran
+   *   after this gate's failure; `gateRound === maxRound` means this
+   *   gate's round *was* the last one reached, with no later round to
+   *   fix it.
    * - Pre-synthesis gates (refinement_round = -1): refinement itself is
    *   code-only and cannot fix them, but the zero-trade repair path
    *   re-runs the spec validator after committing whitelisted spec
