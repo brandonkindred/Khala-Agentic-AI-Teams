@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
-import type { PaperTradingComparison, PaperTradingSession, QualityGateResult, StrategyLabRecord, TradeRecord } from '../../../models';
+import type { QualityGateResult, StrategyLabRecord, TradeRecord } from '../../../models';
 import { StrategyCardComponent } from './strategy-card.component';
 
 function makeBacktest(overrides: Partial<StrategyLabRecord['backtest']> = {}): StrategyLabRecord['backtest'] {
@@ -224,36 +224,6 @@ describe('StrategyCardComponent', () => {
     });
   });
 
-  describe('comparisonMetrics (precomputed comparison-table rows)', () => {
-    const comparison: PaperTradingComparison = {
-      backtest_win_rate_pct: 55, paper_win_rate_pct: 52,
-      backtest_annualized_return_pct: 12, paper_annualized_return_pct: 11,
-      backtest_sharpe_ratio: 1.5, paper_sharpe_ratio: 1.4,
-      backtest_max_drawdown_pct: -5, paper_max_drawdown_pct: -6,
-      backtest_profit_factor: 1.8, paper_profit_factor: 1.7,
-      win_rate_aligned: true, return_aligned: true, sharpe_aligned: true,
-      drawdown_aligned: true, profit_factor_aligned: true, overall_aligned: true,
-    };
-
-    it('formats each metric row', () => {
-      expect(component.comparisonMetrics(comparison)).toEqual([
-        { label: 'Win Rate', backtest: '55.0%', paper: '52.0%', aligned: true },
-        { label: 'Annual Return', backtest: '12.0%', paper: '11.0%', aligned: true },
-        { label: 'Sharpe', backtest: '1.50', paper: '1.40', aligned: true },
-        { label: 'Max Drawdown', backtest: '-5.0%', paper: '-6.0%', aligned: true },
-        { label: 'Profit Factor', backtest: '1.80', paper: '1.70', aligned: true },
-      ]);
-    });
-
-    it('keeps a stable array reference across repeat calls for the same comparison object (so @for does not thrash)', () => {
-      const first = component.comparisonMetrics(comparison);
-      expect(component.comparisonMetrics(comparison)).toBe(first);
-
-      const differentObject = { ...comparison };
-      expect(component.comparisonMetrics(differentObject)).not.toBe(first);
-    });
-  });
-
   describe('truncatedHypothesis', () => {
     it('returns the hypothesis unchanged when 70 characters or fewer', () => {
       component.record = makeRecord({
@@ -294,26 +264,15 @@ describe('StrategyCardComponent', () => {
     });
   });
 
-  it('verdictLabel/verdictColor cover ready_for_live, not_performant, and inconclusive', () => {
-    expect(component.verdictLabel('ready_for_live')).toBe('READY FOR LIVE');
+  it('verdictColor covers ready_for_live, not_performant, and inconclusive', () => {
     expect(component.verdictColor('ready_for_live')).toBe('winning');
-    expect(component.verdictLabel('not_performant')).toBe('NOT PERFORMANT');
     expect(component.verdictColor('not_performant')).toBe('losing');
-    expect(component.verdictLabel(null)).toBe('INCONCLUSIVE');
     expect(component.verdictColor(undefined)).toBe('neutral');
   });
 
   it('returnColor/returnColorLabel classify annualized return', () => {
     expect(component.returnColor(12)).toBe('winning');
     expect(component.returnColorLabel(-1)).toBe('Negative');
-  });
-
-  it('publishabilitySkipLabel prefers publishability_skip_reason', () => {
-    expect(
-      component.publishabilitySkipLabel(
-        makeRecord({ publishability_skip_reason: 'realism_failed', paper_trading_skipped_reason: 'alignment_unresolved' }),
-      ),
-    ).toBe('realism_failed');
   });
 
   describe('outputs', () => {
@@ -348,7 +307,11 @@ describe('StrategyCardComponent', () => {
       expect(spy).toHaveBeenCalledWith(event);
     });
 
-    it('emits paperTradeRequested exactly once when "Paper Trade This Strategy" is clicked', () => {
+    // Rendering/behavior of the paper-trading panel itself is covered by
+    // PaperTradingPanelComponent's own spec; this just guards that its
+    // paperTradeRequested output is actually forwarded up through
+    // StrategyCardComponent's own output (onRunPaperTrading), not dropped.
+    it('forwards paperTradeRequested from the paper-trading panel', () => {
       component.record = makeRecord({ is_winning: true, is_publishable: true });
       fixture.detectChanges();
       const spy = vi.fn();
@@ -471,19 +434,6 @@ describe('StrategyCardComponent', () => {
       expect(fixture.nativeElement.querySelector('.delete-strategy-btn mat-spinner')).toBeTruthy();
     });
 
-    it('shows a paper-trading skipped notice with the skip reason for a non-publishable record', () => {
-      component.record = makeRecord({
-        is_winning: true,
-        is_publishable: false,
-        publishability_skip_reason: 'realism_failed',
-      });
-      fixture.detectChanges();
-
-      const skipped: HTMLElement = fixture.nativeElement.querySelector('.paper-trading-skipped');
-      expect(skipped).toBeTruthy();
-      expect(skipped.textContent).toContain('realism_failed');
-    });
-
     it('renders the Signal Intelligence panel only when hasSignalBrief() is true', () => {
       component.record = makeRecord({ signal_intelligence_brief: undefined });
       component.expanded = true;
@@ -495,33 +445,6 @@ describe('StrategyCardComponent', () => {
       }));
       fixture.detectChanges();
       expect(fixture.nativeElement.querySelector('.signal-panel')).toBeTruthy();
-    });
-
-    it('gives the comparison table its own accessible name via a visually-hidden caption', () => {
-      const comparison: PaperTradingComparison = {
-        backtest_win_rate_pct: 55, paper_win_rate_pct: 52,
-        backtest_annualized_return_pct: 12, paper_annualized_return_pct: 11,
-        backtest_sharpe_ratio: 1.5, paper_sharpe_ratio: 1.4,
-        backtest_max_drawdown_pct: -5, paper_max_drawdown_pct: -6,
-        backtest_profit_factor: 1.8, paper_profit_factor: 1.7,
-        win_rate_aligned: true, return_aligned: true, sharpe_aligned: true,
-        drawdown_aligned: true, profit_factor_aligned: true, overall_aligned: true,
-      };
-      component.paperSession = {
-        status: 'completed',
-        verdict: 'ready_for_live',
-        trades: [],
-        data_period_start: '2025-01-01',
-        data_period_end: '2025-06-01',
-        comparison,
-      } as unknown as PaperTradingSession;
-      component.expanded = true;
-      fixture.detectChanges();
-
-      const caption: HTMLElement | null = fixture.nativeElement.querySelector('table.comparison-table > caption');
-      expect(caption).toBeTruthy();
-      expect(caption?.className).toContain('visually-hidden');
-      expect(caption?.textContent?.trim()).toBe('Backtest vs. paper-trading metric comparison');
     });
 
     it('renders entry/exit rules, sizing, and the signal brief as labeled rows, with no raw JSON dump remaining', () => {

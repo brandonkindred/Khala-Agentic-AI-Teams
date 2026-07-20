@@ -9,16 +9,13 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatExpansionModule } from '@angular/material/expansion';
 import type { PageEvent } from '@angular/material/paginator';
 
-import { DateOnlyPipe } from '../../../shared/date-only.pipe';
-import { formatPct, formatRatio } from '../../../shared/number-format';
 import { TradeLedgerComponent } from '../trade-ledger/trade-ledger.component';
 import { QualityGateListComponent } from '../quality-gate-list/quality-gate-list.component';
+import { PaperTradingPanelComponent } from '../paper-trading-panel/paper-trading-panel.component';
 import {
   returnColor,
   returnColorLabel,
-  verdictLabel,
   verdictColor,
-  publishabilitySkipLabel,
   gateIcon as pureGateIcon,
   gateSeverityClass as pureGateSeverityClass,
   type GateViewModel,
@@ -29,18 +26,9 @@ import {
 } from '../strategy-lab.formatters';
 import type {
   PaperTradingSession,
-  PaperTradingComparison,
   QualityGateResult,
   StrategyLabRecord,
 } from '../../../models';
-
-/** Precomputed comparison-table row — see `comparisonMetrics`. */
-interface ComparisonRow {
-  label: string;
-  backtest: string;
-  paper: string;
-  aligned: boolean;
-}
 
 /**
  * Presentational strategy-lab result card. Renders one record's summary
@@ -49,11 +37,10 @@ interface ComparisonRow {
  * paper-trading section. Owns no cross-record state (expand/collapse
  * tracking, delete-in-flight, pagination, paper-trading-in-flight all live on
  * the host, which passes the derived value for *this* record down as
- * `@Input()`s) and reports every user action up via the `@Output()`s below
- * for the host to act on, with one exception: `copyStrategyCode()` manages a
- * local clipboard-confirmation flash (`strategyCodeCopied` and its reset
- * timer) entirely within this component, since that transient UI feedback
- * has no bearing on host-owned state.
+ * `@Input()`s) and performs no externally-observable side effects beyond a
+ * clipboard write and confirmation flash (`copyStrategyCode()`) and an
+ * internal memoization cache (`gateViewModels()`) — every user action that
+ * matters to the host is reported up via the `@Output()`s below.
  *
  * Preconditions: `record` is set before the first render (required input).
  * Postconditions: renders identically for the same `record`/inputs regardless
@@ -68,7 +55,6 @@ interface ComparisonRow {
     CommonModule,
     DecimalPipe,
     DatePipe,
-    DateOnlyPipe,
     MatCardModule,
     MatButtonModule,
     MatIconModule,
@@ -78,6 +64,7 @@ interface ComparisonRow {
     MatExpansionModule,
     TradeLedgerComponent,
     QualityGateListComponent,
+    PaperTradingPanelComponent,
   ],
   templateUrl: './strategy-card.component.html',
   styleUrl: './strategy-card.component.scss',
@@ -113,9 +100,7 @@ export class StrategyCardComponent implements OnDestroy {
 
   readonly returnColor = returnColor;
   readonly returnColorLabel = returnColorLabel;
-  readonly verdictLabel = verdictLabel;
   readonly verdictColor = verdictColor;
-  readonly publishabilitySkipLabel = publishabilitySkipLabel;
   readonly flattenObjectRows = flattenObjectRows;
   readonly entryRuleRows = entryRuleRows;
   readonly exitRuleRows = exitRuleRows;
@@ -139,12 +124,12 @@ export class StrategyCardComponent implements OnDestroy {
    * Preconditions: none — a falsy `code` (e.g. if ever invoked outside the
    *   template's `@if (strategyCode(); as code)` guard) is a safe no-op rather
    *   than a caller contract violation.
-   * Postconditions: when `code` is non-empty and the Clipboard API is available,
-   *   `code` is written to the clipboard and `strategyCodeCopied` is true for
-   *   ~1.5s (the reset timer is tracked so it is cancelled on destroy and never
-   *   fires twice); a rejected clipboard write is swallowed so it cannot surface
-   *   as an unhandled rejection. When `code` is falsy, `strategyCodeCopied` is
-   *   left unchanged.
+   * Postconditions: a falsy `code` leaves all state unchanged. Otherwise, `code`
+   *   is written to the clipboard when the Clipboard API is available (a no-op
+   *   when it isn't) with any write rejection swallowed so it cannot surface as
+   *   an unhandled rejection; `strategyCodeCopied` is set true for ~1.5s
+   *   regardless of clipboard availability or write outcome (the reset timer is
+   *   tracked so it is cancelled on destroy and never fires twice).
    */
   copyStrategyCode(code: string): void {
     if (!code) return;
@@ -237,11 +222,6 @@ export class StrategyCardComponent implements OnDestroy {
    */
   strategyCode(): string | undefined {
     return this.record.strategy_code || this.record.strategy.strategy_code;
-  }
-
-  /** Accessible name for the paper-trading comparison table's scrollable wrapper (same rationale as the trade-ledger's own equivalent in `TradeLedgerComponent`). */
-  comparisonTableRegionLabel(): string {
-    return `${this.record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
   }
 
   /**
@@ -338,23 +318,5 @@ export class StrategyCardComponent implements OnDestroy {
     });
     this.gateViewModelsCache = { record: this.record, viewModels };
     return viewModels;
-  }
-
-  // Same reference-identity caveat as `gateViewModelsCache` above, keyed on
-  // the paper-trading comparison object instead of the record.
-  private comparisonMetricsCache: { comparison: PaperTradingComparison; rows: ComparisonRow[] } | null = null;
-
-  comparisonMetrics(c: PaperTradingComparison): ComparisonRow[] {
-    const cached = this.comparisonMetricsCache;
-    if (cached && cached.comparison === c) return cached.rows;
-    const rows: ComparisonRow[] = [
-      { label: 'Win Rate', backtest: formatPct(c.backtest_win_rate_pct), paper: formatPct(c.paper_win_rate_pct), aligned: c.win_rate_aligned },
-      { label: 'Annual Return', backtest: formatPct(c.backtest_annualized_return_pct), paper: formatPct(c.paper_annualized_return_pct), aligned: c.return_aligned },
-      { label: 'Sharpe', backtest: formatRatio(c.backtest_sharpe_ratio), paper: formatRatio(c.paper_sharpe_ratio), aligned: c.sharpe_aligned },
-      { label: 'Max Drawdown', backtest: formatPct(c.backtest_max_drawdown_pct), paper: formatPct(c.paper_max_drawdown_pct), aligned: c.drawdown_aligned },
-      { label: 'Profit Factor', backtest: formatRatio(c.backtest_profit_factor), paper: formatRatio(c.paper_profit_factor), aligned: c.profit_factor_aligned },
-    ];
-    this.comparisonMetricsCache = { comparison: c, rows };
-    return rows;
   }
 }
