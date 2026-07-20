@@ -398,13 +398,18 @@ class DesignAgent:
         starvation signal (``LLMSemanticExhaustionError.schema_forced``),
         which the caller inspects to decide whether to degrade to the
         unconstrained parse-retry loop. This method never falls back itself
-        and never retries. ``charge=True`` (unlike
-        ``RefinementAgent._invoke_structured``'s ``charge=False``): the
-        legacy loop below charges the design-phase budget on every real LLM
-        call including retries, so this pre-flight call must charge too for
-        budget-accounting parity. Mirrors
-        :meth:`RefinementAgent._invoke_structured`.
+        and never retries. ``charge=True``: the legacy loop below charges the
+        design-phase budget on every real LLM call including retries, so this
+        pre-flight call must charge too for budget-accounting parity. Mirrors
+        :meth:`RefinementAgent._invoke_structured`, which also charges.
         """
+        assert _structured_output_available(), (
+            "precondition: caller must verify _structured_output_available() before "
+            "invoking (only that path exposes an adapter with a .client)"
+        )
+        assert system_prompt and user_prompt, (
+            "precondition: system_prompt and user_prompt must be non-empty"
+        )
         client = get_strands_model("strategy_design").client
 
         def _call(prompt: str) -> str:
@@ -486,7 +491,8 @@ class DesignAgent:
         retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
         prompt = user_prompt
 
-        if _structured_output_available():
+        structured_attempted = _structured_output_available()
+        if structured_attempted:
             try:
                 parsed = self._invoke_structured(system_prompt, user_prompt)
             except StrategyLabLLMError as exc:
@@ -499,7 +505,7 @@ class DesignAgent:
                 )
             else:
                 try:
-                    return _finalize_parsed(parsed)
+                    finalized = _finalize_parsed(parsed)
                 except StrategySpecParseError as exc:
                     logger.warning(
                         "DesignAgent (structured) emitted invalid rule shape; "
@@ -507,6 +513,12 @@ class DesignAgent:
                         exc,
                     )
                     prompt = _build_correction_prompt(user_prompt, exc)
+                else:
+                    logger.info(
+                        "strategy_lab structured_output outcome=succeeded "
+                        "agent=strategy_design phase=design_generate_structured",
+                    )
+                    return finalized
 
         for attempt in range(retries + 1):
             # A history-free agent per attempt (see method docstring). Strands
@@ -539,9 +551,11 @@ class DesignAgent:
                 )
             except ValueError as exc:
                 logger.warning(
-                    "DesignAgent emitted unparseable JSON (attempt %d/%d): %s",
+                    "DesignAgent emitted unparseable JSON (attempt %d/%d) "
+                    "(structured_attempted=%s): %s",
                     attempt + 1,
                     retries + 1,
+                    structured_attempted,
                     exc,
                 )
                 if attempt >= retries:
@@ -553,9 +567,11 @@ class DesignAgent:
                 return _finalize_parsed(parsed)
             except StrategySpecParseError as exc:
                 logger.warning(
-                    "DesignAgent emitted invalid rule shape (attempt %d/%d): %s",
+                    "DesignAgent emitted invalid rule shape (attempt %d/%d) "
+                    "(structured_attempted=%s): %s",
                     attempt + 1,
                     retries + 1,
+                    structured_attempted,
                     exc,
                 )
                 if attempt >= retries:
@@ -744,6 +760,11 @@ class DesignAgent:
                     "degrading to the legacy single-shot call."
                 )
                 parsed = _invoke_legacy()
+            else:
+                logger.info(
+                    "strategy_lab structured_output outcome=succeeded "
+                    "agent=strategy_design phase=design_self_review_structured",
+                )
         else:
             parsed = _invoke_legacy()
         # Self-review tolerates advisory warnings on an otherwise-ready

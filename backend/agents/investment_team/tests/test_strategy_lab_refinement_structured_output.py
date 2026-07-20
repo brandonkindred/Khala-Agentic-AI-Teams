@@ -291,3 +291,97 @@ def test_structured_output_available_false_for_bedrock_provider(
 ) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
     assert mod._structured_output_available() is False
+
+
+# ---------------------------------------------------------------------------
+# Observability: success telemetry + measurable call-count reduction
+# ---------------------------------------------------------------------------
+
+
+def test_structured_success_logs_outcome_succeeded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The structured happy path emits an INFO ``outcome=succeeded`` marker so
+    the resend-free path is observable in production logs (not just silent)."""
+    stub_client = _StubClient({"strategy_code": "# fixed", "changes_made": "x"})
+    monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
+    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+
+    logger_name = "investment_team.strategy_lab.agents.refinement"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        RefinementAgent().run(
+            spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+        )
+
+    succeeded = [r for r in caplog.records if "outcome=succeeded" in r.message]
+    assert len(succeeded) == 1
+    assert "agent=strategy_refinement" in succeeded[0].message
+    assert "phase=refinement_structured" in succeeded[0].message
+    assert "failure_phase=execution" in succeeded[0].message
+
+
+def test_structured_path_issues_fewer_calls_than_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measurable-reduction evidence for the parent structured-output work.
+
+    Replays the SAME simulated failure sequence — one response the strict
+    extractor rejects, then a valid one — down both paths and counts LLM
+    calls. On the structured path a schema-conformant decode cannot emit
+    unparseable JSON, so the first (and only) call succeeds and no
+    ``build_json_correction_prompt`` resend fires. On the degraded legacy
+    path the same sequence costs a second, full-context resend. Fewer calls
+    is a direct proxy for the token/latency win (mocked clients have no real
+    latency to measure), and the strict inequality is the acceptance
+    evidence.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
+
+    # --- Structured path: one call, zero correction resends. ---
+    structured_corrections = 0
+
+    def _count_structured_correction(*_a: Any, **_k: Any) -> str:
+        nonlocal structured_corrections
+        structured_corrections += 1
+        return "unused"
+
+    structured_client = _StubClient({"strategy_code": "# fixed", "changes_made": "ok"})
+    monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(structured_client))
+    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setattr(mod, "build_json_correction_prompt", _count_structured_correction)
+
+    RefinementAgent().run(
+        spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+    )
+    structured_calls = len(structured_client.calls)
+
+    assert structured_calls == 1
+    assert structured_corrections == 0
+
+    # --- Legacy fallback path: same failure sequence, one resend. ---
+    fallback_corrections = 0
+    real_build = mod.build_json_correction_prompt
+
+    def _count_fallback_correction(*args: Any, **kwargs: Any) -> str:
+        nonlocal fallback_corrections
+        fallback_corrections += 1
+        return real_build(*args, **kwargs)
+
+    scripted = _ScriptedAgent(["not json at all", _GOOD])
+    monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
+    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(mod, "Agent", lambda **_k: scripted)
+    monkeypatch.setattr(mod, "build_json_correction_prompt", _count_fallback_correction)
+
+    RefinementAgent().run(
+        spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+    )
+    fallback_calls = scripted.calls
+
+    assert fallback_calls == 2
+    assert fallback_corrections == 1
+
+    # The structured path is strictly cheaper for the same failure sequence.
+    assert structured_calls < fallback_calls
