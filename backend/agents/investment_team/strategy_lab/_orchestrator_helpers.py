@@ -871,9 +871,9 @@ def _merge_risk_limits_tighten_only(
 
     - ``loosened_fields`` lists fields whose proposed value would loosen
       the limit (raise an "lower"-direction cap, lower a "higher"-direction
-      floor, or transition ``target_annual_vol`` from ``None`` to a
-      value — which fundamentally changes the sizing model and is
-      treated as loosening).
+      floor, or transition ``target_annual_vol`` between ``None`` and a
+      value in either direction — which fundamentally changes the sizing
+      model and is treated as loosening).
     - ``discarded_unknown_keys`` lists fields the caller proposed that
       either aren't in the ``RiskLimits`` schema or are marked
       immutable in ``_RISK_LIMIT_TIGHTEN_DIRECTION`` (e.g.
