@@ -23,6 +23,9 @@ import {
   gateSeverityClass as pureGateSeverityClass,
   type GateViewModel,
   flattenObjectRows,
+  entryRuleRows,
+  exitRuleRows,
+  sizingRows,
 } from '../strategy-lab.formatters';
 import type {
   PaperTradingSession,
@@ -111,6 +114,9 @@ export class StrategyCardComponent implements OnDestroy {
   readonly verdictColor = verdictColor;
   readonly publishabilitySkipLabel = publishabilitySkipLabel;
   readonly flattenObjectRows = flattenObjectRows;
+  readonly entryRuleRows = entryRuleRows;
+  readonly exitRuleRows = exitRuleRows;
+  readonly sizingRows = sizingRows;
 
   /** True for ~1.5s after `copyStrategyCode()` runs, flashing a confirmation icon on the copy button. */
   strategyCodeCopied = false;
@@ -127,13 +133,18 @@ export class StrategyCardComponent implements OnDestroy {
    * Copy the generated strategy code to the clipboard, flashing a confirmation icon.
    * Mirrors `CodingTeamPageComponent.copyJobId()`'s pattern.
    *
-   * Preconditions: `code` is the non-empty string currently rendered in the panel.
-   * Postconditions: when the Clipboard API is available, `code` is written to the
-   *   clipboard and `strategyCodeCopied` is true for ~1.5s (the reset timer is
-   *   tracked so it is cancelled on destroy and never fires twice); a rejected
-   *   clipboard write is swallowed so it cannot surface as an unhandled rejection.
+   * Preconditions: none — a falsy `code` (e.g. if ever invoked outside the
+   *   template's `@if (strategyCode(); as code)` guard) is a safe no-op rather
+   *   than a caller contract violation.
+   * Postconditions: when `code` is non-empty and the Clipboard API is available,
+   *   `code` is written to the clipboard and `strategyCodeCopied` is true for
+   *   ~1.5s (the reset timer is tracked so it is cancelled on destroy and never
+   *   fires twice); a rejected clipboard write is swallowed so it cannot surface
+   *   as an unhandled rejection. When `code` is falsy, `strategyCodeCopied` is
+   *   left unchanged.
    */
   copyStrategyCode(code: string): void {
+    if (!code) return;
     navigator.clipboard?.writeText(code).catch(() => {
       // Clipboard write can reject (permission denied, insecure context); ignore — the user can
       // still read/select the code manually.

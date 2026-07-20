@@ -1,4 +1,21 @@
-import type { QualityGateResult, StrategyLabRecord } from '../../models';
+import type {
+  QualityGateResult,
+  StrategyLabRecord,
+  EntryRule,
+  ExitRule,
+  SizingRule,
+  Predicate,
+  PredicateSide,
+  IndicatorRef,
+  IndicatorParamValue,
+  BarFieldRef,
+  IndicatorSource,
+  IndicatorName,
+  StopLossBasis,
+  ComparisonOp,
+} from '../../models';
+import { COMPARISON_OP_OPTIONS } from '../../models';
+import { formatPct, formatUsd } from '../../shared/number-format';
 
 /** Material icon per asset class, keyed by the lowercased category value. */
 export const ASSET_CLASS_ICONS: Record<string, string> = {
@@ -105,6 +122,186 @@ export function flattenObjectRows(obj: unknown): { label: string; value: string 
       label: humanizeKey(key),
       value: typeof value === 'object' ? JSON.stringify(value) : String(value),
     }));
+}
+
+const INDICATOR_DISPLAY_NAMES: Record<IndicatorName, string> = {
+  sma: 'SMA',
+  ema: 'EMA',
+  rsi: 'RSI',
+  macd: 'MACD',
+  bollinger: 'Bollinger Bands',
+  atr: 'ATR',
+  adx: 'ADX',
+  stochastic: 'Stochastic',
+  vwap: 'VWAP',
+  donchian: 'Donchian Channel',
+  keltner: 'Keltner Channel',
+  obv: 'OBV',
+  mfi: 'MFI',
+  roc: 'ROC',
+  cci: 'CCI',
+  williams_r: 'Williams %R',
+};
+
+const BAR_FIELD_LABELS: Record<BarFieldRef, string> = {
+  'bar.close': 'Close',
+  'bar.high': 'High',
+  'bar.low': 'Low',
+  'bar.volume': 'Volume',
+};
+
+const INDICATOR_SOURCE_LABELS: Record<IndicatorSource, string> = {
+  close: 'Close',
+  high: 'High',
+  low: 'Low',
+  open: 'Open',
+  volume: 'Volume',
+  hl2: 'HL2',
+  ohlc4: 'OHLC4',
+};
+
+const STOP_LOSS_BASIS_LABELS: Record<StopLossBasis, string> = {
+  entry_price: 'Entry Price',
+  trailing_high: 'Trailing High',
+  trailing_low: 'Trailing Low',
+};
+
+function isIndicatorRef(side: PredicateSide | number | null | undefined): side is IndicatorRef {
+  return typeof side === 'object' && side !== null && 'name' in side;
+}
+
+function formatIndicatorParams(params: Record<string, IndicatorParamValue> | null | undefined): string {
+  if (!params || typeof params !== 'object') return '';
+  return Object.entries(params)
+    .map(([key, value]) => `${humanizeKey(key)}: ${value}`)
+    .join(', ');
+}
+
+function formatPredicateSide(side: PredicateSide | number | null | undefined): string {
+  if (side === null || side === undefined) return '—';
+  if (typeof side === 'number') return String(side);
+  if (typeof side === 'string') return BAR_FIELD_LABELS[side as BarFieldRef] ?? side;
+  if (isIndicatorRef(side)) {
+    const name = INDICATOR_DISPLAY_NAMES[side.name] ?? String(side.name);
+    const paramsStr = formatIndicatorParams(side.params);
+    const sourceStr = side.source ? ` on ${INDICATOR_SOURCE_LABELS[side.source] ?? side.source}` : '';
+    return paramsStr ? `${name}(${paramsStr})${sourceStr}` : `${name}${sourceStr}`;
+  }
+  // Defensive: unexpected shape for a predicate side — never throws, never drops data.
+  return typeof side === 'object' ? JSON.stringify(side) : String(side);
+}
+
+function formatComparisonOp(op: ComparisonOp | null | undefined): string {
+  if (!op) return '—';
+  return COMPARISON_OP_OPTIONS.find((option) => option.value === op)?.label ?? String(op);
+}
+
+function predicateRows(predicate: Predicate | null | undefined): { label: string; value: string }[] {
+  if (!predicate || typeof predicate !== 'object') return flattenObjectRows(predicate);
+  const lhsLabel = isIndicatorRef(predicate.lhs) ? 'Indicator' : 'Price Field';
+  return [
+    { label: lhsLabel, value: formatPredicateSide(predicate.lhs) },
+    { label: 'Operator', value: formatComparisonOp(predicate.op) },
+    { label: 'Threshold', value: formatPredicateSide(predicate.rhs) },
+  ];
+}
+
+/**
+ * Label/value rows for one entry rule, breaking its predicate down into
+ * semantic Indicator/Price-Field, Operator, and Threshold rows rather than
+ * `flattenObjectRows`'s generic per-key treatment (which leaves a nested
+ * `when` predicate as one opaque JSON-stringified row).
+ *
+ * Preconditions: none enforced — `rule` is expected to be an `EntryRule`,
+ *   but this function tolerates any shape defensively, since real callers
+ *   include non-conforming legacy/test data whose `entry_rules` entries
+ *   predate the current `kind`-discriminated shape.
+ * Postconditions: never throws. When `rule.kind === 'entry'`, returns a
+ *   `Side` row, the predicate rows, and a trailing `Note` row only when
+ *   `rule.note` is non-empty. Otherwise delegates to `flattenObjectRows(rule)`.
+ */
+export function entryRuleRows(rule: EntryRule): { label: string; value: string }[] {
+  if (!rule || rule.kind !== 'entry') return flattenObjectRows(rule);
+  const rows: { label: string; value: string }[] = [
+    { label: 'Side', value: rule.side === 'short' ? 'Short' : 'Long' },
+    ...predicateRows(rule.when),
+  ];
+  if (rule.note) rows.push({ label: 'Note', value: rule.note });
+  return rows;
+}
+
+/**
+ * Label/value rows for one exit rule, handling all three `kind` variants
+ * with real semantic rows instead of `flattenObjectRows`'s generic treatment.
+ *
+ * Preconditions: none enforced — see `entryRuleRows`'s note.
+ * Postconditions: never throws. Each variant's rows start with a `Type` row
+ *   (multiple exit-rule kinds can appear in the same list, so each row-set
+ *   must self-identify). An unrecognized `kind` delegates to `flattenObjectRows(rule)`.
+ */
+export function exitRuleRows(rule: ExitRule): { label: string; value: string }[] {
+  if (!rule) return flattenObjectRows(rule);
+  let rows: { label: string; value: string }[];
+  switch (rule.kind) {
+    case 'stop_loss':
+      rows = [
+        { label: 'Type', value: 'Stop Loss' },
+        { label: 'Stop Distance', value: formatPct(rule.pct * 100) },
+        { label: 'Basis', value: STOP_LOSS_BASIS_LABELS[rule.basis ?? 'entry_price'] },
+      ];
+      break;
+    case 'take_profit':
+      rows = [
+        { label: 'Type', value: 'Take Profit' },
+        { label: 'Target', value: formatPct(rule.pct * 100) },
+      ];
+      break;
+    case 'signal_exit':
+      rows = [{ label: 'Type', value: 'Signal Exit' }, ...predicateRows(rule.when)];
+      break;
+    default:
+      return flattenObjectRows(rule);
+  }
+  if (rule.note) rows.push({ label: 'Note', value: rule.note });
+  return rows;
+}
+
+/**
+ * Label/value rows for a strategy's sizing rule, handling all three `kind`
+ * variants with real semantic rows instead of `flattenObjectRows`'s generic
+ * treatment.
+ *
+ * Preconditions: none enforced — see `entryRuleRows`'s note.
+ * Postconditions: never throws. Each variant's rows start with a `Method`
+ *   row. An unrecognized `kind` delegates to `flattenObjectRows(sizing)`.
+ */
+export function sizingRows(sizing: SizingRule): { label: string; value: string }[] {
+  if (!sizing) return flattenObjectRows(sizing);
+  let rows: { label: string; value: string }[];
+  switch (sizing.kind) {
+    case 'fixed_fraction':
+      rows = [
+        { label: 'Method', value: 'Fixed Fraction' },
+        { label: 'Position Size', value: formatPct(sizing.fraction * 100) },
+      ];
+      break;
+    case 'volatility_target':
+      rows = [
+        { label: 'Method', value: 'Volatility Target' },
+        { label: 'Target Annual Volatility', value: formatPct(sizing.target_annual_vol * 100) },
+      ];
+      break;
+    case 'fixed_notional':
+      rows = [
+        { label: 'Method', value: 'Fixed Notional' },
+        { label: 'Notional (USD)', value: formatUsd(sizing.notional_usd) },
+      ];
+      break;
+    default:
+      return flattenObjectRows(sizing);
+  }
+  if (sizing.note) rows.push({ label: 'Note', value: sizing.note });
+  return rows;
 }
 
 /**
