@@ -886,6 +886,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId);
   }
 
+  /**
+   * Screen-reader state text for a phase-stepper step, mirroring the visual
+   * completed/current/pending cue that sighted users get from CSS classes and
+   * the icon swap.
+   *
+   * Preconditions: `phaseId` is one of the STRATEGY_LAB_PHASES ids; called only
+   *   while a run is active (the stepper renders under `runStatus.current_cycle`).
+   * Postconditions: returns exactly one of `'completed'`, `'current step'`, or
+   *   `'not started'`, derived solely from `isPhaseCompleted`/`isCurrentPhase`
+   *   (no independent ordering logic), so it never disagrees with the visual state.
+   */
+  phaseStateLabel(phaseId: string): string {
+    if (this.isPhaseCompleted(phaseId)) return 'completed';
+    if (this.isCurrentPhase(phaseId)) return 'current step';
+    return 'not started';
+  }
+
   readonly getAssetClassIcon = getAssetClassIcon;
 
   // ---------------------------------------------------------------------------
