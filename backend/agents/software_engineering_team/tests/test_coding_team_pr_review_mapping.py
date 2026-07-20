@@ -7,8 +7,8 @@ from typing import Optional
 
 import pytest
 
-from software_engineering_team.coding_team.github_source.client import Issue
-from software_engineering_team.coding_team.github_source.issue_proposals import (
+from software_engineering_team.github_source.client import Issue
+from software_engineering_team.github_source.issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
     duplicate_check_max_open_issues,
@@ -16,7 +16,7 @@ from software_engineering_team.coding_team.github_source.issue_proposals import 
     group_similar_findings,
     proposal_from_findings,
 )
-from software_engineering_team.coding_team.github_source.pr_review_mapping import (
+from software_engineering_team.github_source.pr_review_mapping import (
     build_review_body,
     choose_event,
     format_comment_body,

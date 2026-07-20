@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from software_engineering_team.coding_team.api.advisory_lock import advisory_lock
+from software_engineering_team.api.advisory_lock import advisory_lock
 
 
 def test_advisory_lock_process_only_when_postgres_unconfigured(monkeypatch) -> None:

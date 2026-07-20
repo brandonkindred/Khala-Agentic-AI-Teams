@@ -212,6 +212,50 @@ def _is_return_only_body(stmts: List[ast.stmt]) -> bool:
     return len(stmts) == 1 and isinstance(stmts[0], ast.Return)
 
 
+def _is_bar_symbol(n: ast.expr, bar_name: str) -> bool:
+    """True iff ``n`` is a ``<bar_name>.symbol`` attribute access.
+
+    Shared by :func:`_early_return_symbol_guard` and :func:`_symbol_gate`,
+    which both need to recognise the live-symbol receiver before resolving
+    the comparison's other operand.
+    """
+    return (
+        isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id == bar_name
+        and n.attr == "symbol"
+    )
+
+
+def _resolve_symbol_string(n: ast.expr, name_strings: Optional["_NameStrings"]) -> Optional[str]:
+    """Resolve ``n`` to a string constant for symbol-gate/guard comparison.
+
+    Shared by :func:`_early_return_symbol_guard` and :func:`_symbol_gate`.
+    Recognises an inline string literal, a bare ``Name`` bound to a
+    module-level string constant (via ``name_strings.globals_``), or a
+    ``self.X``/``cls.X`` attribute bound to a class-level string constant
+    (via ``name_strings.attrs``).
+    """
+    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+        return n.value
+    if name_strings is None:  # pragma: no cover — name_strings always provided in live call path
+        return None
+    # Bare ``Name`` resolves through the module/global scope only —
+    # class-body bare names are NOT in lexical scope for methods.
+    if isinstance(n, ast.Name):
+        return name_strings.globals_.get(n.id)
+    # ``self.X`` / ``cls.X`` resolves through the class chain
+    # (instance dict via ``__init__`` shadowing class body), never
+    # through module scope.
+    if (  # pragma: no cover — self.X/cls.X in symbol-gate/early-return-guard position rare in generated strategies
+        isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id in {"self", "cls"}
+    ):
+        return name_strings.attrs.get(n.attr)
+    return None
+
+
 def _early_return_symbol_guard(
     stmt: ast.If,
     name_strings: Optional["_NameStrings"] = None,
@@ -282,36 +326,6 @@ def _early_return_symbol_guard(
 
     test = stmt.test
 
-    def _is_bar_symbol(n: ast.expr) -> bool:
-        return (
-            isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name)
-            and n.value.id == bar_name
-            and n.attr == "symbol"
-        )
-
-    def _resolve_string(n: ast.expr) -> Optional[str]:
-        if isinstance(n, ast.Constant) and isinstance(n.value, str):
-            return n.value
-        if (
-            name_strings is None
-        ):  # pragma: no cover — name_strings always provided in live call path
-            return None
-        # Bare ``Name`` resolves through the module/global scope only —
-        # class-body bare names are NOT in lexical scope for methods.
-        if isinstance(n, ast.Name):
-            return name_strings.globals_.get(n.id)
-        # ``self.X`` / ``cls.X`` resolves through the class chain
-        # (instance dict via ``__init__`` shadowing class body), never
-        # through module scope.
-        if (  # pragma: no cover — ``self.X``/``cls.X`` in early-return guard rare in generated strategies
-            isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name)
-            and n.value.id in {"self", "cls"}
-        ):
-            return name_strings.attrs.get(n.attr)
-        return None
-
     # ``bar.symbol <op> X`` / ``X <op> bar.symbol`` → allow / deny
     # depending on the operator polarity.
     if isinstance(test, ast.Compare) and len(test.ops) == 1:
@@ -319,14 +333,14 @@ def _early_return_symbol_guard(
         if isinstance(op, (ast.NotEq, ast.Eq)):
             polarity = "allow" if isinstance(op, ast.NotEq) else "deny"
             left, right = test.left, test.comparators[0]
-            if _is_bar_symbol(left):
-                sym = _resolve_string(right)
+            if _is_bar_symbol(left, bar_name):
+                sym = _resolve_symbol_string(right, name_strings)
                 if sym is not None:
                     return polarity, {sym}
             if _is_bar_symbol(
-                right
+                right, bar_name
             ):  # pragma: no cover — reversed-operand early-return guard rare in generated strategies
-                sym = _resolve_string(left)
+                sym = _resolve_symbol_string(left, name_strings)
                 if sym is not None:
                     return polarity, {sym}
         # ``bar.symbol not in (X, Y)`` → allow {X, Y}; the matching
@@ -335,10 +349,10 @@ def _early_return_symbol_guard(
         if isinstance(op, (ast.NotIn, ast.In)):
             polarity = "allow" if isinstance(op, ast.NotIn) else "deny"
             left, right = test.left, test.comparators[0]
-            if _is_bar_symbol(left) and isinstance(right, (ast.Tuple, ast.List, ast.Set)):
+            if _is_bar_symbol(left, bar_name) and isinstance(right, (ast.Tuple, ast.List, ast.Set)):
                 syms: set = set()
                 for elt in right.elts:
-                    s = _resolve_string(elt)
+                    s = _resolve_symbol_string(elt, name_strings)
                     if (
                         s is None
                     ):  # pragma: no cover — unresolvable element in symbol-list guard rare
@@ -389,49 +403,19 @@ def _symbol_gate(
     op = node.ops[0]
     left, right = node.left, node.comparators[0]
 
-    def _is_bar_symbol(n: ast.expr) -> bool:
-        return (
-            isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name)
-            and n.value.id == bar_name
-            and n.attr == "symbol"
-        )
-
-    def _string_const(n: ast.expr) -> Optional[str]:
-        if isinstance(n, ast.Constant) and isinstance(n.value, str):
-            return n.value
-        if (
-            name_strings is None
-        ):  # pragma: no cover — name_strings always provided in live call path
-            return None
-        # Bare ``Name`` resolves through the module/global scope only —
-        # class-body bare names are NOT in lexical scope for methods.
-        if isinstance(n, ast.Name):
-            return name_strings.globals_.get(n.id)
-        # ``self.X`` / ``cls.X`` resolves through the class chain
-        # (instance dict via ``__init__`` shadowing class body), never
-        # through module scope.
-        if (  # pragma: no cover — self.X/cls.X in symbol-gate position rare in generated strategies
-            isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name)
-            and n.value.id in {"self", "cls"}
-        ):
-            return name_strings.attrs.get(n.attr)
-        return None
-
     if isinstance(op, (ast.Eq, ast.Is)):
-        if _is_bar_symbol(left):
-            sym = _string_const(right)
+        if _is_bar_symbol(left, bar_name):
+            sym = _resolve_symbol_string(right, name_strings)
             return {sym} if sym is not None else None
         if _is_bar_symbol(
-            right
+            right, bar_name
         ):  # pragma: no cover — reversed operand symbol gate rare in generated strategies
-            sym = _string_const(left)
+            sym = _resolve_symbol_string(left, name_strings)
             return {sym} if sym is not None else None
         return None
 
     if isinstance(op, ast.In):
-        if not _is_bar_symbol(left):
+        if not _is_bar_symbol(left, bar_name):
             return None
         if not isinstance(
             right, (ast.Tuple, ast.List, ast.Set)
@@ -439,7 +423,7 @@ def _symbol_gate(
             return None
         syms: set = set()
         for elt in right.elts:
-            s = _string_const(elt)
+            s = _resolve_symbol_string(elt, name_strings)
             if s is None:  # pragma: no cover — unresolvable element in symbol-list gate rare
                 # Partial allow-list: refuse to gate. Better to leave
                 # the predicate unconstrained than apply a wrong filter.

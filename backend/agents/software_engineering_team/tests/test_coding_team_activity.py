@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from software_engineering_team.coding_team.activity import ActivityBridge
+from software_engineering_team.activity import ActivityBridge
 
 
 def _collect(updates: List[Dict[str, Any]]):

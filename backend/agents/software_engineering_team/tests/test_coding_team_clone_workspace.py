@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from software_engineering_team.coding_team.clone_workspace import (
+from software_engineering_team.clone_workspace import (
     agent_cache_dir,
     clone_lock_path,
     ephemeral_workspace_roots,

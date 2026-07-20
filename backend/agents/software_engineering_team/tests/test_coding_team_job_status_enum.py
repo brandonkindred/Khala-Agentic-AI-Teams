@@ -6,8 +6,8 @@ from typing import Any, Dict, Optional
 
 import pytest
 
-from software_engineering_team.coding_team import hitl, job_store
-from software_engineering_team.coding_team.models import JobStatus
+from software_engineering_team import hitl, job_store
+from software_engineering_team.models import JobStatus
 
 
 class _FakeJobStoreClient:

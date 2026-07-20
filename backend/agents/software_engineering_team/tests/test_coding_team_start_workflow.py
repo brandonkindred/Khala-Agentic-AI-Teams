@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from software_engineering_team.coding_team.temporal import start_workflow as sw
-from software_engineering_team.coding_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
+from software_engineering_team.temporal import coding_team_start_workflow as sw
+from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 
 
 def test_start_coding_team_workflow_forwards_run_payload_id_and_queue(monkeypatch):
