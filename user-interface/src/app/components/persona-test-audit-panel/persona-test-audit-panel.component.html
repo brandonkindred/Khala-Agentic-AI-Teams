@@ -13,7 +13,7 @@
 
 @if (loading) {
   <div class="loading-state">
-    <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+    <mat-progress-bar mode="indeterminate" aria-label="Loading run details"></mat-progress-bar>
     <p>Loading run details...</p>
   </div>
 }
@@ -84,7 +84,7 @@
         </mat-card>
 
         @if (!isTerminal) {
-          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+          <mat-progress-bar mode="indeterminate" aria-label="Test run in progress"></mat-progress-bar>
           <p class="muted-text">Test is still running. This page auto-refreshes every 10 seconds.</p>
         }
       </div>
@@ -172,7 +172,7 @@
               @if (seJobProgress !== null) {
                 <div class="detail-item">
                   <span class="detail-label">Progress</span>
-                  <mat-progress-bar mode="determinate" [value]="seJobProgress"></mat-progress-bar>
+                  <mat-progress-bar mode="determinate" [value]="seJobProgress" aria-label="SE Team pipeline progress"></mat-progress-bar>
                   <span class="progress-pct">{{ seJobProgress }}%</span>
                 </div>
               }
