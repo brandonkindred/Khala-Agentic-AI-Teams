@@ -188,13 +188,6 @@ class AgentLockStore:
                 pass
             raise
 
-    def _delete_record(self, agent_id: str) -> None:
-        path = self._record_path(agent_id)
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-
     @staticmethod
     def _lock_exclusive(handle) -> None:
         """Best-effort exclusive advisory lock on an open file ``handle``.

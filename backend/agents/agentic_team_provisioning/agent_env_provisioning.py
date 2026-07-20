@@ -170,8 +170,15 @@ def _provision_one(
     Postconditions:
         * ``store.mark_agent_env_provision_finished`` is called exactly once
           for ``(team_id, stable_key)``.
-        * The ``AgentLockStore`` record for ``provisioning_agent_id`` is not
-          held by this run's owner token when this function returns.
+        * This function always attempts ``lock_store.release(...)`` for
+          ``provisioning_agent_id`` under this run's owner token before
+          returning; on the common path that succeeds and the record is no
+          longer held by this run. A release failure (e.g. an unreadable
+          lock record) is logged and swallowed rather than re-raised —
+          matching this package's convention that cleanup/release paths
+          never mask the original provisioning result — so in that rare
+          case the record can remain held under this run's owner token
+          until its lease naturally expires.
     """
     from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
     from agent_provisioning_team.shared.agent_lock import AgentLockBusyError, AgentLockStore

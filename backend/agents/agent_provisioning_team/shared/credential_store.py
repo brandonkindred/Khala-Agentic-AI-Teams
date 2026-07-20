@@ -414,18 +414,46 @@ class CredentialStore:
     ) -> Optional[Dict[str, Any]]:
         """Retrieve credentials for an agent (all or specific tool).
 
-        The whole-dict form (``tool_name`` omitted) never surfaces the
-        internal fencing-token sentinel key; a blob holding nothing else
-        (a fencing tombstone left by :meth:`delete_credentials`) reads back
-        as ``None``, same as no file at all.
+        Preconditions:
+            * ``agent_id`` is non-empty.
+        Postconditions:
+            * Scans every candidate independently (primary, then legacy —
+              same order as :meth:`list_tool_names`), not just whichever one
+              ``_read_agent_credentials`` would stop at first. A candidate
+              that decrypts to nothing but the fencing-token sentinel (left
+              behind by :meth:`delete_credentials`'s tombstone, or by
+              :meth:`delete_tool_credentials` purging a primary's last real
+              tool) is treated as having no visible data and skipped, so a
+              sentinel-only primary can never shadow a legacy candidate that
+              still holds a real tool's credentials — unlike a naive
+              single-candidate read, which would stop at the sentinel-only
+              primary and report the tool as absent even though it is still
+              recoverable from the legacy candidate.
+            * The whole-dict form (``tool_name`` omitted) never surfaces the
+              sentinel key; returns the first candidate's visible data once
+              any candidate has some, or ``None`` if every candidate is
+              missing, unreadable, or sentinel-only.
+            * The per-tool form returns that tool's entry from the first
+              candidate that has it, or ``None`` if no candidate does.
         """
-        all_creds, _src = self._read_agent_credentials(agent_id)
-        if all_creds is None:
-            return None
-        if tool_name:
-            return all_creds.get(tool_name)
-        visible = {k: v for k, v in all_creds.items() if k != _FENCING_TOKEN_KEY}
-        return visible or None
+        assert agent_id, "agent_id must be non-empty"
+        for path in self._agent_file_candidates(agent_id):
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(self.multifernet.decrypt(path.read_bytes()).decode())
+            except (InvalidToken, ValueError, OSError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            if tool_name:
+                if tool_name in data:
+                    return data[tool_name]
+                continue
+            visible = {k: v for k, v in data.items() if k != _FENCING_TOKEN_KEY}
+            if visible:
+                return visible
+        return None
 
     def list_tool_names(self, agent_id: str) -> set[str]:
         """Return every tool name stored for ``agent_id`` across ALL candidates.
@@ -614,11 +642,11 @@ class CredentialStore:
                 # dropping it would let a resumed stale caller's later
                 # store_credentials bootstrap-accept (current_token=None) and
                 # resurrect a secret a newer owner tore down — the exact
-                # resurrection the mark exists to block. (A primary reduced to
-                # sentinel-only can shadow a legacy file's OTHER tools from the
-                # fall-through read, but that narrow masking is strictly less
-                # harmful than mark loss; the proper fix is to skip
-                # sentinel-only blobs in the read path, not to unlink here.)
+                # resurrection the mark exists to block. A primary reduced to
+                # sentinel-only no longer shadows a legacy file's OTHER tools:
+                # get_credentials/list_tool_names both scan every candidate
+                # independently and skip a sentinel-only blob rather than
+                # stopping at it.
                 if data:
                     primary.write_bytes(self.multifernet.encrypt(json.dumps(data).encode()))
                     primary.chmod(0o600)

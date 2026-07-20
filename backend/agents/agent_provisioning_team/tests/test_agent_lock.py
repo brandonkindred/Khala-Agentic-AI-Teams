@@ -218,13 +218,6 @@ def test_write_record_cleans_up_tmp_file_on_replace_failure(tmp_path: Path, monk
     assert store.get_owner("agent-1") is None
 
 
-def test_delete_record_is_noop_when_already_gone(tmp_path: Path) -> None:
-    """_delete_record tolerates a record removed out-of-band between the
-    ownership check and the unlink (a narrow, otherwise-harmless TOCTOU)."""
-    store = _store(tmp_path)
-    store._delete_record("never-acquired")  # must not raise
-
-
 def test_acquire_returns_token_starting_at_one(tmp_path: Path) -> None:
     store = _store(tmp_path)
     token = store.acquire("agent-1", owner="job-1")
