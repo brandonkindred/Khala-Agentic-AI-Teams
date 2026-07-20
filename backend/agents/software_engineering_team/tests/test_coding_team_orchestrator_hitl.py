@@ -5,17 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-from software_engineering_team.coding_team import orchestrator as orch_mod
-from software_engineering_team.coding_team.models import CodingTeamPlanInput, StackSpec, TaskStatus
-from software_engineering_team.coding_team.orchestrator import (
+from software_engineering_team import coding_team_orchestrator as orch_mod
+from software_engineering_team.coding_team_orchestrator import (
     CodingTeamSwarm,
     _hydrate_resolved_from_record,
     _plan_with_hitl,
     _run_pause_cycle,
     run_coding_team_orchestrator,
 )
-from software_engineering_team.coding_team.pause_cycle import _format_decisions
-from software_engineering_team.coding_team.task_graph import TaskGraphService
+from software_engineering_team.models import CodingTeamPlanInput, StackSpec, TaskStatus
+from software_engineering_team.pause_cycle import _format_decisions
+from software_engineering_team.task_graph import TaskGraphService
 
 GIT_UTILS = "shared.git.git_utils"
 
@@ -104,7 +104,7 @@ def test_format_decisions():
 
 
 def test_render_decision_line_branches():
-    from software_engineering_team.coding_team.hitl import render_decision_line
+    from software_engineering_team.hitl import render_decision_line
 
     # question + answer → "q → a"
     assert render_decision_line({"question_text": "Which DB?", "answer": "Postgres"}) == (
@@ -530,7 +530,7 @@ def test_plan_with_hitl_exhausts_rounds_fails_closed():
 
 
 def test_plan_text_renders_resolved_and_assumptions():
-    from software_engineering_team.coding_team.tech_lead_agent.agent import _plan_text
+    from software_engineering_team.tech_lead_agent.agent import _plan_text
 
     plan = CodingTeamPlanInput(
         repo_path="/tmp",
@@ -547,7 +547,7 @@ def test_plan_text_renders_resolved_and_assumptions():
 
 
 def test_render_resolved_questions_skips_non_dict_entries():
-    from software_engineering_team.coding_team.tech_lead_agent.agent import (
+    from software_engineering_team.tech_lead_agent.agent import (
         _render_resolved_questions,
     )
 
@@ -557,7 +557,7 @@ def test_render_resolved_questions_skips_non_dict_entries():
 
 
 def test_plan_to_task_graph_parses_open_questions(monkeypatch):
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr(
@@ -576,7 +576,7 @@ def test_plan_to_task_graph_parses_open_questions(monkeypatch):
 
 
 def test_plan_to_task_graph_failure_includes_open_questions_key(monkeypatch):
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
 

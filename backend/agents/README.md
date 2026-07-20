@@ -16,7 +16,6 @@ backend/agents/
 ├── analytics/                         # Analytics utilities
 ├── blogging/
 ├── branding_team/
-├── coding_team/
 ├── continuation_logs/                 # Continuation log storage
 ├── deepthought/                       # Recursive self-organising agent
 ├── docker/                            # Agents-only Docker assets
@@ -74,7 +73,6 @@ For team-specific setup and env vars, use each team's README.
 ## Team READMEs
 
 - `software_engineering_team/README.md`
-- `coding_team/README.md`
 - `planning_team/README.md`
 - `blogging/README.md`
 - `personal_assistant_team/README.md`

@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from software_engineering_team.coding_team.models import TaskStatus
-from software_engineering_team.coding_team.task_graph import TaskGraphService, create_task_graph
+from software_engineering_team.models import TaskStatus
+from software_engineering_team.task_graph import TaskGraphService, create_task_graph
 
 
 def test_add_task() -> None:
@@ -220,7 +220,7 @@ def test_create_task_graph() -> None:
 
 def test_snapshot_restore_round_trips_subtasks() -> None:
     """A task's subtasks survive a snapshot → restore round-trip (serialization + reconstruction)."""
-    from software_engineering_team.coding_team.models import Subtask
+    from software_engineering_team.models import Subtask
 
     tg = TaskGraphService(job_id="j1")
     tg.add_task(
@@ -243,7 +243,7 @@ def test_snapshot_restore_round_trips_subtasks() -> None:
 
 def test_get_next_eligible_subtask() -> None:
     """Returns the first subtask whose subtask-deps are all MERGED; None when blocked/none/empty."""
-    from software_engineering_team.coding_team.models import Subtask
+    from software_engineering_team.models import Subtask
 
     tg = TaskGraphService(job_id="j1")
     assert tg.get_next_eligible_subtask("missing") is None  # unknown task
@@ -264,7 +264,7 @@ def test_get_next_eligible_subtask() -> None:
 
 def test_get_next_eligible_subtask_skips_in_flight() -> None:
     """IN_PROGRESS and IN_REVIEW subtasks are not re-selected; the next TO_DO subtask is returned."""
-    from software_engineering_team.coding_team.models import Subtask
+    from software_engineering_team.models import Subtask
 
     tg = TaskGraphService(job_id="j1")
     tg.add_task(

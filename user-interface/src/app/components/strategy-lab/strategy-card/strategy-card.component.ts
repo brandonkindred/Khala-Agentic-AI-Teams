@@ -1,5 +1,5 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output } from '@angular/core';
-import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
+import { ChangeDetectionStrategy, Component, EventEmitter, Input, OnDestroy, Output } from '@angular/core';
+import { CommonModule, DecimalPipe, DatePipe } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -7,11 +7,12 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatExpansionModule } from '@angular/material/expansion';
-import { MatTableModule } from '@angular/material/table';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import type { PageEvent } from '@angular/material/paginator';
 
 import { DateOnlyPipe } from '../../../shared/date-only.pipe';
 import { formatPct, formatRatio } from '../../../shared/number-format';
+import { TradeLedgerComponent } from '../trade-ledger/trade-ledger.component';
+import { QualityGateListComponent } from '../quality-gate-list/quality-gate-list.component';
 import {
   returnColor,
   returnColorLabel,
@@ -20,22 +21,15 @@ import {
   publishabilitySkipLabel,
   gateIcon as pureGateIcon,
   gateSeverityClass as pureGateSeverityClass,
+  type GateViewModel,
+  flattenObjectRows,
 } from '../strategy-lab.formatters';
 import type {
   PaperTradingSession,
   PaperTradingComparison,
   QualityGateResult,
   StrategyLabRecord,
-  TradeRecord,
 } from '../../../models';
-
-/** Precomputed per-gate template data — see `gateViewModels`. */
-interface GateViewModel {
-  gate: QualityGateResult;
-  icon: string;
-  severityClass: string;
-  isRemedied: boolean;
-}
 
 /** Precomputed comparison-table row — see `comparisonMetrics`. */
 interface ComparisonRow {
@@ -52,8 +46,10 @@ interface ComparisonRow {
  * paper-trading section. Owns no cross-record state (expand/collapse
  * tracking, delete-in-flight, pagination, paper-trading-in-flight all live on
  * the host, which passes the derived value for *this* record down as
- * `@Input()`s) and performs no side effects itself — every user action is
- * reported up via the `@Output()`s below for the host to act on.
+ * `@Input()`s) and performs no side effects itself except for
+ * `copyStrategyCode`, which writes to the clipboard and manages a
+ * confirmation timer. Every other user action is reported up via the
+ * `@Output()`s below for the host to act on.
  *
  * Preconditions: `record` is set before the first render (required input).
  * Postconditions: renders identically for the same `record`/inputs regardless
@@ -68,8 +64,6 @@ interface ComparisonRow {
     CommonModule,
     DecimalPipe,
     DatePipe,
-    CurrencyPipe,
-    JsonPipe,
     DateOnlyPipe,
     MatCardModule,
     MatButtonModule,
@@ -78,13 +72,13 @@ interface ComparisonRow {
     MatTooltipModule,
     MatDividerModule,
     MatExpansionModule,
-    MatTableModule,
-    MatPaginatorModule,
+    TradeLedgerComponent,
+    QualityGateListComponent,
   ],
   templateUrl: './strategy-card.component.html',
   styleUrl: './strategy-card.component.scss',
 })
-export class StrategyCardComponent {
+export class StrategyCardComponent implements OnDestroy {
   /** The lab record this card renders. */
   @Input({ required: true }) record!: StrategyLabRecord;
   /** Whether the card title renders as an `<h3>` (dashboard-tab context) or `<h2>` (standalone route). */
@@ -118,13 +112,41 @@ export class StrategyCardComponent {
   readonly verdictLabel = verdictLabel;
   readonly verdictColor = verdictColor;
   readonly publishabilitySkipLabel = publishabilitySkipLabel;
+  readonly flattenObjectRows = flattenObjectRows;
 
-  readonly PAGE_SIZE = 20;
-  readonly TRADE_COLUMNS = [
-    'trade_num', 'entry_date', 'exit_date', 'symbol',
-    'entry_price', 'exit_price', 'shares', 'return_pct',
-    'net_pnl', 'cumulative_pnl', 'outcome',
-  ];
+  /** True for ~1.5s after `copyStrategyCode()` runs, flashing a confirmation icon on the copy button. */
+  strategyCodeCopied = false;
+  private copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+  ngOnDestroy(): void {
+    if (this.copyResetTimer) {
+      clearTimeout(this.copyResetTimer);
+      this.copyResetTimer = null;
+    }
+  }
+
+  /**
+   * Copy the generated strategy code to the clipboard, flashing a confirmation icon.
+   * Mirrors `CodingTeamPageComponent.copyJobId()`'s pattern.
+   *
+   * Preconditions: `code` is the non-empty string currently rendered in the panel.
+   * Postconditions: when the Clipboard API is available, `code` is written to the
+   *   clipboard and `strategyCodeCopied` is true for ~1.5s (the reset timer is
+   *   tracked so it is cancelled on destroy and never fires twice); a rejected
+   *   clipboard write is swallowed so it cannot surface as an unhandled rejection.
+   */
+  copyStrategyCode(code: string): void {
+    navigator.clipboard?.writeText(code).catch(() => {
+      // Clipboard write can reject (permission denied, insecure context); ignore — the user can
+      // still read/select the code manually.
+    });
+    this.strategyCodeCopied = true;
+    if (this.copyResetTimer) clearTimeout(this.copyResetTimer);
+    this.copyResetTimer = setTimeout(() => {
+      this.strategyCodeCopied = false;
+      this.copyResetTimer = null;
+    }, 1500);
+  }
 
   /** Delete-button click handler. Postconditions: `deleteRequested` emits exactly once; no local state changes (the host owns delete-in-flight tracking). */
   onDelete(): void {
@@ -195,35 +217,17 @@ export class StrategyCardComponent {
    * `record.strategy.strategy_code` on older ones); resolving the fallback
    * here once keeps it out of the template and in one testable place.
    *
-   * Postconditions: returns `record.strategy_code` when set and non-empty,
-   *   else `record.strategy.strategy_code`, else `undefined`.
+   * Postconditions: returns `record.strategy_code` when truthy; otherwise
+   *   `record.strategy.strategy_code` verbatim (which may itself be an empty
+   *   string or `undefined` — not coerced here, since the "Strategy Code"
+   *   panel's own template gate independently re-checks truthiness before
+   *   rendering this value).
    */
   strategyCode(): string | undefined {
     return this.record.strategy_code || this.record.strategy.strategy_code;
   }
 
-  /**
-   * Accessible name for the trade-table's scrollable wrapper (WCAG 2.4.7 —
-   * the wrapper, not the table, must be focusable since the global outline
-   * would otherwise be clipped by `overflow-x: auto`).
-   */
-  tradeTableRegionLabel(): string {
-    return `${this.record.strategy.asset_class} strategy trade history, scrollable`;
-  }
-
-  /**
-   * Accessible name for the trade-ledger `<table>` itself — distinct from
-   * `tradeTableRegionLabel`, which names the scrollable wrapper div: a
-   * screen reader's table-navigation commands read the `<table>`'s own
-   * accessible name, not the wrapper's.
-   *
-   * Postconditions: returns a non-empty, state-independent label.
-   */
-  tradeTableAccessibleName(): string {
-    return `Trade ledger, ${this.tradeCount()} trades`;
-  }
-
-  /** Accessible name for the paper-trading comparison table's scrollable wrapper (same rationale as `tradeTableRegionLabel`). */
+  /** Accessible name for the paper-trading comparison table's scrollable wrapper (same rationale as the trade-ledger's own equivalent in `TradeLedgerComponent`). */
   comparisonTableRegionLabel(): string {
     return `${this.record.strategy.asset_class} strategy backtest vs. paper-trading comparison, scrollable`;
   }
@@ -239,92 +243,6 @@ export class StrategyCardComponent {
    */
   hasSignalBrief(): boolean {
     return this.record.signal_intelligence_brief != null && Object.keys(this.record.signal_intelligence_brief).length > 0;
-  }
-
-  // A `StrategyCardComponent` instance is reused (per the `@for track
-  // record.lab_record_id` in the host) across status polls for the same
-  // record — a poll replaces `record` with a brand-new object, so every cache
-  // below is keyed on `this.record` identity (not just derived inputs like
-  // `pageIndex`) to invalidate correctly when that happens.
-  private pagedTradesCache: { record: StrategyLabRecord; page: number; trades: TradeRecord[] } | null = null;
-  private winCountCache: { record: StrategyLabRecord; count: number } | null = null;
-
-  /**
-   * Trade-ledger rows for the current paginator page. Cached per
-   * (record, page) so the mat-table `dataSource` gets a stable array
-   * reference across change-detection cycles that don't change either,
-   * letting it diff instead of re-rendering every row.
-   *
-   * Postconditions: returns `PAGE_SIZE` trades starting at `pageIndex *
-   *   PAGE_SIZE` (fewer on the last page); same array reference as the
-   *   previous call when `record` and `pageIndex` are both unchanged.
-   */
-  pagedTrades(): TradeRecord[] {
-    const page = this.pageIndex;
-    const cached = this.pagedTradesCache;
-    // Returning a stable array reference for the same (record, page) lets the
-    // mat-table dataSource diff instead of re-rendering every row each CD cycle.
-    if (cached && cached.record === this.record && cached.page === page) {
-      return cached.trades;
-    }
-    const start = page * this.PAGE_SIZE;
-    const trades = this.record.backtest.trades.slice(start, start + this.PAGE_SIZE);
-    this.pagedTradesCache = { record: this.record, page, trades };
-    return trades;
-  }
-
-  /** Postconditions: returns the total number of trades in `record.backtest.trades`, independent of pagination. */
-  tradeCount(): number {
-    return this.record.backtest.trades.length;
-  }
-
-  /**
-   * Count of trades with `outcome === 'win'`, cached per record (see the
-   * cache-invalidation note above `pagedTradesCache`).
-   *
-   * Postconditions: returns a value in `[0, tradeCount()]`.
-   */
-  winCount(): number {
-    const cached = this.winCountCache;
-    if (cached && cached.record === this.record) {
-      return cached.count;
-    }
-    const count = this.record.backtest.trades.filter((t) => t.outcome === 'win').length;
-    this.winCountCache = { record: this.record, count };
-    return count;
-  }
-
-  /**
-   * Net P&L across the whole trade history. `cumulative_pnl` on each trade
-   * is already a running total, so the last trade's value is the total —
-   * no need to sum every trade's `net_pnl` here.
-   *
-   * Postconditions: returns `0` when there are no trades, else the last
-   *   trade's `cumulative_pnl`.
-   */
-  totalNetPnl(): number {
-    const trades = this.record.backtest.trades;
-    return trades.length ? trades[trades.length - 1].cumulative_pnl : 0;
-  }
-
-  /** Postconditions: returns `'win-cell'` when `t.outcome === 'win'`, else `'loss-cell'`. */
-  tradeReturnColor(t: TradeRecord): string {
-    return t.outcome === 'win' ? 'win-cell' : 'loss-cell';
-  }
-
-  /**
-   * Precision tiering for the trade-ledger entry/exit price columns: fewer
-   * decimals for large prices (where sub-dollar precision is noise) and more
-   * for sub-$1 prices (where it's signal).
-   *
-   * Preconditions: `price` is finite (not `NaN`/`Infinity`).
-   * Postconditions: returns `price` formatted with 0 decimals when `>= 1000`,
-   *   2 decimals when in `[1, 1000)`, 4 decimals when `< 1`.
-   */
-  formatPrice(price: number): string {
-    if (price >= 1000) return price.toFixed(0);
-    if (price >= 1) return price.toFixed(2);
-    return price.toFixed(4);
   }
 
   /**
@@ -382,6 +300,10 @@ export class StrategyCardComponent {
     return pureGateSeverityClass(gate, this.isRemedied(gate));
   }
 
+  // Invalidates on `record` reference identity, not deep equality — relies on
+  // the host always replacing the record with a new object on change (never
+  // mutating one in place), same as `pagedTradesCache`/`winCountCache` in
+  // `TradeLedgerComponent`.
   private gateViewModelsCache: { record: StrategyLabRecord; viewModels: GateViewModel[] } | null = null;
 
   /**
@@ -406,6 +328,8 @@ export class StrategyCardComponent {
     return viewModels;
   }
 
+  // Same reference-identity caveat as `gateViewModelsCache` above, keyed on
+  // the paper-trading comparison object instead of the record.
   private comparisonMetricsCache: { comparison: PaperTradingComparison; rows: ComparisonRow[] } | null = null;
 
   comparisonMetrics(c: PaperTradingComparison): ComparisonRow[] {

@@ -95,35 +95,6 @@ describe('StrategyCardComponent', () => {
     component.record = makeRecord();
   });
 
-  describe('pagedTrades / winCount', () => {
-    it('memoizes pagedTrades and winCount per record', () => {
-      component.record = makeRecord({
-        backtest: {
-          trades: [
-            makeTrade({ outcome: 'win', cumulative_pnl: 10 }),
-            makeTrade({ outcome: 'loss', cumulative_pnl: 4 }),
-            makeTrade({ outcome: 'win', cumulative_pnl: 9 }),
-          ],
-        } as unknown as StrategyLabRecord['backtest'],
-      });
-
-      const paged1 = component.pagedTrades();
-      expect(component.pagedTrades()).toBe(paged1); // stable reference (same record + page)
-      expect(component.winCount()).toBe(2);
-      expect(component.winCount()).toBe(2); // served from cache on the second call
-    });
-
-    it('invalidates the cache when a new record object replaces the old one (status poll)', () => {
-      const winningTrades = [makeTrade({ outcome: 'win' }), makeTrade({ outcome: 'win' })];
-      const losingTrades = [makeTrade({ outcome: 'loss' })];
-      component.record = makeRecord({ backtest: { trades: winningTrades } as unknown as StrategyLabRecord['backtest'] });
-      expect(component.winCount()).toBe(2);
-
-      component.record = makeRecord({ backtest: { trades: losingTrades } as unknown as StrategyLabRecord['backtest'] });
-      expect(component.winCount()).toBe(0);
-    });
-  });
-
   describe('hasSignalBrief', () => {
     it('returns false when signal_intelligence_brief is unset', () => {
       component.record = makeRecord({ signal_intelligence_brief: undefined });
@@ -140,23 +111,6 @@ describe('StrategyCardComponent', () => {
         signal_intelligence_brief: { summary: 'Momentum confirmed by volume.' } as unknown as StrategyLabRecord['signal_intelligence_brief'],
       });
       expect(component.hasSignalBrief()).toBe(true);
-    });
-  });
-
-  describe('formatPrice', () => {
-    it('formats prices >= 1000 with no decimal places', () => {
-      expect(component.formatPrice(1234.567)).toBe('1235');
-      expect(component.formatPrice(1000)).toBe('1000');
-    });
-
-    it('formats prices in [1, 1000) with 2 decimal places', () => {
-      expect(component.formatPrice(150.126)).toBe('150.13');
-      expect(component.formatPrice(1)).toBe('1.00');
-    });
-
-    it('formats prices below 1 with 4 decimal places', () => {
-      expect(component.formatPrice(0.12345)).toBe('0.1235');
-      expect(component.formatPrice(0)).toBe('0.0000');
     });
   });
 
@@ -406,6 +360,44 @@ describe('StrategyCardComponent', () => {
     });
   });
 
+  describe('copyStrategyCode', () => {
+    it('writes the code to the clipboard and flashes strategyCodeCopied', () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      try {
+        expect(component.strategyCodeCopied).toBe(false);
+        component.copyStrategyCode('print("hello")');
+        expect(writeText).toHaveBeenCalledWith('print("hello")');
+        expect(component.strategyCodeCopied).toBe(true);
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
+    });
+
+    it('swallows a rejected clipboard write instead of leaking an unhandled rejection', async () => {
+      const writeText = vi.fn().mockRejectedValue(new Error('permission denied'));
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      try {
+        expect(() => component.copyStrategyCode('print("hello")')).not.toThrow();
+        expect(component.strategyCodeCopied).toBe(true);
+        // Let the rejected promise settle; the .catch() must absorb it.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
+    });
+
+    it('cancels the copy-confirmation timer on destroy', () => {
+      component.copyStrategyCode('print("hello")');
+      expect(component.strategyCodeCopied).toBe(true);
+      expect(component['copyResetTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['copyResetTimer']).toBeNull();
+    });
+  });
+
   describe('showTitle / expanded gating', () => {
     // OnPush + a decorator `@Input()`: mutating the property directly (bypassing
     // Angular's own input-binding path, which is what a real `[showTitle]="..."`
@@ -517,6 +509,52 @@ describe('StrategyCardComponent', () => {
       expect(caption).toBeTruthy();
       expect(caption?.className).toContain('visually-hidden');
       expect(caption?.textContent?.trim()).toBe('Backtest vs. paper-trading metric comparison');
+    });
+
+    it('renders entry/exit rules, sizing, and the signal brief as labeled rows, with no raw JSON dump remaining', () => {
+      component.record = makeRecord({
+        strategy: {
+          strategy_id: 'strat-1',
+          authored_by: 'design-agent',
+          asset_class: 'stocks',
+          hypothesis: 'Stocks with rising volume tend to continue trending.',
+          signal_definition: 'volume_zscore > 2',
+          timeframe: 'daily',
+          entry_rules: [{ indicator: 'volume_zscore', operator: '>', value: 2 }],
+          exit_rules: [{ indicator: 'days_held', operator: '>', value: 10 }],
+          sizing: { method: 'fixed_fraction', value: 0.1 },
+          target_symbols: ['AAPL'],
+          risk_limits: {},
+          speculative: false,
+          requires_redesign: false,
+          unparsed_rules: [],
+          audit: {},
+        } as unknown as StrategyLabRecord['strategy'],
+        signal_intelligence_brief: {
+          summary: 'Momentum confirmed by volume.',
+        } as unknown as StrategyLabRecord['signal_intelligence_brief'],
+      });
+      component.expanded = true;
+      fixture.detectChanges();
+
+      // No raw JSON dump remains anywhere in the rules/sizing/signal-brief sections.
+      expect(fixture.nativeElement.querySelector('.rule-json')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.signal-json')).toBeNull();
+
+      const allText = (el: Element) =>
+        Array.from(el.querySelectorAll('dt, dd')).map((n) => n.textContent?.trim());
+
+      const detailSections: HTMLElement[] = Array.from(fixture.nativeElement.querySelectorAll('.detail-section'));
+      const entrySection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Entry Rules')!;
+      const exitSection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Exit Rules')!;
+      const sizingSection = detailSections.find((s) => s.querySelector('strong')?.textContent === 'Sizing')!;
+
+      expect(allText(entrySection)).toEqual(['Indicator', 'volume_zscore', 'Operator', '>', 'Value', '2']);
+      expect(allText(exitSection)).toEqual(['Indicator', 'days_held', 'Operator', '>', 'Value', '10']);
+      expect(allText(sizingSection)).toEqual(['Method', 'fixed_fraction', 'Value', '0.1']);
+
+      const signalPanel: HTMLElement = fixture.nativeElement.querySelector('.signal-panel');
+      expect(allText(signalPanel)).toEqual(['Summary', 'Momentum confirmed by volume.']);
     });
   });
 });

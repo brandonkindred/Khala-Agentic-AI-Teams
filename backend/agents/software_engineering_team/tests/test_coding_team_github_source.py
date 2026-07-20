@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 import httpx
 import pytest
 
-from software_engineering_team.coding_team.github_source import (
+from software_engineering_team.github_source import (
     GitHubAPIError,
     GitHubClient,
     Issue,
@@ -30,12 +30,12 @@ from software_engineering_team.coding_team.github_source import (
     pick_ready_issue,
     scrub_token_from_text,
 )
-from software_engineering_team.coding_team.github_source.client import (
+from software_engineering_team.github_source.client import (
     MAX_ISSUES_TRAVERSED,
     _is_safe_ref,
     _parse_next_link,
 )
-from software_engineering_team.coding_team.models import CodingTeamPlanInput
+from software_engineering_team.models import CodingTeamPlanInput
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -266,7 +266,7 @@ class TestClientIssueCommentMarker:
         '@khala review' webhook can recognize (and never re-trigger on) Khala's own
         output — author identity can't do this, since Khala posts with the operator's
         PAT and the PAT owner may be exactly the person triggering reviews."""
-        from software_engineering_team.coding_team.github_source.client import KHALA_COMMENT_MARKER
+        from software_engineering_team.github_source.client import KHALA_COMMENT_MARKER
 
         seen: dict[str, Any] = {}
 
@@ -278,7 +278,7 @@ class TestClientIssueCommentMarker:
         assert seen["body"]["body"] == f"Code review failed: boom\n\n{KHALA_COMMENT_MARKER}"
 
     def test_add_issue_comment_does_not_duplicate_marker(self) -> None:
-        from software_engineering_team.coding_team.github_source.client import KHALA_COMMENT_MARKER
+        from software_engineering_team.github_source.client import KHALA_COMMENT_MARKER
 
         seen: dict[str, Any] = {}
 
@@ -294,7 +294,7 @@ class TestClientIssueCommentMarker:
 
 class TestClientCreateIssue:
     def test_create_issue_posts_and_returns_issue(self) -> None:
-        from software_engineering_team.coding_team.github_source.client import KHALA_COMMENT_MARKER
+        from software_engineering_team.github_source.client import KHALA_COMMENT_MARKER
 
         seen: dict[str, Any] = {}
 
@@ -340,7 +340,7 @@ class TestClientCreateIssue:
         assert "labels" not in seen["body"]
 
     def test_create_issue_raises_on_error(self) -> None:
-        from software_engineering_team.coding_team.github_source import GitHubAPIError
+        from software_engineering_team.github_source import GitHubAPIError
 
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(403, json={"message": "no scope"})
@@ -693,17 +693,17 @@ def _stub_heavy_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     # the stub outlives the test and can leak into an unrelated test (in this
     # file, or another sharing the same xdist worker process) that needs the
     # real orchestrator module.
-    if "software_engineering_team.coding_team.orchestrator" not in sys.modules or not hasattr(
-        sys.modules["software_engineering_team.coding_team.orchestrator"], "_stubbed"
+    if "software_engineering_team.coding_team_orchestrator" not in sys.modules or not hasattr(
+        sys.modules["software_engineering_team.coding_team_orchestrator"], "_stubbed"
     ):
-        stub = types.ModuleType("software_engineering_team.coding_team.orchestrator")
+        stub = types.ModuleType("software_engineering_team.coding_team_orchestrator")
         stub._stubbed = True  # type: ignore[attr-defined]
 
         def _noop(*_a: Any, **_kw: Any) -> None:
             return None
 
         stub.run_coding_team_orchestrator = _noop  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team.orchestrator", stub)
+        monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team_orchestrator", stub)
 
     # git_utils now lives in the neutral, stdlib-only shared.git package, so the
     # real module imports cheaply. Importing it (instead of injecting a fake into
@@ -776,7 +776,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     fake_jobs = FakeJobServiceClient(team="coding_team")
 
-    from software_engineering_team.coding_team import job_store as job_store_mod
+    from software_engineering_team import job_store as job_store_mod
 
     monkeypatch.setattr(job_store_mod, "_client", lambda *a, **kw: fake_jobs)
 
@@ -785,7 +785,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
 
-    from software_engineering_team.coding_team.api import main as api_main
+    from software_engineering_team.api import coding_team_main as api_main
 
     holder: dict[str, Any] = {"client": _FakeClient()}
 
@@ -886,7 +886,7 @@ class TestEndpointHappyPath:
         and the raw record (echoed by the generic GET /api/jobs/{team}) never holds a usable PAT."""
         from cryptography.fernet import Fernet
 
-        from software_engineering_team.coding_team import token_crypto
+        from software_engineering_team import token_crypto
 
         monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode())
         gh = _FakeClient(issues=[_issue(11, title="Add feature")], sub_map={11: []})
@@ -910,7 +910,7 @@ class TestEndpointHappyPath:
 
     def test_no_encryption_key_skips_token_persistence(self, patched_app, monkeypatch) -> None:
         """With no key configured, the token is simply not persisted (resume falls back to env)."""
-        from software_engineering_team.coding_team import token_crypto
+        from software_engineering_team import token_crypto
 
         monkeypatch.delenv("INTEGRATION_ENCRYPTION_KEY", raising=False)
         monkeypatch.setattr(token_crypto, "_load_key", lambda: None)
@@ -1459,7 +1459,7 @@ class TestPrepareIssueBranch:
     def api(self, monkeypatch):
         """Import the api module fresh, without the patched_app fixture's stubs."""
         _stub_heavy_modules(monkeypatch)
-        from software_engineering_team.coding_team.api import main as api_main
+        from software_engineering_team.api import coding_team_main as api_main
 
         return api_main
 
@@ -1521,7 +1521,7 @@ class TestGitCredentialThreading:
     def api(self, monkeypatch):
         """Import the api module fresh, without the patched_app fixture's stubs."""
         _stub_heavy_modules(monkeypatch)
-        from software_engineering_team.coding_team.api import main as api_main
+        from software_engineering_team.api import coding_team_main as api_main
 
         return api_main
 
@@ -1795,7 +1795,7 @@ class TestBusyCheckoutGuard:
     (no running sibling) still recover."""
 
     def test_running_sibling_on_same_checkout_fails_job(self, patched_app, monkeypatch) -> None:
-        from software_engineering_team.coding_team.job_store import create_job, update_job
+        from software_engineering_team.job_store import create_job, update_job
 
         api = patched_app["api"]
         repo_path = patched_app["repo_path"]
@@ -1824,7 +1824,7 @@ class TestBusyCheckoutGuard:
         different spelling of the same checkout (symlink, `/.` suffix) must
         still block — string equality would fail open exactly where the
         guard matters."""
-        from software_engineering_team.coding_team.job_store import create_job, update_job
+        from software_engineering_team.job_store import create_job, update_job
 
         api = patched_app["api"]
         repo_path = patched_app["repo_path"]
@@ -1851,7 +1851,7 @@ class TestBusyCheckoutGuard:
         assert prep_calls == []
 
     def test_terminal_sibling_does_not_block(self, patched_app, monkeypatch) -> None:
-        from software_engineering_team.coding_team.job_store import create_job, update_job
+        from software_engineering_team.job_store import create_job, update_job
 
         repo_path = patched_app["repo_path"]
         create_job(job_id="sibling-2", repo_path=repo_path, plan_input=None)
@@ -1874,7 +1874,7 @@ class TestPublishWindowLiveness:
     checkout mid-publish."""
 
     def test_job_stays_running_during_publish_window(self, patched_app, monkeypatch) -> None:
-        from software_engineering_team.coding_team.job_store import list_jobs as store_list_jobs
+        from software_engineering_team.job_store import list_jobs as store_list_jobs
 
         api = patched_app["api"]
         repo_path = patched_app["repo_path"]
@@ -1909,7 +1909,7 @@ class TestEphemeralCheckoutCleanup:
 
     def test_request_default_cleanup_flag_is_false(self) -> None:
         """RunFromGitHubRequest defaults cleanup_checkout_on_success to False."""
-        from software_engineering_team.coding_team.api.main import RunFromGitHubRequest
+        from software_engineering_team.api.coding_team_main import RunFromGitHubRequest
 
         req = RunFromGitHubRequest(owner="o", repo="r", repo_path="/tmp/x")
         assert req.cleanup_checkout_on_success is False
@@ -2297,7 +2297,7 @@ class TestGitHubRepoReader:
     def test_reads_and_caches_and_lists(self) -> None:
         import base64
 
-        from software_engineering_team.coding_team.github_source import GitHubRepoReader
+        from software_engineering_team.github_source import GitHubRepoReader
 
         calls = {"contents": 0, "tree": 0}
 
@@ -2320,7 +2320,7 @@ class TestGitHubRepoReader:
         assert calls["contents"] == 1
 
     def test_read_failure_and_cap_return_none(self) -> None:
-        from software_engineering_team.coding_team.github_source import GitHubRepoReader
+        from software_engineering_team.github_source import GitHubRepoReader
 
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(404, json={"message": "Not Found"})
@@ -2331,7 +2331,7 @@ class TestGitHubRepoReader:
         assert reader.read_file("b.py") is None  # cap reached -> None
 
     def test_tree_error_is_failsafe(self) -> None:
-        from software_engineering_team.coding_team.github_source import GitHubRepoReader
+        from software_engineering_team.github_source import GitHubRepoReader
 
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(500, text="boom")
@@ -2340,7 +2340,7 @@ class TestGitHubRepoReader:
         assert reader.list_files() == []
 
     def test_list_files_is_capped(self) -> None:
-        from software_engineering_team.coding_team.github_source import GitHubRepoReader
+        from software_engineering_team.github_source import GitHubRepoReader
 
         def handler(_req: httpx.Request) -> httpx.Response:
             blobs = [{"type": "blob", "path": f"f{i}.py"} for i in range(10)]
@@ -2363,7 +2363,7 @@ class TestGitHubRepoReader:
         import threading
         import time
 
-        from software_engineering_team.coding_team.github_source import GitHubRepoReader
+        from software_engineering_team.github_source import GitHubRepoReader
 
         calls = {"contents": 0}
 
@@ -2401,7 +2401,7 @@ class TestGitHubRepoReader:
         import threading
         import time
 
-        from software_engineering_team.coding_team.github_source import GitHubRepoReader
+        from software_engineering_team.github_source import GitHubRepoReader
 
         calls = {"tree": 0}
 

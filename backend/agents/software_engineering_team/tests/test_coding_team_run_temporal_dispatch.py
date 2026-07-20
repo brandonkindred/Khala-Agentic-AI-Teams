@@ -9,8 +9,8 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 import shared.temporal
-from software_engineering_team.coding_team.api import main as api
-from software_engineering_team.coding_team.temporal import start_workflow as sw
+from software_engineering_team.api import coding_team_main as api
+from software_engineering_team.temporal import coding_team_start_workflow as sw
 
 client = TestClient(api.app)
 

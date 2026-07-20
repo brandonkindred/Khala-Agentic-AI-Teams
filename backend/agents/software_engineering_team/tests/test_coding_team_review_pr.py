@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from software_engineering_team.coding_team.github_source import (
+from software_engineering_team.github_source import (
     MAX_REVIEW_COMMENTS_TRAVERSED,
     GitHubAPIError,
     GitHubClient,
@@ -770,13 +770,13 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from job_service_client_fake import FakeJobServiceClient
 
     fake_jobs = FakeJobServiceClient(team="coding_team")
-    from software_engineering_team.coding_team import job_store as job_store_mod
+    from software_engineering_team import job_store as job_store_mod
 
     monkeypatch.setattr(job_store_mod, "_client", lambda *a, **kw: fake_jobs)
     monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
     monkeypatch.delenv("PR_REVIEW_EVENT", raising=False)
 
-    from software_engineering_team.coding_team.api import main as api_main
+    from software_engineering_team.api import coding_team_main as api_main
 
     holder: dict[str, Any] = {"client": _FakeReviewClient()}
     monkeypatch.setattr(api_main, "GitHubClient", lambda **_kw: holder["client"])
@@ -801,7 +801,7 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
             return out
 
     monkeypatch.setattr(
-        "software_engineering_team.coding_team.engine_provider._provider", _FakeProvider()
+        "software_engineering_team.engine_provider._provider", _FakeProvider()
     )
 
     from fastapi.testclient import TestClient
@@ -1096,7 +1096,7 @@ class TestReviewEndpoint:
         own last-resort finalize failing on a store outage) must never propagate
         out of ``_run_pr_review`` — the daemon-thread hook must not die and the
         job must still be marked failed, honoring the "never raises" contract."""
-        import software_engineering_team.coding_team.api.pr_review as prm
+        import software_engineering_team.api.pr_review as prm
 
         def _boom(*_a: Any, **_kw: Any) -> None:
             raise RuntimeError("body blew up past its own handler")
@@ -1396,7 +1396,7 @@ class TestReviewEndpoint:
         assert review_app["jobs"].get_job(job_id) is not None
 
     def test_heartbeat_job_touches_job_service(self, review_app) -> None:
-        from software_engineering_team.coding_team import job_store as job_store_mod
+        from software_engineering_team import job_store as job_store_mod
 
         fake_jobs = review_app["jobs"]
         review_app["client"].post("/review-pr", json=_review_body())
@@ -2688,7 +2688,7 @@ class TestAnchorToFirstFileUnit:
 
     def test_returns_first_key_of_valid_by_path(self) -> None:
         """The first key in insertion order is used as the anchor path (Python 3.7+)."""
-        from software_engineering_team.coding_team.github_source import anchor_to_first_file
+        from software_engineering_team.github_source import anchor_to_first_file
 
         finding = _FakeReviewIssue("low", line=1, file_path="not_here.py", description="x")
         valid_by_path = {"first_file.py": {1}, "second_file.py": {2}, "third_file.py": {3}}
@@ -2698,7 +2698,7 @@ class TestAnchorToFirstFileUnit:
 
     def test_single_entry_valid_by_path(self) -> None:
         """Single-entry valid_by_path → anchors to that one file, no line key."""
-        from software_engineering_team.coding_team.github_source import anchor_to_first_file
+        from software_engineering_team.github_source import anchor_to_first_file
 
         finding = _FakeReviewIssue("high", line=10, file_path="gone.py", description="gone")
         valid_by_path = {"only_file.py": {5, 6, 7}}
@@ -2718,7 +2718,7 @@ class TestAnchorToFirstFileUnit:
 
         Validates: Requirements 2.2, 2.5
         """
-        from software_engineering_team.coding_team.github_source import anchor_to_first_file
+        from software_engineering_team.github_source import anchor_to_first_file
 
         finding = _FakeReviewIssue("low", line=4, file_path="src/config.py", description="issue")
         valid_by_path = {"src/api.py": {1, 2, 3}, "src/utils.py": {5, 6}}
@@ -2732,7 +2732,7 @@ class TestAnchorToFirstFileUnit:
 
         Validates: Requirements 2.2, 2.5
         """
-        from software_engineering_team.coding_team.github_source import anchor_to_first_file
+        from software_engineering_team.github_source import anchor_to_first_file
 
         finding = _FakeReviewIssue("low", line=4, file_path="missing.py", description="issue")
         assert anchor_to_first_file(finding, {}) is None
@@ -2742,7 +2742,7 @@ class TestAnchorToFirstFileUnit:
 
         Validates: Requirements 2.2, 2.5
         """
-        from software_engineering_team.coding_team.github_source import (
+        from software_engineering_team.github_source import (
             anchor_to_first_file,
             format_comment_body,
         )
@@ -2885,7 +2885,7 @@ class TestFixedRunPrReview:
 
 class TestWholeFileReview:
     def test_fetch_head_files_returns_whole_files_and_skips_binary(self, review_app) -> None:
-        from software_engineering_team.coding_team.api.pr_review import _fetch_head_files
+        from software_engineering_team.api.pr_review import _fetch_head_files
 
         files = [
             PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None),
@@ -2902,7 +2902,7 @@ class TestWholeFileReview:
         assert out == {"a.py": "WHOLE\n"}  # removed + binary skipped
 
     def test_fetch_head_files_degrades_on_client_without_method(self, review_app) -> None:
-        from software_engineering_team.coding_team.api.pr_review import _fetch_head_files
+        from software_engineering_team.api.pr_review import _fetch_head_files
 
         files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
         # A client missing get_file_contents must degrade to {} (hunk fallback),
@@ -2917,7 +2917,7 @@ class TestWholeFileReview:
         import threading
         import time
 
-        from software_engineering_team.coding_team.api.pr_review import _fetch_head_files
+        from software_engineering_team.api.pr_review import _fetch_head_files
 
         num_files = 16
         files = [
@@ -2939,7 +2939,7 @@ class TestWholeFileReview:
         assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
-        from software_engineering_team.coding_team.github_source import GitHubRepoReader
+        from software_engineering_team.github_source import GitHubRepoReader
 
         gh = review_app["github"]["client"]
         gh.get_file_contents = lambda o, r, path, ref: "def a():\n    return 1\n"
@@ -2953,7 +2953,7 @@ class TestWholeFileReview:
                 return _FakeOutput(issues=[])
 
         monkeypatch.setattr(
-            "software_engineering_team.coding_team.engine_provider._provider", _CapProvider()
+            "software_engineering_team.engine_provider._provider", _CapProvider()
         )
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -2977,7 +2977,7 @@ class TestWholeFileReview:
                 return _FakeOutput(issues=[])
 
         monkeypatch.setattr(
-            "software_engineering_team.coding_team.engine_provider._provider", _CapProvider()
+            "software_engineering_team.engine_provider._provider", _CapProvider()
         )
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -2999,16 +2999,18 @@ class TestWholeFileReview:
                 return _FakeOutput(issues=[])
 
         monkeypatch.setattr(
-            "software_engineering_team.coding_team.engine_provider._provider", _CapProvider()
+            "software_engineering_team.engine_provider._provider", _CapProvider()
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
-        from software_engineering_team.coding_team.api.pr_review import WHOLE_FILE_FOCUS_NOTE_PREFIX
+        from software_engineering_team.api.pr_review import WHOLE_FILE_FOCUS_NOTE_PREFIX
 
         assert WHOLE_FILE_FOCUS_NOTE_PREFIX in captured["task_requirements"]
 
-    def test_partial_head_fetch_falls_back_to_hunks(self, review_app, monkeypatch) -> None:
+    def test_partial_head_fetch_reviews_fetched_subset_whole_and_missing_subset_via_hunks(
+        self, review_app, monkeypatch
+    ) -> None:
         gh = review_app["github"]["client"]
         # Two reviewable files; only one fetches whole content.
         gh.files = [
@@ -3018,23 +3020,158 @@ class TestWholeFileReview:
         gh.get_file_contents = lambda o, r, path, ref: "whole a\n" if path == "a.py" else None
         gh.get_repository_tree = lambda o, r, ref, recursive=True: []
 
-        captured: dict[str, Any] = {}
+        calls: list[dict[str, Any]] = []
 
         class _CapProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                captured.update(kw)
+                calls.append(dict(kw))
                 return _FakeOutput(issues=[])
 
         monkeypatch.setattr(
-            "software_engineering_team.coding_team.engine_provider._provider", _CapProvider()
+            "software_engineering_team.engine_provider._provider", _CapProvider()
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        # Only 1 of 2 reviewable files fetched -> must NOT silently drop b.py.
-        # Falls back to hunk mode (covers every changed file).
-        assert captured.get("files") is None
-        assert captured["pre_numbered"] is True
-        assert captured["code"]
+        # Only 1 of 2 reviewable files fetched whole -> a.py must NOT silently
+        # revert to hunk mode, and b.py must NOT be silently dropped: two
+        # calls, one whole-file (a.py only), one hunk (b.py only).
+        assert len(calls) == 2
+        whole_call = next(c for c in calls if c.get("files"))
+        hunk_call = next(c for c in calls if c.get("code"))
+        assert whole_call["files"] == {"a.py": "whole a\n"}
+        assert whole_call["pre_numbered"] is False
+
+        from software_engineering_team.api.pr_review import (
+            WHOLE_FILE_FOCUS_NOTE_PREFIX,
+        )
+
+        assert WHOLE_FILE_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
+        assert not hunk_call.get("files")
+        assert hunk_call["pre_numbered"] is True
+        assert "b.py" in hunk_call["code"]
+        assert "a.py" not in hunk_call["code"]
+
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["files_reviewed"] == 2  # 1 whole + 1 hunk
+
+    def test_partial_head_fetch_posts_findings_from_both_whole_file_and_hunk_subsets(
+        self, review_app, monkeypatch
+    ) -> None:
+        gh = review_app["github"]["client"]
+        gh.files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1,1 +1,2 @@\n x\n+y", 1, 0, None),
+        ]
+        gh.get_file_contents = lambda o, r, path, ref: "whole a\n" if path == "a.py" else None
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: []
+
+        class _SplitProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                if kw.get("files"):
+                    return _FakeOutput(
+                        issues=[
+                            _FakeReviewIssue(
+                                "high",
+                                line=2,
+                                file_path="a.py",
+                                description="whole-file finding",
+                            )
+                        ],
+                        summary="",  # blank: must not blank out the merged narrative
+                        spec="",
+                    )
+                return _FakeOutput(
+                    issues=[
+                        _FakeReviewIssue(
+                            "high", line=2, file_path="b.py", description="hunk finding"
+                        )
+                    ],
+                    summary="Hunk summary text",
+                    spec="",
+                )
+
+        monkeypatch.setattr(
+            "software_engineering_team.engine_provider._provider", _SplitProvider()
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+
+        # Both findings actually made it onto the PR -- neither subset silently
+        # vanished.
+        posted_bodies = (
+            [c["body"] for r in gh.reviews for c in (r.get("comments") or [])]
+            + [c["body"] for c in gh.review_comments]
+            + [b for _n, b in gh.comments]
+        )
+        assert any("whole-file finding" in b for b in posted_bodies)
+        assert any("hunk finding" in b for b in posted_bodies)
+        assert job["review_summary"]["total_issues"] == 2
+
+        # The merged narrative drops the blank whole-file summary and keeps
+        # the hunk-fallback summary -- proves _MergedReviewerOutput ran.
+        assert "Hunk summary text" in gh.reviews[-1]["body"]
+
+    def test_endpoint_noop_when_nothing_whole_file_reviewable(
+        self, review_app, monkeypatch
+    ) -> None:
+        gh = review_app["github"]["client"]
+        # Only a removed file and a binary (no-patch) file -- nothing is
+        # reviewable, so the gate must fire BEFORE any head-file fetch or
+        # reviewer call, exactly as the old `if not code` gate did.
+        gh.files = [
+            PullRequestFile("gone.py", "removed", "@@ -1 +0 @@\n-x", 0, 1, None),
+            PullRequestFile("img.png", "added", "", 0, 0, None),
+        ]
+        fetch_calls = 0
+
+        def _get_file_contents(o, r, path, ref):
+            nonlocal fetch_calls
+            fetch_calls += 1
+            return "should never be reached"
+
+        gh.get_file_contents = _get_file_contents
+
+        provider_calls = 0
+
+        class _CountingProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                nonlocal provider_calls
+                provider_calls += 1
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr(
+            "software_engineering_team.engine_provider._provider",
+            _CountingProvider(),
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["status_text"] == "No reviewable file content"
+        assert any("no reviewable file content" in b.lower() for _n, b in gh.comments)
+        assert fetch_calls == 0  # gate fires before any head-file fetch
+        assert provider_calls == 0  # ...and before any reviewer call
+
+    def test_endpoint_noop_when_reviewable_but_pure_removal_hunk_and_fetch_fails(
+        self, review_app
+    ) -> None:
+        gh = review_app["github"]["client"]
+        # "modified" + non-empty patch => _is_whole_file_reviewable is True, but
+        # the patch is pure removal (no +/context lines), so render_annotated_hunks
+        # -> "" and _build_review_code skips it. Default gh has no
+        # get_file_contents, so the whole-file fetch also fails -> must still
+        # land on the exact same noop as before this change.
+        gh.files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,0 @@\n-a\n-b", 0, 2, None),
+        ]
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["status_text"] == "No reviewable file content"
 
 
 # ---------------------------------------------------------------------------
@@ -3052,7 +3189,7 @@ class TestParallelReviewReads:
         import threading
         import time
 
-        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+        from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
         seen_threads: set[int] = set()
         lock = threading.Lock()
@@ -3096,7 +3233,7 @@ class TestParallelReviewReads:
         assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
 
     def test_fetch_pr_metadata_get_pull_request_failure_propagates(self, review_app) -> None:
-        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+        from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
         class _C:
             def get_pull_request(self, o, r, n):
@@ -3112,7 +3249,7 @@ class TestParallelReviewReads:
             _fetch_pr_metadata(_C(), "o", "r", 7)
 
     def test_fetch_pr_metadata_get_pull_request_files_failure_propagates(self, review_app) -> None:
-        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+        from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
         class _C:
             def get_pull_request(self, o, r, n):
@@ -3144,7 +3281,7 @@ class TestParallelReviewReads:
         """A get_authenticated_login failure must degrade to "" without blocking
         or failing the (independent) pr/files fetches, unlike get_pull_request and
         get_pull_request_files, which are not best-effort."""
-        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+        from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
         class _C:
             def get_pull_request(self, o, r, n):
@@ -3181,7 +3318,7 @@ class TestParallelReviewReads:
         get_authenticated_login must ALSO degrade to "" rather than propagate —
         the docstring promises this lookup "must never fail the review", not
         just for GitHubAPIError."""
-        from software_engineering_team.coding_team.api.pr_review import _fetch_pr_metadata
+        from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
         class _C:
             def get_pull_request(self, o, r, n):
@@ -3217,7 +3354,7 @@ class TestParallelReviewReads:
         import threading
         import time
 
-        from software_engineering_team.coding_team.api.pr_review import _fetch_existing_comments
+        from software_engineering_team.api.pr_review import _fetch_existing_comments
 
         seen_threads: set[int] = set()
         lock = threading.Lock()
@@ -3260,7 +3397,7 @@ class TestParallelReviewReads:
         """Any of the three calls failing must degrade the WHOLE result to [] —
         the same all-or-nothing semantics the prior serial version had — not a
         partial result from the two calls that succeeded."""
-        from software_engineering_team.coding_team.api.pr_review import _fetch_existing_comments
+        from software_engineering_team.api.pr_review import _fetch_existing_comments
 
         class _C:
             def list_review_comments(self, o, r, n):
@@ -3285,7 +3422,7 @@ class TestParallelReviewReads:
         of the three calls must ALSO degrade the whole result to [] — the
         docstring promises "Any failure ... degrades the WHOLE result", not
         just a GitHubAPIError."""
-        from software_engineering_team.coding_team.api.pr_review import _fetch_existing_comments
+        from software_engineering_team.api.pr_review import _fetch_existing_comments
 
         class _C:
             def list_review_comments(self, o, r, n):
@@ -3305,7 +3442,7 @@ class TestSafeCommentUnit:
     failure from add_issue_comment, not just GitHubAPIError."""
 
     def test_returns_false_on_github_api_error(self, review_app) -> None:
-        from software_engineering_team.coding_team.api.pr_review import _safe_comment
+        from software_engineering_team.api.pr_review import _safe_comment
 
         class _C:
             def add_issue_comment(self, o, r, n, body):
@@ -3316,7 +3453,7 @@ class TestSafeCommentUnit:
     def test_returns_false_on_non_api_error(self, review_app) -> None:
         """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) must
         ALSO degrade to False rather than propagate."""
-        from software_engineering_team.coding_team.api.pr_review import _safe_comment
+        from software_engineering_team.api.pr_review import _safe_comment
 
         class _C:
             def add_issue_comment(self, o, r, n, body):
@@ -3325,7 +3462,7 @@ class TestSafeCommentUnit:
         assert _safe_comment(_C(), "o", "r", 7, "body") is False
 
     def test_returns_true_on_success(self, review_app) -> None:
-        from software_engineering_team.coding_team.api.pr_review import _safe_comment
+        from software_engineering_team.api.pr_review import _safe_comment
 
         posted: list[tuple[int, str]] = []
 
@@ -3765,7 +3902,7 @@ class TestDuplicateProposalDetection:
         """Regression: listing open issues can succeed while annotate_duplicate_proposals
         itself raises (e.g. a bug in the matching logic) -- this must degrade to "no
         duplicates found" exactly like a listing failure, not fail the whole review."""
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.api import pr_review
 
         def _raise(*_a, **_k):
             raise RuntimeError("boom")
@@ -3921,7 +4058,7 @@ class TestDetectDuplicateProposalsUnit:
         }
 
     def test_empty_proposals_never_calls_the_client(self) -> None:
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.api import pr_review
 
         class _Client:
             def list_open_issues(self, _o, _r):
@@ -3931,7 +4068,7 @@ class TestDetectDuplicateProposalsUnit:
         assert result == []
 
     def test_matches_against_a_fetched_open_issue(self) -> None:
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.api import pr_review
 
         class _Client:
             def list_open_issues(self, _o, _r):
@@ -3951,7 +4088,7 @@ class TestDetectDuplicateProposalsUnit:
         assert proposal["issue_url"] == "https://example/issues/42"
 
     def test_list_open_issues_failure_degrades_to_unmatched(self) -> None:
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.api import pr_review
 
         class _Client:
             def list_open_issues(self, _o, _r):
@@ -3966,7 +4103,7 @@ class TestDetectDuplicateProposalsUnit:
     def test_annotation_failure_falls_back_to_unmatched(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from software_engineering_team.coding_team.api import pr_review
+        from software_engineering_team.api import pr_review
 
         class _Client:
             def list_open_issues(self, _o, _r):
@@ -3989,8 +4126,8 @@ class TestCreateReviewIssuesUnit:
     def test_review_store_fallback_when_job_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When the in-memory job has aged out, the durable review row's proposals
         are used to file an issue instead."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         # No live job, but a durable review row carries the proposals.
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
@@ -4040,8 +4177,8 @@ class TestCreateReviewIssuesUnit:
 
     def test_raises_review_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Neither store knowing the job id raises ReviewNotFoundError."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         monkeypatch.setattr(api_main, "get_job", lambda *_a, **_k: None)
         monkeypatch.setattr(api_main, "get_review", lambda *_a, **_k: None)
@@ -4051,8 +4188,8 @@ class TestCreateReviewIssuesUnit:
     def test_partial_failure_persists_progress(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When one proposal's GitHub call fails, the other's successful creation is
         still persisted rather than lost."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {
@@ -4109,8 +4246,8 @@ class TestCreateReviewIssuesUnit:
         error would misleadingly suggest only that one proposal had a problem. Every
         failure must also still be logged, regardless of which one ends up in the
         composite exception."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {
@@ -4162,8 +4299,8 @@ class TestCreateReviewIssuesUnit:
     ) -> None:
         """A non-list pending_issue_proposals field degrades to no candidates rather
         than raising."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -4181,8 +4318,8 @@ class TestCreateReviewIssuesUnit:
     ) -> None:
         """A proposal already carrying an issue_url is skipped even when explicitly
         requested again alongside a genuinely unfiled one."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -4224,8 +4361,8 @@ class TestCreateReviewIssuesUnit:
         GitHub issue for it — the concurrent filer has no other guard against two
         tasks for the SAME proposal both observing issue_url unset before either
         writes it, so the id list itself must be deduped first."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -4258,8 +4395,8 @@ class TestCreateReviewIssuesUnit:
     def test_persist_swallows_store_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failure persisting the updated proposals never fails the request — the
         GitHub issue already exists regardless of whether the local record updates."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {"owner": "o", "repo": "r", "pr_number": 1, "pr_url": "u"},
@@ -4294,8 +4431,8 @@ class TestCreateReviewIssuesUnit:
     def test_repo_mismatch_raises_before_any_issue(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A mismatched expected owner/repo raises RepoMismatchError before the
         GitHub client is ever constructed."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {"owner": "acme", "repo": "widget", "pr_number": 1, "pr_url": "u"},
@@ -4317,8 +4454,8 @@ class TestCreateReviewIssuesUnit:
 
     def test_repo_match_is_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Expected owner/repo are compared case-insensitively, as GitHub treats them."""
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "github_context": {"owner": "Acme", "repo": "Widget", "pr_number": 1, "pr_url": "u"},
@@ -4365,7 +4502,7 @@ class TestCreateReviewIssuesUnit:
         import contextlib as _contextlib
 
         import shared.postgres
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import pr_review_issues
 
         conn = MagicMock()
 
@@ -4395,7 +4532,7 @@ class TestCreateReviewIssuesUnit:
             - The context manager enters and exits without raising.
         """
         import shared.postgres
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import pr_review_issues
 
         monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
         monkeypatch.setattr(
@@ -4416,7 +4553,7 @@ class TestCreateReviewIssuesUnit:
             - The merge preserves the preferred list's order and returns fresh
               dicts (no aliasing of either input's entries).
         """
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import pr_review_issues
 
         preferred = [
             {"id": "p0", "issue_url": None},
@@ -4449,8 +4586,8 @@ class TestCreateReviewIssuesUnit:
             - The loaded context's pending_issue_proposals carry the row's
               filed issue_url for the shared proposal id.
         """
-        from software_engineering_team.coding_team.api import main as api_main
-        from software_engineering_team.coding_team.api import pr_review_issues
+        from software_engineering_team.api import coding_team_main as api_main
+        from software_engineering_team.api import pr_review_issues
 
         job = {
             "status": "completed",
@@ -4505,7 +4642,7 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
         [
             sys.executable,
             "-c",
-            "import software_engineering_team.coding_team.api.pr_review_issues",
+            "import software_engineering_team.api.pr_review_issues",
         ],
         cwd=str(agents_root),
         capture_output=True,

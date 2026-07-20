@@ -9,13 +9,15 @@ local name bindings (indicator evaluators, numeric periods, string
 constants), and recognises the symbol-gate and position-gate idioms
 generated strategies use for entry/exit routing and per-symbol filtering.
 
-Depends on module-level operand-building, name-binding, and symbol/label
-helpers defined in
-:mod:`investment_team.strategy_lab.coverage_probe.indicator_probe`, which
-also imports :class:`SubconditionVisitor` back for its own
-``_extract_subconditions`` driver — see the import at the bottom of that
-module for why the two modules must only be entered via
-``indicator_probe``.
+Depends on module-level operand-building/subcond-building helpers defined
+in :mod:`investment_team.strategy_lab.coverage_probe.indicator_probe`
+and on predicate/symbol-gate resolution helpers defined in
+:mod:`investment_team.strategy_lab.coverage_probe.predicate_resolution`.
+Neither of those modules imports this one at module-load time (their
+``_extract_subconditions`` driver imports :class:`SubconditionVisitor`
+locally, inside its own function body — see that function for why), so
+this module has no import-order constraint of its own and may be
+imported directly.
 
 Pure: no I/O, no LLM, no subprocess.
 """
@@ -33,25 +35,13 @@ from investment_team.strategy_lab.coverage_probe.indicator_probe import (
     _BLOCK_FIELDS,
     _MAX_SUBCONDITIONS,
     _OR_OPS,
-    _bar_param_name,
     _bind_tuple_unpack,
     _build_compound_subcond,
     _build_subcond,
     _build_truthy_subcond,
-    _collect_name_periods,
-    _collect_name_strings,
-    _early_return_symbol_guard,
-    _evaluate_static_predicate,
-    _find_strategy_class,
-    _flatten_top_terms,
     _format_label,
-    _intersect_symbols,
-    _is_return_only_body,
     _numeric_literal,
     _resolve_assign_evaluator,
-    _resolve_string_in_method,
-    _strip_position_gate,
-    _symbol_gate,
 )
 from investment_team.strategy_lab.coverage_probe.predicate_ir import (
     Leg,
@@ -62,6 +52,20 @@ from investment_team.strategy_lab.coverage_probe.predicate_ir import (
     build_or_group,
     leg_gate_symbols,
     tree_or_unknown,
+)
+from investment_team.strategy_lab.coverage_probe.predicate_resolution import (
+    _bar_param_name,
+    _collect_name_periods,
+    _collect_name_strings,
+    _early_return_symbol_guard,
+    _evaluate_static_predicate,
+    _find_strategy_class,
+    _flatten_top_terms,
+    _intersect_symbols,
+    _is_return_only_body,
+    _resolve_string_in_method,
+    _strip_position_gate,
+    _symbol_gate,
 )
 
 

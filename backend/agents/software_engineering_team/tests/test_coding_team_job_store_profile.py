@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from software_engineering_team.coding_team import job_store
+from software_engineering_team import job_store
 from user_profile import ArtifactType
 
 

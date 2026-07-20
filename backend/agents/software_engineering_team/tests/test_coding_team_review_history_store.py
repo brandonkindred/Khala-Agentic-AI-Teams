@@ -11,12 +11,12 @@ import pytest
 
 from shared.postgres import TeamSchema, is_postgres_enabled, register_team_schemas
 from shared.postgres.testing import truncate_team_tables
-from software_engineering_team.coding_team.review_history_store import (
+from software_engineering_team.postgres import SCHEMA as SE_SCHEMA
+from software_engineering_team.review_history_store import (
     list_reviews,
     record_review_start,
     update_review,
 )
-from software_engineering_team.postgres import SCHEMA as SE_SCHEMA
 
 pytestmark = pytest.mark.skipif(
     not is_postgres_enabled(),

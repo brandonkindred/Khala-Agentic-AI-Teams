@@ -181,9 +181,9 @@ jobs:
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
             # SE imports planning_team, agent_repair_team from its orchestrator
-            # and Temporal activities; coding_team is an in-package sub-team
-            # (backend/agents/software_engineering_team/coding_team/), so it's
-            # already covered by the software_engineering_team/** path below.
+            # and Temporal activities; the coding-team execution engine lives as
+            # direct children of software_engineering_team/, so it's already
+            # covered by the software_engineering_team/** path below.
             software_engineering:
               - 'backend/agents/software_engineering_team/**'
               - 'backend/agents/planning_team/**'

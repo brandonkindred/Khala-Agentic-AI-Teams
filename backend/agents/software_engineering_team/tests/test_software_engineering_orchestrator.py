@@ -124,7 +124,7 @@ def test_run_failed_tasks_delegates_to_coding_team(tmp_path: Path) -> None:
     emit_called = MagicMock()
 
     with patch(
-        "software_engineering_team.coding_team.orchestrator.run_coding_team_orchestrator",
+        "software_engineering_team.coding_team_orchestrator.run_coding_team_orchestrator",
         side_effect=fake_delegate,
     ):
         with patch("orchestrator._emit_coding_team_metrics", emit_called):
@@ -167,7 +167,7 @@ def test_run_failed_tasks_repopulates_failed_from_snapshot(tmp_path: Path) -> No
         )
 
     with patch(
-        "software_engineering_team.coding_team.orchestrator.run_coding_team_orchestrator",
+        "software_engineering_team.coding_team_orchestrator.run_coding_team_orchestrator",
         side_effect=fake_delegate,
     ):
         with patch("orchestrator._emit_coding_team_metrics", MagicMock()):
@@ -191,7 +191,7 @@ def test_run_failed_tasks_marks_failed_on_delegate_error(tmp_path: Path) -> None
 
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch(
-            "software_engineering_team.coding_team.orchestrator.run_coding_team_orchestrator",
+            "software_engineering_team.coding_team_orchestrator.run_coding_team_orchestrator",
             side_effect=RuntimeError("boom"),
         ):
             orchestrator.run_failed_tasks(job_id)
@@ -215,7 +215,7 @@ def test_run_failed_tasks_cancelled_on_cancellation(tmp_path: Path) -> None:
 
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch(
-            "software_engineering_team.coding_team.orchestrator.run_coding_team_orchestrator",
+            "software_engineering_team.coding_team_orchestrator.run_coding_team_orchestrator",
             side_effect=orchestrator.CancellationError("cancelled"),
         ):
             orchestrator.run_failed_tasks(job_id)
@@ -575,7 +575,7 @@ def test_run_orchestrator_invokes_coding_team_not_v2_workers(
                         ):
                             with (
                                 patch(
-                                    "software_engineering_team.coding_team.orchestrator.run_coding_team_orchestrator",
+                                    "software_engineering_team.coding_team_orchestrator.run_coding_team_orchestrator",
                                     side_effect=capture_run_coding_team,
                                 ),
                                 patch(

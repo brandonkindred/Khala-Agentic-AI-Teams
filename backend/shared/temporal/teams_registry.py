@@ -48,7 +48,7 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     "user_agent_founder": "user_agent_founder.temporal",
     "agentic_team_provisioning": "agentic_team_provisioning.temporal",
     "deepthought": "deepthought.temporal",
-    "coding_team": "software_engineering_team.coding_team.temporal",
+    "coding_team": "software_engineering_team.temporal.coding_team_workflow",
     "agent_provisioning": "agent_provisioning_team.temporal",
     "job_matching": "job_matching_team.temporal",
     "soc2_compliance": "soc2_compliance_team.temporal",

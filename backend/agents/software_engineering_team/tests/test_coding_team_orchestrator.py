@@ -15,27 +15,27 @@ from typing import Any, Dict, List
 
 import pytest
 
-from software_engineering_team.coding_team import orchestrator as orch_mod
-from software_engineering_team.coding_team import progress_config as progress_mod
-from software_engineering_team.coding_team.models import (
+from software_engineering_team import coding_team_orchestrator as orch_mod
+from software_engineering_team import progress_config as progress_mod
+from software_engineering_team.coding_team_orchestrator import (
+    CodingTeamSwarm,
+    run_coding_team_orchestrator,
+)
+from software_engineering_team.models import (
     CodingTeamPlanInput,
     StackSpec,
     Task,
     TaskStatus,
 )
-from software_engineering_team.coding_team.orchestrator import (
-    CodingTeamSwarm,
-    run_coding_team_orchestrator,
-)
-from software_engineering_team.coding_team.task_graph import TaskGraphService
-from software_engineering_team.coding_team.team_routing import (
+from software_engineering_team.task_graph import TaskGraphService
+from software_engineering_team.team_routing import (
     _BACKEND_V2_STACK_SPEC,
     _quality_gate_agent_type,
     _target_matches_agent,
     _team_key,
     _v2_team_kind_for_stack,
 )
-from software_engineering_team.coding_team.worker_factory import _v2_text_mode_llm
+from software_engineering_team.worker_factory import _v2_text_mode_llm
 
 GIT_UTILS = "shared.git.git_utils"
 
@@ -558,7 +558,7 @@ def test_review_verdict_cache_key_covers_every_reviewer_input():
     changes-summary/diff evidence and user decisions (spec_content is swarm-level
     and never actually varies within one run, so this is exercised directly here
     rather than through an end-to-end swarm scenario)."""
-    from software_engineering_team.coding_team.swarm_review import _review_verdict_cache_key
+    from software_engineering_team.swarm_review import _review_verdict_cache_key
 
     base = dict(
         task_title="T",
@@ -596,7 +596,7 @@ def test_review_verdict_cache_key_does_not_collide_across_list_boundaries():
     acceptance_criteria=["a"], evidence="b", user_decisions=["c"] previously
     flattened to an identical sequence and collided.
     """
-    from software_engineering_team.coding_team.swarm_review import _review_verdict_cache_key
+    from software_engineering_team.swarm_review import _review_verdict_cache_key
 
     base = dict(task_title="T", task_description="D", spec_content="spec")
 
@@ -615,7 +615,7 @@ def test_review_verdict_cache_key_does_not_collide_across_list_boundaries():
 
 def test_review_retries_transient_error_then_succeeds(monkeypatch):
     """A transient reviewer error (rate limit/timeout) is retried, not turned into a rejection."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
@@ -639,7 +639,7 @@ def test_review_retries_transient_error_then_succeeds(monkeypatch):
 
 def test_review_returns_error_after_exhausting_retries(monkeypatch):
     """After all attempts fail, the verdict is flagged error=True (not a substantive rejection)."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
@@ -661,7 +661,7 @@ def test_review_returns_error_after_exhausting_retries(monkeypatch):
 def test_review_missing_approved_is_infra_error_not_rejection(monkeypatch):
     """A parseable verdict with no 'approved' field must surface error=True (fail once), not be
     silently coerced to approved=False and re-sent through the revision loop."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
@@ -680,7 +680,7 @@ def test_review_missing_approved_is_infra_error_not_rejection(monkeypatch):
 
 def test_review_explicit_false_is_substantive_rejection(monkeypatch):
     """An explicit approved=False is a real rejection (error=False), not an infra failure."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr(
@@ -702,7 +702,7 @@ def test_review_non_bool_approved_is_infra_failure_not_rejection(monkeypatch):
     from a truncated ``{"approved": ``) must NOT slip through as a substantive rejection.
     The guard raises so it surfaces as an infra failure (error=True), never a silent
     approved=False that would burn a revision round on a verdict the model never gave."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "0")  # single attempt, no backoff waits
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
@@ -721,7 +721,7 @@ def test_review_non_bool_approved_is_infra_failure_not_rejection(monkeypatch):
 
 def test_review_retry_attempts_env_parsing(monkeypatch):
     """_review_retry_attempts: valid → retries+1; negative/garbage/empty → documented default."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "3")
     assert tl_mod._review_retry_attempts() == 4  # 3 retries + 1
@@ -1503,7 +1503,7 @@ def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, caplog):
     swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_raises=True))
 
     with caplog.at_level(
-        _logging.ERROR, logger="software_engineering_team.coding_team.orchestrator"
+        _logging.ERROR, logger="software_engineering_team.coding_team_orchestrator"
     ):
         swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
@@ -3306,7 +3306,7 @@ def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monk
 def test_tech_lead_review_progress_reports_attempts_and_retry_waits(monkeypatch):
     """A flaky review reports attempt 1/N, the backoff wait, attempt 2/N, then a
     terminal done at 1.0 — silent retries are the prime 'looks hung' source."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "2")  # → 3 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
@@ -3339,7 +3339,7 @@ def test_tech_lead_review_progress_reports_attempts_and_retry_waits(monkeypatch)
 
 def test_tech_lead_review_progress_terminal_done_on_exhausted_retries(monkeypatch):
     """Exhausted retries still emit a terminal done at 1.0 (no perpetual mid-bar)."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
@@ -3367,7 +3367,7 @@ def test_tech_lead_review_fail_fast_reports_actual_attempt_count(monkeypatch):
     """A fail-fast error (rate limit) skips retries entirely; the diagnostic must say
     1 attempt — claiming the full budget misleads the operator about what ran."""
     from llm_service.interface import LLMRateLimitError
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "2")  # → budget of 3 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
@@ -3391,7 +3391,7 @@ def test_tech_lead_review_fail_fast_reports_actual_attempt_count(monkeypatch):
 def test_tech_lead_review_raising_callback_never_burns_attempts(monkeypatch):
     """A raising progress_callback is an observability bug, not an LLM failure: it must
     be swallowed, never counted as a failed attempt, and the review must succeed."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     calls = {"n": 0}
@@ -3413,7 +3413,7 @@ def test_tech_lead_review_raising_callback_never_burns_attempts(monkeypatch):
 
 def test_tech_lead_review_no_callback_unchanged(monkeypatch):
     """progress_callback omitted → result identical to the pre-callback behavior."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr(
@@ -3562,7 +3562,7 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
 
 def _capture_review_prompt(monkeypatch):
     """Patch the Tech Lead's LLM call to record the rendered review prompt and approve."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     captured: Dict[str, str] = {}
 
@@ -4346,7 +4346,7 @@ def test_run_checks_cancellation_before_preparing_worktrees(tmp_path):
 def test_review_uses_fresh_agent_per_call_not_shared(monkeypatch):
     """run_code_review must build a fresh review Agent per call (never reuse a shared instance), so
     concurrent reviews don't race on a Strands Agent's mutable conversation history."""
-    from software_engineering_team.coding_team.tech_lead_agent import agent as tl_mod
+    from software_engineering_team.tech_lead_agent import agent as tl_mod
 
     built = []
 

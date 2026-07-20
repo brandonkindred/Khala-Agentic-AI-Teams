@@ -1,0 +1,134 @@
+.panel-icon {
+  font-size: 1.1rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  vertical-align: middle;
+  margin-right: 0.4rem;
+  color: var(--kh-text-muted);
+}
+
+.pnl-pos { color: var(--kh-success); font-weight: 600; }
+.pnl-neg { color: var(--kh-error); font-weight: 600; }
+
+// ── Ledger summary bar ────────────────────────────────────────────────────────
+
+.ledger-summary {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 0 1rem;
+  border-bottom: 1px solid var(--kh-border-subtle);
+  margin-bottom: 0.75rem;
+}
+
+.ledger-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.ls-value {
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--kh-text-primary);
+
+  &.winning { color: var(--kh-success); }
+  &.losing  { color: var(--kh-error); }
+}
+
+.ls-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kh-text-muted);
+}
+
+// ── Trade table ────────────────────────────────────────────────────────────────
+
+.trade-table-wrap {
+  overflow-x: auto;
+  border-radius: var(--kh-radius-sm);
+  border: 1px solid var(--kh-border);
+
+  &:focus-visible {
+    // Transparent outline shows in forced-colors / High Contrast Mode,
+    // where the inset box-shadow ring is dropped (WCAG 2.4.7).
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 2px var(--kh-focus-ring);
+  }
+}
+
+.trade-table {
+  width: 100%;
+  font-size: 0.82rem;
+
+  // Sticky header
+  ::ng-deep .mat-mdc-header-row {
+    background: var(--kh-surface-3);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  ::ng-deep th.mat-mdc-header-cell {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--kh-text-tertiary);
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+
+  ::ng-deep td.mat-mdc-cell {
+    padding: 0 8px;
+    line-height: 2rem;
+    white-space: nowrap;
+    color: var(--kh-text-secondary);
+  }
+
+  ::ng-deep tr.win-row td {
+    background: var(--kh-success-subtle);
+  }
+
+  ::ng-deep tr.loss-row td {
+    background: var(--kh-error-subtle);
+  }
+}
+
+.num-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.win-cell  { color: var(--kh-success); font-weight: 600; }
+.loss-cell { color: var(--kh-error); font-weight: 600; }
+
+.symbol-badge {
+  display: inline-block;
+  background: var(--kh-accent-subtle);
+  color: var(--kh-accent-text);
+  border-radius: var(--kh-radius-sm);
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.outcome-pip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: 700;
+
+  &.win-pip  { background: var(--kh-success-subtle); color: var(--kh-success); }
+  &.loss-pip { background: var(--kh-error-subtle); color: var(--kh-error); }
+}
+
+.trade-paginator {
+  border-top: 1px solid var(--kh-border);
+}

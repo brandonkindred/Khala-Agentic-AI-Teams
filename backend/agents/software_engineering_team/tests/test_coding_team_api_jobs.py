@@ -7,7 +7,7 @@ from typing import Any, Dict
 import httpx
 from fastapi.testclient import TestClient
 
-from software_engineering_team.coding_team.api import main as api
+from software_engineering_team.api import coding_team_main as api
 
 client = TestClient(api.app)
 

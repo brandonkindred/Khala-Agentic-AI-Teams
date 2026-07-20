@@ -9,8 +9,8 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from software_engineering_team.coding_team import token_crypto
-from software_engineering_team.coding_team.api import main as api
+from software_engineering_team import token_crypto
+from software_engineering_team.api import coding_team_main as api
 
 client = TestClient(api.app)
 
@@ -965,7 +965,7 @@ def test_auto_resume_raises_on_unhandled_spawn_result(monkeypatch):
     exhaustiveness guard), not be silently treated as a successful auto-resume. _try_auto_resume
     calls _claim_and_spawn_resume as a same-module reference, so the patch target is the
     orchestration module itself, not the main/api re-export."""
-    from software_engineering_team.coding_team.api import orchestration
+    from software_engineering_team.api import orchestration
 
     monkeypatch.setattr(
         orchestration, "_claim_and_spawn_resume", lambda *a, **k: ("bogus-outcome", None, None)

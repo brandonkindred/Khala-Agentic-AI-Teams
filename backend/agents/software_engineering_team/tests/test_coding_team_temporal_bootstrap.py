@@ -24,7 +24,7 @@ import unittest.mock as mock
 
 import pytest
 
-_NS = "software_engineering_team.coding_team.temporal"
+_NS = "software_engineering_team.temporal.coding_team_workflow"
 
 
 def _purge(prefix: str) -> None:
@@ -53,9 +53,9 @@ def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
     import shared.temporal
 
-    _purge("software_engineering_team.coding_team.temporal")
+    _purge("software_engineering_team.temporal.coding_team_workflow")
     with mock.patch.object(shared.temporal, "start_team_worker") as patched:
-        importlib.import_module("software_engineering_team.coding_team.temporal")
+        importlib.import_module("software_engineering_team.temporal.coding_team_workflow")
         assert patched.call_count == 0, (
             f"Module-level start_team_worker bootstrap re-introduced "
             f"(call count = {patched.call_count}). This causes a race on the "
@@ -67,13 +67,13 @@ def test_importing_temporal_package_does_not_call_start_team_worker():
 def test_temporal_package_does_not_call_os_getenv_at_import_time():
     """The package __init__ defines CodingTeamWorkflow and is what the sandbox
     replays — it must not call os.getenv at import."""
-    _purge("software_engineering_team.coding_team.temporal")
+    _purge("software_engineering_team.temporal.coding_team_workflow")
     import os
 
     with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
-        importlib.import_module("software_engineering_team.coding_team.temporal")
+        importlib.import_module("software_engineering_team.temporal.coding_team_workflow")
         assert spy.call_count == 0, (
-            f"software_engineering_team.coding_team.temporal.__init__ called os.getenv {spy.call_count} "
+            f"software_engineering_team.temporal.coding_team_workflow.__init__ called os.getenv {spy.call_count} "
             f"time(s) at import — this trips the temporalio workflow sandbox "
             f"during workflow registration."
         )
@@ -83,12 +83,12 @@ def test_worker_module_exposes_team_service_entrypoint():
     """team_service/entrypoint.py looks up ``TEAM_TEMPORAL_WORKER_FUNC`` on
     ``TEAM_TEMPORAL_WORKER_MODULE``. Keep that contract pinned so a rename
     can't silently break docker-compose."""
-    from software_engineering_team.coding_team.temporal import worker
+    from software_engineering_team.temporal import coding_team_worker as worker
 
     fn = getattr(worker, "start_coding_team_temporal_worker_thread", None)
     assert callable(fn), (
         "team_service entrypoint expects a no-arg "
-        "start_coding_team_temporal_worker_thread() in coding_team.temporal.worker"
+        "start_coding_team_temporal_worker_thread() in software_engineering_team.temporal.coding_team_worker"
     )
 
 
@@ -96,7 +96,7 @@ def test_worker_start_is_no_op_when_temporal_disabled(monkeypatch):
     """Standalone uvicorn dev path: with TEMPORAL_ADDRESS unset, the worker
     boot must return False instead of raising."""
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
-    from software_engineering_team.coding_team.temporal.worker import (
+    from software_engineering_team.temporal.coding_team_worker import (
         start_coding_team_temporal_worker_thread,
     )
 
