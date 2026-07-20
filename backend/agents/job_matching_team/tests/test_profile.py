@@ -134,9 +134,9 @@ def test_weights_normalize_to_one():
 
 
 def _enable_postgres(monkeypatch):
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
 
 
 def test_load_career_profile_none_when_postgres_disabled(monkeypatch):

@@ -2,9 +2,9 @@
 
 :class:`BackgroundHeartbeat` consolidates the daemon-thread + ``event.wait(interval)``
 loop + best-effort-beat + stop/join scaffolding that several teams had each
-hand-rolled. It is Temporal-agnostic and lives in ``shared_concurrency`` (stdlib
-only) so non-Temporal callers can use it without importing ``shared_temporal``. See
-the class docstring for the parameters and ``shared_concurrency/README.md`` for the
+hand-rolled. It is Temporal-agnostic and lives in ``shared.concurrency`` (stdlib
+only) so non-Temporal callers can use it without importing ``shared.temporal``. See
+the class docstring for the parameters and ``shared/concurrency/README.md`` for the
 rationale and usage examples.
 """
 

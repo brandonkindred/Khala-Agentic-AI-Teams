@@ -20,7 +20,7 @@ import time
 from concurrent import futures
 from typing import Any, Optional
 
-from shared_temporal.client import (
+from shared.temporal.client import (
     get_default_task_queue,
     get_temporal_client,
     get_temporal_loop,
@@ -324,8 +324,8 @@ def _get_job_manager(team: str) -> Any:
     # ``httpx`` dependency). The lightweight bridges in this module
     # (``start_workflow_sync`` / ``signal_workflow_sync`` / ``cancel_workflow_sync``),
     # which many callers use without ever touching the job store, must not pull that in
-    # just by importing ``shared_temporal.runner``. There is no circular-import concern
-    # (``job_service_client`` does not import ``shared_temporal``); this is purely to
+    # just by importing ``shared.temporal.runner``. There is no circular-import concern
+    # (``job_service_client`` does not import ``shared.temporal``); this is purely to
     # keep the import surface of the bridge path minimal.
     from job_service_client import JobServiceClient
 

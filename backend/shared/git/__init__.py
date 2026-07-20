@@ -12,7 +12,7 @@ Layout:
 
 Both submodules are stdlib-only (``subprocess``/``re``/``hashlib``). The public
 API is large and stable; import the specific names you need from the submodule,
-e.g. ``from shared_git.git_utils import branch_diff, checkout_branch``.
+e.g. ``from shared.git.git_utils import branch_diff, checkout_branch``.
 
 Preconditions:
     - ``backend/agents`` is on ``sys.path`` (the ``shared_*`` convention).
@@ -22,6 +22,6 @@ Postconditions:
 
 from __future__ import annotations
 
-from shared_git import branch_utils, git_utils
+from shared.git import branch_utils, git_utils
 
 __all__ = ["git_utils", "branch_utils"]

@@ -1,4 +1,4 @@
-# shared_job_event_bus
+# shared.job_event_bus
 
 A single implementation of the process-local, per-job **event bus** used to
 stream a job's progress to SSE clients. Several teams had independently
@@ -13,8 +13,8 @@ team — not a shared singleton. A team module instantiates its own `BusState` a
 binds thin `subscribe`/`unsubscribe`/`publish`/`cleanup_job` wrappers over it:
 
 ```python
-from shared_job_event_bus import BusState, Subscription
-from shared_job_event_bus import subscribe as _subscribe   # etc.
+from shared.job_event_bus import BusState, Subscription
+from shared.job_event_bus import subscribe as _subscribe   # etc.
 
 _state = BusState()
 
@@ -46,7 +46,7 @@ re-hand-roll the daemon-thread lifecycle, construct a **`ReaperHandle`** over th
 `shutdown()` from the app's `on_shutdown` hook:
 
 ```python
-from shared_job_event_bus import BusState, ReaperHandle
+from shared.job_event_bus import BusState, ReaperHandle
 
 _state = BusState()
 _reaper = ReaperHandle(
@@ -79,5 +79,5 @@ or use sticky sessions until a cross-process bus (Postgres `LISTEN/NOTIFY` or
 - `blogging/shared/job_event_bus.py` — reaper enabled (`BLOGGING_EVENT_BUS_*`).
 - `investment_team/api/job_event_bus.py` — reaper enabled (`INVESTMENT_EVENT_BUS_*`).
 
-Both bind their SSE endpoints to `shared_sse` for the streaming generator (see
-`shared_sse/`).
+Both bind their SSE endpoints to `shared.sse` for the streaming generator (see
+`shared.sse/`).

@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from shared_concurrency.latest_value_flusher import LatestValueFlusher
+from shared.concurrency.latest_value_flusher import LatestValueFlusher
 
 
 def test_enqueue_then_drain_delivers_the_payload() -> None:
@@ -723,7 +723,7 @@ def test_stop_with_zero_join_timeout_does_not_busy_spin_or_flood_logs(caplog) ->
     flusher.enqueue("first")
 
     stop_thread = threading.Thread(target=flusher.stop)
-    with caplog.at_level("WARNING", logger="shared_concurrency.latest_value_flusher"):
+    with caplog.at_level("WARNING", logger="shared.concurrency.latest_value_flusher"):
         stop_thread.start()
         time.sleep(0.3)  # let stop() poll several times while the writer is still blocked
         release.set()

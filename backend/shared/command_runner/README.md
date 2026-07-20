@@ -1,4 +1,4 @@
-# shared_command_runner
+# shared.command_runner
 
 Neutral, team-agnostic **command runner** and **build/test/lint error parser**.
 
@@ -18,7 +18,7 @@ import the other's internals.
 ## Usage
 
 ```python
-from shared_command_runner import run_pytest, CommandResult, parse_command_failure
+from shared.command_runner import run_pytest, CommandResult, parse_command_failure
 
 result: CommandResult = run_pytest(project_path)
 if not result.success:
@@ -32,8 +32,8 @@ if not result.success:
   `error_parsing` (in `CommandResult.parsed_failures`) — an in-package import
   with no team dependency.
 - Tests that stub subprocess behaviour patch the module where the symbol is
-  used, e.g. `@patch("shared_command_runner.runner.subprocess.run")` or
-  `@patch("shared_command_runner.runner.run_command")`.
+  used, e.g. `@patch("shared.command_runner.runner.subprocess.run")` or
+  `@patch("shared.command_runner.runner.run_command")`.
 - Depends on `backend/agents` being on `sys.path` (the repo-wide `shared_*`
   convention).
 
@@ -41,4 +41,4 @@ if not result.success:
 
 `runner.ensure_backend_project_initialized` still lazily imports git helpers
 from `software_engineering_team.shared.git_utils`; that integration-only path
-moves to the neutral `shared_git` package when the git utilities are promoted.
+moves to the neutral `shared.git` package when the git utilities are promoted.

@@ -16,8 +16,8 @@ from agent_cognition.memory.store import AgentCognitionStorageUnavailable
 from agent_cognition.models import RuleSource
 from agent_cognition.postgres import SCHEMA
 from agent_cognition.rules import provision, store
-from shared_postgres import is_postgres_enabled, register_team_schemas
-from shared_postgres.testing import truncate_team_tables
+from shared.postgres import is_postgres_enabled, register_team_schemas
+from shared.postgres.testing import truncate_team_tables
 
 # Applied per-test (not module-wide) so the DB-independent guard-branch tests
 # below still run when Postgres is absent.

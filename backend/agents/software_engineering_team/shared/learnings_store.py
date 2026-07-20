@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
 
-from shared_postgres import pg_cursor
+from shared.postgres import pg_cursor
 from software_engineering_team.shared.env_config import env_float
 
 logger = logging.getLogger(__name__)

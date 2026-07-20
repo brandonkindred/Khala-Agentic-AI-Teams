@@ -85,7 +85,7 @@ telemetry (`record_llm_call`) and emitted as OpenTelemetry span attributes
 > time / passed as an argument). An *outer* `team`/`objective` propagates across
 > `asyncio.to_thread` (the Strands path) automatically, but not across a raw
 > `ThreadPoolExecutor.submit`; for raw-thread fan-out, propagate with
-> `contextvars.copy_context()` (see `shared_concurrency/heartbeat.py`).
+> `contextvars.copy_context()` (see `shared/concurrency/heartbeat.py`).
 
 Use `unwrap_client(client)` when you need the concrete provider client (e.g. an
 `isinstance(c, OllamaLLMClient)` check), since `get_client` returns the wrapper

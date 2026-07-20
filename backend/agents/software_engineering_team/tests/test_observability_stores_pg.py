@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def _schema():
-    from shared_postgres import get_conn, is_postgres_enabled, register_team_schemas
+    from shared.postgres import get_conn, is_postgres_enabled, register_team_schemas
 
     if not is_postgres_enabled():
         pytest.skip("Postgres not configured")

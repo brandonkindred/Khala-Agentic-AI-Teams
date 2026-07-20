@@ -9,13 +9,13 @@ the same clamps, so the bounds live here once rather than being duplicated:
   the API process, outside the temporalio sandbox) to pass as a workflow argument.
 
 Keeping one source of truth prevents the two paths from drifting apart. This module
-imports only ``shared_env`` (a lightweight env parser), so it is safe to import from the
+imports only ``shared.env`` (a lightweight env parser), so it is safe to import from the
 runtime module without pulling in anything heavy.
 """
 
 from __future__ import annotations
 
-from shared_env import parse_int
+from shared.env import parse_int
 
 _DEFAULT_WAIT_TIMEOUT_S = 259200  # 72h — tolerates runs left overnight/weekend.
 _MIN_WAIT_TIMEOUT_S = 60

@@ -23,7 +23,7 @@ The audit is a fan-out/fan-in pipeline: load the repository (code, config, docs)
 The same decomposed pipeline runs two ways:
 
 - **Thread mode** (default): `SOC2AuditOrchestrator` runs the five TSC audits concurrently in a thread pool.
-- **Temporal mode** (when `TEMPORAL_ADDRESS` is set): `Soc2AuditWorkflow` orchestrates the pipeline as durable, annotated activities — `soc2_load_repo` → five `soc2_audit_criterion` activities fanned out with `asyncio.gather` → `soc2_write_report` (with `soc2_mark_failed` as the terminal failure marker). Each activity wraps one `pipeline.py` step, so both modes produce the same `SOC2AuditResult`. The worker follows the shared `shared_temporal` pattern (registered in `shared_temporal.teams_registry`; task queue `soc2_compliance-queue`) and boots via the team_service entrypoint or the API `on_startup` backstop.
+- **Temporal mode** (when `TEMPORAL_ADDRESS` is set): `Soc2AuditWorkflow` orchestrates the pipeline as durable, annotated activities — `soc2_load_repo` → five `soc2_audit_criterion` activities fanned out with `asyncio.gather` → `soc2_write_report` (with `soc2_mark_failed` as the terminal failure marker). Each activity wraps one `pipeline.py` step, so both modes produce the same `SOC2AuditResult`. The worker follows the shared `shared.temporal` pattern (registered in `shared.temporal.teams_registry`; task queue `soc2_compliance-queue`) and boots via the team_service entrypoint or the API `on_startup` backstop.
 
   `soc2_load_repo` loads the repository **once** and persists the `RepoContext` to a durable snapshot keyed by `job_id` (`context_snapshot.py`, on the `AGENT_CACHE` volume), then passes only the resolved repo path across the workflow. Each audit activity reads that same immutable snapshot, so the large uncapped code corpus never enters Temporal workflow history (payload/size safety) and every criterion audits an identical repo state even if the live checkout changes mid-run. The snapshot is cleaned up when the audit completes or fails. Set `AGENT_CACHE` in Temporal deployments so the snapshot survives a worker restart between activities.
 
@@ -127,7 +127,7 @@ soc2_compliance_team/
 ├── pipeline.py        # Decomposed pipeline steps shared by both execution modes
 ├── context_snapshot.py # Durable RepoContext snapshot (keyed by job_id) for Temporal fan-out
 ├── orchestrator.py    # SOC2AuditOrchestrator, run_soc2_audit() (thread-mode driver)
-├── temporal/          # Temporal workflow + activities (shared_temporal pattern)
+├── temporal/          # Temporal workflow + activities (shared.temporal pattern)
 │   ├── activities.py  # soc2_load_repo, soc2_audit_criterion, soc2_write_report, soc2_mark_failed
 │   ├── workflows.py   # Soc2AuditWorkflow (load → fan-out audits → report)
 │   ├── worker.py      # start_soc2_temporal_worker_thread()

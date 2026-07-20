@@ -15,7 +15,7 @@ Retrieval is two-stage:
 
 Storage: ``social_marketing_winning_posts`` table declared in
 ``social_media_marketing_team.postgres``. This module is pure data
-access via ``shared_postgres.get_conn``.
+access via ``shared.postgres.get_conn``.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from typing import Any, Optional
 
 from psycopg.rows import dict_row
 
-from shared_postgres import Json, get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import Json, get_conn
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 

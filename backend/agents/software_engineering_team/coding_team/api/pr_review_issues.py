@@ -137,7 +137,7 @@ def _issue_creation_lock(job_id: str):
     """
     with _issue_creation_process_lock(job_id), contextlib.ExitStack() as stack:
         try:
-            from shared_postgres import (  # noqa: PLC0415 - optional dep path
+            from shared.postgres import (  # noqa: PLC0415 - optional dep path
                 get_conn,
                 is_postgres_enabled,
             )

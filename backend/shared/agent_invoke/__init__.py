@@ -1,5 +1,5 @@
 """
-shared_agent_invoke — invoke shim mounted inside the agent sandbox runtime.
+shared.agent_invoke — invoke shim mounted inside the agent sandbox runtime.
 
 ``mount_invoke_shim(app)`` attaches ``POST /_agents/{agent_id}/invoke`` to the
 sandbox's FastAPI app. The shim reads manifests from the in-process

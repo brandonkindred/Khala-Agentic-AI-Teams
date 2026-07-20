@@ -1,4 +1,4 @@
-"""Tests for the sync signal/cancel bridges added to shared_temporal.runner.
+"""Tests for the sync signal/cancel bridges added to shared.temporal.runner.
 
 ``signal_workflow_sync`` / ``cancel_workflow_sync`` resolve the workflow handle from
 the shared client and schedule the async call on the worker loop via
@@ -14,8 +14,8 @@ import threading
 
 import pytest
 
-import shared_temporal.client as client_mod
-import shared_temporal.runner as runner
+import shared.temporal.client as client_mod
+import shared.temporal.runner as runner
 
 
 class _FakeHandle:
@@ -165,12 +165,12 @@ def test_execute_requires_non_empty_ids():
 
 
 def test_bridges_are_exported():
-    import shared_temporal
+    import shared.temporal
 
-    assert shared_temporal.signal_workflow_sync is runner.signal_workflow_sync
-    assert shared_temporal.cancel_workflow_sync is runner.cancel_workflow_sync
-    assert shared_temporal.execute_workflow_sync is runner.execute_workflow_sync
-    assert shared_temporal.execute_workflow_async is runner.execute_workflow_async
+    assert shared.temporal.signal_workflow_sync is runner.signal_workflow_sync
+    assert shared.temporal.cancel_workflow_sync is runner.cancel_workflow_sync
+    assert shared.temporal.execute_workflow_sync is runner.execute_workflow_sync
+    assert shared.temporal.execute_workflow_async is runner.execute_workflow_async
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ async def test_execute_workflow_async_uses_dedicated_client_wait_executor(runnin
     """Regression: the client-ready poll previously ran via ``asyncio.to_thread``,
     which always uses the running loop's *default* executor — a burst of concurrent
     cold-start callers could exhaust threads shared with unrelated ``to_thread``
-    work elsewhere in the process. It must instead run on shared_temporal's own
+    work elsewhere in the process. It must instead run on shared.temporal's own
     dedicated pool (``runner._get_client_wait_executor``), identifiable by its
     ``temporal-client-wait`` thread name prefix."""
     import threading
@@ -280,7 +280,7 @@ async def test_execute_workflow_async_uses_dedicated_client_wait_executor(runnin
         return orig_get_client()
 
     # Patch the name bound inside `runner` (not `client_mod`) — `_await_client`
-    # calls the function via its own `from shared_temporal.client import
+    # calls the function via its own `from shared.temporal.client import
     # get_temporal_client` binding, so patching the origin module's attribute
     # would not intercept calls made through runner's already-bound name.
     monkeypatch.setattr(runner, "get_temporal_client", _recording_get_client)

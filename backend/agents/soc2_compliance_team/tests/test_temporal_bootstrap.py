@@ -1,9 +1,9 @@
-"""Regression tests for the SOC2 Temporal bootstrap (shared_temporal pattern).
+"""Regression tests for the SOC2 Temporal bootstrap (shared.temporal pattern).
 
 Guards the two failure modes the shared wiring is designed to avoid:
 
 1. **Self-bootstrap at import time.** The temporal package ``__init__`` must not
-   call ``shared_temporal.start_team_worker`` — the worker connects the client
+   call ``shared.temporal.start_team_worker`` — the worker connects the client
    asynchronously, so a module-level boot would race the first
    ``start_audit_workflow`` call. Boot is the team_service entrypoint's job (or
    the API ``on_startup`` backstop).
@@ -69,10 +69,10 @@ def _purged(prefix: str):
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     with _purged("soc2_compliance_team.temporal"):
-        with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+        with mock.patch.object(shared.temporal, "start_team_worker") as patched:
             importlib.import_module("soc2_compliance_team.temporal")
             importlib.import_module("soc2_compliance_team.temporal.workflows")
             importlib.import_module("soc2_compliance_team.temporal.start_workflow")
@@ -155,7 +155,7 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
 
 
 def test_start_audit_workflow_delegates_to_shared_bridge(monkeypatch, tmp_path):
-    """The team wrapper forwards to ``shared_temporal.start_workflow_sync`` with
+    """The team wrapper forwards to ``shared.temporal.start_workflow_sync`` with
     the SOC2 workflow id + task queue."""
     from soc2_compliance_team.temporal import Soc2AuditWorkflow
     from soc2_compliance_team.temporal import start_workflow as sw
@@ -193,7 +193,7 @@ def test_start_audit_workflow_rejects_nonexistent_repo_path():
 
 
 def test_soc2_registered_in_teams_registry():
-    """SOC2 is a first-class shared_temporal team."""
-    from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES
+    """SOC2 is a first-class shared.temporal team."""
+    from shared.temporal.teams_registry import TEAM_TEMPORAL_MODULES
 
     assert TEAM_TEMPORAL_MODULES.get("soc2_compliance") == "soc2_compliance_team.temporal"

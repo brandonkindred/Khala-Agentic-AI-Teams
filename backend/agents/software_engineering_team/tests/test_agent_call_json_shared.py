@@ -1,6 +1,6 @@
 """Tests for the shared ``agent_call_json`` helper and ``parse_code_edits``.
 
-``agent_call_json`` (promoted into ``shared_llm_recovery``) is the resilient
+``agent_call_json`` (promoted into ``shared.llm_recovery``) is the resilient
 replacement for the ``json.loads(str(agent(prompt)).strip())`` idiom; it must
 recover fenced/prose-wrapped JSON and only re-raise when nothing parses.
 ``parse_code_edits`` deduplicates the ``{"edits": [...]}`` -> ``CodeEdit`` loop
@@ -14,7 +14,7 @@ import json
 import pytest
 from build_fix_specialist.models import CodeEdit, parse_code_edits
 
-from shared_llm_recovery import agent_call_json
+from shared.llm_recovery import agent_call_json
 
 
 class _Agent:

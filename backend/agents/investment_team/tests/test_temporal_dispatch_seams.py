@@ -30,37 +30,37 @@ from investment_team.api.main import (
 
 
 def test_require_temporal_raises_503_when_disabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     with pytest.raises(HTTPException) as ei:
         api_main._require_temporal()
     assert ei.value.status_code == 503
 
 
 def test_require_temporal_ok_when_enabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     api_main._require_temporal()  # must not raise
 
 
 def test_execute_advisory_503_when_disabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     with pytest.raises(HTTPException) as ei:
         REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
     assert ei.value.status_code == 503
 
 
 def test_execute_advisory_delegates_when_enabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     captured = {}
 
     def _fake(op, payload, *, key):
@@ -75,19 +75,19 @@ def test_execute_advisory_delegates_when_enabled(monkeypatch) -> None:
 
 
 def test_start_paper_trading_503_when_disabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     with pytest.raises(HTTPException) as ei:
         REAL_START_PAPER("pt-1", {})
     assert ei.value.status_code == 503
 
 
 def test_start_paper_trading_delegates_when_enabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     started = []
     monkeypatch.setattr(
         sw, "start_paper_trading_workflow", lambda sid, payload: started.append(sid)
@@ -98,10 +98,10 @@ def test_start_paper_trading_delegates_when_enabled(monkeypatch) -> None:
 
 
 def test_signal_paper_trading_stop_delegates_when_enabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     signalled = []
     monkeypatch.setattr(sw, "signal_paper_trading_stop", lambda sid: signalled.append(sid))
 
@@ -113,12 +113,12 @@ def test_route_returns_503_when_temporal_disabled(monkeypatch) -> None:
     """End-to-end: with the real seam restored and Temporal off, the route 503s."""
     from fastapi.testclient import TestClient
 
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
 
     # Override the autouse inline seam with the real one, then disable Temporal.
     monkeypatch.setattr(api_main, "_execute_advisory", REAL_EXECUTE_ADVISORY)
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
 
     client = TestClient(api_main.app)
     resp = client.post("/memos", json={"user_id": "u1", "recommendation": "r", "rationale": "x"})
@@ -131,7 +131,7 @@ def test_route_returns_503_when_temporal_disabled(monkeypatch) -> None:
 
 
 def test_execute_advisory_workflow_builds_id_and_dispatches(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
     captured = {}
@@ -145,7 +145,7 @@ def test_execute_advisory_workflow_builds_id_and_dispatches(monkeypatch) -> None
         )
         return {"ok": 1}
 
-    monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
+    monkeypatch.setattr(shared.temporal, "execute_workflow_sync", _fake_exec)
 
     result = sw.execute_advisory_workflow("promotion_decision", {"a": 1}, key="s1")
     assert result == {"ok": 1}
@@ -160,7 +160,7 @@ def test_execute_advisory_workflow_builds_id_and_dispatches(monkeypatch) -> None
 def test_execute_advisory_workflow_mints_unique_id_per_call(monkeypatch) -> None:
     """Two calls for the same (op, key) — e.g. two chat messages in the same
     advisor session — must not collide on a live Temporal workflow id."""
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
     ids = []
@@ -169,7 +169,7 @@ def test_execute_advisory_workflow_mints_unique_id_per_call(monkeypatch) -> None
         ids.append(workflow_id)
         return {"ok": 1}
 
-    monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
+    monkeypatch.setattr(shared.temporal, "execute_workflow_sync", _fake_exec)
 
     sw.execute_advisory_workflow("advisor_message", {}, key="session-1")
     sw.execute_advisory_workflow("advisor_message", {}, key="session-1")
@@ -181,7 +181,7 @@ def test_execute_advisory_workflow_mints_unique_id_per_call(monkeypatch) -> None
 def test_execute_advisory_workflow_truncates_long_key(monkeypatch) -> None:
     """An unbounded caller-supplied key (e.g. a long client-provided user_id)
     must not push the workflow id past Temporal's server-side length limit."""
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
     captured = {}
@@ -190,7 +190,7 @@ def test_execute_advisory_workflow_truncates_long_key(monkeypatch) -> None:
         captured["workflow_id"] = workflow_id
         return {"ok": 1}
 
-    monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
+    monkeypatch.setattr(shared.temporal, "execute_workflow_sync", _fake_exec)
 
     huge_key = "u" * 5_000
     sw.execute_advisory_workflow("advisor_start", {}, key=huge_key)
@@ -208,7 +208,7 @@ def test_execute_advisory_workflow_empty_key_still_dispatches(monkeypatch) -> No
     (every call site's Pydantic request field is a required, non-optional
     ``str``), so it is out of this function's precondition and not exercised
     here."""
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
     captured = {}
@@ -217,7 +217,7 @@ def test_execute_advisory_workflow_empty_key_still_dispatches(monkeypatch) -> No
         captured["workflow_id"] = workflow_id
         return {"ok": 1}
 
-    monkeypatch.setattr(shared_temporal, "execute_workflow_sync", _fake_exec)
+    monkeypatch.setattr(shared.temporal, "execute_workflow_sync", _fake_exec)
 
     sw.execute_advisory_workflow("advisor_start", {}, key="")
 
@@ -232,12 +232,12 @@ def test_execute_advisory_workflow_unknown_op_raises() -> None:
 
 
 def test_start_paper_trading_workflow_builds_id(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
     captured = {}
     monkeypatch.setattr(
-        shared_temporal,
+        shared.temporal,
         "start_workflow_sync",
         lambda run, payload, *, workflow_id, task_queue: captured.update(
             workflow_id=workflow_id, task_queue=task_queue
@@ -248,12 +248,12 @@ def test_start_paper_trading_workflow_builds_id(monkeypatch) -> None:
 
 
 def test_signal_paper_trading_stop_sends_stop_signal(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.temporal import start_workflow as sw
 
     captured = {}
     monkeypatch.setattr(
-        shared_temporal,
+        shared.temporal,
         "signal_workflow_sync",
         lambda wid, signal: captured.update(wid=wid, signal=signal),
     )
@@ -338,9 +338,9 @@ def test_execute_advisory_translates_application_error_by_type(monkeypatch) -> N
     from temporalio.client import WorkflowFailureError
     from temporalio.exceptions import ActivityError, ApplicationError
 
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _raise(*a, **kw):
         app_err = ApplicationError("Proposal prop-1 not found", type="NotFound", non_retryable=True)
@@ -406,14 +406,14 @@ def test_translate_advisory_failure_defaults_to_502_for_unknown_error() -> None:
 
 
 def test_execute_advisory_maps_client_not_ready_runtime_error_to_503(monkeypatch) -> None:
-    """``shared_temporal._await_client`` raises a bare RuntimeError when
+    """``shared.temporal._await_client`` raises a bare RuntimeError when
     TEMPORAL_ADDRESS is set but no worker client ever became ready — this must
     surface as the same 503 ``_require_temporal`` raises up front, not the
     generic 502 ``_translate_advisory_failure`` defaults to for an unrecognized
     error."""
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _raise(*a, **kw):
         raise RuntimeError("Temporal client not available; is the team's worker running?")
@@ -430,9 +430,9 @@ def test_execute_advisory_passes_through_503_when_disabled_without_translation(
 ) -> None:
     """_require_temporal's HTTPException(503) must not be re-wrapped by the
     generic translator."""
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     with pytest.raises(HTTPException) as ei:
         REAL_EXECUTE_ADVISORY("committee_memo", {}, key="k")
     assert ei.value.status_code == 503

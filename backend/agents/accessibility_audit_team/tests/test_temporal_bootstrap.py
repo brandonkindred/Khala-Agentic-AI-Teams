@@ -46,10 +46,10 @@ def _purge(prefix: str) -> None:
 
 def test_importing_temporal_package_does_not_start_worker():
     """Loading the package must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("accessibility_audit_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("accessibility_audit_team.temporal")
         importlib.import_module("accessibility_audit_team.temporal.start_workflow")
         assert patched.call_count == 0, (
@@ -146,7 +146,7 @@ def test_start_workflow_rejects_blank_ids():
 
 
 def test_start_workflow_dispatches_and_returns_workflow_id(monkeypatch):
-    import shared_temporal
+    import shared.temporal
     from accessibility_audit_team.temporal import worker
 
     # Idempotent worker-start is called first; stub it so no thread spins up.
@@ -159,7 +159,7 @@ def test_start_workflow_dispatches_and_returns_workflow_id(monkeypatch):
         captured["task_queue"] = task_queue
         captured["args"] = args
 
-    monkeypatch.setattr(shared_temporal, "start_workflow_sync", _fake_sync)
+    monkeypatch.setattr(shared.temporal, "start_workflow_sync", _fake_sync)
     from accessibility_audit_team.temporal.start_workflow import (
         start_accessibility_audit_workflow,
     )
@@ -518,9 +518,9 @@ def test_pattern_a_exports_in_sync():
 
 
 def test_temporal_dispatch_none_when_disabled(monkeypatch):
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     from accessibility_audit_team.api import main
 
     assert main._get_temporal_dispatcher() is None
@@ -532,15 +532,15 @@ def test_temporal_dispatch_none_on_import_error(monkeypatch):
 
     from accessibility_audit_team.api import main
 
-    # A non-module object makes ``from shared_temporal import ...`` raise ImportError.
-    monkeypatch.setitem(sys.modules, "shared_temporal", object())
+    # A non-module object makes ``from shared.temporal import ...`` raise ImportError.
+    monkeypatch.setitem(sys.modules, "shared.temporal", object())
     assert main._get_temporal_dispatcher() is None
 
 
 def test_temporal_dispatch_returns_starter_when_enabled(monkeypatch):
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     from accessibility_audit_team.api import main
     from accessibility_audit_team.temporal.start_workflow import (
         start_accessibility_audit_workflow,
@@ -552,9 +552,9 @@ def test_temporal_dispatch_returns_starter_when_enabled(monkeypatch):
 def test_temporal_dispatch_logs_and_falls_back_on_start_workflow_import_error(monkeypatch):
     """Temporal enabled but the team's start_workflow module fails to import:
     log a warning and fall back (return None) rather than raise."""
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     # sys.modules[name] = None makes `from ..temporal.start_workflow import ...` raise ImportError.
     monkeypatch.setitem(sys.modules, "accessibility_audit_team.temporal.start_workflow", None)
     from accessibility_audit_team.api import main
@@ -1159,7 +1159,7 @@ def test_heartbeat_activity_and_job_propagates_temporal_cancellation(monkeypatch
 
 
 def _make_fake_background_heartbeat():
-    """Build a fresh stand-in class for ``shared_concurrency.BackgroundHeartbeat``
+    """Build a fresh stand-in class for ``shared.concurrency.BackgroundHeartbeat``
     that captures the ``beat`` callable instead of running a real background
     thread, so a test can invoke it directly to assert on the combined heartbeat
     wiring.
@@ -1196,7 +1196,7 @@ def test_run_phase_wires_combined_heartbeat(monkeypatch):
     """A long phase's BackgroundHeartbeat must ping both Temporal and the job
     service — not just Temporal — or the job row goes stale against the API's
     independent stale-job monitor while the phase is still healthily running."""
-    import shared_concurrency
+    import shared.concurrency
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
 
@@ -1204,7 +1204,7 @@ def test_run_phase_wires_combined_heartbeat(monkeypatch):
     jm.get_job.return_value = None
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
     fake_heartbeat_cls, captured = _make_fake_background_heartbeat()
-    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
+    monkeypatch.setattr(shared.concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
     beat_activity = mock.Mock()
     monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
 
@@ -1220,7 +1220,7 @@ def test_run_phase_wires_combined_heartbeat(monkeypatch):
 
 
 def test_finalize_activity_wires_combined_heartbeat(monkeypatch):
-    import shared_concurrency
+    import shared.concurrency
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
 
@@ -1230,7 +1230,7 @@ def test_finalize_activity_wires_combined_heartbeat(monkeypatch):
         ax, "finalize_audit_step", mock.AsyncMock(return_value=_finalized_result(True))
     )
     fake_heartbeat_cls, captured = _make_fake_background_heartbeat()
-    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
+    monkeypatch.setattr(shared.concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
     beat_activity = mock.Mock()
     monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
 
@@ -1243,7 +1243,7 @@ def test_finalize_activity_wires_combined_heartbeat(monkeypatch):
 
 
 def test_retest_activity_wires_combined_heartbeat(monkeypatch):
-    import shared_concurrency
+    import shared.concurrency
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team.temporal import activities as acts
 
@@ -1251,7 +1251,7 @@ def test_retest_activity_wires_combined_heartbeat(monkeypatch):
     jm.get_job.return_value = None
     monkeypatch.setattr(ax, "run_retest_job", mock.AsyncMock())
     fake_heartbeat_cls, captured = _make_fake_background_heartbeat()
-    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
+    monkeypatch.setattr(shared.concurrency, "BackgroundHeartbeat", fake_heartbeat_cls)
     beat_activity = mock.Mock()
     monkeypatch.setattr(acts.activity, "heartbeat", beat_activity)
 
@@ -2164,18 +2164,18 @@ def _patch_retest_api(monkeypatch, *, audit_found=True):
 
 
 def test_retest_dispatcher_none_when_disabled(monkeypatch):
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     from accessibility_audit_team.api import main
 
     assert main._get_retest_temporal_dispatcher() is None
 
 
 def test_retest_dispatcher_returns_starter_when_enabled(monkeypatch):
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     from accessibility_audit_team.api import main
     from accessibility_audit_team.temporal.start_workflow import (
         start_accessibility_audit_retest_workflow,

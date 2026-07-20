@@ -1,8 +1,8 @@
-"""Tests for shared_temporal.client's Temporal connection wiring.
+"""Tests for shared.temporal.client's Temporal connection wiring.
 
 Guards that the client and worker actually agree on the payload codec: the
 worker is built from the exact `Client` `connect_temporal_client()` returns
-(see `shared_temporal/worker.py`), so a codec mismatch between them would
+(see `shared/temporal/worker.py`), so a codec mismatch between them would
 silently break decoding rather than raise — this pins the `data_converter`
 argument passed to `Client.connect`.
 """
@@ -13,14 +13,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from shared_temporal import client as client_mod
-from shared_temporal.codec import GzipPayloadCodec, min_compress_bytes
+from shared.temporal import client as client_mod
+from shared.temporal.codec import GzipPayloadCodec, min_compress_bytes
 
 
 @pytest.mark.asyncio
 async def test_connect_temporal_client_passes_shared_data_converter(monkeypatch):
     """connect_temporal_client() must call Client.connect with the same
-    DataConverter shared_temporal.codec.build_data_converter() would build, so
+    DataConverter shared.temporal.codec.build_data_converter() would build, so
     the client (used to start/signal workflows) and the worker (constructed
     from that same client) decode payloads identically."""
     monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")

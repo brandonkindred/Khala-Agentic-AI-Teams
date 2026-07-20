@@ -456,7 +456,7 @@ def test_run_setup_impl_succeeds_in_worktree_with_development_checked_out_elsewh
     runs there. ``run_setup_impl``'s ``ensure_development_branch(path)`` call
     must not fail trying to attach a branch that's exclusively held elsewhere.
     """
-    from shared_git.git_utils import add_worktree, create_feature_branch
+    from shared.git.git_utils import add_worktree, create_feature_branch
 
     repo = tmp_path / "shared-checkout"
     repo.mkdir()

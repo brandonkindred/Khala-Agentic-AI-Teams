@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from shared_hitl.models import PendingQuestion
+from shared.hitl.models import PendingQuestion
 
 
 def pending_questions_from_raw(raw: List[Any]) -> List[PendingQuestion]:

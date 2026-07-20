@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from shared_temporal.runner import _await_client
+from shared.temporal.runner import _await_client
 
 logger = logging.getLogger(__name__)
 

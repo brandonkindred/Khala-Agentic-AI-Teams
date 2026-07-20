@@ -7,8 +7,8 @@ import pytest
 from agent_console.models import RunCreate
 from agent_console.postgres import SCHEMA
 from agent_console.store import get_store
-from shared_postgres import is_postgres_enabled, register_team_schemas
-from shared_postgres.testing import truncate_team_tables
+from shared.postgres import is_postgres_enabled, register_team_schemas
+from shared.postgres.testing import truncate_team_tables
 
 pytestmark = pytest.mark.skipif(
     not is_postgres_enabled(),

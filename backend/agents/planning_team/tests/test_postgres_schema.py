@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from planning_team.postgres import SCHEMA
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 EXPECTED_TABLES = ["planning_runs"]
 
@@ -58,7 +58,7 @@ def test_all_ddl_is_idempotent() -> None:
 
 
 def test_registry_wiring() -> None:
-    from shared_postgres.registry import TEAM_POSTGRES_MODULES
+    from shared.postgres.registry import TEAM_POSTGRES_MODULES
 
     assert TEAM_POSTGRES_MODULES["planning"] == "planning_team.postgres"
 
@@ -67,12 +67,12 @@ def test_registry_wiring() -> None:
 # Idempotency test (live Postgres only).
 # ---------------------------------------------------------------------------
 def test_schema_applies_idempotently() -> None:
-    from shared_postgres import is_postgres_enabled, register_team_schemas
+    from shared.postgres import is_postgres_enabled, register_team_schemas
 
     if not is_postgres_enabled():
         pytest.skip("POSTGRES_HOST not set; skipping live-Postgres schema test")
 
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres.testing import truncate_team_tables
 
     assert register_team_schemas(SCHEMA) is True
     assert register_team_schemas(SCHEMA) is True

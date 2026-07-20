@@ -10,7 +10,7 @@ documented in ``docs/ENV_VARS.md``:
     unset / blank / unparseable  -> the documented default
     out of range                 -> clamped to the floor / ceiling
 
-Leaf module: standard library only, so any layer (``shared_postgres``,
+Leaf module: standard library only, so any layer (``shared.postgres``,
 ``llm_service``, every team) can import it without creating an import cycle.
 
 Invariants:

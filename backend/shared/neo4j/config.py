@@ -1,6 +1,6 @@
 """Environment resolution for the shared Neo4j / Graphiti knowledge-graph layer.
 
-Mirrors ``shared_postgres.client``'s env-helper style. Connection details and the
+Mirrors ``shared.postgres.client``'s env-helper style. Connection details and the
 Graphiti LLM/embedder wiring are resolved from environment variables at call time
 (so tests and operators can override per-process).
 

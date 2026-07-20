@@ -10,7 +10,7 @@ still repaired.
 
 from __future__ import annotations
 
-from shared_llm_recovery import extract_files_from_content, extract_json_object
+from shared.llm_recovery import extract_files_from_content, extract_json_object
 
 # ---------------------------------------------------------------------------
 # repair=False (strict): only strictly valid JSON survives; no json-repair.

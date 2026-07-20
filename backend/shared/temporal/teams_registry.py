@@ -29,14 +29,14 @@ import importlib
 import logging
 from typing import Any, Iterable, Optional
 
-from shared_temporal.worker import start_team_worker
+from shared.temporal.worker import start_team_worker
 
 logger = logging.getLogger(__name__)
 
 # team_slug -> module dotted path exporting WORKFLOWS / ACTIVITIES
 TEAM_TEMPORAL_MODULES: dict[str, str] = {
     # Already-Temporal teams are registered via their own startup hooks; this
-    # registry covers teams migrated by the shared_temporal rollout.
+    # registry covers teams migrated by the shared.temporal rollout.
     "market_research": "market_research_team.temporal",
     "personal_assistant": "personal_assistant_team.temporal",
     "accessibility_audit": "accessibility_audit_team.temporal",

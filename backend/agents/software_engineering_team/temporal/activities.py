@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import activity
 
-from shared_concurrency import BackgroundHeartbeat
+from shared.concurrency import BackgroundHeartbeat
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
@@ -548,7 +548,7 @@ def execute_coding_team_activity(
     from software_engineering_team.temporal.phase_models import PlanResult as PlanResultModel
 
     try:
-        from shared_repo_context.repo_utils import read_repo_code, truncate_for_context
+        from shared.repo_context.repo_utils import read_repo_code, truncate_for_context
         from software_engineering_team.orchestrator import _build_coding_team_plan_input
 
         plan_data = PlanResultModel.model_validate(plan_result)

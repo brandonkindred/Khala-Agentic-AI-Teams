@@ -1,4 +1,4 @@
-# shared_repo_context
+# shared.repo_context
 
 Neutral, team-agnostic **repository scanning / context** utilities.
 
@@ -16,7 +16,7 @@ for them so neither team imports the other's internals.
 ## Usage
 
 ```python
-from shared_repo_context import read_repo_code, FULL_STACK_EXTENSIONS, REPO_INSPECT_EXCLUDE_DIRS
+from shared.repo_context import read_repo_code, FULL_STACK_EXTENSIONS, REPO_INSPECT_EXCLUDE_DIRS
 
 briefing = read_repo_code(repo_path, FULL_STACK_EXTENSIONS, exclude_dirs=REPO_INSPECT_EXCLUDE_DIRS)
 ```

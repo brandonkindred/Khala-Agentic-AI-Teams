@@ -6,8 +6,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import shared_app.factory as factory
-from shared_app import create_team_app
+import shared.app.factory as factory
+from shared.app import create_team_app
 
 
 @pytest.fixture(autouse=True)
@@ -75,11 +75,11 @@ def test_postgres_schema_exposed_on_app_state() -> None:
 def test_extra_postgres_schemas_exposed_and_registered(monkeypatch) -> None:
     """extra_postgres_schemas combine with the primary schema on app.state and
     all of them are registered on startup, in primary-then-extras order."""
-    import shared_postgres
+    import shared.postgres
 
     registered = []
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: registered.append(s))
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: registered.append(s))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: None)
 
     schema1, schema2, schema3 = object(), object(), object()
     app = create_team_app(
@@ -97,11 +97,11 @@ def test_extra_postgres_schemas_exposed_and_registered(monkeypatch) -> None:
 
 def test_extra_schemas_only_no_primary(monkeypatch) -> None:
     """The wiring fires from extra_postgres_schemas alone, with no primary schema."""
-    import shared_postgres
+    import shared.postgres
 
     registered = []
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: registered.append(s))
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: registered.append(s))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: None)
 
     schema2 = object()
     app = create_team_app(
@@ -121,7 +121,7 @@ def test_no_schemas_at_all_exposes_empty_list() -> None:
 def test_one_schema_registration_failure_does_not_block_others(monkeypatch) -> None:
     """A single schema's registration failure is logged but does not prevent the
     remaining schemas in the set from registering."""
-    import shared_postgres
+    import shared.postgres
 
     schema1, schema2 = object(), object()
     registered = []
@@ -131,8 +131,8 @@ def test_one_schema_registration_failure_does_not_block_others(monkeypatch) -> N
             raise RuntimeError("pg down for schema1")
         registered.append(schema)
 
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", _register)
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", _register)
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: None)
 
     app = create_team_app(
         service_name="svc",
@@ -146,12 +146,12 @@ def test_one_schema_registration_failure_does_not_block_others(monkeypatch) -> N
 
 
 def test_schema_import_failure_does_not_break_startup(monkeypatch) -> None:
-    """If shared_postgres.register_team_schemas can't even be imported, the
+    """If shared.postgres.register_team_schemas can't even be imported, the
     import failure is logged and startup still proceeds."""
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.delattr(shared_postgres, "register_team_schemas", raising=False)
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
+    monkeypatch.delattr(shared.postgres, "register_team_schemas", raising=False)
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: None)
 
     app = create_team_app(service_name="svc", team_key="tk", title="T", postgres_schema=object())
     with TestClient(app):
@@ -159,11 +159,11 @@ def test_schema_import_failure_does_not_break_startup(monkeypatch) -> None:
 
 
 def test_no_postgres_schema_skips_db_wiring(monkeypatch) -> None:
-    import shared_postgres
+    import shared.postgres
 
     called = []
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: called.append(s))
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: called.append("close"))
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: called.append(s))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: called.append("close"))
 
     app = create_team_app(service_name="svc", team_key="tk", title="T")
     with TestClient(app):
@@ -172,13 +172,13 @@ def test_no_postgres_schema_skips_db_wiring(monkeypatch) -> None:
 
 
 def test_postgres_schema_registers_on_startup_and_closes_on_shutdown(monkeypatch) -> None:
-    import shared_postgres
+    import shared.postgres
 
     events = []
     monkeypatch.setattr(
-        shared_postgres, "register_team_schemas", lambda s: events.append(("register", s))
+        shared.postgres, "register_team_schemas", lambda s: events.append(("register", s))
     )
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: events.append(("close", None)))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: events.append(("close", None)))
 
     schema = object()
     app = create_team_app(service_name="svc", team_key="tk", title="T", postgres_schema=schema)
@@ -209,13 +209,13 @@ def test_lifecycle_hooks_run_in_order(monkeypatch) -> None:
 
 
 def test_schema_registration_failure_does_not_break_startup(monkeypatch) -> None:
-    import shared_postgres
+    import shared.postgres
 
     def boom(_schema) -> None:
         raise RuntimeError("pg down")
 
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", boom)
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: None)
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", boom)
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: None)
 
     app = create_team_app(service_name="svc", team_key="tk", title="T", postgres_schema=object())
     # Startup must not raise despite the registration failure.
@@ -224,14 +224,14 @@ def test_schema_registration_failure_does_not_break_startup(monkeypatch) -> None
 
 
 def test_close_pool_failure_is_swallowed(monkeypatch) -> None:
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: None)
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: None)
 
     def boom() -> None:
         raise RuntimeError("close failed")
 
-    monkeypatch.setattr(shared_postgres, "close_pool", boom)
+    monkeypatch.setattr(shared.postgres, "close_pool", boom)
     app = create_team_app(service_name="svc", team_key="tk", title="T", postgres_schema=object())
     with TestClient(app):
         pass  # shutdown must not raise
@@ -240,11 +240,11 @@ def test_close_pool_failure_is_swallowed(monkeypatch) -> None:
 def test_on_startup_failure_still_closes_pool(monkeypatch) -> None:
     # A raising on_startup must NOT leak the pool register_team_schemas opened:
     # teardown (close_pool) runs regardless.
-    import shared_postgres
+    import shared.postgres
 
     closed = []
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: None)
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: closed.append(True))
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: None)
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: closed.append(True))
 
     def on_startup() -> None:
         raise RuntimeError("startup boom")
@@ -265,11 +265,11 @@ def test_on_startup_failure_still_closes_pool(monkeypatch) -> None:
 def test_on_shutdown_failure_still_closes_pool(monkeypatch) -> None:
     # A raising on_shutdown must NOT skip close_pool: the pool is always closed
     # on shutdown, and the hook's failure is swallowed (logged), not propagated.
-    import shared_postgres
+    import shared.postgres
 
     closed = []
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: None)
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: closed.append(True))
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: None)
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: closed.append(True))
 
     def on_shutdown() -> None:
         raise RuntimeError("shutdown boom")

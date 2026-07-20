@@ -1,4 +1,4 @@
-"""Test helpers for ``shared_postgres``.
+"""Test helpers for ``shared.postgres``.
 
 Small utilities that are useful only in tests — kept out of the main
 package so production imports don't pull them in. The key primitive is
@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Iterable
 
-from shared_postgres.client import get_conn, is_postgres_enabled
-from shared_postgres.schema import TeamSchema
+from shared.postgres.client import get_conn, is_postgres_enabled
+from shared.postgres.schema import TeamSchema
 
 logger = logging.getLogger(__name__)
 

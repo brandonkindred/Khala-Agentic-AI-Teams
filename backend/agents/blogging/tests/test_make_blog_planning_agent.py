@@ -1,6 +1,6 @@
 """Tests for the zero-arg ``make_blog_planning_agent`` factory.
 
-The Agent Console sandbox dispatcher (``shared_agent_invoke.dispatch``) calls
+The Agent Console sandbox dispatcher (``shared.agent_invoke.dispatch``) calls
 ``make_*`` entrypoints with no arguments and then binds ``.run`` on the
 returned object, passing the raw JSON request body. The factory must wire an
 env-configured LLM client into ``BlogPlanningAgent`` and return a wrapper that
@@ -100,7 +100,7 @@ def test_manifest_entrypoint_resolves_via_shim_dispatcher(monkeypatch: pytest.Mo
 
     clear_client_cache()
 
-    # Mirror what shared_agent_invoke.dispatch.invoke_entrypoint does with the
+    # Mirror what shared.agent_invoke.dispatch.invoke_entrypoint does with the
     # manifest's entrypoint string. No direct dependency on the shim module
     # here so the test stays narrow.
     import importlib

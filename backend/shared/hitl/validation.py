@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 
 from fastapi import HTTPException
 
-from shared_hitl.models import SubmitAnswersRequest
+from shared.hitl.models import SubmitAnswersRequest
 
 
 def validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> List[Dict[str, Any]]:

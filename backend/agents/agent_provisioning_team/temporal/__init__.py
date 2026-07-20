@@ -1,8 +1,8 @@
 """Temporal workflows and worker for the Agent Provisioning team.
 
-Follows shared_temporal Pattern A: exports ``WORKFLOWS``/``ACTIVITIES`` and
+Follows shared.temporal Pattern A: exports ``WORKFLOWS``/``ACTIVITIES`` and
 self-boots a worker via ``start_team_worker`` when ``TEMPORAL_ADDRESS`` is
-set, so ``shared_temporal.teams_registry.start_all_team_workers`` picks up
+set, so ``shared.temporal.teams_registry.start_all_team_workers`` picks up
 this team the same way it picks up every other team.
 
 Sandbox workflows/activities are exported separately, as ``SANDBOX_WORKFLOWS``
@@ -83,7 +83,7 @@ SANDBOX_ACTIVITIES = [
     sandbox_reap_activity,
 ]
 
-from shared_temporal import start_team_worker  # noqa: E402
+from shared.temporal import start_team_worker  # noqa: E402
 
 if is_temporal_enabled():
     start_team_worker("agent_provisioning", WORKFLOWS, ACTIVITIES, task_queue=TASK_QUEUE)

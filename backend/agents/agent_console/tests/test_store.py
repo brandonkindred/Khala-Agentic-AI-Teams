@@ -1,7 +1,7 @@
 """Integration tests for :class:`AgentConsoleStore` against a live Postgres.
 
 Skipped automatically when ``POSTGRES_HOST`` is unset (matches the pattern
-used by ``shared_postgres`` tests).
+used by ``shared.postgres`` tests).
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from agent_console.store import (
     SavedInputNameConflict,
     get_store,
 )
-from shared_postgres import is_postgres_enabled, register_team_schemas
-from shared_postgres.testing import truncate_team_tables
+from shared.postgres import is_postgres_enabled, register_team_schemas
+from shared.postgres.testing import truncate_team_tables
 
 pytestmark = pytest.mark.skipif(
     not is_postgres_enabled(),

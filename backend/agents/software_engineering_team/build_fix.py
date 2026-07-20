@@ -29,7 +29,7 @@ from typing import Dict
 from strands import Agent  # noqa: E402
 
 from llm_service import get_strands_model  # noqa: E402
-from shared_repo_context.repo_utils import find_repo_files  # noqa: E402
+from shared.repo_context.repo_utils import find_repo_files  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def _run_build_verification(
     For frontend: runs ng build.
     For backend: runs python syntax check (pytest if tests exist).
     """
-    from shared_command_runner.runner import (
+    from shared.command_runner.runner import (
         run_command,
         run_ng_build_with_nvm_fallback,
         run_pytest,
@@ -87,7 +87,7 @@ def _run_build_verification(
         if not (frontend_dir / "package.json").exists():
             logger.info("Build verification: no frontend project found, skipping frontend build")
             return True, ""
-        from shared_command_runner.runner import is_ng_build_environment_failure
+        from shared.command_runner.runner import is_ng_build_environment_failure
 
         result = run_ng_build_with_nvm_fallback(frontend_dir)
         if not result.success:
@@ -103,7 +103,7 @@ def _run_build_verification(
                 return True, ""
             failures = result.parsed_failures("ng_build")
             if failures:
-                from shared_command_runner.error_parsing import (
+                from shared.command_runner.error_parsing import (
                     build_agent_feedback,
                     get_failure_class_tag,
                 )
@@ -163,7 +163,7 @@ def _run_build_verification(
             if not test_result.success:
                 failures = test_result.parsed_failures("pytest")
                 if failures:
-                    from shared_command_runner.error_parsing import (
+                    from shared.command_runner.error_parsing import (
                         build_agent_feedback,
                         get_failure_class_tag,
                     )
@@ -199,7 +199,7 @@ def _run_build_verification(
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
 
-        from shared_command_runner.runner import run_command
+        from shared.command_runner.runner import run_command
 
         errors: list[str] = []
         # Validate .github/workflows/*.yml
@@ -266,7 +266,7 @@ def _try_build_fix_one_at_a_time(
     Use a tool-agent style flow to identify all build issues, then fix them one at a time.
     Returns (True, "") if build passes after fixes; otherwise (False, error_summary).
     """
-    from shared_command_runner.runner import (
+    from shared.command_runner.runner import (
         run_command,
         run_ng_build_with_nvm_fallback,
         run_pytest,
@@ -285,7 +285,7 @@ def _try_build_fix_one_at_a_time(
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
         try:
-            from shared_command_runner.runner import (
+            from shared.command_runner.runner import (
                 is_ng_build_environment_failure,
             )
 

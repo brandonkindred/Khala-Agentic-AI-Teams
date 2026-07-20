@@ -21,8 +21,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from shared_concurrency import BackgroundHeartbeat
-from shared_http import get_pooled_client
+from shared.concurrency import BackgroundHeartbeat
+from shared.http import get_pooled_client
 
 logger = logging.getLogger(__name__)
 

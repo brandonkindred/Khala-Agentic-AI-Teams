@@ -1,4 +1,4 @@
-# shared_hitl
+# shared.hitl
 
 Single owner of the **human-in-the-loop (HITL) "pending question / answer"** contract:
 the Pydantic schemas, answer-submission validation, progress coercion, and status

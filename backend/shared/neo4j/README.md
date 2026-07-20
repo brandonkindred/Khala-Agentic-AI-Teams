@@ -1,6 +1,6 @@
-# shared_neo4j
+# shared.neo4j
 
-The graph counterpart to [`shared_postgres`](../shared_postgres/README.md): a thin,
+The graph counterpart to [`shared.postgres`](../postgres/README.md): a thin,
 env-gated wrapper around a process-wide [Graphiti](https://github.com/getzep/graphiti)
 client that owns the Neo4j async driver. It is the infrastructure layer for the
 **knowledge-graph layer over Agent Cognition** — Graphiti ingests agent memories as
@@ -15,13 +15,13 @@ temporal episodes and extracts entities/relationships with bi-temporal
 A real deployment **always** runs Neo4j as required infrastructure — Graphiti depends
 on it, so it is not an optional feature flag. The disabled path exists **only** so the
 unit-test suite can run against a faked Graphiti without standing up a database,
-mirroring how `shared_postgres` runs without a live Postgres. Do not treat the unset
+mirroring how `shared.postgres` runs without a live Postgres. Do not treat the unset
 state as a supported production configuration.
 
 ## Usage
 
 ```python
-from shared_neo4j import is_neo4j_enabled, get_graphiti, close_graphiti, register_graph_indices
+from shared.neo4j import is_neo4j_enabled, get_graphiti, close_graphiti, register_graph_indices
 
 # at startup (FastAPI lifespan / the graph sync worker):
 await register_graph_indices()           # no-op when NEO4J_BOLT_URL is unset

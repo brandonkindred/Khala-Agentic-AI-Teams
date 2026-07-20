@@ -247,7 +247,7 @@ async def test_invoke_generated_agent_is_dispatch_compatible(fake_strands):
     # Regression: the manifest entrypoint must be invokable as ``fn(body)`` by the
     # sandbox dispatch shim. It's an async coroutine fn, so the shim awaits it; run
     # it through the real dispatch path to prove that contract end-to-end.
-    from shared_agent_invoke.dispatch import invoke_entrypoint
+    from shared.agent_invoke.dispatch import invoke_entrypoint
 
     result = await invoke_entrypoint(
         "agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent",
@@ -283,7 +283,7 @@ def test_shape_invoke_result_degrades_when_envelope_absent(monkeypatch: pytest.M
 async def test_invoke_generated_agent_writeback_reaches_shim(fake_strands):
     # End-to-end: with a channel open, invoke_generated_agent returns a wrapped
     # writeback whose events the shim lifts into its driven result (→ memory_events).
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     with runtime_channel({"rules": [_ADVISORY]}):
         result = await agent_builder.invoke_generated_agent({"agent_name": "A", "message": "hi"})

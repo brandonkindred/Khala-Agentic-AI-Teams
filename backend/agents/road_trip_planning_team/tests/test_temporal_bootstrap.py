@@ -37,7 +37,7 @@ def test_temporal_package_exports_workflows_and_activities():
 
 
 def test_worker_start_is_noop_when_temporal_disabled(monkeypatch):
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
     from road_trip_planning_team.temporal.worker import start_road_trip_temporal_worker_thread
 
     assert start_road_trip_temporal_worker_thread() is False

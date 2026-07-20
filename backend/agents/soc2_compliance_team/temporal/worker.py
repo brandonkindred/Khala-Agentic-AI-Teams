@@ -4,7 +4,7 @@ Exposes a no-arg ``start_soc2_temporal_worker_thread`` that the generic
 team_service entrypoint invokes at boot via the ``TEAM_TEMPORAL_WORKER_MODULE`` /
 ``TEAM_TEMPORAL_WORKER_FUNC`` env vars, so the Temporal worker (and its connected
 client) is ready before uvicorn starts accepting requests. Delegates to the
-shared :func:`shared_temporal.start_team_worker`, which installs the shared
+shared :func:`shared.temporal.start_team_worker`, which installs the shared
 sandbox passthroughs and gzip payload codec and is idempotent per team.
 """
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from shared_temporal import is_temporal_enabled, start_team_worker
+from shared.temporal import is_temporal_enabled, start_team_worker
 from soc2_compliance_team.temporal import (
     ACTIVITIES,
     MAX_CONCURRENT_ACTIVITIES,
@@ -23,7 +23,7 @@ from soc2_compliance_team.temporal import (
 logger = logging.getLogger(__name__)
 
 # Team key for the per-team worker registry. Matches the slug registered in
-# ``shared_temporal.teams_registry`` so double-starts are idempotent.
+# ``shared.temporal.teams_registry`` so double-starts are idempotent.
 TEAM_KEY = "soc2_compliance"
 
 

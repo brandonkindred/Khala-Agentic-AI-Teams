@@ -1,6 +1,6 @@
-"""Tests for shared_neo4j — all faked, no live Neo4j or graphiti_core required.
+"""Tests for shared.neo4j — all faked, no live Neo4j or graphiti_core required.
 
-Mirrors ``shared_postgres``'s test idiom: prove the env gate, the config
+Mirrors ``shared.postgres``'s test idiom: prove the env gate, the config
 resolvers, the lazy/locked singleton lifecycle (via a monkeypatched builder), the
 gated-off schema registration, and the timing decorator — none of which need a
 database or the ``graphiti_core`` dependency installed.
@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from shared_neo4j import (
+from shared.neo4j import (
     GRAPH_SCHEMA,
     GraphSchema,
     GraphUnavailable,
@@ -23,7 +23,7 @@ from shared_neo4j import (
     register_graph_indices,
     timed_graph_op,
 )
-from shared_neo4j import client as client_mod
+from shared.neo4j import client as client_mod
 
 
 @pytest.fixture(autouse=True)
@@ -346,7 +346,7 @@ def test_timed_graph_op_logs_slow_call(monkeypatch):
 
 
 def test_slow_threshold_garbage_falls_back(monkeypatch):
-    from shared_neo4j import metrics as metrics_mod
+    from shared.neo4j import metrics as metrics_mod
 
     monkeypatch.setenv("NEO4J_SLOW_OP_MS", "not-a-number")
     assert metrics_mod._slow_threshold_ms() == 1000.0

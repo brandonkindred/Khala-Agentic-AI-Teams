@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from shared_temporal import is_temporal_enabled, start_team_worker
+from shared.temporal import is_temporal_enabled, start_team_worker
 from user_agent_founder.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
 
 logger = logging.getLogger(__name__)

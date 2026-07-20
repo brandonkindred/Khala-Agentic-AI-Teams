@@ -2,12 +2,12 @@
 
 Declares the ``social_marketing_winning_posts`` table used by
 ``shared/winning_posts_bank.py``. Registered from the team's FastAPI
-lifespan via ``shared_postgres.register_team_schemas``.
+lifespan via ``shared.postgres.register_team_schemas``.
 """
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="social_marketing",

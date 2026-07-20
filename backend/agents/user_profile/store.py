@@ -1,10 +1,10 @@
 """Postgres-backed store for user profiles and artifact associations.
 
 Data is persisted in the shared Khala Postgres instance via
-``shared_postgres.get_conn``. DDL lives in ``user_profile.postgres`` and
+``shared.postgres.get_conn``. DDL lives in ``user_profile.postgres`` and
 is registered from the unified_api FastAPI lifespan.
 
-The store is stateless; the connection pool is owned by shared_postgres.
+The store is stateless; the connection pool is owned by shared.postgres.
 Every public function that issues SQL is wrapped in ``@timed_query`` so slow
 reads/writes surface as structured log lines. (``record_association_safe`` is the
 exception: it is a thin best-effort wrapper that delegates to the timed
@@ -21,8 +21,8 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 from .models import Association, UserProfile, UserProfileUpdate
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shared_job_event_bus import (
+from shared.job_event_bus import (
     BusState,
     Subscription,
     cleanup_job,

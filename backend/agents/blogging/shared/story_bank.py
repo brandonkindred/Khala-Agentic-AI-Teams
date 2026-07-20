@@ -9,7 +9,7 @@ originally written for.
 Storage: the ``blogging_stories`` table declared in
 ``blogging.postgres`` and registered from the blogging team's FastAPI
 lifespan. DDL lives there — this module is pure data access via
-``shared_postgres.get_conn`` (pool-backed since PR 0).
+``shared.postgres.get_conn`` (pool-backed since PR 0).
 
 The public API (module-level functions ``save_story``,
 ``find_relevant_stories``, ``list_stories``, ``get_story``,
@@ -26,8 +26,8 @@ from typing import Any, Optional
 
 from psycopg.rows import dict_row
 
-from shared_postgres import Json, get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import Json, get_conn
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 

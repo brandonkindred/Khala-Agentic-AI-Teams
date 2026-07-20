@@ -28,8 +28,8 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn, is_postgres_enabled
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn, is_postgres_enabled
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 _STORE = "coding_team"

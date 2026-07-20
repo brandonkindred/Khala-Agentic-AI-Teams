@@ -50,7 +50,7 @@ from agent_cognition.models import CognitionContext, CognitionWriteback, Rule
 from agent_cognition.redaction import sanitize_for_memory
 from agent_cognition.rules.enforcement import evaluate_postcondition, evaluate_precondition
 from agent_cognition.runtime_config import read_int_with_floor
-from shared_postgres import get_conn, is_postgres_enabled
+from shared.postgres import get_conn, is_postgres_enabled
 
 if TYPE_CHECKING:
     from agent_cognition.memory.rollup import RollupReport
@@ -737,7 +737,7 @@ def _conn():
           :class:`AgentCognitionStorageUnavailable`; errors raised inside the
           ``with`` body propagate unchanged, so a genuine query bug is never
           masked as an infrastructure outage. Commit-on-success and
-          rollback-on-error are delegated to the underlying ``shared_postgres``
+          rollback-on-error are delegated to the underlying ``shared.postgres``
           pool context.
     """
     if not is_postgres_enabled():

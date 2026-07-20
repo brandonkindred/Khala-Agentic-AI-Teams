@@ -118,11 +118,11 @@ def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
     cannot be monkeypatched after the fact; instead we monkeypatch the first thing the
     hook touches (``stop_blog_stale_monitor``) and assert it ran during teardown.
     """
-    fake_shared_postgres = type(sys)("shared_postgres")
+    fake_shared.postgres = type(sys)("shared.postgres")
     registered: list = []
-    fake_shared_postgres.register_team_schemas = lambda s: registered.append(s)
-    fake_shared_postgres.close_pool = lambda: None
-    monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
+    fake_shared.postgres.register_team_schemas = lambda s: registered.append(s)
+    fake_shared.postgres.close_pool = lambda: None
+    monkeypatch.setitem(sys.modules, "shared.postgres", fake_shared.postgres)
 
     from agents.blogging.shared import blog_job_store
 
@@ -144,7 +144,7 @@ def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
 
 def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
     """A failing schema registration or pool close must not break app startup/teardown."""
-    fake_shared_postgres = type(sys)("shared_postgres")
+    fake_shared.postgres = type(sys)("shared.postgres")
 
     def boom_register(*a, **kw):
         raise RuntimeError("register failed")
@@ -152,9 +152,9 @@ def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
     def boom_close():
         raise RuntimeError("close failed")
 
-    fake_shared_postgres.register_team_schemas = boom_register
-    fake_shared_postgres.close_pool = boom_close
-    monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
+    fake_shared.postgres.register_team_schemas = boom_register
+    fake_shared.postgres.close_pool = boom_close
+    monkeypatch.setitem(sys.modules, "shared.postgres", fake_shared.postgres)
 
     # NB: the real _run_blogging_service_shutdown runs on teardown — create_team_app
     # captured it as on_shutdown at construction time, so it cannot be monkeypatched

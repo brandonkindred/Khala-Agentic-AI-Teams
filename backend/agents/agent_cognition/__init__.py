@@ -7,7 +7,7 @@ generated agents. See ``DESIGN.md`` / ``IMPLEMENTATION_PLAN.md`` in this
 directory for the full design and the staged delivery plan.
 
 This module re-exports the domain models only, so importing the package root
-stays cheap and dependency-light (pure pydantic — no psycopg / shared_postgres
+stays cheap and dependency-light (pure pydantic — no psycopg / shared.postgres
 pulled in). The CognitiveContext facade lives in :mod:`agent_cognition.context`
 and is imported from there directly by the few callers that need it (the invoke
 proxy, the scheduler), keeping its psycopg + storage/rules import chain off the

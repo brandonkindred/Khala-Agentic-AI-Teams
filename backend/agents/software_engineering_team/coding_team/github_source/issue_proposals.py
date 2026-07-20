@@ -26,7 +26,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Any, Iterable, Optional
 
-from shared_env import parse_float, parse_int
+from shared.env import parse_float, parse_int
 
 from .client import Issue, scrub_token_from_text
 

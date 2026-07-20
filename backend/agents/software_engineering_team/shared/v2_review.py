@@ -19,7 +19,7 @@ tests stay green without rewriting their patch targets.
 The code-review / QA / security checks are independent — none reads another's
 output, they only contribute to the shared ``issues`` list — so the shared body
 fans them out concurrently via :func:`_run_review_steps` (a thin wrapper over
-``shared_concurrency.parallel_map``), unless ``llm`` is a
+``shared.concurrency.parallel_map``), unless ``llm`` is a
 :class:`~llm_service.clients.dummy.DummyLLMClient` (or a Strands wrapper around
 one), which forces sequential execution because the scripted test doubles are
 not thread-safe. Each step returns a :class:`_ReviewStepResult` (issues plus an
@@ -502,7 +502,7 @@ def _run_review_steps(
         # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
         # parallel_map import — keeps the module import light for callers that never hit the
         # concurrent branch (e.g. every DummyLLMClient-backed test).
-        from shared_concurrency import parallel_map
+        from shared.concurrency import parallel_map
 
         results = parallel_map(
             step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False

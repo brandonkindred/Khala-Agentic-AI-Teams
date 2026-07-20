@@ -174,10 +174,10 @@ def recommend_activities_activity(
     """
     from road_trip_planning_team.pipeline import recommend_activities
 
-    # shared_concurrency is stdlib-only (threading/contextvars/logging) with no
+    # shared.concurrency is stdlib-only (threading/contextvars/logging) with no
     # import side effects, and this runs in the worker thread pool (outside the
     # workflow sandbox), so the call-time import is safe.
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     with BackgroundHeartbeat(
         activity.heartbeat, _ACTIVITIES_HEARTBEAT_INTERVAL_S, copy_context=True

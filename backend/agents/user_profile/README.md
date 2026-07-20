@@ -22,7 +22,7 @@ later without a data-model change.
 |---|---|
 | `postgres/__init__.py` | `SCHEMA: TeamSchema` — `user_profiles` + `user_profile_associations` (pure data; registered from the unified_api lifespan). |
 | `models.py` | Pydantic `UserProfile`, `UserProfileUpdate`, `Association`. |
-| `store.py` | CRUD via `shared_postgres.get_conn()`; `DEFAULT_USER_ID`; `record_association_safe` (best-effort). |
+| `store.py` | CRUD via `shared.postgres.get_conn()`; `DEFAULT_USER_ID`; `record_association_safe` (best-effort). |
 | `__init__.py` | Public surface + `ArtifactType` constants. |
 
 HTTP routes live in `backend/unified_api/routes/user_profile.py` (mounted at

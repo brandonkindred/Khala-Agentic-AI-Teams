@@ -32,4 +32,4 @@ omit =
     # shared/git_utils.py before the extraction — its branch/merge/recovery paths
     # drive live git worktrees and are exercised by integration tests, not unit
     # tests. branch_utils (pure helpers) remains gated.
-    */shared_git/git_utils.py
+    */shared/git/git_utils.py

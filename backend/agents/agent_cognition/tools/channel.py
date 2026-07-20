@@ -17,7 +17,7 @@ in the shim's frame. Agent code never holds the audit object and has nothing to
 forge into. Integrity-critical tools additionally use the ``platform_bound`` path,
 where the broker runs platform-side.
 
-Pure stdlib (``contextvars``); no Postgres, no FastAPI. ``shared_agent_invoke``
+Pure stdlib (``contextvars``); no Postgres, no FastAPI. ``shared.agent_invoke``
 imports :func:`runtime_channel` lazily so it has no hard dependency on this
 package — an agent with no cognition simply runs without a channel.
 

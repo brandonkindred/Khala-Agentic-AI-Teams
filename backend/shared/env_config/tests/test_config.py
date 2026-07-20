@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from shared_env_config import env_bool, env_float, env_int
+from shared.env_config import env_bool, env_float, env_int
 
 _KNOB = "SHARED_TEST_ENV_KNOB"
 
@@ -38,11 +38,11 @@ def test_env_bool_logs_on_set_but_unrecognized(monkeypatch, caplog) -> None:
     import logging
 
     monkeypatch.delenv(_KNOB, raising=False)
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         env_bool(_KNOB)
     assert not caplog.records  # unset: no warning
     monkeypatch.setenv(_KNOB, "maybe")
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         assert env_bool(_KNOB) is False
     assert any("Unrecognized bool" in r.message for r in caplog.records)
 
@@ -53,7 +53,7 @@ def test_env_bool_warns_on_set_but_empty(monkeypatch, caplog) -> None:
     import logging
 
     monkeypatch.setenv(_KNOB, "")
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         assert env_bool(_KNOB, default=True) is True
     assert any("Unrecognized bool" in r.message for r in caplog.records)
 
@@ -82,11 +82,11 @@ def test_env_int_logs_on_set_but_unparseable(monkeypatch, caplog) -> None:
     import logging
 
     monkeypatch.delenv(_KNOB, raising=False)
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         env_int(_KNOB, 7, 1)
     assert not caplog.records  # unset: no warning
     monkeypatch.setenv(_KNOB, "1O24")
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         assert env_int(_KNOB, 7, 1) == 7
     assert any("Invalid int" in r.message for r in caplog.records)
 
@@ -95,12 +95,12 @@ def test_env_float_logs_on_unparseable_and_nonfinite(monkeypatch, caplog) -> Non
     import logging
 
     monkeypatch.setenv(_KNOB, "abc")
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         assert env_float(_KNOB, 1.5, 0.0) == pytest.approx(1.5)
     assert any("Invalid float" in r.message for r in caplog.records)
     caplog.clear()
     monkeypatch.setenv(_KNOB, "inf")
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         assert env_float(_KNOB, 1.5, 0.0) == pytest.approx(1.5)
     assert any("Non-finite" in r.message for r in caplog.records)
 
@@ -128,7 +128,7 @@ def test_clamp_rejects_inverted_bounds() -> None:
     # floor > ceiling is a caller bug; _clamp raises ValueError (not assert) so
     # it is enforced even under `python -O`, where the default-respects-bounds
     # asserts in env_int/env_float are stripped.
-    from shared_env_config.config import _clamp
+    from shared.env_config.config import _clamp
 
     with pytest.raises(ValueError, match="floor"):
         _clamp(7.0, 10.0, 5.0)

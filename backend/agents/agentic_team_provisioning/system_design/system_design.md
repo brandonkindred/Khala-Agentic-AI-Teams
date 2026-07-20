@@ -29,9 +29,9 @@ graph LR
     pg["postgres/__init__.py<br/>(AGENTIC_POSTGRES_SCHEMA)"]
     tmp["temporal/__init__.py<br/>(AgenticTeamProvisioningWorkflow)"]
     llm["llm_service"]
-    shared_pg["shared_postgres"]
-    shared_tmp["shared_temporal"]
-    shared_obs["shared_observability"]
+    shared_pg["shared.postgres"]
+    shared_tmp["shared.temporal"]
+    shared_obs["shared.observability"]
     jsc["job_service_client"]
     apt["agent_provisioning_team"]
 
@@ -90,7 +90,7 @@ graph LR
 
 ## 2. Persistence — ER diagram
 
-Both backends share the same logical schema. The shared SQLite instance at `$AGENT_CACHE/agentic_team_provisioning.db` is authoritative when `POSTGRES_HOST` is unset; otherwise Postgres (JSONB columns) registered via `shared_postgres.register_team_schemas(AGENTIC_POSTGRES_SCHEMA)` in the FastAPI lifespan (`api/main.py:77-92`) takes over.
+Both backends share the same logical schema. The shared SQLite instance at `$AGENT_CACHE/agentic_team_provisioning.db` is authoritative when `POSTGRES_HOST` is unset; otherwise Postgres (JSONB columns) registered via `shared.postgres.register_team_schemas(AGENTIC_POSTGRES_SCHEMA)` in the FastAPI lifespan (`api/main.py:77-92`) takes over.
 
 ```mermaid
 erDiagram
@@ -240,7 +240,7 @@ Domain models (`models.py`):
 flowchart TD
     Start["Module import / request"]
     Start --> Q1{"POSTGRES_HOST set?"}
-    Q1 -->|yes| PG["Use Postgres via<br/>shared_postgres<br/>(JSONB schema)"]
+    Q1 -->|yes| PG["Use Postgres via<br/>shared.postgres<br/>(JSONB schema)"]
     Q1 -->|no| SQLite["Use local SQLite<br/>$AGENT_CACHE/agentic_team_provisioning.db"]
 
     Start --> Q2{"TEMPORAL_ADDRESS set<br/>and is_temporal_enabled()?"}
@@ -259,7 +259,7 @@ flowchart TD
 
 | Variable | Default | Effect |
 |---|---|---|
-| `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | unset | Enables Postgres-backed stores via `shared_postgres.register_team_schemas` |
+| `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | unset | Enables Postgres-backed stores via `shared.postgres.register_team_schemas` |
 | `TEMPORAL_ADDRESS` / `TEMPORAL_NAMESPACE` / `TEMPORAL_TASK_QUEUE` | unset | Enables Temporal worker bootstrap in `temporal/__init__.py:38-44` |
 | `AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED` | `true` | Toggles the Agent Provisioning bridge (`agent_env_provisioning.py:25-29`) |
 | `AGENTIC_TEAM_AGENT_PROVISIONING_MANIFEST` | `minimal.yaml` | Manifest passed to `ProvisioningOrchestrator.run_workflow` (`agent_env_provisioning.py:30`) |

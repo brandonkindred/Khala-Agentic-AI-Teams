@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from shared_agent_invoke.limits import (
+from shared.agent_invoke.limits import (
     DEFAULT_MAX_WRITEBACK_BYTES,
     cap_tool_audit,
     max_writeback_bytes,

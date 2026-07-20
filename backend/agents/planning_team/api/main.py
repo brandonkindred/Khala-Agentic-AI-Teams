@@ -47,7 +47,7 @@ from planning_team.shared.workspace import (  # noqa: E402
     WorkspaceResolutionError,
     resolve_workspace,
 )
-from shared_app import create_team_app  # noqa: E402
+from shared.app import create_team_app  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ app.add_middleware(
 # auto-answer callback) and never sets waiting_for_answers, so it always 400s today —
 # so tightening the request type is behavior-neutral. (E402: must follow the sys.path
 # insert above, like the other agents-path imports in this module.)
-from shared_hitl.models import SubmitAnswersRequest  # noqa: E402
+from shared.hitl.models import SubmitAnswersRequest  # noqa: E402
 
 
 def _get_llm():

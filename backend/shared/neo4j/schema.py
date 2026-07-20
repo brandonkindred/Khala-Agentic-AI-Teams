@@ -1,6 +1,6 @@
 """Graph index/constraint registration — the Graphiti analogue of ``TeamSchema``.
 
-``shared_postgres`` exports a ``TeamSchema`` of DDL statements run at startup;
+``shared.postgres`` exports a ``TeamSchema`` of DDL statements run at startup;
 Graphiti instead owns its own schema and exposes
 ``build_indices_and_constraints()`` to create the Neo4j indexes and constraints it
 needs. :func:`register_graph_indices` is the one-call wrapper a FastAPI lifespan
@@ -13,8 +13,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from shared_neo4j import config
-from shared_neo4j.client import get_graphiti
+from shared.neo4j import config
+from shared.neo4j.client import get_graphiti
 
 logger = logging.getLogger(__name__)
 
@@ -48,5 +48,5 @@ async def register_graph_indices() -> bool:
         return False
     graphiti = get_graphiti()
     await graphiti.build_indices_and_constraints()
-    logger.info("shared_neo4j graph indices/constraints ensured (%s)", GRAPH_SCHEMA.name)
+    logger.info("shared.neo4j graph indices/constraints ensured (%s)", GRAPH_SCHEMA.name)
     return True

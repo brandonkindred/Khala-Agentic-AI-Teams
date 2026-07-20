@@ -65,7 +65,7 @@ any profile field via `profile_overrides`.
 
 Postgres tables `job_matching_runs`, `job_matching_ranked_jobs`, and
 `job_matching_listing_states` (user triage state keyed by posting fingerprint;
-see `postgres/__init__.py`), registered via `shared_app.create_team_app`'s
+see `postgres/__init__.py`), registered via `shared.app.create_team_app`'s
 `postgres_schema=JOB_MATCHING_SCHEMA`. This team also depends on the central
 `user_profile` schema (`user_profiles`/`user_profile_associations`) for
 career-profile reads/writes, declared via `create_team_app`'s
@@ -86,13 +86,13 @@ either way:
 
 - **Thread mode** (default): the scan runs on a daemon thread in-process.
 - **Temporal mode** (when `TEMPORAL_ADDRESS` is set): the scan is dispatched to a
-  durable `JobMatchingWorkflow` (shared_temporal Pattern A). The workflow is
+  durable `JobMatchingWorkflow` (shared.temporal Pattern A). The workflow is
   visible in the Temporal UI and an in-flight scan survives a worker/process
   restart. The worker boots via `temporal/worker.py`
   (`TEAM_TEMPORAL_WORKER_MODULE`/`_FUNC` in docker-compose, run by the
   team_service entrypoint), with the API lifespan (`_start_temporal_worker_backstop`
   in `api/main.py`) as a backstop when the app is served standalone (`uvicorn …:app`).
-  The team is also registered in `shared_temporal.teams_registry` for any future
+  The team is also registered in `shared.temporal.teams_registry` for any future
   in-process `start_all_team_workers` host.
 
 ## Configuration

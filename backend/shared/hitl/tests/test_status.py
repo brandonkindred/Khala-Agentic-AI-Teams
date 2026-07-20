@@ -1,12 +1,12 @@
-"""Tests for shared_hitl.status.pending_questions_from_raw — full-fidelity materialization."""
+"""Tests for shared.hitl.status.pending_questions_from_raw — full-fidelity materialization."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from shared_hitl.models import PendingQuestion
-from shared_hitl.status import pending_questions_from_raw
+from shared.hitl.models import PendingQuestion
+from shared.hitl.status import pending_questions_from_raw
 
 
 def test_empty_returns_empty():

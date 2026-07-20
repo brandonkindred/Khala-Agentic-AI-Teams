@@ -229,7 +229,7 @@ raise the mode) is tracked in
 
 ### 6. Persistence via the Khala job service (not a team schema)
 
-Unlike teams that own a Postgres schema via `shared_postgres`, the investment
+Unlike teams that own a Postgres schema via `shared.postgres`, the investment
 team persists **everything** through the job service:
 
 - `_PersistentDict` ([`api/main.py`](../api/main.py):85) presents a dict-like
@@ -240,7 +240,7 @@ team persists **everything** through the job service:
   `investment_paper_trading_sessions`, `investment_advisor_sessions`.
 - Survives server restart; no in-memory-only state for artifacts.
 
-Trade-off: the team does **not** publish a `shared_postgres` `SCHEMA` constant
+Trade-off: the team does **not** publish a `shared.postgres` `SCHEMA` constant
 — artifact storage is opaque to the job DB. Operators cleaning up strategy-lab
 data query the `jobs` table directly (see
 [`../README.md`](../README.md):77-86) or use `DELETE /strategy-lab/storage`.

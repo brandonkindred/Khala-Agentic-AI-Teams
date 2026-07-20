@@ -121,7 +121,7 @@ begin_run → spec_intake → architecture → capabilities → evaluation → s
 The package follows the shared **Pattern A** convention: `temporal/__init__.py`
 exports `WORKFLOWS`/`ACTIVITIES`, and `temporal/worker.py` registers exactly those
 lists on the `TEMPORAL_TASK_QUEUE_AI_SYSTEMS` (default `ai-systems`) task queue.
-See `backend/agents/shared_temporal/README.md`.
+See `backend/shared/temporal/README.md`.
 
 ## Example mission statement
 

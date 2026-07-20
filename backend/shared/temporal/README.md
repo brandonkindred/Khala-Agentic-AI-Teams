@@ -1,4 +1,4 @@
-# shared_temporal
+# shared.temporal
 
 Single source of truth for Temporal-backed, resumable job execution across
 every agent team. Replaces the per-team `temporal/client.py`,
@@ -40,7 +40,7 @@ every agent team. Replaces the per-team `temporal/client.py`,
 3. **Start the worker** during app lifespan:
 
    ```python
-   from shared_temporal import start_team_worker
+   from shared.temporal import start_team_worker
    from my_team.temporal.workflows import MyTeamWorkflow, run_pipeline
 
    start_team_worker("my_team", [MyTeamWorkflow], [run_pipeline])
@@ -49,7 +49,7 @@ every agent team. Replaces the per-team `temporal/client.py`,
 4. **Dispatch jobs** from your HTTP handlers via `run_team_job`:
 
    ```python
-   from shared_temporal import run_team_job
+   from shared.temporal import run_team_job
    from my_team.temporal.workflows import MyTeamWorkflow
 
    run_team_job(
@@ -74,8 +74,8 @@ for either mode.
 The "daemon thread beats a callable on an interval" keep-alive that Temporal
 activities use (e.g. `execute_coding_team_activity`'s `activity.heartbeat()`
 beater) is driven by the shared `BackgroundHeartbeat` helper in the
-**`shared_concurrency`** package (it is Temporal-agnostic and also used by
-non-Temporal callers). See `backend/agents/shared_concurrency/README.md`.
+**`shared.concurrency`** package (it is Temporal-agnostic and also used by
+non-Temporal callers). See `backend/shared/concurrency/README.md`.
 
 The coding-team activity's beater interval is set by
 `CODING_TEAM_HEARTBEAT_INTERVAL_S` (seconds; blank/garbage/non-positive falls
@@ -94,7 +94,7 @@ back to `30`).
 ## Payload compression
 
 `connect_temporal_client` builds its `Client`'s `DataConverter` via
-`shared_temporal.codec.build_data_converter`, which always installs a gzip
+`shared.temporal.codec.build_data_converter`, which always installs a gzip
 `PayloadCodec`. A team whose activities move large, highly compressible
 payloads — e.g. `code_review_agent`'s map-reduce chunks, which carry the full,
 untruncated diff by design — can otherwise trip Temporal's 512 KiB
@@ -112,13 +112,13 @@ staggered fleet rollout could strand in-flight workflows if writing defaulted
 on. Roll out safely by deploying this code everywhere first (decode-only,
 nothing changes), then flipping the env var on once every service on the
 cluster is confirmed upgraded. See `docs/ENV_VARS.md` for the toggle/threshold
-env vars and `shared_temporal/codec.py` for the implementation.
+env vars and `shared/temporal/codec.py` for the implementation.
 
 ## See also
 
-- **`backend/agents/shared_postgres/`** — sibling module that applies the
+- **`backend/shared/postgres/`** — sibling module that applies the
   same registry idea to Postgres DDL. Each team exports a `SCHEMA:
   TeamSchema` from `<team>/postgres/__init__.py` and its FastAPI lifespan
-  calls `register_team_schemas(SCHEMA)` at startup. Unlike `shared_temporal`'s
-  Pattern A (import-time side effect), `shared_postgres` uses Pattern B
+  calls `register_team_schemas(SCHEMA)` at startup. Unlike `shared.temporal`'s
+  Pattern A (import-time side effect), `shared.postgres` uses Pattern B
   (explicit lifespan call) because DDL is synchronous blocking I/O.

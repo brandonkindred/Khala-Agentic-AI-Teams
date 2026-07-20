@@ -2,7 +2,7 @@
 
 Pure data module — importing it has no side effects. DDL runs when the
 unified API lifespan calls
-``shared_postgres.register_team_schemas(SCHEMA)``.
+``shared.postgres.register_team_schemas(SCHEMA)``.
 
 Schema shape (Phase 1 + Phase 2 of issue #243):
 
@@ -30,7 +30,7 @@ table — idempotent, so re-running on existing deployments leaves
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA: TeamSchema = TeamSchema(
     team="product_delivery",

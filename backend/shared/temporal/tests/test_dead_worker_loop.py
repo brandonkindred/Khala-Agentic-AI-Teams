@@ -16,9 +16,9 @@ import asyncio
 
 import pytest
 
-import shared_temporal.client as client_mod
-import shared_temporal.runner as runner
-import shared_temporal.worker as worker_mod
+import shared.temporal.client as client_mod
+import shared.temporal.runner as runner
+import shared.temporal.worker as worker_mod
 
 
 @pytest.fixture(autouse=True)

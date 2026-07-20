@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 
 from deepthought.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
-from shared_temporal import is_temporal_enabled, start_team_worker
+from shared.temporal import is_temporal_enabled, start_team_worker
 
 logger = logging.getLogger(__name__)
 

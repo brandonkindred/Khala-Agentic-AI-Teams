@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from llm_service import get_client
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 from .agents import (
     AvailabilityTSCAgent,

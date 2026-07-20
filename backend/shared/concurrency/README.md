@@ -1,4 +1,4 @@
-# shared_concurrency
+# shared.concurrency
 
 Small, dependency-light concurrency primitives shared across agent teams.
 Importing this package pulls in only the Python standard library.
@@ -14,7 +14,7 @@ generic — it knows nothing about Temporal or the job service; it just calls a
 `beat` callable every `interval_s` until stopped.
 
 ```python
-from shared_concurrency import BackgroundHeartbeat
+from shared.concurrency import BackgroundHeartbeat
 
 # Externally controlled (context manager owns start + stop):
 with BackgroundHeartbeat(activity.heartbeat, 30.0, copy_context=True):
@@ -72,7 +72,7 @@ through this helper fixes worker bounds, exception propagation, and context
 propagation once — and new sites get context propagation for free.
 
 ```python
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 # Common case — bounded, order-preserving, context propagated, None skipped:
 results = parallel_map(prospects, run_one, max_workers=8)
@@ -124,7 +124,7 @@ sum of their write latencies even though their LLM/build/lint work ran in
 parallel.
 
 ```python
-from shared_concurrency import LatestValueFlusher
+from shared.concurrency import LatestValueFlusher
 
 with LatestValueFlusher(job_client.update_job, name="job-persist") as flusher:
     flusher.enqueue({"status_text": "working"})  # never blocks

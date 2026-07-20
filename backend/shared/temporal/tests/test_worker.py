@@ -20,7 +20,7 @@ load via the real importer instead of being replayed.
 
 from __future__ import annotations
 
-import shared_temporal.worker as worker
+import shared.temporal.worker as worker
 
 
 def test_workflow_runner_passes_through_boto3_strands_and_httpx():

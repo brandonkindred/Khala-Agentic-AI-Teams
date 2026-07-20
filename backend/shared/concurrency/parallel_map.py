@@ -9,8 +9,8 @@ in ``contextvars.copy_context().run(...)`` or it silently drops the LLM
 attribution / request-id contextvars (see ``llm_service.attribution``). Routing
 all fan-out through this one helper fixes worker bounds, exception propagation,
 and context propagation once instead of per-team. It is stdlib-only and lives in
-``shared_concurrency`` so any team can use it without extra dependencies. See
-``shared_concurrency/README.md`` for the rationale and usage examples.
+``shared.concurrency`` so any team can use it without extra dependencies. See
+``shared/concurrency/README.md`` for the rationale and usage examples.
 
 Requires Python 3.9+ (uses ``ThreadPoolExecutor.shutdown(cancel_futures=...)``).
 The project targets Python 3.10 (``backend/pyproject.toml`` ``target-version =

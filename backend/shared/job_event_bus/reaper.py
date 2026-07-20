@@ -1,4 +1,4 @@
-"""Reusable reaper-equipped binding for a :class:`~shared_job_event_bus.bus.BusState`.
+"""Reusable reaper-equipped binding for a :class:`~shared.job_event_bus.bus.BusState`.
 
 Several teams stream a job's progress over SSE and keep long-lived connections
 open. To bound in-memory growth under abnormal conditions (a crash that skips
@@ -25,8 +25,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional, Tuple, Union
 
-from shared_concurrency import BackgroundHeartbeat
-from shared_job_event_bus.bus import BusState, reap_once
+from shared.concurrency import BackgroundHeartbeat
+from shared.job_event_bus.bus import BusState, reap_once
 
 _DEFAULT_LOGGER = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ class ReaperHandle:
 
         Preconditions:
             - The resolved ``ttl_seconds``/``max_jobs`` are non-negative (enforced
-              by the underlying :func:`~shared_job_event_bus.bus.reap_once`, which
+              by the underlying :func:`~shared.job_event_bus.bus.reap_once`, which
               raises ``ValueError`` otherwise).
         Postconditions:
             - Subscriptions idle past the TTL and the oldest jobs over the cap are

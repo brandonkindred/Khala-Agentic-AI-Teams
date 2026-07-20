@@ -1,4 +1,4 @@
-# shared_run_thread_registry
+# shared.run_thread_registry
 
 A single implementation of the process-local "which thread, if any, is running this job's
 orchestrator" registry. `coding_team` and `software_engineering_team` had independently hand-rolled
@@ -12,7 +12,7 @@ its call sites need module-level function names (e.g. for `monkeypatch.setattr(m
 compatibility), binds thin wrappers over it:
 
 ```python
-from shared_run_thread_registry import RunThreadRegistry
+from shared.run_thread_registry import RunThreadRegistry
 
 _registry = RunThreadRegistry()
 _register_run_thread = _registry.register

@@ -43,7 +43,7 @@ from agent_cognition.memory import rollup, store
 from agent_cognition.memory.store import AgentCognitionStorageUnavailable
 from agent_cognition.rules import reflection
 from agent_cognition.runtime_config import read_int_with_floor
-from shared_postgres import is_postgres_enabled
+from shared.postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 

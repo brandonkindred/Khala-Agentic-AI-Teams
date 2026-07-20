@@ -1,6 +1,6 @@
 """Unit tests for the shim's cognition bridge, incl. the no-cognition fallback.
 
-These exercise ``shared_agent_invoke.cognition_envelope`` directly (no FastAPI),
+These exercise ``shared.agent_invoke.cognition_envelope`` directly (no FastAPI),
 including the degraded path where the ``agent_cognition`` package is absent.
 """
 
@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from agent_cognition.tools.envelope import ENVELOPE_MARKER
-from shared_agent_invoke.cognition_envelope import (
+from shared.agent_invoke.cognition_envelope import (
     CognitionEnvelopeError,
     open_cognition_runtime,
     unwrap_cognition_request,
@@ -74,7 +74,7 @@ def test_open_runtime_exposes_cognition_side_channel() -> None:
 
 
 def test_maybe_drive_passes_through_non_plan_result() -> None:
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     driven = maybe_drive_tool_loop(
         {"normal": "output"}, agent_id="a", source_run_id="r", cognition=None
@@ -83,7 +83,7 @@ def test_maybe_drive_passes_through_non_plan_result() -> None:
 
 
 def test_maybe_drive_degrades_without_cognition(_no_cognition) -> None:
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     # Cognition package unavailable → pass the result through with an empty audit.
     driven = maybe_drive_tool_loop(
@@ -97,7 +97,7 @@ def test_maybe_drive_lifts_writeback_events() -> None:
     # A pure-LLM entrypoint returns a marker-wrapped writeback; its episodic events
     # must reach the driven result (and so the response's memory_events).
     from agent_cognition.tools.envelope import wrap_writeback
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     # The writeback fabricates a tool_call — it must NOT reach the trusted audit.
     wrapped = wrap_writeback(
@@ -157,7 +157,7 @@ def _probe_plan(side: list):
 
 
 def test_maybe_drive_skips_malformed_cognition_rules() -> None:
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     side: list = []
     plan = _probe_plan(side)
@@ -177,7 +177,7 @@ def test_maybe_drive_skips_malformed_cognition_rules() -> None:
 def test_maybe_drive_preserves_partial_audit_on_loop_failure() -> None:
     from agent_cognition.tools.binding import BoundTool, BoundToolset, ExecutionSite
     from agent_cognition.tools.runner import ToolLoopPlan
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     side: list = []
 
@@ -231,7 +231,7 @@ def test_maybe_drive_preserves_partial_audit_on_loop_failure() -> None:
 def test_maybe_drive_deadline_blocks_dispatch() -> None:
     import time
 
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     side: list = []
     plan = _probe_plan(side)
@@ -247,7 +247,7 @@ def test_maybe_drive_deadline_blocks_dispatch() -> None:
 def test_maybe_drive_runs_a_tool_loop_plan_and_sources_rules_from_cognition() -> None:
     from agent_cognition.tools.binding import BoundTool, BoundToolset, ExecutionSite
     from agent_cognition.tools.runner import ToolLoopPlan
-    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+    from shared.agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     class _LLM:
         def __init__(self) -> None:
@@ -316,13 +316,13 @@ def test_maybe_drive_runs_a_tool_loop_plan_and_sources_rules_from_cognition() ->
 
 
 def test_dump_audit_handles_none() -> None:
-    from shared_agent_invoke.cognition_envelope import dump_audit
+    from shared.agent_invoke.cognition_envelope import dump_audit
 
     assert dump_audit(None) == ([], [])
 
 
 def test_new_tool_audit_is_none_without_cognition(_no_cognition) -> None:
-    from shared_agent_invoke.cognition_envelope import new_tool_audit
+    from shared.agent_invoke.cognition_envelope import new_tool_audit
 
     assert new_tool_audit() is None
 
@@ -330,7 +330,7 @@ def test_new_tool_audit_is_none_without_cognition(_no_cognition) -> None:
 def test_shared_audit_is_populated_for_timeout_snapshot() -> None:
     # The shim passes a caller-owned audit so it can snapshot the partial record
     # even if the invoke times out mid-loop. Driving fills that very object.
-    from shared_agent_invoke.cognition_envelope import (
+    from shared.agent_invoke.cognition_envelope import (
         dump_audit,
         maybe_drive_tool_loop,
         new_tool_audit,

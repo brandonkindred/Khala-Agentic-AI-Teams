@@ -7,6 +7,6 @@ Re-exports :func:`env_bool`, :func:`env_int`, and :func:`env_float` (see
 
 from __future__ import annotations
 
-from shared_env_config.config import env_bool, env_float, env_int
+from shared.env_config.config import env_bool, env_float, env_int
 
 __all__ = ["env_bool", "env_int", "env_float"]

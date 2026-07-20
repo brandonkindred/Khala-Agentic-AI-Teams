@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from shared_env import parse_int
+from shared.env import parse_int
 
 # Cap on CONSECUTIVE no-change revision rounds — rounds where the engineer revisited a task it
 # already flagged done and produced no change to the branch diff. This is deliberately distinct from

@@ -305,7 +305,7 @@ def _ensure_otel_instruments() -> None:
         # on the hot path). A failed init is treated as "OTel off for this process".
         _otel_initialized = True
         try:
-            from shared_observability import get_meter, get_tracer
+            from shared.observability import get_meter, get_tracer
 
             _otel_tracer = get_tracer("khala.llm_service")
             meter = get_meter("khala.llm_service")

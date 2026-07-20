@@ -61,7 +61,7 @@ async def connect_temporal_client() -> Optional["Client"]:
     """Connect to Temporal using env vars. Returns None if not configured."""
     from temporalio.client import Client
 
-    from shared_temporal.codec import build_data_converter
+    from shared.temporal.codec import build_data_converter
 
     address = get_temporal_address()
     if not address:

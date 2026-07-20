@@ -1,6 +1,6 @@
 """Central registry of team Postgres schema modules.
 
-Analogue of ``shared_temporal/teams_registry.py``. Each entry maps a
+Analogue of ``shared/temporal/teams_registry.py``. Each entry maps a
 team slug to the dotted path of a module that exports ``SCHEMA:
 TeamSchema``. ``register_all_team_schemas`` imports each module lazily
 and applies its schema; it is not wired into the ``unified_api``
@@ -15,8 +15,8 @@ import logging
 from collections.abc import Iterable
 from typing import Optional
 
-from shared_postgres.runner import register_team_schemas
-from shared_postgres.schema import TeamSchema
+from shared.postgres.runner import register_team_schemas
+from shared.postgres.schema import TeamSchema
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
-"""Smoke tests for the shared_observability OpenTelemetry bootstrap.
+"""Smoke tests for the shared.observability OpenTelemetry bootstrap.
 
-These tests verify the public contract of the shared_observability module
+These tests verify the public contract of the shared.observability module
 without requiring a real OTLP collector. They use the in-memory span
 exporter so every assertion runs fully offline.
 
@@ -22,7 +22,7 @@ _TEAM_KEY = "unit_test"
 def _otel_ready() -> None:
     """Initialise OpenTelemetry once for the whole test session."""
     pytest.importorskip("opentelemetry.sdk.trace")
-    from shared_observability import init_otel
+    from shared.observability import init_otel
 
     init_otel(service_name=_SERVICE_NAME, team_key=_TEAM_KEY)
 
@@ -47,7 +47,7 @@ def span_exporter():
 
 
 def test_init_otel_reports_enabled() -> None:
-    from shared_observability import init_otel, is_otel_enabled
+    from shared.observability import init_otel, is_otel_enabled
 
     assert init_otel(service_name=_SERVICE_NAME, team_key=_TEAM_KEY) is True
     assert is_otel_enabled() is True
@@ -55,7 +55,7 @@ def test_init_otel_reports_enabled() -> None:
 
 def test_resolve_endpoint_for_log_reflects_export_state(monkeypatch) -> None:
     """The init log must distinguish 'no exporter' from 'real endpoint'."""
-    from shared_observability.otel import _resolve_endpoint_for_log
+    from shared.observability.otel import _resolve_endpoint_for_log
 
     for var in (
         "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -84,7 +84,7 @@ def test_metric_exporter_opted_out_via_metrics_exporter_none(monkeypatch) -> Non
     """
     pytest.importorskip("opentelemetry.exporter.otlp.proto.http.metric_exporter")
     pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
-    from shared_observability.otel import (
+    from shared.observability.otel import (
         _build_metric_exporter,
         _build_span_exporter,
         _otlp_metrics_enabled,
@@ -113,7 +113,7 @@ def test_metric_exporter_opted_out_via_metrics_exporter_none(monkeypatch) -> Non
 
 def test_get_tracer_and_meter_surface_is_usable() -> None:
     """Tracer and meter returned by the helpers must support the common API."""
-    from shared_observability import get_meter, get_tracer
+    from shared.observability import get_meter, get_tracer
 
     tracer = get_tracer("unit-test")
     with tracer.start_as_current_span("noop") as span:
@@ -133,7 +133,7 @@ def test_instrument_fastapi_app_attaches_server_spans(span_exporter) -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from shared_observability import instrument_fastapi_app
+    from shared.observability import instrument_fastapi_app
 
     app = FastAPI()
     instrument_fastapi_app(app, team_key=_TEAM_KEY)
@@ -165,7 +165,7 @@ def test_instrument_fastapi_app_is_idempotent(span_exporter, caplog) -> None:
 
     from fastapi import FastAPI
 
-    from shared_observability import instrument_fastapi_app
+    from shared.observability import instrument_fastapi_app
 
     app = FastAPI()
     instrument_fastapi_app(app, team_key=_TEAM_KEY)

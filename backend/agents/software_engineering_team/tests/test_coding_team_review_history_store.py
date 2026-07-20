@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from shared_postgres import TeamSchema, is_postgres_enabled, register_team_schemas
-from shared_postgres.testing import truncate_team_tables
+from shared.postgres import TeamSchema, is_postgres_enabled, register_team_schemas
+from shared.postgres.testing import truncate_team_tables
 from software_engineering_team.coding_team.review_history_store import (
     list_reviews,
     record_review_start,

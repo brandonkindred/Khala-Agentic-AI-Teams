@@ -19,7 +19,7 @@ Postconditions:
 
 from __future__ import annotations
 
-from shared_dev_models.models import (
+from shared.dev_models.models import (
     ArchitectureComponent,
     Epic,
     Initiative,

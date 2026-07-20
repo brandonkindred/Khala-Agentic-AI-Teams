@@ -5,7 +5,7 @@ This is the cross-container read/write layer for small operator-managed secrets
 key management and table shape of ``unified_api/integration_credentials.py`` +
 ``unified_api/postgres_encrypted_credentials.py`` so the two interoperate — same
 ``encrypted_integration_credentials`` table, same Fernet key precedence — but it
-lives in ``shared_postgres`` so **team containers can read secrets without
+lives in ``shared.postgres`` so **team containers can read secrets without
 importing ``unified_api``** (which they must never do).
 
 Why a separate module instead of reusing the unified_api one: agent teams run in
@@ -30,12 +30,12 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from shared_postgres.client import get_conn, is_postgres_enabled
-from shared_postgres.metrics import timed_query
+from shared.postgres.client import get_conn, is_postgres_enabled
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-_STORE = "shared_postgres_secrets"
+_STORE = "shared.postgres_secrets"
 _DEFAULT_CACHE_DIR = ".agent_cache"
 
 _LOCK = threading.Lock()

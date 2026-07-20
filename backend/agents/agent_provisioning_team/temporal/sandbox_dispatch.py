@@ -6,7 +6,7 @@ the branch here (rather than inside the sandbox package) preserves layering: the
 sandbox package stays unaware of Temporal, and these helpers depend on both.
 
 ``acquire``/``teardown`` are async (awaited from ``async def`` routes) and use
-the non-blocking :func:`shared_temporal.runner.execute_workflow_async` bridge so
+the non-blocking :func:`shared.temporal.runner.execute_workflow_async` bridge so
 the API event loop is never blocked for the duration of a ~90s cold start. The
 reaper is started once at boot via the blocking sync bridge (acceptable during
 lifespan startup; callers may wrap it in ``asyncio.to_thread``).
@@ -45,8 +45,8 @@ from agent_provisioning_team.temporal.sandbox_workflows import (
     SandboxReaperWorkflow,
     SandboxTeardownWorkflow,
 )
-from shared_temporal import translate_workflow_failure
-from shared_temporal.runner import execute_workflow_async, start_workflow_sync
+from shared.temporal import translate_workflow_failure
+from shared.temporal.runner import execute_workflow_async, start_workflow_sync
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ def _reraise_sandbox_error(exc: Exception) -> None:
     ``SandboxAcquireFailedError`` → 503; ``reap_once()`` catches ``DockerError``
     specifically around its own direct (non-Temporal) ``teardown()`` call.
     Delegates the actual cause-chain walk to
-    :func:`shared_temporal.translate_workflow_failure` — the codebase's single
+    :func:`shared.temporal.translate_workflow_failure` — the codebase's single
     shared implementation of "walk the chain, match an ``ApplicationError``
     type marker, re-raise the native exception" — rather than a bespoke walk.
     A client-side ``asyncio.TimeoutError`` (which carries no ``.type``) has no
@@ -197,12 +197,12 @@ def start_sandbox_reaper_workflow(
           restart or from a sibling replica) is swallowed — that IS the desired
           single-instance behavior. Any other exception propagates.
 
-    ``client_ready_timeout_s`` is forwarded to :func:`shared_temporal.start_workflow_sync`
+    ``client_ready_timeout_s`` is forwarded to :func:`shared.temporal.start_workflow_sync`
     (which forwards it to its own internal client-readiness poll). Boot-time
     callers that already retry this whole call with their own backoff (e.g.
     ``unified_api.main._start_sandbox_reaper_with_retry``) should pass a short
     value here — otherwise the default 10s internal poll
-    (``shared_temporal.runner.CLIENT_READY_TIMEOUT_S``) stacks underneath the
+    (``shared.temporal.runner.CLIENT_READY_TIMEOUT_S``) stacks underneath the
     caller's own backoff, so a single outer "attempt" can block for up to 10s
     before the outer retry loop even gets a chance to apply its own delay.
     """

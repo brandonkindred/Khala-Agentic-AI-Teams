@@ -15,7 +15,7 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel
 
-from shared_postgres.aggregate import (
+from shared.postgres.aggregate import (
     build_merge_statement,
     merge_jsonb_returning,
     merge_jsonb_via_cursor,
@@ -99,7 +99,7 @@ def test_merge_via_cursor_rejects_empty_key() -> None:
 
 def test_merge_jsonb_returning_drives_connection(monkeypatch) -> None:
     """Cover the get_conn() path of merge_jsonb_returning without a live DB."""
-    import shared_postgres.aggregate as agg
+    import shared.postgres.aggregate as agg
 
     cur = _StubCursor({"data": {"x": 1, "y": 2}})
 
@@ -124,7 +124,7 @@ def test_merge_jsonb_returning_drives_connection(monkeypatch) -> None:
     reason="POSTGRES_HOST not set; skipping live Postgres semantics check",
 )
 def test_merge_jsonb_returning_against_live_postgres() -> None:
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     table = f"_agg_merge_test_{uuid4().hex[:8]}"
     try:

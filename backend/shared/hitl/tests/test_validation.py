@@ -1,4 +1,4 @@
-"""Tests for shared_hitl.validation.validate_answers — the reconciled strict rule set."""
+"""Tests for shared.hitl.validation.validate_answers — the reconciled strict rule set."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any, Dict, List
 import pytest
 from fastapi import HTTPException
 
-from shared_hitl.models import SubmitAnswersRequest
-from shared_hitl.validation import validate_answers
+from shared.hitl.models import SubmitAnswersRequest
+from shared.hitl.validation import validate_answers
 
 
 def _job(pending: List[Dict[str, Any]], waiting: bool = True) -> Dict[str, Any]:

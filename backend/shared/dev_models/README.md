@@ -1,4 +1,4 @@
-# shared_dev_models
+# shared.dev_models
 
 Neutral, team-agnostic **software-development pipeline models**.
 
@@ -17,13 +17,13 @@ hand tasks to SE's code-v2 team leads). This package is their single home.
 ## Usage
 
 ```python
-from shared_dev_models import Task, TaskStatus, TaskType, PlanningHierarchy
+from shared.dev_models import Task, TaskStatus, TaskType, PlanningHierarchy
 ```
 
 ## Compatibility
 
 `software_engineering_team/shared/models.py` remains as a thin compatibility
 shim that re-exports this package's `models` module object (so
-`software_engineering_team.shared.models.Task is shared_dev_models.models.Task` —
+`software_engineering_team.shared.models.Task is shared.dev_models.models.Task` —
 `isinstance` and identity are preserved for the many existing SE importers). New
-code, and all of coding_team, imports `shared_dev_models` directly.
+code, and all of coding_team, imports `shared.dev_models` directly.

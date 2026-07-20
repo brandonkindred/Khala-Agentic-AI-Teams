@@ -1,4 +1,4 @@
-"""Tests for the git-worktree primitives added to :mod:`shared_git.git_utils`.
+"""Tests for the git-worktree primitives added to :mod:`shared.git.git_utils`.
 
 These exercise real ``git`` subprocesses against a ``tmp_path`` repository
 rather than mocking git calls: worktree isolation is the entire point of the
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from shared_git.git_utils import (
+from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     add_worktree,
     checkout_branch,
@@ -180,7 +180,7 @@ def test_ensure_development_branch_fails_closed_when_worktree_list_query_fails(
     attached elsewhere" and skip the checkout — it falls back to attempting
     the normal checkout, surfacing any real conflict through that call's own
     error instead of masking the query failure."""
-    import shared_git.git_utils as git_utils_mod
+    import shared.git.git_utils as git_utils_mod
 
     ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t6-query-fails")
     assert ok, branch
@@ -309,7 +309,7 @@ def test_remove_worktree_reports_failure_when_fallback_cannot_remove_it(
 ) -> None:
     """If even the filesystem fallback can't remove the directory, remove_worktree reports failure
     rather than claiming success."""
-    import shared_git.git_utils as git_utils_mod
+    import shared.git.git_utils as git_utils_mod
 
     untracked_dir = repo.parent / "stuck-worktree"
     untracked_dir.mkdir()
@@ -325,7 +325,7 @@ def test_remove_worktree_reports_failure_when_fallback_cannot_remove_it(
 
 
 def test_prune_worktrees_reports_git_failure(repo: Path, monkeypatch) -> None:
-    import shared_git.git_utils as git_utils_mod
+    import shared.git.git_utils as git_utils_mod
 
     monkeypatch.setattr(git_utils_mod, "_run_git", lambda *a, **k: (1, "boom"))
 

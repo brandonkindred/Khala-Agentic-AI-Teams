@@ -1,4 +1,4 @@
-# shared_git
+# shared.git
 
 Neutral, team-agnostic **git operations**.
 
@@ -18,8 +18,8 @@ of "one team importing the other's internals" by giving it a neutral home.
 ## Usage
 
 ```python
-from shared_git.git_utils import branch_diff, checkout_branch, DEVELOPMENT_BRANCH
-from shared_git import branch_utils
+from shared.git.git_utils import branch_diff, checkout_branch, DEVELOPMENT_BRANCH
+from shared.git import branch_utils
 ```
 
 ## Compatibility
@@ -28,4 +28,4 @@ from shared_git import branch_utils
 as thin `sys.modules` alias shims onto this package, so the many existing SE
 importers — and the tests that `@patch("software_engineering_team.shared.git_utils.…")`
 — keep working unchanged (the shim IS the same module object). coding_team and
-`shared_command_runner` import `shared_git` directly.
+`shared.command_runner` import `shared.git` directly.

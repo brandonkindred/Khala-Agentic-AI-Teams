@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from shared_command_runner.error_parsing import (
+from shared.command_runner.error_parsing import (
     FailureClass,
     build_agent_feedback,
     get_failure_class_tag,
@@ -20,8 +20,8 @@ from shared_command_runner.error_parsing import (
     parse_command_failure,
     parse_devops_failure,
 )
-from shared_dev_models import ToolRecommendation, model_to_dict
-from shared_repo_context.repo_utils import (
+from shared.dev_models import ToolRecommendation, model_to_dict
+from shared.repo_context.repo_utils import (
     int_env,
     read_repo_code,
     read_repo_files_as_dict,
@@ -99,7 +99,7 @@ def test_failure_class_tag_and_log(caplog) -> None:
 
 
 # ---------------------------------------------------------------------------
-# shared_dev_models
+# shared.dev_models
 # ---------------------------------------------------------------------------
 
 
@@ -156,7 +156,7 @@ def test_model_to_dict_variants() -> None:
 
 
 # ---------------------------------------------------------------------------
-# shared_repo_context
+# shared.repo_context
 # ---------------------------------------------------------------------------
 
 

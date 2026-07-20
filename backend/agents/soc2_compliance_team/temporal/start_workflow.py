@@ -1,7 +1,7 @@
 """Start the SOC2 Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
-bridge). We deliberately do NOT use ``shared_temporal.run_team_job``: it creates
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
+bridge). We deliberately do NOT use ``shared.temporal.run_team_job``: it creates
 its own job row and sets ``status=running`` itself, which would collide with the
 API's ``create_job`` and the activity-owned RUNNING/COMPLETED bookkeeping.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 from soc2_compliance_team.temporal import (
     WORKFLOW_ID_PREFIX,
     Soc2AuditWorkflow,

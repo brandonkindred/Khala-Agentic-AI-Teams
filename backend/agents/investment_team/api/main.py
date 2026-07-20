@@ -134,8 +134,8 @@ from investment_team.strategy_lab_context import (
     normalize_allowed_asset_classes,
 )
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
-from shared_app import create_team_app
-from shared_concurrency import parallel_map
+from shared.app import create_team_app
+from shared.concurrency import parallel_map
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1748,7 +1748,7 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
           is logged. Never raises.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         return False
     if not is_temporal_enabled():
@@ -1936,8 +1936,8 @@ def _require_temporal() -> None:
         ``HTTPException(503)``.
     """
     try:
-        from shared_temporal import is_temporal_enabled
-    except ImportError as exc:  # pragma: no cover - shared_temporal always present
+        from shared.temporal import is_temporal_enabled
+    except ImportError as exc:  # pragma: no cover - shared.temporal always present
         raise HTTPException(
             status_code=503, detail="Temporal support is unavailable for this endpoint."
         ) from exc
@@ -2001,7 +2001,7 @@ def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str
     except HTTPException:
         raise
     except RuntimeError as exc:
-        # ``shared_temporal._await_client`` raises a bare RuntimeError when
+        # ``shared.temporal._await_client`` raises a bare RuntimeError when
         # TEMPORAL_ADDRESS is set but the worker's client never became ready in
         # time — the same "no running worker" condition ``_require_temporal``
         # checks for up front, just discovered later. Map it to the same 503
@@ -3057,7 +3057,7 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
 async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     """SSE endpoint — async generator so it doesn't block Uvicorn worker threads."""
     from investment_team.api.job_event_bus import subscribe, unsubscribe
-    from shared_sse import sse_job_stream_async, sse_line
+    from shared.sse import sse_job_stream_async, sse_line
 
     with _lock:
         state = _active_runs.get(run_id)

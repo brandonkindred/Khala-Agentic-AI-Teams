@@ -3,7 +3,7 @@
 The settings UI (``PUT /api/llm-config`` in the unified API) writes provider /
 model / API keys into the ``encrypted_integration_credentials`` table under the
 ``llm_config`` service. Every team container reads them back through this module
-via ``shared_postgres.secrets`` — no dependency on ``unified_api``.
+via ``shared.postgres.secrets`` — no dependency on ``unified_api``.
 
 Reads are cached for a short TTL so a UI change propagates to all containers
 within the TTL without any cross-container signalling, while keeping the common
@@ -85,10 +85,10 @@ def _ttl_seconds() -> float:
 def _postgres_enabled() -> bool:
     """True when Postgres is configured. Lazy import so non-PG envs stay clean."""
     try:
-        from shared_postgres import is_postgres_enabled
+        from shared.postgres import is_postgres_enabled
 
         return is_postgres_enabled()
-    except Exception:  # noqa: BLE001 - shared_postgres optional at import time
+    except Exception:  # noqa: BLE001 - shared.postgres optional at import time
         return False
 
 
@@ -103,7 +103,7 @@ def _load_all() -> dict[str, str]:
     if not _postgres_enabled():
         return {}
     try:
-        from shared_postgres.secrets import get_secrets
+        from shared.postgres.secrets import get_secrets
     except Exception:  # noqa: BLE001 - defensive
         return {}
     try:

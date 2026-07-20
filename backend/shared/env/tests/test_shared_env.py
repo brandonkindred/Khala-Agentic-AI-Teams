@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from shared_env import env_flag_enabled, parse_float, parse_int
+from shared.env import env_flag_enabled, parse_float, parse_int
 
 # ---------------------------------------------------------------------------
 # env_flag_enabled

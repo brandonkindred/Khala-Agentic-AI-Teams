@@ -25,7 +25,7 @@ from concurrent import futures
 from itertools import islice
 from typing import Any
 
-from shared_env_config import env_float, env_int
+from shared.env_config import env_float, env_int
 from unified_api.bounded_executor import get_or_recreate_executor, submit_safely
 
 logger = logging.getLogger(__name__)

@@ -23,7 +23,7 @@ from job_service_client import (
     RESTARTABLE_STATUSES,
     validate_job_for_action,
 )
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from shared.observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 from ..models import (
     DeprovisionResponse,

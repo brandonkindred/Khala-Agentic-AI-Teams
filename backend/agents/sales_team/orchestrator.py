@@ -10,7 +10,7 @@ from functools import cached_property
 from typing import Callable, List, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 from .agents import (
     CloserAgent,

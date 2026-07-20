@@ -1,4 +1,4 @@
-# shared_observability
+# shared.observability
 
 Shared OpenTelemetry bootstrap for every Khala agent team. This module
 is the single source of truth for tracing, metrics, and log-trace
@@ -31,7 +31,7 @@ wrappers.
 ```python
 # my_team/api/main.py
 from fastapi import FastAPI
-from shared_observability import init_otel, instrument_fastapi_app
+from shared.observability import init_otel, instrument_fastapi_app
 
 init_otel(service_name="my-team", team_key="my_team")
 

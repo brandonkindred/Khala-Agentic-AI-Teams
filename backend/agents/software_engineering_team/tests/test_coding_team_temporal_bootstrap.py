@@ -51,10 +51,10 @@ def _restore_temporal_modules():
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("software_engineering_team.coding_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("software_engineering_team.coding_team.temporal")
         assert patched.call_count == 0, (
             f"Module-level start_team_worker bootstrap re-introduced "

@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from shared_concurrency.parallel_map import parallel_map
+from shared.concurrency.parallel_map import parallel_map
 
 
 def test_empty_input_returns_empty_without_executor() -> None:
@@ -330,7 +330,7 @@ def test_on_first_exception_hook_raising_does_not_mask_worker_error(caplog) -> N
     def fn(_x: int) -> int:
         raise _Worker("real failure")
 
-    with caplog.at_level(logging.ERROR, logger="shared_concurrency.parallel_map"):
+    with caplog.at_level(logging.ERROR, logger="shared.concurrency.parallel_map"):
         with pytest.raises(_Worker, match="real failure"):
             parallel_map([1], fn, max_workers=1, on_first_exception=hook)
 
@@ -346,11 +346,11 @@ def test_pool_is_shut_down_even_when_hook_raises_baseexception(monkeypatch) -> N
     propagates."""
     import sys
 
-    import shared_concurrency.parallel_map  # noqa: F401 — ensure the module is imported
+    import shared.concurrency.parallel_map  # noqa: F401 — ensure the module is imported
 
     # The package re-exports the ``parallel_map`` function under the same name as
     # the submodule, so reach the module object through sys.modules.
-    pm = sys.modules["shared_concurrency.parallel_map"]
+    pm = sys.modules["shared.concurrency.parallel_map"]
 
     shutdown_calls: list = []
     real_pool_cls = pm.ThreadPoolExecutor

@@ -220,9 +220,9 @@ def build_wrapper_body(
         "import logging\n"
         "_log = logging.getLogger('team_service')\n"
         "try:\n"
-        "    from shared_observability import init_otel, instrument_fastapi_app\n"
+        "    from shared.observability import init_otel, instrument_fastapi_app\n"
         "except Exception:\n"
-        "    _log.warning('shared_observability import failed', exc_info=True)\n"
+        "    _log.warning('shared.observability import failed', exc_info=True)\n"
         "    def init_otel(*_a, **_k):\n"
         "        return None\n"
         "    def instrument_fastapi_app(*_a, **_k):\n"
@@ -230,7 +230,7 @@ def build_wrapper_body(
         "try:\n"
         f"    init_otel(service_name={team_name!r}, team_key={team_name!r})\n"
         "except Exception:\n"
-        "    _log.warning('shared_observability init_otel failed', exc_info=True)\n"
+        "    _log.warning('shared.observability init_otel failed', exc_info=True)\n"
     )
 
     # Each worker is its own process. Under fork (uvicorn's default on Linux) the
@@ -241,7 +241,7 @@ def build_wrapper_body(
     # kill is logged before the worker vanishes and a native fault dumps a stack.
     body += (
         "try:\n"
-        "    from shared_observability import install_fault_diagnostics, start_memory_watchdog\n"
+        "    from shared.observability import install_fault_diagnostics, start_memory_watchdog\n"
         "    install_fault_diagnostics()\n"
         f"    start_memory_watchdog({team_name!r})\n"
         "except Exception:\n"
@@ -295,7 +295,7 @@ def build_wrapper_body(
         # database (the lifespan's registration doesn't run until uvicorn starts
         # serving, after this import-time block). Gating on TEMPORAL_ADDRESS keeps
         # thread/local mode side-effect-free: no worker start ⇒ no race ⇒ leave DDL
-        # to the lifespan, honoring shared_postgres's "DDL only from the lifespan"
+        # to the lifespan, honoring shared.postgres's "DDL only from the lifespan"
         # contract. The app was imported above, so its schemas are on
         # app.state.postgres_schemas (primary + any extras). register_team_schemas
         # is a no-op when POSTGRES_HOST is unset, and CREATE TABLE IF NOT EXISTS is
@@ -311,7 +311,7 @@ def build_wrapper_body(
             "        try:\n"
             "            _schemas = getattr(getattr(app, 'state', None), 'postgres_schemas', None) or ()\n"
             "            if _schemas:\n"
-            "                from shared_postgres import register_team_schemas as _rts\n"
+            "                from shared.postgres import register_team_schemas as _rts\n"
             "                for _schema in _schemas:\n"
             "                    try:\n"
             "                        if _rts(_schema):\n"
@@ -352,11 +352,11 @@ def _resolve_app() -> str:
     # Initialize OpenTelemetry *before* importing the team module so any
     # tracer/meter references captured at import time see the real providers.
     try:
-        from shared_observability import init_otel
+        from shared.observability import init_otel
 
         init_otel(service_name=TEAM_NAME, team_key=TEAM_NAME)
     except Exception:
-        logger.warning("shared_observability init_otel unavailable", exc_info=True)
+        logger.warning("shared.observability init_otel unavailable", exc_info=True)
 
     # Validate the team module can be imported (fail fast with a clear error).
     try:
@@ -416,7 +416,7 @@ if __name__ == "__main__":
     # Arm fault diagnostics in the supervisor process first; forked workers
     # inherit faulthandler, and the generated wrapper re-arms it per worker.
     try:
-        from shared_observability import install_fault_diagnostics
+        from shared.observability import install_fault_diagnostics
 
         install_fault_diagnostics(logger)
     except Exception:

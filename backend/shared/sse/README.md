@@ -1,4 +1,4 @@
-# shared_sse
+# shared.sse
 
 A single implementation of the **Server-Sent-Events streaming generator** used by
 per-job progress endpoints (`GET /…/{job_id}/stream`). Several teams had cloned
@@ -21,7 +21,7 @@ connection alive with comment pings until a deadline — and the copies drifted
 Both take the team-specific pieces as parameters:
 
 ```python
-from shared_sse import sse_job_stream_sync, sse_line
+from shared.sse import sse_job_stream_sync, sse_line
 
 return StreamingResponse(
     sse_job_stream_sync(
@@ -42,7 +42,7 @@ in each endpoint because it needs the team's state lookup; it reuses `sse_line`.
 
 The bus is consumed structurally via the `sub` handle returned by `subscribe`
 (`sub.events` deque, `sub.touch()`, `sub.notify`), so this module has **no import
-dependency** on `shared_job_event_bus`. Both stream functions call `sub.touch()`
+dependency** on `shared.job_event_bus`. Both stream functions call `sub.touch()`
 every pass so an event-bus reaper does not evict an actively-connected consumer.
 
 ## Current consumers

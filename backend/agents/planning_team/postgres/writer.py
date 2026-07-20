@@ -23,22 +23,22 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from shared_postgres import bounded_probe, get_conn, is_postgres_enabled, probe_cursor
+from shared.postgres import bounded_probe, get_conn, is_postgres_enabled, probe_cursor
 
 logger = logging.getLogger(__name__)
 
-# shared_postgres.get_conn()/pg_cursor() apply no statement_timeout by design (it
+# shared.postgres.get_conn()/pg_cursor() apply no statement_timeout by design (it
 # would cap legitimate long-running team queries), so the INSERT itself is bounded
 # via probe_cursor — otherwise a lock wait on the ON CONFLICT target row could
 # block the statement indefinitely. A fixed, modest bound rather than
-# shared_postgres.statement_timeout_ms(): that accessor's "0 disables it" default
+# shared.postgres.statement_timeout_ms(): that accessor's "0 disables it" default
 # would otherwise combine with probe_cursor's 1ms floor clamp to time this write
 # out on effectively every call once an operator disables the shared default.
 _AUDIT_WRITE_TIMEOUT_S = 5.0
 
 # probe_cursor only bounds the statement once a connection exists — a wedged pool
 # acquisition or a fully dead TCP socket (no server response at all) is outside its
-# reach (see shared_postgres.probe_cursor's own docstring). bounded_probe closes
+# reach (see shared.postgres.probe_cursor's own docstring). bounded_probe closes
 # that gap by running the whole acquire/write/cleanup operation in a detached
 # worker thread with a hard wall-clock budget, abandoning it (capped, so a
 # sustained outage can't grow unbounded threads) rather than ever blocking the
@@ -77,7 +77,7 @@ def record_planning_run(
           stalls (pool acquisition, connect, a wedged socket, or the statement
           itself) — when Postgres is disabled (``POSTGRES_HOST`` unset), the write
           fails for any operational reason, or the whole acquire/write/cleanup
-          operation is abandoned by ``shared_postgres.bounded_probe`` after
+          operation is abandoned by ``shared.postgres.bounded_probe`` after
           exceeding its budget; such a failure is logged at DEBUG or WARNING, never
           raised.
     Raises:
@@ -92,7 +92,7 @@ def record_planning_run(
     def _write() -> bool:
         try:
             with get_conn() as conn, probe_cursor(conn, timeout_s=_AUDIT_WRITE_TIMEOUT_S) as cur:
-                from shared_postgres import Json
+                from shared.postgres import Json
 
                 cur.execute(
                     "INSERT INTO planning_runs "

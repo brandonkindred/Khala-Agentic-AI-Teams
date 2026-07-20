@@ -50,8 +50,8 @@ from agent_cognition.postgres import SCHEMA
 from agent_cognition.rules import reflection
 from agent_cognition.rules import store as rules_store
 from llm_service.interface import LLMClient
-from shared_postgres import is_postgres_enabled, register_team_schemas
-from shared_postgres.testing import truncate_team_tables
+from shared.postgres import is_postgres_enabled, register_team_schemas
+from shared.postgres.testing import truncate_team_tables
 
 _UTC = timezone.utc
 

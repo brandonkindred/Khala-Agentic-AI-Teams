@@ -14,7 +14,7 @@ import httpx
 from fastapi import HTTPException, Response
 from pydantic import BaseModel, Field
 
-from shared_app import create_team_app
+from shared.app import create_team_app
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.orchestrator import run_workflow
 from user_agent_founder.postgres import SCHEMA as USER_AGENT_FOUNDER_POSTGRES_SCHEMA
@@ -195,7 +195,7 @@ def _dispatch_founder_run(run_id: str) -> str:
     if Temporal is enabled but the workflow fails to start.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
 
         if is_temporal_enabled():
             from user_agent_founder.temporal.start_workflow import start_founder_workflow
@@ -945,7 +945,7 @@ def cancel_job(job_id: str) -> dict[str, str]:
     # Thread mode has no workflow to signal — its poll loop observes the cancelled
     # job status directly — so this is Temporal-only and never fatal to the cancel.
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
 
         if is_temporal_enabled():
             from user_agent_founder.temporal.start_workflow import cancel_founder_workflow

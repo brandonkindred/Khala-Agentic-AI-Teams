@@ -2,7 +2,7 @@
 
 The synchronous route handlers call these helpers, which start the matching workflow
 and block for its result on the worker's event loop (via
-``shared_temporal.execute_workflow_sync``), then rebuild the Pydantic response the
+``shared.temporal.execute_workflow_sync``), then rebuild the Pydantic response the
 route returns. This is the single, forward Temporal dispatch path — there is no
 non-Temporal fallback.
 
@@ -39,7 +39,7 @@ from agent_studio.temporal import (
     SendMessageWorkflow,
     StartConversationWorkflow,
 )
-from shared_temporal import execute_workflow_sync
+from shared.temporal import execute_workflow_sync
 
 logger = logging.getLogger(__name__)
 

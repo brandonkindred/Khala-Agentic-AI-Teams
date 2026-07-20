@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from shared_postgres import pg_cursor
+from shared.postgres import pg_cursor
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def record_event(
         with pg_cursor() as cur:
             if cur is None:
                 return False
-            from shared_postgres import Json
+            from shared.postgres import Json
 
             # Normalize to an aware UTC timestamp: a naive datetime would be read
             # by Postgres in the session TimeZone, silently shifting DORA windows.

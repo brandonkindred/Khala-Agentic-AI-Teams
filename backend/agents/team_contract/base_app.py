@@ -87,15 +87,15 @@ def create_team_app(
     # Initialize OpenTelemetry providers before constructing the app so the
     # FastAPI instrumentor we install below sees fully-configured tracers.
     try:
-        from shared_observability import init_otel, instrument_fastapi_app
-    except Exception:  # pragma: no cover - shared_observability always ships with agents
+        from shared.observability import init_otel, instrument_fastapi_app
+    except Exception:  # pragma: no cover - shared.observability always ships with agents
         init_otel = None  # type: ignore[assignment]
         instrument_fastapi_app = None  # type: ignore[assignment]
     if init_otel is not None:
         try:
             init_otel(service_name=f"{name}-team", team_key=name)
         except Exception:
-            logger.warning("shared_observability init_otel failed for %s", name, exc_info=True)
+            logger.warning("shared.observability init_otel failed for %s", name, exc_info=True)
 
     app = FastAPI(
         title=f"Khala {name.replace('_', ' ').title()} Team",

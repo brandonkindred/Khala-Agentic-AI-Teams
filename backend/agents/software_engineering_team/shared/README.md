@@ -248,15 +248,15 @@ commit_changes(repo_path, "Add new API endpoint")
 merge_branch(repo_path, "feature/new-api", "main")
 ```
 
-## Command Runner (moved to `shared_command_runner`)
+## Command Runner (moved to `shared.command_runner`)
 
 The command runner now lives in the neutral top-level package
-`shared_command_runner` (see `backend/agents/shared_command_runner/`) so both the
+`shared.command_runner` (see `backend/shared/command_runner/`) so both the
 software-engineering team and the coding team can use it without importing each
 other. Safe shell command execution:
 
 ```python
-from shared_command_runner import run_command
+from shared.command_runner import run_command
 
 result = run_command(
     ["npm", "install"],
@@ -358,13 +358,13 @@ from shared.coding_standards import (
 config = get_linting_config("python")
 ```
 
-## Error Parsing (moved to `shared_command_runner.error_parsing`)
+## Error Parsing (moved to `shared.command_runner.error_parsing`)
 
 Parses error messages from build/test output. Now part of the neutral
-`shared_command_runner` package (see `backend/agents/shared_command_runner/`):
+`shared.command_runner` package (see `backend/shared/command_runner/`):
 
 ```python
-from shared_command_runner import parse_command_failure
+from shared.command_runner import parse_command_failure
 
 failures = parse_command_failure("pytest", stdout, stderr)
 # Returns list of structured ParsedFailure objects with file, line, message

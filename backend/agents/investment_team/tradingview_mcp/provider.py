@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from shared_env_config import env_float
+from shared.env_config import env_float
 
 from .client import TradingViewMcpClient
 from .config import TradingViewMcpConfig, resolve_tradingview_mcp_config
@@ -19,7 +19,7 @@ def _resolve_timeout() -> float:
 
     Preconditions: none.
     Postconditions: returns ``TRADINGVIEW_MCP_TIMEOUT_SEC`` parsed via the shared
-        :func:`shared_env_config.env_float` (so unset/garbled → ``30.0``); a **non-positive**
+        :func:`shared.env_config.env_float` (so unset/garbled → ``30.0``); a **non-positive**
         value (``0``/negative) also falls back to ``30.0`` rather than becoming a
         near-zero timeout that would make every request time out immediately. Never raises.
     """

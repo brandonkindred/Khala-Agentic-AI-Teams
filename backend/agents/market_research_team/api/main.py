@@ -24,7 +24,7 @@ from market_research_team.shared.job_store import (
     list_jobs,
     update_job,
 )
-from shared_app import create_team_app
+from shared.app import create_team_app
 
 logger = logging.getLogger(__name__)
 
@@ -133,14 +133,14 @@ def _dispatch_market_research_run(job_id: str, payload: RunMarketResearchRequest
           ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
           started as a durable ``MarketResearchWorkflow``; otherwise the
           legacy thread path runs unchanged.
-        - A missing ``shared_temporal`` (Temporal not installed) falls through
+        - A missing ``shared.temporal`` (Temporal not installed) falls through
           to the thread path; any *other* failure while starting the workflow
           (broken import in the team's own Temporal stack, or a client that
           never connected) propagates to the caller, which marks the job
           FAILED — a Temporal-enabled run is never silently downgraded.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         is_temporal_enabled = None
 

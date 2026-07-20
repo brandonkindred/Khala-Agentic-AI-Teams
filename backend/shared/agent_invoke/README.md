@@ -1,4 +1,4 @@
-# shared_agent_invoke
+# shared.agent_invoke
 
 FastAPI shim mounted inside the `khala-agent-sandbox` image. Exposes the
 single specialist agent loaded by the sandbox runtime to the Agent Console
@@ -14,7 +14,7 @@ middleware that restricts dispatch to the one agent id bound via
 ## Mount
 
 ```python
-from shared_agent_invoke import mount_invoke_shim
+from shared.agent_invoke import mount_invoke_shim
 
 app = FastAPI(...)
 mount_invoke_shim(app)
@@ -64,7 +64,7 @@ envelope with the error text.
 
 ```bash
 cd backend
-python3 -m pytest agents/shared_agent_invoke/tests/ --asyncio-mode=auto
+python3 -m pytest shared/agent_invoke/tests/ --asyncio-mode=auto
 ```
 
 ## Adding a new agent to the Runner

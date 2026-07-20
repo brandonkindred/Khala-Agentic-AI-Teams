@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from shared_git.git_utils import DEVELOPMENT_BRANCH, initialize_new_repo
+from shared.git.git_utils import DEVELOPMENT_BRANCH, initialize_new_repo
 from software_engineering_team.coding_team.worktree_manager import (
     WorktreeManager,
     WorktreePrepareError,

@@ -19,7 +19,7 @@ import time
 from functools import wraps
 from typing import Any, Callable, TypeVar
 
-logger = logging.getLogger("shared_postgres.metrics")
+logger = logging.getLogger("shared.postgres.metrics")
 
 F = TypeVar("F", bound=Callable[..., Any])
 

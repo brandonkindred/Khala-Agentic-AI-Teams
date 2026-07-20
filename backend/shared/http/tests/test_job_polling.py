@@ -1,4 +1,4 @@
-"""Tests for shared_http.job_polling."""
+"""Tests for shared.http.job_polling."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from shared_http import close_pool
-from shared_http.job_polling import (
+from shared.http import close_pool
+from shared.http.job_polling import (
     DEFAULT_TERMINAL_STATUSES,
     get_json,
     poll_until_terminal,
@@ -48,7 +48,7 @@ def _mock_client(response=None, raise_for_status_error=None, request_error=None,
 
 def test_post_json_returns_parsed_body_on_success():
     client = _mock_client(response={"job_id": "abc"})
-    with patch("shared_http.job_polling.get_pooled_client", return_value=client):
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
         out = post_json("http://x/run", {"a": 1})
     assert out == {"job_id": "abc"}
     client.post.assert_called_once_with("http://x/run", json={"a": 1})
@@ -57,19 +57,19 @@ def test_post_json_returns_parsed_body_on_success():
 def test_post_json_returns_none_on_http_status_error():
     error = httpx.HTTPStatusError("boom", request=MagicMock(), response=MagicMock())
     client = _mock_client(raise_for_status_error=error)
-    with patch("shared_http.job_polling.get_pooled_client", return_value=client):
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
         assert post_json("http://x/run", {}) is None
 
 
 def test_post_json_returns_none_on_transport_error():
     client = _mock_client(request_error=httpx.ConnectError("refused"))
-    with patch("shared_http.job_polling.get_pooled_client", return_value=client):
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
         assert post_json("http://x/run", {}) is None
 
 
 def test_post_json_returns_none_on_json_parse_error():
     client = _mock_client(json_error=ValueError("not json"))
-    with patch("shared_http.job_polling.get_pooled_client", return_value=client):
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
         assert post_json("http://x/run", {}) is None
 
 
@@ -83,7 +83,7 @@ def test_post_json_rejects_empty_url():
 
 def test_get_json_returns_parsed_body_on_success():
     client = _mock_client(response={"status": "running"})
-    with patch("shared_http.job_polling.get_pooled_client", return_value=client):
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
         out = get_json("http://x/status/1")
     assert out == {"status": "running"}
     client.get.assert_called_once_with("http://x/status/1")
@@ -92,13 +92,13 @@ def test_get_json_returns_parsed_body_on_success():
 def test_get_json_returns_none_on_http_status_error():
     error = httpx.HTTPStatusError("boom", request=MagicMock(), response=MagicMock())
     client = _mock_client(raise_for_status_error=error)
-    with patch("shared_http.job_polling.get_pooled_client", return_value=client):
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
         assert get_json("http://x/status/1") is None
 
 
 def test_get_json_returns_none_on_transport_error():
     client = _mock_client(request_error=httpx.ConnectError("refused"))
-    with patch("shared_http.job_polling.get_pooled_client", return_value=client):
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
         assert get_json("http://x/status/1") is None
 
 
@@ -112,7 +112,7 @@ def test_get_json_rejects_empty_url():
 
 def test_poll_terminal_immediately_no_sleep(monkeypatch):
     monkeypatch.setattr(
-        "shared_http.job_polling.time.sleep",
+        "shared.http.job_polling.time.sleep",
         lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
     )
     result = poll_until_terminal(lambda: {"status": "completed", "x": 1})
@@ -120,14 +120,14 @@ def test_poll_terminal_immediately_no_sleep(monkeypatch):
 
 
 def test_poll_terminal_after_n_polls(monkeypatch):
-    monkeypatch.setattr("shared_http.job_polling.time.sleep", lambda *_: None)
+    monkeypatch.setattr("shared.http.job_polling.time.sleep", lambda *_: None)
     statuses = iter([{"status": "running"}, {"status": "running"}, {"status": "completed"}])
     result = poll_until_terminal(lambda: next(statuses), poll_interval=0.01, total_timeout=10)
     assert result == {"status": "completed"}
 
 
 def test_poll_invokes_on_poll_for_each_non_terminal_status(monkeypatch):
-    monkeypatch.setattr("shared_http.job_polling.time.sleep", lambda *_: None)
+    monkeypatch.setattr("shared.http.job_polling.time.sleep", lambda *_: None)
     seen = []
     statuses = iter(
         [{"status": "running", "n": 1}, {"status": "running", "n": 2}, {"status": "completed"}]
@@ -150,7 +150,7 @@ def test_poll_times_out():
 
 def test_poll_short_circuits_on_status_fn_none(monkeypatch):
     monkeypatch.setattr(
-        "shared_http.job_polling.time.sleep",
+        "shared.http.job_polling.time.sleep",
         lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
     )
     calls = {"n": 0}

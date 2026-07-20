@@ -47,7 +47,7 @@ def _build_service() -> AgentStudioService:
           ``is_postgres_enabled()`` and the psycopg dependency is importable.
     """
     try:
-        from shared_postgres import is_postgres_enabled
+        from shared.postgres import is_postgres_enabled
 
         if is_postgres_enabled():
             from agent_studio.pg_store import PostgresAgentStudioConversationStore

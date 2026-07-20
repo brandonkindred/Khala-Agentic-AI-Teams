@@ -1,13 +1,13 @@
 """Shared Postgres schema registration for team microservices.
 
-Mirrors ``shared_temporal`` in structure but uses **Pattern B**
+Mirrors ``shared.temporal`` in structure but uses **Pattern B**
 (explicit lifespan call) rather than Pattern A (import side effect),
 because schema DDL is synchronous blocking I/O. See the README for
 details.
 
 Typical usage in a team's ``api/main.py`` lifespan::
 
-    from shared_postgres import close_pool, register_team_schemas
+    from shared.postgres import close_pool, register_team_schemas
     from my_team.postgres import SCHEMA
 
     @asynccontextmanager
@@ -20,12 +20,12 @@ Typical usage in a team's ``api/main.py`` lifespan::
         close_pool()
 """
 
-from shared_postgres.aggregate import (
+from shared.postgres.aggregate import (
     build_merge_statement,
     merge_jsonb_returning,
     merge_jsonb_via_cursor,
 )
-from shared_postgres.client import (
+from shared.postgres.client import (
     StorageStatus,
     bounded_probe,
     check_connection,
@@ -40,11 +40,11 @@ from shared_postgres.client import (
     resolve_storage_status,
     statement_timeout_ms,
 )
-from shared_postgres.metrics import timed_query
-from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
-from shared_postgres.runner import ensure_team_schema, register_team_schemas
-from shared_postgres.schema import TeamSchema
-from shared_postgres.secrets import (
+from shared.postgres.metrics import timed_query
+from shared.postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
+from shared.postgres.runner import ensure_team_schema, register_team_schemas
+from shared.postgres.schema import TeamSchema
+from shared.postgres.secrets import (
     delete_secret,
     get_fernet,
     get_secret,
@@ -58,7 +58,7 @@ from shared_postgres.secrets import (
 def _import_json_adapter():
     """Lazy re-export of ``psycopg.types.json.Json``.
 
-    Imported at call sites as ``from shared_postgres import Json`` so
+    Imported at call sites as ``from shared.postgres import Json`` so
     stores that insert dicts into JSONB columns don't have to learn the
     psycopg submodule path. Lazy so importing this package still works
     when ``psycopg`` isn't installed (e.g. linter runs, docs builds).

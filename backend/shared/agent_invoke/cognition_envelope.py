@@ -3,7 +3,7 @@
 The sandbox shim must unwrap a cognition-wrapped request, expose the cognition
 side channel, and — when the agent returns a :class:`ToolLoopPlan` — **drive the
 brokered tool loop itself** so the trusted audit never passes through
-agent-reachable state. But ``shared_agent_invoke`` is a thin boundary component
+agent-reachable state. But ``shared.agent_invoke`` is a thin boundary component
 that should *not* hard-depend on ``agent_cognition`` (an image without cognition
 still runs agents), so every touchpoint here imports it **lazily** and degrades
 to a pass-through when it is absent.

@@ -75,11 +75,11 @@ def _http_client() -> "httpx.Client":
     Preconditions:
         - None.
     Postconditions:
-        - Returns the shared, connection-pooled client from ``shared_http``
+        - Returns the shared, connection-pooled client from ``shared.http``
           (already thread-safe, env-tunable keepalive, atexit-registered
           teardown) — never constructs a private client for this team.
     """
-    from shared_http import get_pooled_client
+    from shared.http import get_pooled_client
 
     return get_pooled_client()
 
@@ -100,7 +100,7 @@ def _beating(extra_beat: Callable[[], None] | None = None) -> Any:
         - Returns an unstarted ``BackgroundHeartbeat`` context manager; entering
           it starts the daemon beater, exiting stops and joins it.
     """
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     def _beat() -> None:
         activity.heartbeat()

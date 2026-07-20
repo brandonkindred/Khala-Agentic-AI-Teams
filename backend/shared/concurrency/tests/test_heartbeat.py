@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from shared_concurrency.heartbeat import BackgroundHeartbeat
+from shared.concurrency.heartbeat import BackgroundHeartbeat
 
 
 def test_beats_until_stopped() -> None:

@@ -28,10 +28,10 @@ def _purge(prefix: str) -> None:
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("personal_assistant_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("personal_assistant_team.temporal")
         importlib.import_module("personal_assistant_team.temporal.workflows")
         importlib.import_module("personal_assistant_team.temporal.start_workflow")
@@ -197,7 +197,7 @@ def test_registered_in_shared_registry():
     — no split-brain risk. PA's primary boot path remains its own
     docker-compose hook; this registry entry just makes ``start_all_team_workers``
     safe to also call for PA (idempotent per team name)."""
-    from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES
+    from shared.temporal.teams_registry import TEAM_TEMPORAL_MODULES
 
     assert TEAM_TEMPORAL_MODULES["personal_assistant"] == "personal_assistant_team.temporal"
 
@@ -206,7 +206,7 @@ def test_shared_registry_derives_pa_task_queue_from_module_export(monkeypatch):
     """``start_all_team_workers`` must use PA's own ``TASK_QUEUE`` ("personal-assistant"),
     not the generic ``f"{team}-queue"`` convention, or the worker it starts would poll
     a queue nothing dispatches to."""
-    from shared_temporal import teams_registry
+    from shared.temporal import teams_registry
 
     captured: dict = {}
 
@@ -228,7 +228,7 @@ def test_shared_registry_derives_pa_max_concurrent_activities_from_module_export
     # silently fall back to start_team_worker's default of 4 — since
     # start_team_worker is idempotent per team and whichever caller starts
     # the worker first wins for the whole process.
-    from shared_temporal import teams_registry
+    from shared.temporal import teams_registry
 
     captured: dict = {}
 

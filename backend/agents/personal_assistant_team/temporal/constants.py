@@ -16,7 +16,7 @@ them during workflow registration — a top-level ``os.getenv`` here would trip 
 sandbox. (Dropping the ``TEMPORAL_TASK_QUEUE_PA`` override is safe: docker-compose
 never set it, so the effective queue is unchanged.)
 
-The team IS registered in ``shared_temporal.teams_registry.TEAM_TEMPORAL_MODULES``:
+The team IS registered in ``shared.temporal.teams_registry.TEAM_TEMPORAL_MODULES``:
 ``start_all_team_workers`` reads this module's own ``TASK_QUEUE`` export (falling
 back to ``f"{team}-queue"`` only when a team doesn't define one), so it correctly
 polls ``"personal-assistant"`` rather than deriving a mismatched queue name. PA's

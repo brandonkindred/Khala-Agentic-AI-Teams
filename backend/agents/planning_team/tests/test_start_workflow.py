@@ -1,11 +1,11 @@
 """Unit tests for the Planning start-workflow dispatcher.
 
 ``start_planning_workflow`` is now a thin wrapper over the shared sync→async
-bridge (``shared_temporal.start_workflow_sync``): it forwards ``PlanningWorkflow.run``
+bridge (``shared.temporal.start_workflow_sync``): it forwards ``PlanningWorkflow.run``
 with the positional workflow args, the ``planning-<job_id>`` workflow id, and the
 Planning task queue, after enforcing its blank-input preconditions. The bridge's
 own client-ready wait / ``run_coroutine_threadsafe`` behavior is covered by
-``shared_temporal``'s tests.
+``shared.temporal``'s tests.
 """
 
 import sys

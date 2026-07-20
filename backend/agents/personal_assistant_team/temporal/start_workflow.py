@@ -1,7 +1,7 @@
 """Start the personal-assistant Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared
-sync->async bridge). We deliberately do NOT use ``shared_temporal.run_team_job``
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared
+sync->async bridge). We deliberately do NOT use ``shared.temporal.run_team_job``
 here: it would create its own job row under the ``personal_assistant`` team
 slug and set ``status=running`` itself, colliding with the API's ``create_job``
 (namespaced under ``personal_assistant_team``) and the activity-owned
@@ -18,7 +18,7 @@ from personal_assistant_team.temporal import (
     WORKFLOW_ID_PREFIX_ASSISTANT,
     PaAssistantWorkflow,
 )
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

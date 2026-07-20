@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from agent_cognition.runtime_config import read_positive_int
-from shared_neo4j import get_graphiti, is_neo4j_enabled, timed_graph_op
+from shared.neo4j import get_graphiti, is_neo4j_enabled, timed_graph_op
 
 logger = logging.getLogger(__name__)
 

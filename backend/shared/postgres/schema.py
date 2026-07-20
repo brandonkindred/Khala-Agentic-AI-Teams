@@ -6,7 +6,7 @@ must be pure data: importing it should have **no side effects** (no
 connection attempts, no DDL execution). DDL runs only when a FastAPI
 lifespan explicitly calls ``register_team_schemas(SCHEMA)``.
 
-This is the main contrast with ``shared_temporal``'s Pattern A, which
+This is the main contrast with ``shared.temporal``'s Pattern A, which
 launches a daemon worker thread as an import side effect. Schema DDL is
 synchronous blocking I/O and must not fire from a unit test or linter
 import.
@@ -34,7 +34,7 @@ class TeamSchema:
             Statements run in order, each in its own transaction, so a
             failure in one doesn't abort the rest.
         table_names: Explicit list of tables the team owns. Used by
-            ``shared_postgres.testing.truncate_team_tables`` to wipe
+            ``shared.postgres.testing.truncate_team_tables`` to wipe
             state between tests. Kept as an explicit declaration
             instead of regex-parsing ``statements`` so there is no
             ambiguity around comments, whitespace, or unusual DDL.

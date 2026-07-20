@@ -1,4 +1,4 @@
-"""Unit tests for shared_observability.process_health.
+"""Unit tests for shared.observability.process_health.
 
 These cover the diagnostics that turn a silent worker death into a debuggable
 event: defensive env parsing, RSS / cgroup-limit reads, the memory-pressure
@@ -16,7 +16,7 @@ import types
 
 import pytest
 
-from shared_observability import process_health as ph
+from shared.observability import process_health as ph
 
 # --------------------------------------------------------------------- env parsing
 
@@ -535,7 +535,7 @@ def test_start_memory_watchdog_requires_team() -> None:
 def test_watchdog_dataclass_is_reexported_from_package() -> None:
     """``Watchdog`` is the public return type of start_memory_watchdog, so it is
     importable from the package without reaching into the private submodule."""
-    from shared_observability import Watchdog as ExportedWatchdog
+    from shared.observability import Watchdog as ExportedWatchdog
 
     assert ExportedWatchdog is ph.Watchdog
 

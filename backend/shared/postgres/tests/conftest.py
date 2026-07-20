@@ -1,7 +1,7 @@
-"""Test harness for ``shared_postgres``.
+"""Test harness for ``shared.postgres``.
 
 Adds the ``backend/agents`` directory to ``sys.path`` so tests can
-import ``shared_postgres`` without relying on a project install, and
+import ``shared.postgres`` without relying on a project install, and
 provides a session-scoped fixture that applies every team's schema
 exactly once against the configured Postgres (used by tests marked
 with ``@pytest.mark.integration``).
@@ -35,7 +35,7 @@ def live_postgres():
     if not os.environ.get("POSTGRES_HOST", "").strip():
         pytest.skip("POSTGRES_HOST not set; skipping live Postgres fixture")
 
-    from shared_postgres import close_pool, register_all_team_schemas
+    from shared.postgres import close_pool, register_all_team_schemas
 
     results = register_all_team_schemas()
     failed = [team for team, ok in results.items() if not ok]

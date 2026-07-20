@@ -209,7 +209,7 @@ def review_chunk_activity(
           propagates unchanged (fail closed) — the workflow's ``RetryPolicy`` then
           governs re-attempts.
     """
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     from ..chunk_reviewer import ChunkReviewAgent
     from ..mapping import _cached_review_chunk, _sibling_surface

@@ -1,7 +1,7 @@
-# shared_postgres
+# shared.postgres
 
 Shared Postgres schema registration for Khala agent teams. Sibling to
-`shared_temporal/`: each team declares its tables once, and the team's
+`shared.temporal/`: each team declares its tables once, and the team's
 FastAPI lifespan applies them at startup when `POSTGRES_HOST` is set.
 
 ## Why
@@ -14,7 +14,7 @@ Before this module, Postgres DDL lived in three places:
 
 SQLite-backed teams (branding, startup_advisor, user_agent_founder,
 team_assistant, agentic_team_provisioning, blogging) had no Postgres
-story at all. `shared_postgres` unifies all of this behind one pattern.
+story at all. `shared.postgres` unifies all of this behind one pattern.
 
 ## The pattern
 
@@ -23,7 +23,7 @@ story at all. `shared_postgres` unifies all of this behind one pattern.
 `backend/agents/<team>/postgres/__init__.py`:
 
 ```python
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="branding",
@@ -49,7 +49,7 @@ call, no connection attempts, no top-level side effects.
 ```python
 from contextlib import asynccontextmanager
 
-from shared_postgres import close_pool, register_team_schemas
+from shared.postgres import close_pool, register_team_schemas
 from branding_team.postgres import SCHEMA
 
 @asynccontextmanager
@@ -70,7 +70,7 @@ local dev runs without Postgres keep working.
 
 ## Pattern A vs Pattern B
 
-`shared_temporal` uses **Pattern A** — `temporal/__init__.py` calls
+`shared.temporal` uses **Pattern A** — `temporal/__init__.py` calls
 `start_team_worker(...)` at module-import time, which launches a
 daemon thread. That works because:
 
@@ -78,7 +78,7 @@ daemon thread. That works because:
   never block the main flow.
 - Worker startup failures are caught inside the thread.
 
-`shared_postgres` uses **Pattern B** — the team exports only data,
+`shared.postgres` uses **Pattern B** — the team exports only data,
 and the lifespan calls `register_team_schemas` explicitly. This is
 required because:
 
@@ -119,7 +119,7 @@ rather than adding a second pool.
 ## API
 
 ```python
-from shared_postgres import (
+from shared.postgres import (
     TeamSchema,              # dataclass — the data contract
     is_postgres_enabled,     # bool gate
     register_team_schemas,   # no-op when disabled; else runs DDL
@@ -132,7 +132,7 @@ from shared_postgres import (
     dict_row,                # psycopg.rows.dict_row re-export for cursor(row_factory=...)
     timed_query,             # @timed_query decorator for store methods
 )
-from shared_postgres.testing import truncate_team_tables, truncate_all_teams
+from shared.postgres.testing import truncate_team_tables, truncate_all_teams
 ```
 
 ## `TeamSchema.table_names`
@@ -156,7 +156,7 @@ no fragile regex parsing of the DDL.
 Wrap store methods with `@timed_query(store="<team>")`. Example:
 
 ```python
-from shared_postgres import timed_query, get_conn
+from shared.postgres import timed_query, get_conn
 
 class BrandingStore:
     @timed_query(store="branding")
@@ -165,13 +165,13 @@ class BrandingStore:
             cur.execute(...)
 ```
 
-Logs go to the `shared_postgres.metrics` logger:
+Logs go to the `shared.postgres.metrics` logger:
 `store=branding op=save_client duration_ms=12 status=ok` at DEBUG, or
 `status=ok slow=true` at INFO for slow queries.
 
 ## Tests
 
-CI runs `shared_postgres/tests/` against a `postgres:18` service
+CI runs `shared/postgres/tests/` against a `postgres:18` service
 container; the job runs `register_all_team_schemas()` first to catch
 cross-team DDL conflicts before any per-team test. Local contributors
 run `docker compose -f docker/docker-compose.yml up -d postgres` and
@@ -191,7 +191,7 @@ migrations and test harnesses.
 
 ## See also
 
-- `backend/agents/shared_temporal/README.md` — sibling module for
+- `backend/shared/temporal/README.md` — sibling module for
   Temporal workflow registration.
 - `backend/job_service/db.py` — original `ensure_schema()` pattern this
   module generalizes.

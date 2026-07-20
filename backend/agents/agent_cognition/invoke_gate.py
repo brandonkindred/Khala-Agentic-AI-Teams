@@ -106,7 +106,7 @@ from agent_cognition.models import (
 )
 from agent_cognition.runtime_config import read_int_with_floor
 from agent_cognition.tools.envelope import wrap_request
-from shared_postgres import is_postgres_enabled
+from shared.postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -1076,7 +1076,7 @@ def _jsonable(value: Any) -> Any:
     Pydantic models (top-level or nested) are dumped to dicts — NOT stringified
     — so a team runner returning a ``BaseModel`` keeps a structured ``output``
     that the postcondition gate and the stored replay envelope can read. A
-    near-duplicate lives in ``shared_agent_invoke.shim``; it cannot be imported
+    near-duplicate lives in ``shared.agent_invoke.shim``; it cannot be imported
     here because that package depends (lazily) on this one — the shapes are
     kept behaviourally aligned instead.
     """

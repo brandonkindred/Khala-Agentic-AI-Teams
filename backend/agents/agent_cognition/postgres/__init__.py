@@ -1,7 +1,7 @@
 """Postgres schema for the Agent Cognition Core.
 
 Pure data module — importing it has no side effects. DDL runs when the
-unified API lifespan calls ``shared_postgres.register_team_schemas(SCHEMA)``.
+unified API lifespan calls ``shared.postgres.register_team_schemas(SCHEMA)``.
 
 The five tables form the durable substrate for the cognition epic:
 
@@ -18,7 +18,7 @@ the events idempotency triple, the summary period key, and the runs PK.
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA: TeamSchema = TeamSchema(
     team="agent_cognition",

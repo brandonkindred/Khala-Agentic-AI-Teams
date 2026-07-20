@@ -37,7 +37,7 @@ Facts this ADR reasons from (confirmed in the current codebase):
   `_GEN_ENTRYPOINT` constant in `agent_studio/registration.py`). That entrypoint's own docstring
   states plainly that invoke "runs through the shared generated-agent entrypoint regardless — runtime
   binding of the authored schema is the separate deferred follow-up." The dispatch call site
-  (`shared_agent_invoke/shim.py`) resolves the manifest before invoking but only forwards `body` to
+  (`shared.agent_invoke/shim.py`) resolves the manifest before invoking but only forwards `body` to
   `invoke_entrypoint(entrypoint, body)` — manifest identity is dropped at that one call, not lost
   system-wide. A **different** class of registry agent — hand-authored specialists with a genuinely
   custom `source.entrypoint` (e.g. `blogging.planner`) — has no such indirection: their advertised
@@ -144,7 +144,7 @@ entrypoint:
   `jsonschema.Draft202012Validator` (condition 3 above guarantees this validates, never coerces) → on
   success, dispatch through the **existing sandboxed invoke surface** (`POST /api/agents/{agent_id}/
   invoke`, `backend/unified_api/routes/agents.py`) rather than calling
-  `shared_agent_invoke/dispatch.py:invoke_entrypoint` directly — see "Preserve the registry invoke
+  `shared.agent_invoke/dispatch.py:invoke_entrypoint` directly — see "Preserve the registry invoke
   boundary" below — poll through any `202` warming response (see below) until a terminal reply arrives,
   then **unwrap the sandbox envelope's `output` key** (the route's success body is
   `{"output": <entrypoint's real return value>, "duration_ms", "trace_id", "logs_tail", ...}` — the
@@ -178,8 +178,8 @@ uses today.
   relies on to detect `WAIT` steps.
 
 **Preserve the registry invoke boundary.** The typed branch must not call
-`shared_agent_invoke/dispatch.py:invoke_entrypoint` directly in-process. That primitive is the sandbox
-shim's internal dispatch call (`shared_agent_invoke/README.md`: "the shim does not run inside production
+`shared.agent_invoke/dispatch.py:invoke_entrypoint` directly in-process. That primitive is the sandbox
+shim's internal dispatch call (`shared.agent_invoke/README.md`: "the shim does not run inside production
 team services; it lives only inside the sandbox container") and carries no guardrail logic of its own —
 the `requires-live-integration` 409 gate and the ephemeral-sandbox-acquire lifecycle live solely in the
 HTTP route layer (`backend/unified_api/routes/agents.py`), which is mounted directly on the **Unified
@@ -214,7 +214,7 @@ runtime-binding caveat (the `typed_io` opt-in half is a separate, backward-compa
 Decision). A
 custom-entrypoint manifest's advertised schema is exactly what its entrypoint code was written
 against, so validation can happen entirely at the DAG/dispatch boundary (§2) with **no change** to
-`shared_agent_invoke/dispatch.py`'s `invoke_entrypoint(entrypoint, body)` calling convention.
+`shared.agent_invoke/dispatch.py`'s `invoke_entrypoint(entrypoint, body)` calling convention.
 
 This converts the caveat from a blocking prerequisite into a scoped-out revisit trigger: **if/when
 Studio-authored (shared-entrypoint) agents need typed DAG execution, the binding-caveat fix — giving
@@ -283,7 +283,7 @@ ADR-007's `test_adapter_agentic_team_contract_drift.py`) should assert these sha
   request** (`agentic_team_provisioning` is a separately-proxied team, not `in_process`, so this is a
   network call using the same base-URL/client pattern as the existing
   `planning_team/adapters/market_research.py` cross-team call — not a same-process function call); never
-  `shared_agent_invoke/dispatch.py:invoke_entrypoint` directly (see "Preserve the registry invoke
+  `shared.agent_invoke/dispatch.py:invoke_entrypoint` directly (see "Preserve the registry invoke
   boundary" in §2). Three response classes, handled distinctly: `200` (success envelope —
   `{"output": ..., "duration_ms": ..., "trace_id": ..., "logs_tail": ..., ...}`; unwrap `output` before
   validating against the resolved `outputs` schema), `202` (sandbox warming, `Retry-After` header — not

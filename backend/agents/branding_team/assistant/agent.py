@@ -19,7 +19,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from branding_team.models import BrandingMission, ColorPalette
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 from .prompts import (
     EXTRACTION_SYSTEM_PROMPT,

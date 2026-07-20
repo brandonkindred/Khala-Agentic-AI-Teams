@@ -6,7 +6,7 @@ Registered from the team's FastAPI lifespan. Tables are prefixed with
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="agentic_team_provisioning",

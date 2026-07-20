@@ -66,7 +66,7 @@ def test_product_analysis_wait_invokes_answer_callback():
             "planning_team.adapters.product_analysis.submit_product_analysis_answers",
             side_effect=_submit,
         ):
-            with patch("shared_http.job_polling.time.sleep", return_value=None):
+            with patch("shared.http.job_polling.time.sleep", return_value=None):
                 out = wait_for_product_analysis_completion(
                     "pa-123", answer_callback=_answer_callback
                 )
@@ -261,6 +261,6 @@ def test_ai_systems_wait_for_completion_delegates_to_poll():
         "planning_team.adapters.ai_systems.get_ai_systems_build_status",
         return_value={"status": "completed", "blueprint": {"name": "agent-x"}},
     ):
-        with patch("shared_http.job_polling.time.sleep", return_value=None):
+        with patch("shared.http.job_polling.time.sleep", return_value=None):
             out = wait_for_ai_systems_build_completion("build-789")
     assert out == {"status": "completed", "blueprint": {"name": "agent-x"}}

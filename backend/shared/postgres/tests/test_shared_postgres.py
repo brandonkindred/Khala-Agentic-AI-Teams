@@ -1,4 +1,4 @@
-"""Tests for shared_postgres — all mocked, no live Postgres required."""
+"""Tests for shared.postgres — all mocked, no live Postgres required."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from shared_postgres import (
+from shared.postgres import (
     TEAM_POSTGRES_MODULES,
     TeamSchema,
     close_pool,
@@ -16,9 +16,9 @@ from shared_postgres import (
     register_all_team_schemas,
     register_team_schemas,
 )
-from shared_postgres import client as client_mod
-from shared_postgres import registry as registry_mod
-from shared_postgres import runner as runner_mod
+from shared.postgres import client as client_mod
+from shared.postgres import registry as registry_mod
+from shared.postgres import runner as runner_mod
 
 # ---------------------------------------------------------------------------
 # Env-var gating
@@ -620,7 +620,7 @@ def test_get_conn_rolls_back_on_error(monkeypatch):
 
 def test_pg_cursor_yields_none_when_disabled(monkeypatch):
     monkeypatch.delenv("POSTGRES_HOST", raising=False)
-    from shared_postgres import pg_cursor
+    from shared.postgres import pg_cursor
 
     with pg_cursor() as cur:
         assert cur is None  # disabled → no connection opened
@@ -628,7 +628,7 @@ def test_pg_cursor_yields_none_when_disabled(monkeypatch):
 
 def test_pg_cursor_yields_cursor_and_commits_when_enabled(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres import pg_cursor
+    from shared.postgres import pg_cursor
 
     fake = _FakePool()
     monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
@@ -643,7 +643,7 @@ def test_pg_cursor_yields_cursor_and_commits_when_enabled(monkeypatch):
 
 def test_pg_cursor_rolls_back_on_error(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres import pg_cursor
+    from shared.postgres import pg_cursor
 
     fake = _FakePool()
     monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
@@ -693,7 +693,7 @@ def test_team_schema_table_names_default():
 
 def test_truncate_team_tables_noop_on_empty_list(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres.testing import truncate_team_tables
 
     schema = TeamSchema(team="demo", statements=[], table_names=[])
     assert truncate_team_tables(schema) == 0
@@ -701,7 +701,7 @@ def test_truncate_team_tables_noop_on_empty_list(monkeypatch):
 
 def test_truncate_team_tables_issues_truncate(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres import testing as testing_mod
+    from shared.postgres import testing as testing_mod
 
     executed: list[str] = []
 
@@ -732,7 +732,7 @@ def test_truncate_team_tables_issues_truncate(monkeypatch):
 
 def test_truncate_team_tables_raises_when_disabled(monkeypatch):
     monkeypatch.delenv("POSTGRES_HOST", raising=False)
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres.testing import truncate_team_tables
 
     schema = TeamSchema(team="demo", table_names=["demo_a"])
     with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
@@ -741,7 +741,7 @@ def test_truncate_team_tables_raises_when_disabled(monkeypatch):
 
 def test_truncate_team_tables_rejects_quote_in_name(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres.testing import truncate_team_tables
 
     schema = TeamSchema(team="demo", table_names=['bad"name'])
     with pytest.raises(ValueError, match="double-quote"):
@@ -755,7 +755,7 @@ def test_truncate_team_tables_rejects_quote_in_name(monkeypatch):
 
 def test_drop_team_tables_noop_on_empty_list(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres.testing import drop_team_tables
+    from shared.postgres.testing import drop_team_tables
 
     schema = TeamSchema(team="demo", statements=[], table_names=[])
     assert drop_team_tables(schema) == 0
@@ -763,7 +763,7 @@ def test_drop_team_tables_noop_on_empty_list(monkeypatch):
 
 def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres import testing as testing_mod
+    from shared.postgres import testing as testing_mod
 
     executed: list[str] = []
 
@@ -789,7 +789,7 @@ def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
 
 def test_drop_team_tables_raises_when_disabled(monkeypatch):
     monkeypatch.delenv("POSTGRES_HOST", raising=False)
-    from shared_postgres.testing import drop_team_tables
+    from shared.postgres.testing import drop_team_tables
 
     schema = TeamSchema(team="demo", table_names=["demo_a"])
     with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
@@ -798,7 +798,7 @@ def test_drop_team_tables_raises_when_disabled(monkeypatch):
 
 def test_drop_team_tables_rejects_quote_in_name(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    from shared_postgres.testing import drop_team_tables
+    from shared.postgres.testing import drop_team_tables
 
     schema = TeamSchema(team="demo", table_names=['bad"name'])
     with pytest.raises(ValueError, match="double-quote"):
@@ -811,21 +811,21 @@ def test_drop_team_tables_rejects_quote_in_name(monkeypatch):
 
 
 def test_timed_query_logs_debug_on_fast_call(caplog):
-    from shared_postgres.metrics import timed_query
+    from shared.postgres.metrics import timed_query
 
     @timed_query(store="demo")
     def fast(x):
         return x * 2
 
-    with caplog.at_level("DEBUG", logger="shared_postgres.metrics"):
+    with caplog.at_level("DEBUG", logger="shared.postgres.metrics"):
         assert fast(5) == 10
 
-    msgs = [rec.message for rec in caplog.records if rec.name == "shared_postgres.metrics"]
+    msgs = [rec.message for rec in caplog.records if rec.name == "shared.postgres.metrics"]
     assert any("store=demo op=fast" in m and "status=ok" in m for m in msgs)
 
 
 def test_timed_query_logs_info_on_slow_call(monkeypatch, caplog):
-    from shared_postgres.metrics import timed_query
+    from shared.postgres.metrics import timed_query
 
     # Force the threshold to 0 so any duration is "slow".
     monkeypatch.setenv("POSTGRES_SLOW_QUERY_MS", "0")
@@ -834,32 +834,32 @@ def test_timed_query_logs_info_on_slow_call(monkeypatch, caplog):
     def slow():
         return 42
 
-    with caplog.at_level("INFO", logger="shared_postgres.metrics"):
+    with caplog.at_level("INFO", logger="shared.postgres.metrics"):
         assert slow() == 42
 
     info_msgs = [
         rec.message
         for rec in caplog.records
-        if rec.name == "shared_postgres.metrics" and rec.levelname == "INFO"
+        if rec.name == "shared.postgres.metrics" and rec.levelname == "INFO"
     ]
     assert any("store=demo op=slow_op" in m and "slow=true" in m for m in info_msgs)
 
 
 def test_timed_query_re_raises_and_logs_error(caplog):
-    from shared_postgres.metrics import timed_query
+    from shared.postgres.metrics import timed_query
 
     @timed_query(store="demo")
     def boom():
         raise ValueError("nope")
 
-    with caplog.at_level("WARNING", logger="shared_postgres.metrics"):
+    with caplog.at_level("WARNING", logger="shared.postgres.metrics"):
         with pytest.raises(ValueError, match="nope"):
             boom()
 
     warn_msgs = [
         rec.message
         for rec in caplog.records
-        if rec.name == "shared_postgres.metrics" and rec.levelname == "WARNING"
+        if rec.name == "shared.postgres.metrics" and rec.levelname == "WARNING"
     ]
     assert any("status=error" in m and "ValueError" in m for m in warn_msgs)
 
@@ -879,9 +879,9 @@ def _psycopg_installed() -> bool:
 
 @pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
 def test_json_reexport_returns_psycopg_adapter():
-    import shared_postgres
+    import shared.postgres
 
-    Json = shared_postgres.Json
+    Json = shared.postgres.Json
     from psycopg.types.json import Json as PsycopgJson
 
     assert Json is PsycopgJson
@@ -889,19 +889,19 @@ def test_json_reexport_returns_psycopg_adapter():
 
 @pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
 def test_dict_row_reexport_returns_psycopg_factory():
-    import shared_postgres
+    import shared.postgres
 
-    dict_row = shared_postgres.dict_row
+    dict_row = shared.postgres.dict_row
     from psycopg.rows import dict_row as psycopg_dict_row
 
     assert dict_row is psycopg_dict_row
 
 
 def test_getattr_raises_on_unknown():
-    import shared_postgres
+    import shared.postgres
 
     with pytest.raises(AttributeError, match="no attribute"):
-        _ = shared_postgres.not_a_real_thing  # type: ignore[attr-defined]
+        _ = shared.postgres.not_a_real_thing  # type: ignore[attr-defined]
 
 
 @pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
@@ -915,7 +915,7 @@ def test_pg_cursor_dict_rows_requests_dict_row_factory(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
     from psycopg.rows import dict_row
 
-    from shared_postgres import pg_cursor
+    from shared.postgres import pg_cursor
 
     fake = _FakePool()
     monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)

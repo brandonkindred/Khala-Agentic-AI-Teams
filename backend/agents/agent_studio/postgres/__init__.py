@@ -1,7 +1,7 @@
 """Postgres schema for the Agent Studio authoring-conversation store.
 
 Pure data module — importing it has no side effects. DDL runs when the unified
-API lifespan calls ``shared_postgres.register_team_schemas(SCHEMA)``.
+API lifespan calls ``shared.postgres.register_team_schemas(SCHEMA)``.
 
 Backs the durable, cross-worker authoring conversation store (the in-memory store
 is retained for the Postgres-less local/dev path). A conversation's in-progress
@@ -12,7 +12,7 @@ serialization uses a ``SELECT … FOR UPDATE`` row lock on the conversation row.
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA: TeamSchema = TeamSchema(
     team="agent_studio",

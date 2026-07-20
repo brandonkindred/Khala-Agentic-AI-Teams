@@ -1,4 +1,4 @@
-"""Tests for shared_temporal.activity_utils.
+"""Tests for shared.temporal.activity_utils.
 
 These exercise the retry/cancellation helpers without a real Temporal server by
 patching the ``temporalio.activity`` context APIs.
@@ -10,7 +10,7 @@ import pytest
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import CancelledError
 
-from shared_temporal import activity_utils
+from shared.temporal import activity_utils
 
 
 def _fake_info(retry_policy, attempt):

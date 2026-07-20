@@ -122,7 +122,7 @@ store, so a completed run survives a worker restart and the API keeps polling
 | `market_research` | 1 h | 1 (submits an external research request) |
 | `document_production` / `sub_agent_provisioning` | 2 h (+ 5 min heartbeat) | 1 (writes files / submits external jobs) |
 
-The worker is registered via `shared_temporal.start_team_worker` (Pattern A:
+The worker is registered via `shared.temporal.start_team_worker` (Pattern A:
 `temporal/__init__.py` exports `WORKFLOWS`/`ACTIVITIES`) and started per uvicorn
 worker by the `team_service` entrypoint (`TEAM_TEMPORAL_WORKER_MODULE` /
 `TEAM_TEMPORAL_WORKER_FUNC`), with the API lifespan as a standalone-dev backstop.
@@ -171,7 +171,7 @@ planning_team/
 │   ├── __init__.py     # WORKFLOWS / ACTIVITIES (Pattern A export contract)
 │   ├── activities.py   # @activity.defn per phase (intake … finalize)
 │   ├── workflows.py    # PlanningWorkflow: phase state machine
-│   ├── worker.py       # start_planning_temporal_worker_thread (shared_temporal)
+│   ├── worker.py       # start_planning_temporal_worker_thread (shared.temporal)
 │   ├── start_workflow.py  # sync → workflow dispatch bridge
 │   ├── client.py
 │   └── constants.py    # TASK_QUEUE, WORKFLOW_ID_PREFIX

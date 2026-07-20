@@ -14,8 +14,8 @@ Exports:
 
 from __future__ import annotations
 
-from shared_concurrency.heartbeat import BackgroundHeartbeat
-from shared_concurrency.latest_value_flusher import LatestValueFlusher
-from shared_concurrency.parallel_map import parallel_map
+from shared.concurrency.heartbeat import BackgroundHeartbeat
+from shared.concurrency.latest_value_flusher import LatestValueFlusher
+from shared.concurrency.parallel_map import parallel_map
 
 __all__ = ["BackgroundHeartbeat", "LatestValueFlusher", "parallel_map"]

@@ -10,7 +10,7 @@ subscribe/unsubscribe, snapshot lookup, the set of terminal event types).
 
 The bus is consumed structurally via the ``sub`` handle returned by ``subscribe``
 (``sub.events`` deque, ``sub.touch()``, ``sub.notify`` event), so this module has
-no dependency on :mod:`shared_job_event_bus` itself.
+no dependency on :mod:`shared.job_event_bus` itself.
 
 Two entry points preserve each team's concurrency model:
 

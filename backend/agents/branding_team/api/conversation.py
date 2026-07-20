@@ -244,7 +244,7 @@ def _auto_create_brand_from_conversation(
 
     Note:
         The steps run as independent statements (each store call takes its own
-        ``shared_postgres`` connection), so this sequence is NOT atomic: if a
+        ``shared.postgres`` connection), so this sequence is NOT atomic: if a
         later step raises, the brand may already exist while the conversation
         link or first version is missing. Acceptable for the single-user
         assistant flow today; making it transactional requires cross-store

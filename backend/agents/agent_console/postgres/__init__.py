@@ -2,12 +2,12 @@
 
 Pure data module — importing it has no side effects. DDL runs when the
 unified API lifespan calls
-``shared_postgres.register_team_schemas(SCHEMA)``.
+``shared.postgres.register_team_schemas(SCHEMA)``.
 """
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA: TeamSchema = TeamSchema(
     team="agent_console",

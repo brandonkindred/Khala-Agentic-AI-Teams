@@ -41,7 +41,7 @@ WORKFLOW_ID_PREFIX = "soc2-audit-"
 # fan-out plus headroom for a concurrent job's load/report/mark-failed step.
 # Defined here (not just in ``temporal/worker.py``) so both the dedicated
 # ``start_soc2_temporal_worker_thread`` boot hook and the generic
-# ``shared_temporal.teams_registry.start_all_team_workers`` host apply the
+# ``shared.temporal.teams_registry.start_all_team_workers`` host apply the
 # same concurrency, instead of the registry silently falling back to the
 # shared default and reintroducing the queuing problem this constant exists
 # to avoid.

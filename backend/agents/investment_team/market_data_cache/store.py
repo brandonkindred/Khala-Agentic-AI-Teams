@@ -36,9 +36,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from shared_concurrency import parallel_map
-from shared_postgres import is_postgres_enabled
-from shared_postgres.client import get_conn
+from shared.concurrency import parallel_map
+from shared.postgres import is_postgres_enabled
+from shared.postgres.client import get_conn
 
 from ..market_data_service import OHLCVBar, compute_adv_from_bars
 from . import paths as _paths
@@ -454,7 +454,7 @@ class MarketDataCache:
     ) -> Optional[SnapshotMeta]:
         if is_postgres_enabled():
             try:
-                from shared_postgres import dict_row  # lazy: optional dep at unit-test time
+                from shared.postgres import dict_row  # lazy: optional dep at unit-test time
 
                 with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
                     cur.execute(

@@ -13,10 +13,10 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-# The HITL "pending question / answer" schemas live in the shared_hitl package so every
+# The HITL "pending question / answer" schemas live in the shared.hitl package so every
 # team shares one reconciled definition; re-exported here so existing importers (routes,
 # StatusResponse) keep using `coding_team.api.models`.
-from shared_hitl.models import (  # noqa: F401
+from shared.hitl.models import (  # noqa: F401
     AnswerSubmission,
     PendingQuestion,
     QuestionOption,

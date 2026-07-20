@@ -30,7 +30,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import Any, Literal, Optional, TypeVar
 
-from shared_env import parse_int
+from shared.env import parse_int
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ def _connect(database: Optional[str] = None):
         import psycopg
     except ImportError as e:
         raise RuntimeError(
-            "psycopg is not installed; install psycopg[binary] to use shared_postgres."
+            "psycopg is not installed; install psycopg[binary] to use shared.postgres."
         ) from e
     return psycopg.connect(dsn(database))
 
@@ -168,7 +168,7 @@ def _get_or_create_pool(database: Optional[str] = None):
             from psycopg_pool import ConnectionPool
         except ImportError as e:
             raise RuntimeError(
-                "psycopg_pool is not installed; install psycopg_pool to use shared_postgres."
+                "psycopg_pool is not installed; install psycopg_pool to use shared.postgres."
             ) from e
         min_size, max_size = _pool_sizes()
         pool = ConnectionPool(
@@ -176,11 +176,11 @@ def _get_or_create_pool(database: Optional[str] = None):
             min_size=min_size,
             max_size=max_size,
             open=True,
-            name=f"shared_postgres[{db}]",
+            name=f"shared.postgres[{db}]",
         )
         _pools[db] = pool
         logger.info(
-            "shared_postgres pool opened: database=%s min_size=%d max_size=%d",
+            "shared.postgres pool opened: database=%s min_size=%d max_size=%d",
             db,
             min_size,
             max_size,
@@ -563,6 +563,6 @@ def close_pool(database: Optional[str] = None) -> None:
                 continue
             try:
                 pool.close()
-                logger.info("shared_postgres pool closed: database=%s", db)
+                logger.info("shared.postgres pool closed: database=%s", db)
             except Exception as e:
-                logger.warning("shared_postgres pool close failed: database=%s error=%s", db, e)
+                logger.warning("shared.postgres pool close failed: database=%s error=%s", db, e)

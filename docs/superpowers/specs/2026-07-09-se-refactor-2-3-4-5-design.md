@@ -61,7 +61,7 @@ Medium. The divergent knobs must be preserved exactly (severity remap, source pr
 ### Problem
 - `write_microtask_output_or_fail` and every batch-fix cycle (execution.py:299/407/529/607) re-write the *entire* `microtask_files` dict via `write_files_and_commit` → `git add -A` (whole-tree stage). O(M·F·R) writes.
 - The v2 orchestrators' `_read_repo_code` (backend `orchestrator.py:83-95`, frontend `orchestrator.py:97-120`) calls `read_repo_code_budgeted` fresh on every `run_workflow` (one per task) — N full repo walks for N tasks — even though `coding_team/orchestrator.py:369-423` already maintains an incremental `_RepoContextCache` that the v2 worker discards at `v2_team_worker.py:375`.
-- `shared_repo_context/repo_utils.py:140-151` materializes the full `rglob("*")` walk into a `List[Path]` before the budgeted read loop.
+- `shared.repo_context/repo_utils.py:140-151` materializes the full `rglob("*")` walk into a `List[Path]` before the budgeted read loop.
 
 ### Approach (decision: safe wins only)
 Three behavior-preserving changes. `all_files` retention is unchanged (the orchestrator documentation phase feeds `exec_result.files` contents to the review LLM, and deliver re-writes files — both need contents; per decision we do not touch that contract).
@@ -77,7 +77,7 @@ Same files written, same commits, same `existing_code` string. Only the amount o
 
 ### Affected files
 - New: `software_engineering_team/shared/repo_context_cache.py`
-- Modified: `shared_repo_context/repo_utils.py`; both v2 `orchestrator.py` (`_read_repo_code`); `coding_team/v2_team_worker.py` (thread the cache instead of discarding).
+- Modified: `shared.repo_context/repo_utils.py`; both v2 `orchestrator.py` (`_read_repo_code`); `coding_team/v2_team_worker.py` (thread the cache instead of discarding).
 - Deferred (follow-up issue): part (a) — both v2 `phases/execution.py` write/commit sites and `shared/phases/deliver.py` moving to `commit_paths` do not ship in this PR.
 - Tests: streaming-walk test, repo-context-cache test.
 
@@ -97,8 +97,8 @@ Low–medium. `_RepoContextCache` already exists and is production-proven; this 
 **(a) Batched trace flusher.** New `software_engineering_team/shared/trace_flusher.py`:
 - Bounded in-memory buffer (`collections.deque`, cap `SE_TRACE_BUFFER_MAX`, default 1000; overflow drops oldest + logs at WARNING — bounded memory, never blocks the caller).
 - `_trace_observer` (registered exactly as today via `register_call_observer`) **enqueues** a copied record into the deque instead of INSERTing. No DB I/O on the call path.
-- A `BackgroundHeartbeat` (`shared_concurrency/heartbeat.py`, existing primitive) drains the deque on interval `SE_TRACE_FLUSH_INTERVAL_S` (default 2.0, mirrors `SE_COST_FLUSH_INTERVAL_S`) using `pg_cursor()` + `cur.executemany` with the existing 16-column INSERT. Failures swallowed + logged (never raise into the flusher thread).
-- `drain()` + `unregister()` called from `_se_shutdown()` (`api/lifecycle.py:35-46`), which runs **before** `close_pool()` (verified at `shared_app/factory.py:130-139`) — so the final flush can still use the pool.
+- A `BackgroundHeartbeat` (`shared.concurrency/heartbeat.py`, existing primitive) drains the deque on interval `SE_TRACE_FLUSH_INTERVAL_S` (default 2.0, mirrors `SE_COST_FLUSH_INTERVAL_S`) using `pg_cursor()` + `cur.executemany` with the existing 16-column INSERT. Failures swallowed + logged (never raise into the flusher thread).
+- `drain()` + `unregister()` called from `_se_shutdown()` (`api/lifecycle.py:35-46`), which runs **before** `close_pool()` (verified at `shared.app/factory.py:130-139`) — so the final flush can still use the pool.
 - Column order + positional params preserved exactly from `trace_store.py:55-78`. `write_trace` remains as a sync one-shot for any non-observer caller (e.g. tests, manual tools).
 
 This refactor is SE-scoped only (`software_engineering_team/shared` + `api/lifecycle.py`) — no shared `llm_service` changes, so no cross-team blast radius.

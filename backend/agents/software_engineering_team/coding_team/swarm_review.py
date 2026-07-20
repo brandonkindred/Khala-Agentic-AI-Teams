@@ -228,7 +228,7 @@ class _ReviewMixin:
         from software_engineering_team.coding_team import orchestrator as _orch
 
         try:
-            from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
+            from shared.git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
             branch = _orch._feature_branch_name(task)
             summary = task.changes_summary or "(no summary recorded)"
@@ -300,7 +300,7 @@ class _ReviewMixin:
             # round would burn the whole revision budget at max cost. Fail the task once instead.
             self._fail_task(task, review, "Tech Lead review could not be completed")
         elif review.get("approved"):
-            from shared_git.git_utils import DEVELOPMENT_BRANCH, merge_branch
+            from shared.git.git_utils import DEVELOPMENT_BRANCH, merge_branch
             from software_engineering_team.coding_team import orchestrator as _orch
 
             try:
@@ -353,7 +353,7 @@ class _ReviewMixin:
         if len(in_review) == 1:
             results = [self._review_with_live_progress(in_review[0], update_fn)]
         else:
-            from shared_concurrency import parallel_map
+            from shared.concurrency import parallel_map
 
             update_fn(status_text=f"Tech Lead reviewing {len(in_review)} task(s)")
             results = parallel_map(

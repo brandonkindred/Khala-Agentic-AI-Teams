@@ -15,7 +15,7 @@ and re-fetches.
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="investment_market_data",

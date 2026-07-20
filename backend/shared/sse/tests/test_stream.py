@@ -8,7 +8,7 @@ from collections import deque
 
 import pytest
 
-from shared_sse import (
+from shared.sse import (
     SSE_KEEPALIVE,
     sse_job_stream_async,
     sse_job_stream_sync,

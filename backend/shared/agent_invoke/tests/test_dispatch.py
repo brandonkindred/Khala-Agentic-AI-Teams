@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from shared_agent_invoke.dispatch import AgentNotRunnableError, invoke_entrypoint
+from shared.agent_invoke.dispatch import AgentNotRunnableError, invoke_entrypoint
 
 
 def _make_module(name: str, **attrs: object) -> None:

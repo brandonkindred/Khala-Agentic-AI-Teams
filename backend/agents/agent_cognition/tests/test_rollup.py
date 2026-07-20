@@ -22,8 +22,8 @@ from agent_cognition.memory import rollup, store
 from agent_cognition.models import EventKind, MemoryEvent, PeriodSummary, Scale
 from agent_cognition.postgres import SCHEMA
 from llm_service.interface import LLMClient
-from shared_postgres import is_postgres_enabled, register_team_schemas
-from shared_postgres.testing import truncate_team_tables
+from shared.postgres import is_postgres_enabled, register_team_schemas
+from shared.postgres.testing import truncate_team_tables
 
 _UTC = timezone.utc
 _ONE_DAY = timedelta(days=1)

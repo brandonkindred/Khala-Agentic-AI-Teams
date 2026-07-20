@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, Optional
 
-from shared_concurrency import LatestValueFlusher
+from shared.concurrency import LatestValueFlusher
 from software_engineering_team.coding_team.progress_config import _coding_progress
 from software_engineering_team.coding_team.task_graph import TaskGraphService, create_task_graph
 

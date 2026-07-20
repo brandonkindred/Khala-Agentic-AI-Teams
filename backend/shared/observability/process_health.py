@@ -115,7 +115,7 @@ def _env_float(
 ) -> float:
     """Parse a float from env var *name*, defensively, then clamp.
 
-    Thin wrapper over the canonical :func:`shared_env.parse_float` (which also
+    Thin wrapper over the canonical :func:`shared.env.parse_float` (which also
     rejects ``inf``/``nan`` — a non-finite interval would busy-loop/crash the
     watchdog), kept for the existing call sites in this module.
 
@@ -126,7 +126,7 @@ def _env_float(
           *default* when the var is unset/blank/non-numeric or parses to a
           non-finite value (``inf``/``nan``). Never raises.
     """
-    from shared_env import parse_float
+    from shared.env import parse_float
 
     return parse_float(name, default, minimum=minimum, maximum=maximum)
 

@@ -32,7 +32,7 @@ import threading  # noqa: F401 - re-exported so coding_team.orchestrator.threadi
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from shared_dev_models import ReviewContext, SystemArchitecture
+from shared.dev_models import ReviewContext, SystemArchitecture
 from software_engineering_team.coding_team import hitl
 from software_engineering_team.coding_team.activity import (
     ActivityBridge,  # noqa: F401 - late-bound via `_orch.ActivityBridge` in swarm_review.py
@@ -179,7 +179,7 @@ def _groom_tasks(
     to the graph — so every task carries real acceptance criteria / scope / subtasks before it can
     reach assignment, review, or revision adjudication.
 
-    Fans the round out via ``shared_concurrency.parallel_map`` (see
+    Fans the round out via ``shared.concurrency.parallel_map`` (see
     ``progress_config._groom_concurrency``), mirroring ``swarm_review._review_and_merge``'s review
     fan-out — grooming is independent per task (each LLM call only needs that task's own
     id/title/description/dependencies plus the shared ``plan_context``), so k tasks cost ~one
@@ -193,7 +193,7 @@ def _groom_tasks(
           ``_groom_one_task``'s postconditions) — never a missing/None slot, even when a task's own
           grooming call failed. Empty ``tasks`` returns ``[]`` without any LLM call.
     """
-    from shared_concurrency import parallel_map
+    from shared.concurrency import parallel_map
 
     return parallel_map(
         tasks,
@@ -500,7 +500,7 @@ def run_coding_team_orchestrator(
         # Flush captured "thinking" to the job record on an interval for the UI poll.
         # beat_first surfaces any planning-phase reasoning immediately; the final flush
         # after the block captures the tail emitted since the last tick.
-        from shared_concurrency import (
+        from shared.concurrency import (
             BackgroundHeartbeat,  # noqa: PLC0415 - local, optional dep path
         )
 
@@ -738,7 +738,7 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
                         if self.aborted:
                             break
                 else:
-                    from shared_concurrency import parallel_map
+                    from shared.concurrency import parallel_map
 
                     _update(status_text=f"Implementing {len(active)} task(s)")
                     parallel_map(

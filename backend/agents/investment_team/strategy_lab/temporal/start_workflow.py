@@ -1,6 +1,6 @@
 """Sync dispatch helper for the Strategy Lab batch workflow.
 
-Wraps ``shared_temporal.start_workflow_sync`` for the synchronous FastAPI
+Wraps ``shared.temporal.start_workflow_sync`` for the synchronous FastAPI
 dispatch path to call, translating a ``RunStrategyLabRequest`` into the
 JSON-shaped ``batch_input`` that ``StrategyLabBatchWorkflow.run`` consumes —
 mirroring the config/clamp/exclusion construction ``_strategy_lab_worker`` does
@@ -91,7 +91,7 @@ def start_strategy_lab_batch_workflow(run_id: str, request: RunStrategyLabReques
     """
     from investment_team.strategy_lab.temporal import TASK_QUEUE, WORKFLOW_ID_PREFIX
     from investment_team.strategy_lab.temporal.workflows import StrategyLabBatchWorkflow
-    from shared_temporal import start_workflow_sync
+    from shared.temporal import start_workflow_sync
 
     start_workflow_sync(
         StrategyLabBatchWorkflow.run,

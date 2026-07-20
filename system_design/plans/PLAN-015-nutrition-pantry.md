@@ -24,7 +24,7 @@ SPEC-014, and maps each story to file paths and test files.
 | Prereq | Status | Notes |
 |---|---|---|
 | SPEC-005 (ingredient KB) | ✅ Shipped (v1.0.0, 770 foods) | `backend/agents/nutrition_meal_planning_team/ingredient_kb/` |
-| `shared_postgres` Pattern B | ✅ Live for this team | `postgres/__init__.py` exports `SCHEMA`; registered from `api/main.py` lifespan |
+| `shared.postgres` Pattern B | ✅ Live for this team | `postgres/__init__.py` exports `SCHEMA`; registered from `api/main.py` lifespan |
 | SPEC-014 (grocery list) | ❌ Spec merged, **no code**, no tracking issue | Blocks W4 only |
 
 **SPEC-014 decision:** W4 ("subtract pantry from grocery list") cannot land

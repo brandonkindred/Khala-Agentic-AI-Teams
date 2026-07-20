@@ -1,4 +1,4 @@
-"""Unit tests for shared_app.bootstrap_syspath."""
+"""Unit tests for shared.app.bootstrap_syspath."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from shared_app import bootstrap_syspath
+from shared.app import bootstrap_syspath
 
 
 @pytest.fixture

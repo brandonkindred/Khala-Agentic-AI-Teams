@@ -1,14 +1,14 @@
 """Process-wide Graphiti client for the knowledge-graph layer.
 
 Graphiti owns the Neo4j async driver, so this module is the Graphiti analogue of
-``shared_postgres.client``: a single lazily-built, lock-guarded ``Graphiti``
+``shared.postgres.client``: a single lazily-built, lock-guarded ``Graphiti``
 instance shared across the process, plus an async teardown. The heavy
 ``graphiti_core`` imports are deferred to first use so importing this package
 (for linting, docs, or a unit test of an unrelated module) never requires the
-dependency to be installed — exactly how ``shared_postgres`` defers ``psycopg``.
+dependency to be installed — exactly how ``shared.postgres`` defers ``psycopg``.
 
 Graphiti is configured against the platform's Ollama via its OpenAI-compatible
-endpoint (see :mod:`shared_neo4j.config`). The LLM client, embedder, and reranker
+endpoint (see :mod:`shared.neo4j.config`). The LLM client, embedder, and reranker
 all point at the same ``/v1`` surface so the layer needs no second provider.
 
 Invariants:
@@ -24,7 +24,7 @@ import logging
 import threading
 from typing import Any
 
-from shared_neo4j import config
+from shared.neo4j import config
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ def _build_graphiti() -> Any:
         cross_encoder=cross_encoder,
     )
     logger.info(
-        "shared_neo4j Graphiti client built: bolt=%s db=%s model=%s embed=%s",
+        "shared.neo4j Graphiti client built: bolt=%s db=%s model=%s embed=%s",
         config.neo4j_bolt_url(),
         config.neo4j_database(),
         model,
@@ -134,6 +134,6 @@ async def close_graphiti() -> None:
         return
     try:
         await graphiti.close()
-        logger.info("shared_neo4j Graphiti client closed")
+        logger.info("shared.neo4j Graphiti client closed")
     except Exception as e:  # pragma: no cover - best-effort teardown
-        logger.warning("shared_neo4j Graphiti close failed: %s", e)
+        logger.warning("shared.neo4j Graphiti close failed: %s", e)

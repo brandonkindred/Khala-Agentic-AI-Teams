@@ -23,7 +23,7 @@ from job_service_client import (
     start_stale_job_monitor,
     validate_job_for_action,
 )
-from shared_app import create_team_app
+from shared.app import create_team_app
 from social_media_marketing_team.adapters.branding import (
     BrandContext,
     BrandIncompleteError,
@@ -84,7 +84,7 @@ def _startup() -> None:
         )
 
         # The worker runs on a daemon thread whose lifecycle is owned by the
-        # shared_temporal worker registry (per-team idempotency), not this hook, so we
+        # shared.temporal worker registry (per-team idempotency), not this hook, so we
         # intentionally do not retain the thread here. Graceful drain of in-flight
         # activities is not managed at this backstop; the daemon exits with the
         # process. Nothing to join on the on_shutdown hook.

@@ -22,15 +22,15 @@ Postconditions:
 
 from __future__ import annotations
 
-from shared_hitl.models import (
+from shared.hitl.models import (
     AnswerSubmission,
     PendingQuestion,
     QuestionOption,
     SubmitAnswersRequest,
 )
-from shared_hitl.progress import coerce_progress
-from shared_hitl.status import pending_questions_from_raw
-from shared_hitl.validation import validate_answers
+from shared.hitl.progress import coerce_progress
+from shared.hitl.status import pending_questions_from_raw
+from shared.hitl.validation import validate_answers
 
 __all__ = [
     "QuestionOption",

@@ -9,7 +9,7 @@ team ``api`` packages. See ``factory.py`` / ``paths.py`` for the contracts.
 
 from __future__ import annotations
 
-from shared_app.factory import create_team_app
-from shared_app.paths import bootstrap_syspath
+from shared.app.factory import create_team_app
+from shared.app.paths import bootstrap_syspath
 
 __all__ = ["bootstrap_syspath", "create_team_app"]

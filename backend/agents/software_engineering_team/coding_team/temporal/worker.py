@@ -31,7 +31,7 @@ def start_coding_team_temporal_worker_thread() -> bool:
           this team, False when Temporal is disabled (``TEMPORAL_ADDRESS``
           unset).
     """
-    from shared_temporal import is_temporal_enabled, start_team_worker
+    from shared.temporal import is_temporal_enabled, start_team_worker
     from software_engineering_team.coding_team.temporal import ACTIVITIES, WORKFLOWS
     from software_engineering_team.coding_team.temporal.constants import TASK_QUEUE
 

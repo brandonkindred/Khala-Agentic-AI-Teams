@@ -1,10 +1,10 @@
-"""Tests for shared_hitl.progress.coerce_progress — clamp to [0, 100]."""
+"""Tests for shared.hitl.progress.coerce_progress — clamp to [0, 100]."""
 
 from __future__ import annotations
 
 import pytest
 
-from shared_hitl.progress import coerce_progress
+from shared.hitl.progress import coerce_progress
 
 
 @pytest.mark.parametrize(

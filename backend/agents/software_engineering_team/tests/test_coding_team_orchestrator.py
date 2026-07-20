@@ -37,7 +37,7 @@ from software_engineering_team.coding_team.team_routing import (
 )
 from software_engineering_team.coding_team.worker_factory import _v2_text_mode_llm
 
-GIT_UTILS = "shared_git.git_utils"
+GIT_UTILS = "shared.git.git_utils"
 
 
 # --------------------------------------------------------------------------- stubs
@@ -891,7 +891,7 @@ def test_snapshot_restore_preserves_new_fields_and_failed_status():
 
 
 def test_branch_diff_returns_full_diff(tmp_path):
-    from shared_git.git_utils import (
+    from shared.git.git_utils import (
         branch_diff,
         create_feature_branch,
         initialize_new_repo,
@@ -911,14 +911,14 @@ def test_branch_diff_returns_full_diff(tmp_path):
 
 
 def test_branch_diff_no_repo(tmp_path):
-    from shared_git.git_utils import branch_diff
+    from shared.git.git_utils import branch_diff
 
     assert branch_diff(tmp_path / "does-not-exist", "development", "feature/x") == ""
 
 
 def test_branch_diff_bad_branch_returns_empty(tmp_path):
     """A failing git diff (e.g. unknown branch) yields "" rather than raising."""
-    from shared_git.git_utils import branch_diff, initialize_new_repo
+    from shared.git.git_utils import branch_diff, initialize_new_repo
 
     ok, _ = initialize_new_repo(tmp_path)
     assert ok

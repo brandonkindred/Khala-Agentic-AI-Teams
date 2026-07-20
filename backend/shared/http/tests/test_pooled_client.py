@@ -5,8 +5,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-import shared_http
-from shared_http import (
+import shared.http
+from shared.http import (
     _DEFAULT_KEEPALIVE_EXPIRY_S,
     _MIN_KEEPALIVE_EXPIRY_S,
     DEFAULT_LIMITS,
@@ -170,4 +170,4 @@ def test_close_pool_swallows_client_close_errors(monkeypatch):
     monkeypatch.setattr(httpx.Client, "close", _boom, raising=True)
     close_pool()  # must not raise
     # Pool was cleared despite the close error.
-    assert shared_http._clients == {}  # noqa: SLF001 — verify teardown cleared state
+    assert shared.http._clients == {}  # noqa: SLF001 — verify teardown cleared state

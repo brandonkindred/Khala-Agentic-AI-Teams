@@ -1099,14 +1099,14 @@ def test_health_returns_ok_with_counts(client: TestClient) -> None:
 
 
 def test_lifespan_swallows_postgres_import_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The lifespan must not crash app boot when shared_postgres is unavailable."""
+    """The lifespan must not crash app boot when shared.postgres is unavailable."""
     import builtins
 
     real_import = builtins.__import__
 
     def _import(name, *args, **kwargs):
         # Block both possible imports inside the lifespan branches.
-        if name in ("sales_team.postgres", "shared_postgres"):
+        if name in ("sales_team.postgres", "shared.postgres"):
             raise ImportError("simulated")
         return real_import(name, *args, **kwargs)
 
@@ -1119,9 +1119,9 @@ def test_lifespan_swallows_postgres_import_failure(monkeypatch: pytest.MonkeyPat
 def test_lifespan_runs_register_and_close_when_imports_succeed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When shared_postgres imports succeed, ``register_team_schemas`` and
+    """When shared.postgres imports succeed, ``register_team_schemas`` and
     ``close_pool`` are both called (exercising lines 65-67 and 74)."""
-    import shared_postgres as sp_mod
+    import shared.postgres as sp_mod
 
     captured: dict[str, int] = {"register": 0, "close": 0}
 
@@ -1142,7 +1142,7 @@ def test_lifespan_runs_register_and_close_when_imports_succeed(
 def test_lifespan_swallows_close_pool_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """When close_pool raises during shutdown, the warning is logged but the
     lifespan exit succeeds (covers the except branch on lines 75-76)."""
-    import shared_postgres as sp_mod
+    import shared.postgres as sp_mod
 
     monkeypatch.setattr(sp_mod, "register_team_schemas", lambda *a, **kw: None)
     monkeypatch.setattr(sp_mod, "close_pool", lambda: (_ for _ in ()).throw(RuntimeError("down")))

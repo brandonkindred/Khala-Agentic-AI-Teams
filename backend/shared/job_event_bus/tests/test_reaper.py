@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from shared_job_event_bus import BusState, ReaperHandle, subscribe
+from shared.job_event_bus import BusState, ReaperHandle, subscribe
 
 
 def _make_handle(state: BusState, **overrides) -> ReaperHandle:

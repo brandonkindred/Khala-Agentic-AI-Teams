@@ -6,7 +6,7 @@ Exposes a no-arg ``start_planning_temporal_worker_thread`` that the generic
 standalone-dev backstop), so the Temporal worker — and its connected client — is
 ready before uvicorn starts accepting requests.
 
-Delegates to ``shared_temporal.start_team_worker``, which owns the daemon-thread
+Delegates to ``shared.temporal.start_team_worker``, which owns the daemon-thread
 lifecycle, the process-wide client/loop slots, and the sandboxed workflow runner
 with the ``pydantic``/``httpx`` passthrough modules the workflow registration
 needs.
@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from planning_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
-from shared_temporal import is_temporal_enabled, start_team_worker
+from shared.temporal import is_temporal_enabled, start_team_worker
 
 logger = logging.getLogger(__name__)
 

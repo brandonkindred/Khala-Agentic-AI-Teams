@@ -22,7 +22,7 @@ from agents.blogging.shared.medium_integration_access import (  # noqa: F401
 )
 from pydantic import BaseModel  # noqa: E402
 
-from shared_app import create_team_app  # noqa: E402
+from shared.app import create_team_app  # noqa: E402
 
 try:
     from agents.blogging.shared.artifacts import (

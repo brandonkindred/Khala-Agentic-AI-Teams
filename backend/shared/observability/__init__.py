@@ -32,7 +32,7 @@ Environment variables:
 
 Usage from a team's ``api/main.py``::
 
-    from shared_observability import init_otel, instrument_fastapi_app
+    from shared.observability import init_otel, instrument_fastapi_app
 
     init_otel(service_name="blogging-team", team_key="blogging")
 
@@ -40,7 +40,7 @@ Usage from a team's ``api/main.py``::
     instrument_fastapi_app(app, team_key="blogging")
 """
 
-from shared_observability.otel import (
+from shared.observability.otel import (
     get_meter,
     get_tracer,
     init_otel,
@@ -48,7 +48,7 @@ from shared_observability.otel import (
     is_otel_enabled,
     shutdown_otel,
 )
-from shared_observability.process_health import (
+from shared.observability.process_health import (
     Watchdog,
     install_fault_diagnostics,
     start_memory_watchdog,

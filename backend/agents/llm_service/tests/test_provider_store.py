@@ -107,11 +107,11 @@ class FakeConn:
 @pytest.fixture
 def fake_db(monkeypatch):
     """Install a fake Postgres so provider_store CRUD runs without a live DB."""
-    import shared_postgres
+    import shared.postgres
 
     cursor = FakeCursor()
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(shared_postgres, "get_conn", lambda *a, **k: FakeConn(cursor))
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "get_conn", lambda *a, **k: FakeConn(cursor))
     # Skip the DDL self-heal so `cursor.executed` only holds the statement under test.
     monkeypatch.setattr(ps, "_table_ensured", True)
     ps.clear_cache()
@@ -203,12 +203,12 @@ def test_select_empty_returns_none():
 def test_select_expired_enqueue_does_no_db_io(monkeypatch):
     """Regression: discovering an expired entry must never touch Postgres from
     select_active_entry — the write is deferred to the background sweep."""
-    import shared_postgres
+    import shared.postgres
 
     def _boom(*_a, **_k):
         raise AssertionError("select_active_entry must not touch Postgres directly")
 
-    monkeypatch.setattr(shared_postgres, "get_conn", _boom)
+    monkeypatch.setattr(shared.postgres, "get_conn", _boom)
     e1 = _entry(1, limit_exceeded=True, reset_at=NOW - timedelta(seconds=1))
     sel = ps.select_active_entry([e1, _entry(2)], now=NOW)
     assert sel.id == 1
@@ -277,9 +277,9 @@ def test_row_to_entry_makes_reset_at_tz_aware():
 
 @pytest.fixture
 def no_postgres(monkeypatch):
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: False)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: False)
     ps.clear_cache()
 
 
@@ -446,11 +446,11 @@ def test_ttl_seconds_env_override(monkeypatch):
 
 
 def test_ensure_table_runs_ddl(monkeypatch):
-    import shared_postgres
+    import shared.postgres
 
     cursor = FakeCursor()
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(shared_postgres, "get_conn", lambda *a, **k: FakeConn(cursor))
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "get_conn", lambda *a, **k: FakeConn(cursor))
     monkeypatch.setattr(ps, "_table_ensured", False)
     ps._ensure_table()
     joined = " ".join(sql for sql, _ in cursor.executed)
@@ -459,11 +459,11 @@ def test_ensure_table_runs_ddl(monkeypatch):
 
 
 def test_ensure_table_swallows_ddl_error(monkeypatch):
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(
-        shared_postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
+        shared.postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
     )
     monkeypatch.setattr(ps, "_table_ensured", False)
     ps._ensure_table()  # must not raise
@@ -474,11 +474,11 @@ def test_load_uncached_disabled_returns_empty(no_postgres):
 
 
 def test_load_uncached_swallows_read_error(monkeypatch):
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(
-        shared_postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
+        shared.postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
     )
     monkeypatch.setattr(ps, "_table_ensured", True)
     assert ps._load_ordered_uncached() == []
@@ -489,22 +489,22 @@ def test_get_entry_disabled_returns_none(no_postgres):
 
 
 def test_get_entry_swallows_read_error(monkeypatch):
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(
-        shared_postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
+        shared.postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
     )
     monkeypatch.setattr(ps, "_table_ensured", True)
     assert ps.get_entry(1) is None
 
 
 def test_mark_and_reset_swallow_write_errors(monkeypatch):
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(
-        shared_postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
+        shared.postgres, "get_conn", lambda *a, **k: FakeConn(FakeCursor(raise_on_execute=True))
     )
     monkeypatch.setattr(ps, "_table_ensured", True)
     # Must not raise — marking/reset are best-effort.

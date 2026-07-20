@@ -4,7 +4,7 @@
 thread" pattern used to move a synchronous, possibly-slow write off a thread that
 holds a lock other threads need (see ``coding_team/orchestrator.py``'s task-graph
 persist split for the motivating use case). It is stdlib-only and lives in
-``shared_concurrency`` alongside :class:`~shared_concurrency.heartbeat.BackgroundHeartbeat`,
+``shared.concurrency`` alongside :class:`~shared.concurrency.heartbeat.BackgroundHeartbeat`,
 whose start/stop/context-manager lifecycle it mirrors.
 """
 

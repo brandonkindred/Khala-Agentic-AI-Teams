@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from shared_hitl.status import pending_questions_from_raw
+from shared.hitl.status import pending_questions_from_raw
 from software_engineering_team.api import main as _main
 from software_engineering_team.api.models import (
     CancelJobResponse,

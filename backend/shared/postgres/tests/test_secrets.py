@@ -1,11 +1,11 @@
-"""Tests for shared_postgres.secrets (Fernet round-trip + Postgres gating)."""
+"""Tests for shared.postgres.secrets (Fernet round-trip + Postgres gating)."""
 
 from __future__ import annotations
 
 import pytest
 from cryptography.fernet import Fernet
 
-import shared_postgres.secrets as secrets_mod
+import shared.postgres.secrets as secrets_mod
 
 
 class _FakeCursor:

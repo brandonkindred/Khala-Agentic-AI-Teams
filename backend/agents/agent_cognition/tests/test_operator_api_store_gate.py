@@ -48,8 +48,8 @@ from agent_cognition.models import (  # noqa: E402
 )
 from agent_cognition.postgres import SCHEMA  # noqa: E402
 from agent_cognition.rules import store  # noqa: E402
-from shared_postgres import is_postgres_enabled, register_team_schemas  # noqa: E402
-from shared_postgres.testing import truncate_team_tables  # noqa: E402
+from shared.postgres import is_postgres_enabled, register_team_schemas  # noqa: E402
+from shared.postgres.testing import truncate_team_tables  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     not is_postgres_enabled(),

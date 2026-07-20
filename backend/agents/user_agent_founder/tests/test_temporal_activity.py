@@ -85,13 +85,13 @@ def _install(monkeypatch, *, run, adapter=None, job=None, attempt=1):
 
 
 def test_http_client_delegates_to_shared_pooled_client(monkeypatch):
-    """_http_client() must reuse the existing shared_http pool rather than
+    """_http_client() must reuse the existing shared.http pool rather than
     hand-rolling its own — a fresh sentinel per call proves no private client
     is constructed in activities.py."""
-    import shared_http
+    import shared.http
 
     sentinel = object()
-    monkeypatch.setattr(shared_http, "get_pooled_client", lambda: sentinel)
+    monkeypatch.setattr(shared.http, "get_pooled_client", lambda: sentinel)
 
     assert acts._http_client() is sentinel
 

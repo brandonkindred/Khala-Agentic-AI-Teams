@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import shared_repo_context.repo_utils as repo_utils_mod
-from shared_repo_context import find_repo_files, read_repo_code_budgeted
+import shared.repo_context.repo_utils as repo_utils_mod
+from shared.repo_context import find_repo_files, read_repo_code_budgeted
 
 
 def test_unreadable_file_is_skipped_not_raised(tmp_path: Path, monkeypatch) -> None:

@@ -394,7 +394,7 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
     """
     with _REVIEW_ADMISSION_LOCK, contextlib.ExitStack() as stack:
         try:
-            from shared_postgres import (  # noqa: PLC0415 - optional dep path
+            from shared.postgres import (  # noqa: PLC0415 - optional dep path
                 get_conn,
                 is_postgres_enabled,
             )
@@ -511,7 +511,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
     # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
     # The context manager guarantees the beat stops on every exit path; on_error keeps
     # a job-service blip from killing the beat thread (or the review).
-    from shared_concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
+    from shared.concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
 
     review_hb = BackgroundHeartbeat(
         lambda: heartbeat_job(job_id),

@@ -35,14 +35,14 @@ import logging
 from typing import List, Sequence
 
 # This module is only ever imported lazily, from inside
-# ``shared_temporal.client``'s connection functions (never from
-# ``shared_temporal/__init__.py``), so importing ``temporalio`` at module
+# ``shared.temporal.client``'s connection functions (never from
+# ``shared/temporal/__init__.py``), so importing ``temporalio`` at module
 # scope here does not force it onto every package import the way it would
 # from the package root.
 from temporalio.api.common.v1 import Payload
 from temporalio.converter import DataConverter, PayloadCodec
 
-from shared_env_config import env_bool, env_int
+from shared.env_config import env_bool, env_int
 
 logger = logging.getLogger(__name__)
 

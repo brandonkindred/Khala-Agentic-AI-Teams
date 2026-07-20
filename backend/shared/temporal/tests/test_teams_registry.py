@@ -1,4 +1,4 @@
-"""Tests for shared_temporal.teams_registry's generic worker-startup host.
+"""Tests for shared.temporal.teams_registry's generic worker-startup host.
 
 ``start_all_team_workers`` is the fallback path a single-process deployment
 could use to boot every registered team's worker in one call, as an
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import types
 
-from shared_temporal import teams_registry
+from shared.temporal import teams_registry
 
 
 def _fake_module(

@@ -132,8 +132,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -r /app/personal_assistant_team/requirements.txt \
         -r /app/agent_provisioning_team/requirements.txt
 
-# Copy every team and shared module (llm_service, shared_postgres,
-# shared_temporal, integrations, etc.) into /app/ so PYTHONPATH=/app can
+# Copy every team and shared module (llm_service, shared.postgres,
+# shared.temporal, integrations, etc.) into /app/ so PYTHONPATH=/app can
 # import them by package name (e.g. `software_engineering_team.api.main`).
 # This covers all 24 enabled teams in unified_api/config.py TEAM_CONFIGS
 # plus the shared infrastructure they depend on.

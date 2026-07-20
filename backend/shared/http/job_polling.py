@@ -1,4 +1,4 @@
-"""Shared HTTP job-submit/poll helpers, built on shared_http.get_pooled_client().
+"""Shared HTTP job-submit/poll helpers, built on shared.http.get_pooled_client().
 
 Several teams' adapters (planning_team's product_analysis, ai_systems, and
 market_research modules) each independently reimplemented the same shape: a
@@ -16,7 +16,7 @@ Invariants:
       a dict shaped like a terminal-failure status (``{status_key: "failed",
       "error": ...}``), the same shape a real terminal status would have.
     - Both functions delegate all connection reuse to
-      shared_http.get_pooled_client(); neither opens/closes an httpx.Client.
+      shared.http.get_pooled_client(); neither opens/closes an httpx.Client.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any, Callable, Dict, FrozenSet, Optional
 
 import httpx
 
-from shared_http import get_pooled_client
+from shared.http import get_pooled_client
 
 logger = logging.getLogger(__name__)
 

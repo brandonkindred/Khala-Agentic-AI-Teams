@@ -57,7 +57,7 @@ class _ImplementationMixin:
               or from ``run_implement`` itself — is contained and routed through
               ``_handle_incomplete_implementation`` exactly like a ``status="failed"`` result, so
               one worker's crash fails only its own task and never aborts the round. This is
-              required, not defensive: ``shared_concurrency.parallel_map`` re-raises a worker
+              required, not defensive: ``shared.concurrency.parallel_map`` re-raises a worker
               exception to its caller and cancels the round's other pending tasks, so without this
               containment one worker crashing would abort every other concurrently-running
               worker's round too — worse than the prior serial loop, where a crash only prevented
@@ -148,7 +148,7 @@ class _ImplementationMixin:
         from software_engineering_team.coding_team import orchestrator as _orch
 
         if diff is None:
-            from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
+            from shared.git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
             branch = _orch._feature_branch_name(task)
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
@@ -231,7 +231,7 @@ class _ImplementationMixin:
             # ``development`` and is silently dropped from the PR. Only a genuinely empty branch is a
             # no-op resolution (work already present elsewhere) that the job-level outcome should
             # report as "already complete".
-            from shared_git.git_utils import (
+            from shared.git.git_utils import (
                 DEVELOPMENT_BRANCH,
                 abort_merge,
                 branch_diff,

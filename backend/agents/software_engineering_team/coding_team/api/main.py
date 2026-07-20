@@ -31,8 +31,8 @@ import shutil  # noqa: F401  (patched via main.shutil.rmtree in tests)
 import subprocess  # noqa: F401  (patched via main.subprocess.run in tests)
 import threading  # noqa: F401  (patched via main.threading.Thread/Timer in tests)
 
-from shared_app import create_team_app
-from shared_git.git_utils import (  # noqa: F401
+from shared.app import create_team_app
+from shared.git.git_utils import (  # noqa: F401
     DEVELOPMENT_BRANCH,
     commit_working_tree,
     git_identity_env,

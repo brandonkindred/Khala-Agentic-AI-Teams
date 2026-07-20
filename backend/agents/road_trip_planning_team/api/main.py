@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from shared_app import create_team_app
+from shared.app import create_team_app
 
 from ..models import PlanTripRequest
 from ..pipeline import run_plan_background
@@ -92,14 +92,14 @@ def _dispatch_plan_run(job_id: str, body: PlanTripRequest) -> str:
           ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
           started as a durable ``RoadTripWorkflow``; otherwise the legacy thread
           path runs unchanged.
-        - A missing ``shared_temporal`` (Temporal not installed) falls through
+        - A missing ``shared.temporal`` (Temporal not installed) falls through
           to the thread path; any *other* failure while starting the workflow
           (broken import in the team's own Temporal stack, or a client that
           never connected) propagates to the caller, which marks the job
           FAILED — a Temporal-enabled run is never silently downgraded.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         is_temporal_enabled = None
 

@@ -21,7 +21,7 @@ Postconditions:
 
 from __future__ import annotations
 
-from shared_repo_context.repo_utils import (
+from shared.repo_context.repo_utils import (
     BACKEND_EXTENSIONS,
     DOCUMENTATION_EXTENSIONS,
     FRONTEND_EXTENSIONS,

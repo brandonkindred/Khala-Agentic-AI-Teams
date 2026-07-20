@@ -54,7 +54,7 @@ flowchart TB
   summaries unique `(agent_id, scale, period_start)` **and events unique `(agent_id,
   source_run_id, source_seq)`** so Step 2's writeback `ON CONFLICT` target exists; summaries
   `version`/`stale` columns; proposal/rule `evidence` columns); register in
-  `shared_postgres/registry.py`; call `register_team_schemas(SCHEMA)` from
+  `shared/postgres/registry.py`; call `register_team_schemas(SCHEMA)` from
   `unified_api/main.py` lifespan.
 - **Depends:** —
 - **✅ Acceptance:** tables created idempotently on startup; models validate/round-trip;
@@ -173,7 +173,7 @@ flowchart TB
   tool request, resumes) — which the current single-shot entrypoint path lacks, so this step
   lands the protocol + a **stubbed-runtime** test and live `platform_bound` use for *generated*
   agents is gated on the Step 14 runtime scaffold. `sandbox_local` tools (v1 default) need no
-  turn protocol. **Also extend `shared_agent_invoke` (`mount_invoke_shim`/`dispatch`)** to (a)
+  turn protocol. **Also extend `shared.agent_invoke` (`mount_invoke_shim`/`dispatch`)** to (a)
   unwrap only on the explicit `__khala_cognition_envelope__` marker — invoke the entrypoint with
   `input` only, expose `cognition` via a side channel, pass unmarked bodies through unchanged —
   and (b) carry the trusted tool-audit channel.
@@ -233,7 +233,7 @@ flowchart TB
   writeback with truncate+flag). On postcondition violation, persist the **shim's trusted
   tool-audit** + a blocked-run event (drop model output/memory) and **store the 4xx envelope as
   `blocked`**. For `platform_bound` tools, drive the SB↔PX tool loop (Step 7). Helper for
-  in-process teams (no HTTP hop). **Requires the `shared_agent_invoke` shim change** (Step 7).
+  in-process teams (no HTTP hop). **Requires the `shared.agent_invoke` shim change** (Step 7).
 - **Depends:** 8, 9
 - **✅ Acceptance:** strict-Pydantic entrypoint receives **only** its declared input; **retry
   with same key+body replays without re-invoking** (side effects run once); **retry with same

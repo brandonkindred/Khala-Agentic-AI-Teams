@@ -39,8 +39,8 @@ from agent_cognition.models import (
 )
 from agent_cognition.postgres import SCHEMA
 from agent_cognition.redaction import sanitize_for_memory
-from shared_postgres import is_postgres_enabled, register_team_schemas
-from shared_postgres.testing import truncate_team_tables
+from shared.postgres import is_postgres_enabled, register_team_schemas
+from shared.postgres.testing import truncate_team_tables
 
 _PG = pytest.mark.skipif(
     not is_postgres_enabled(),
@@ -451,7 +451,7 @@ def test_sanitize_for_memory_direct() -> None:
 def _read_run(agent_id: str, source_run_id: str) -> dict | None:
     from psycopg.rows import dict_row
 
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -463,7 +463,7 @@ def _read_run(agent_id: str, source_run_id: str) -> dict | None:
 
 
 def _expire_lease(agent_id: str, source_run_id: str) -> None:
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -728,7 +728,7 @@ def test_abandon_run_releases_only_the_owned_in_progress_row() -> None:
 # ---------------------------------------------------------------------------
 def _backdate_completed_at(agent_id: str, source_run_id: str, age: timedelta) -> None:
     """Push a terminal row's ``completed_at`` ``age`` into the past."""
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(

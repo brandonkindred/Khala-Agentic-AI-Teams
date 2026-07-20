@@ -28,7 +28,7 @@ from llm_service import (
     get_client,
     llm_attribution,
 )
-from shared_repo_context.repo_utils import (
+from shared.repo_context.repo_utils import (
     read_repo_code,
     truncate_for_context,
 )

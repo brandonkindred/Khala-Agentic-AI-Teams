@@ -151,7 +151,7 @@ Interval (seconds, default `5`) for the background sweep that clears a provider 
 selection logic behind `get_client`'s failover, called on every LLM call) no longer performs this
 reset itself — doing so meant a blocking `UPDATE`/`commit`/cache-clear round trip to Postgres on
 whichever call happened to discover the expiry. Instead it enqueues the entry's id in-process
-(pure Python, no I/O) and a lazily-started background thread (`shared_concurrency.heartbeat.BackgroundHeartbeat`,
+(pure Python, no I/O) and a lazily-started background thread (`shared.concurrency.heartbeat.BackgroundHeartbeat`,
 mirroring the SE team's `trace_flusher` pattern — see `SE_TRACE_FLUSH_INTERVAL_S`) drains the queue
 on this interval and performs the actual reset write. The caller still gets the entry back
 immediately either way; only the DB write (and its cross-container visibility) is deferred by up to
@@ -267,7 +267,7 @@ resolves. Not load-bearing outside integration tests.
 
 ### TEMPORAL_PAYLOAD_COMPRESSION
 Boolean (default `false` — opt-in). The shared Temporal client
-(`shared_temporal.client`, used by every team's client and worker) always
+(`shared.temporal.client`, used by every team's client and worker) always
 installs a gzip `PayloadCodec` on its `DataConverter`; this var gates only
 whether that codec *writes* compressed payloads — decoding an already-compressed
 payload is never gated, so any process running this codec can always read what
@@ -305,9 +305,9 @@ Exposes HTTP log endpoint.
 ## Observability (OpenTelemetry)
 
 Every team microservice, the unified API, the blogging service, and the job
-service bootstrap OpenTelemetry via `shared_observability.init_otel`. Metrics are
+service bootstrap OpenTelemetry via `shared.observability.init_otel`. Metrics are
 collected by Prometheus scraping `/metrics`; traces are exported over OTLP. See
-`backend/agents/shared_observability/README.md` for the full SDK-honored list.
+`backend/shared/observability/README.md` for the full SDK-honored list.
 
 ### OTEL_EXPORTER_OTLP_ENDPOINT
 OTLP collector endpoint for trace (and, unless disabled, metric) export. When
@@ -404,9 +404,9 @@ Retention window (by `last_seen`) for `se_learnings` rows used by
 
 ## Process Health and Worker Sizing
 
-`shared_observability.process_health` arms each team worker with fault
+`shared.observability.process_health` arms each team worker with fault
 diagnostics and a memory watchdog; `team_service/entrypoint.py` controls how many
-workers run. See `backend/agents/shared_observability/process_health.py`.
+workers run. See `backend/shared/observability/process_health.py`.
 
 ### TEAM_WORKERS
 uvicorn worker processes per team service (default 2; parsed defensively, clamped
@@ -883,25 +883,25 @@ Bind address/port for the Unified API (default `0.0.0.0:8080`).
 
 ### HTTP_KEEPALIVE_EXPIRY_S
 Seconds an idle keep-alive socket is kept in the shared outbound HTTP pool
-(`shared_http.get_pooled_client`, used by `JobServiceClient` and other hot paths) before it is
+(`shared.http.get_pooled_client`, used by `JobServiceClient` and other hot paths) before it is
 recycled. Default `15.0`, floor `1.0` (a positive value below the floor is clamped up; non-numeric,
 non-finite, or non-positive values fall back to the default). Recommended range: a few seconds up to
 just under the idle-connection timeout of the upstream/proxy, so the client drops a socket before the
 far end closes it — reusing a server-closed connection otherwise raises
 `httpx.RemoteProtocolError` ("server disconnected without sending a response"). Read once at import
-when `shared_http.DEFAULT_LIMITS` is built, so a change takes effect only on a fresh process.
+when `shared.http.DEFAULT_LIMITS` is built, so a change takes effect only on a fresh process.
 
 ### POSTGRES_HOST (and POSTGRES_PORT / USER / PASSWORD / DB)
 Required for migrated teams (blogging, branding, team_assistant, startup_advisor,
 user_agent_founder, agentic_team_provisioning, unified_api credentials). Enables Postgres-backed
-stores via `shared_postgres`; no SQLite fallback. Setting `POSTGRES_HOST` only marks Postgres
-*configured* — use `shared_postgres.check_connection()` for a real `SELECT 1` reachability probe
+stores via `shared.postgres`; no SQLite fallback. Setting `POSTGRES_HOST` only marks Postgres
+*configured* — use `shared.postgres.check_connection()` for a real `SELECT 1` reachability probe
 (the LLM Provider page and GitHub integration use it to tell "configured but unreachable" apart
 from "not configured").
 
 ### POSTGRES_CONNECT_TIMEOUT_S
 libpq `connect_timeout` (seconds) applied to **every** Postgres connection the platform opens —
-both the `shared_postgres` pool (used by `check_connection()` and the migrated-team stores) **and**
+both the `shared.postgres` pool (used by `check_connection()` and the migrated-team stores) **and**
 the unified-API encrypted credential store (`postgres_encrypted_credentials`, the live read path for
 the GitHub / Slack / Medium PAT/secret lookups, which is a per-call connection outside the pool).
 Default `3`, floor `1`. Bounds how long a TCP connect to a down or unreachable host can hang —
@@ -923,7 +923,7 @@ Scoped to the credential store only — it is deliberately **not** applied to th
 would cap legitimate long-running team queries.
 
 ### POSTGRES_PROBE_MAX_WORKERS
-Caps the number of concurrent `shared_postgres.bounded_probe` worker threads **per surface** — the
+Caps the number of concurrent `shared.postgres.bounded_probe` worker threads **per surface** — the
 bounded offload behind the LLM Provider page and the GitHub config-status reads each get their own
 budget of this size, so a stall on one can't starve the other. Default `4`, floor `1`. A probe
 normally completes in milliseconds and frees its slot immediately; the cap only bites when that many
@@ -949,7 +949,7 @@ only if you genuinely run more than 32 distinct *static* probe labels.
 
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice
-(`shared_observability.process_health`). A daemon thread samples the container's
+(`shared.observability.process_health`). A daemon thread samples the container's
 cgroup memory usage (cgroup v2 `memory.current` → v1 `memory.usage_in_bytes` →
 per-process RSS off-cgroup) and logs a single WARNING as it approaches the
 budget, so the last log line before an OOM-kill (SIGKILL, no traceback) names the
@@ -1069,7 +1069,7 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the layer's **enablement gate** (`shared_neo4j.is_neo4j_enabled()`): a
+`bolt://neo4j:7687`). This is the layer's **enablement gate** (`shared.neo4j.is_neo4j_enabled()`): a
 real deployment always sets it (Neo4j is required infra — Graphiti runs on top of it), and an unset
 value is tolerated only so the unit-test suite can run against a faked Graphiti without a live
 database. The graph ingests agent memories as temporal episodes partitioned per agent
@@ -1100,7 +1100,7 @@ recomputed summary — whose `version` advanced — is re-ingested as a fresh pe
 than overwriting the prior one. The worker is a no-op when `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
 
 ### NEO4J_SLOW_OP_MS
-Slow-call log threshold (ms, default `1000`) for `shared_neo4j.timed_graph_op`.
+Slow-call log threshold (ms, default `1000`) for `shared.neo4j.timed_graph_op`.
 
 ### AGENT_COGNITION_SCHEDULER_INTERVAL_S
 Cadence (seconds, default `3600`, floored to `60`) of the Agent Cognition scheduler — the live driver
@@ -1124,7 +1124,7 @@ re-executed. Distinct from `AGENT_COGNITION_RUN_TTL_S`, which bounds *terminal* 
 
 ### AGENT_COGNITION_WRITEBACK_MAX_BYTES
 Byte cap on the cognition `cognition_writeback` half of an invoke envelope
-(`agents/shared_agent_invoke/limits.py`, default `1048576` = 1 MiB). The user `output` field has its
+(`shared/agent_invoke/limits.py`, default `1048576` = 1 MiB). The user `output` field has its
 own bound (`AGENT_INVOKE_MAX_OUTPUT_BYTES`), so control/memory data never competes with user output;
 an over-cap writeback is truncated and flagged rather than dropping the response.
 

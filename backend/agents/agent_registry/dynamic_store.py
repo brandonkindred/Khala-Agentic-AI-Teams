@@ -102,7 +102,7 @@ def _store_active() -> bool:
           per-invoke sandbox (``SANDBOX_AGENT_ID`` unset). Callers must treat a
           ``False`` result as "in-memory only, exactly as before".
     """
-    from shared_postgres import is_postgres_enabled
+    from shared.postgres import is_postgres_enabled
 
     return is_postgres_enabled() and not os.environ.get("SANDBOX_AGENT_ID")
 
@@ -139,7 +139,7 @@ def _ensure_schema() -> None:
     with _schema_ensure_lock:
         if _schema_ensured:
             return
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
 
         from . import postgres as _pg_schema
 
@@ -174,8 +174,8 @@ def upsert(manifest: AgentManifest) -> None:
           propagating, narrowing the window in which the caller's best-effort
           degrade-to-local-only path is needed.
     """
-    from shared_postgres import Json, get_conn
-    from shared_postgres.metrics import timed_query
+    from shared.postgres import Json, get_conn
+    from shared.postgres.metrics import timed_query
 
     @timed_query(store=_STORE, op="upsert")
     def _do() -> None:
@@ -204,8 +204,8 @@ def delete(agent_id: str) -> None:
           propagating, narrowing the window in which a stale row could otherwise
           resurface.
     """
-    from shared_postgres import get_conn
-    from shared_postgres.metrics import timed_query
+    from shared.postgres import get_conn
+    from shared.postgres.metrics import timed_query
 
     @timed_query(store=_STORE, op="delete")
     def _do() -> None:
@@ -228,8 +228,8 @@ def get(agent_id: str) -> AgentManifest | None:
           the invoke / provision path depends on for cross-worker save→invoke
           coherence.
     """
-    from shared_postgres import dict_row, get_conn
-    from shared_postgres.metrics import timed_query
+    from shared.postgres import dict_row, get_conn
+    from shared.postgres.metrics import timed_query
 
     @timed_query(store=_STORE, op="get")
     def _do() -> AgentManifest | None:
@@ -277,8 +277,8 @@ def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
     """
     global _all_cache, _all_cache_at
 
-    from shared_postgres import dict_row, get_conn
-    from shared_postgres.metrics import timed_query
+    from shared.postgres import dict_row, get_conn
+    from shared.postgres.metrics import timed_query
 
     def _fresh_copy() -> Optional[list[AgentManifest]]:
         with _all_cache_lock:
@@ -325,8 +325,8 @@ def manifests_with_prefix(prefix: str) -> list[AgentManifest]:
           (id-ordered), matching literally — the prefix's ``%``/``_``/``\\`` LIKE
           metachars are escaped so an id containing them can't broaden the match.
     """
-    from shared_postgres import dict_row, get_conn
-    from shared_postgres.metrics import timed_query
+    from shared.postgres import dict_row, get_conn
+    from shared.postgres.metrics import timed_query
 
     escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 

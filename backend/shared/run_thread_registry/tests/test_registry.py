@@ -2,7 +2,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from shared_run_thread_registry import RunThreadRegistry
+from shared.run_thread_registry import RunThreadRegistry
 
 
 def test_register_marks_thread_alive():

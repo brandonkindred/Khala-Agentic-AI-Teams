@@ -5,25 +5,25 @@ job-backed workflow runner, and generic checkpoint/pause-resume helpers so
 every team can adopt durable, resumable job tracking with minimal code.
 
 Public API:
-    from shared_temporal import (
+    from shared.temporal import (
         get_temporal_client, is_temporal_enabled, connect_temporal_client,
         start_team_worker, run_team_job,
         save_checkpoint, load_checkpoint, wait_for_input, submit_input,
     )
 """
 
-from shared_temporal.activity_utils import (
+from shared.temporal.activity_utils import (
     is_cancelled,
     is_last_attempt,
     raise_if_cancelled,
 )
-from shared_temporal.checkpoints import (
+from shared.temporal.checkpoints import (
     load_checkpoint,
     save_checkpoint,
     submit_input,
     wait_for_input,
 )
-from shared_temporal.client import (
+from shared.temporal.client import (
     connect_temporal_client,
     get_temporal_address,
     get_temporal_client,
@@ -33,8 +33,8 @@ from shared_temporal.client import (
     set_temporal_client,
     set_temporal_loop,
 )
-from shared_temporal.failure_translation import translate_workflow_failure
-from shared_temporal.runner import (
+from shared.temporal.failure_translation import translate_workflow_failure
+from shared.temporal.runner import (
     cancel_workflow_sync,
     execute_workflow_async,
     execute_workflow_sync,
@@ -42,8 +42,8 @@ from shared_temporal.runner import (
     signal_workflow_sync,
     start_workflow_sync,
 )
-from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES, start_all_team_workers
-from shared_temporal.worker import start_team_worker
+from shared.temporal.teams_registry import TEAM_TEMPORAL_MODULES, start_all_team_workers
+from shared.temporal.worker import start_team_worker
 
 __all__ = [
     "TEAM_TEMPORAL_MODULES",

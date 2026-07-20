@@ -28,8 +28,8 @@ from job_service_client import (
     JobServiceClient,
     get_job_service_client,
 )
-from shared_concurrency import BackgroundHeartbeat
-from shared_env import parse_float
+from shared.concurrency import BackgroundHeartbeat
+from shared.env import parse_float
 
 logger = logging.getLogger(__name__)
 

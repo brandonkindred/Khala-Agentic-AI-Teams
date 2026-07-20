@@ -14,7 +14,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable, Optional
 
-from shared_temporal.client import (
+from shared.temporal.client import (
     connect_temporal_client,
     get_default_task_queue,
     get_temporal_loop,

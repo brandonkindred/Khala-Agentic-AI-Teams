@@ -25,7 +25,7 @@ Postconditions:
 
 from __future__ import annotations
 
-from shared_llm_recovery.recovery import (
+from shared.llm_recovery.recovery import (
     agent_call_json,
     extract_files_from_content,
     extract_json_object,

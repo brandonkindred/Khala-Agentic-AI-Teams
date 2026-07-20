@@ -14,7 +14,7 @@ import pytest
 from temporalio.api.common.v1 import Payload
 from temporalio.converter import DataConverter, PayloadCodec
 
-from shared_temporal.codec import (
+from shared.temporal.codec import (
     DEFAULT_MIN_COMPRESS_BYTES,
     GzipPayloadCodec,
     build_data_converter,

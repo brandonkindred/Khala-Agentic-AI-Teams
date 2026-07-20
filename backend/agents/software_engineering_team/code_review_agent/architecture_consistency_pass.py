@@ -52,7 +52,7 @@ from typing import List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
-from shared_env import env_flag_enabled
+from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_map_chunk_chars,

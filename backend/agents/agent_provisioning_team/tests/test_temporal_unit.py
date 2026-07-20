@@ -201,7 +201,7 @@ def test_connect_temporal_client_connects_when_address_set(monkeypatch) -> None:
 
     assert result is fake_client
     # data_converter is the shared gzip-codec DataConverter every team's client
-    # now gets (see shared_temporal.codec) — not this test's concern.
+    # now gets (see shared.temporal.codec) — not this test's concern.
     mock_client_cls.connect.assert_awaited_once_with(
         "localhost:7233", namespace="myns", data_converter=ANY
     )
@@ -451,7 +451,7 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:
-    import shared_temporal
+    import shared.temporal
     from agent_provisioning_team.temporal import worker as worker_mod
 
     # Patch the delegate too: otherwise the assertion passes even if the
@@ -460,7 +460,7 @@ def test_start_worker_thread_no_op_when_disabled() -> None:
     # early return comes from the function's guard.
     with (
         patch.object(worker_mod, "is_temporal_enabled", return_value=False),
-        patch.object(shared_temporal, "start_team_worker") as mock_start,
+        patch.object(shared.temporal, "start_team_worker") as mock_start,
     ):
         assert worker_mod.start_agent_provisioning_temporal_worker_thread() is False
         mock_start.assert_not_called()
@@ -468,13 +468,13 @@ def test_start_worker_thread_no_op_when_disabled() -> None:
 
 def test_start_worker_thread_delegates_to_start_team_worker() -> None:
     """The entrypoint contract (TEAM_TEMPORAL_WORKER_FUNC) resolves to a real,
-    idempotent function that boots the worker via shared_temporal."""
-    import shared_temporal
+    idempotent function that boots the worker via shared.temporal."""
+    import shared.temporal
     from agent_provisioning_team.temporal import worker as worker_mod
 
     with (
         patch.object(worker_mod, "is_temporal_enabled", return_value=True),
-        patch.object(shared_temporal, "start_team_worker", return_value=True) as mock_start,
+        patch.object(shared.temporal, "start_team_worker", return_value=True) as mock_start,
     ):
         assert worker_mod.start_agent_provisioning_temporal_worker_thread() is True
         mock_start.assert_called_once()
@@ -484,12 +484,12 @@ def test_start_worker_thread_delegates_to_start_team_worker() -> None:
 
 
 def test_start_sandbox_worker_thread_returns_false_when_disabled() -> None:
-    import shared_temporal
+    import shared.temporal
     from agent_provisioning_team.temporal import worker as worker_mod
 
     with (
         patch.object(worker_mod, "is_temporal_enabled", return_value=False),
-        patch.object(shared_temporal, "start_team_worker") as mock_start,
+        patch.object(shared.temporal, "start_team_worker") as mock_start,
     ):
         assert worker_mod.start_agent_provisioning_sandbox_temporal_worker_thread() is False
         mock_start.assert_not_called()
@@ -500,14 +500,14 @@ def test_start_sandbox_worker_thread_uses_distinct_team_key_and_queue() -> None:
     provisioning worker (P1 fix): sandbox activities must never be servable
     by the standalone agent-provisioning-service team container, which also
     calls start_agent_provisioning_temporal_worker_thread on TASK_QUEUE."""
-    import shared_temporal
+    import shared.temporal
     from agent_provisioning_team.temporal import SANDBOX_ACTIVITIES, SANDBOX_WORKFLOWS
     from agent_provisioning_team.temporal import worker as worker_mod
     from agent_provisioning_team.temporal.constants import SANDBOX_TASK_QUEUE, TASK_QUEUE
 
     with (
         patch.object(worker_mod, "is_temporal_enabled", return_value=True),
-        patch.object(shared_temporal, "start_team_worker", return_value=True) as mock_start,
+        patch.object(shared.temporal, "start_team_worker", return_value=True) as mock_start,
     ):
         assert worker_mod.start_agent_provisioning_sandbox_temporal_worker_thread() is True
         mock_start.assert_called_once()

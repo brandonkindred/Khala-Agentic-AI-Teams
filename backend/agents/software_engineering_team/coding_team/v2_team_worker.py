@@ -7,11 +7,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_dev_models import ReviewContext, TaskType
-from shared_dev_models import Task as SETask
-from shared_dev_models import TaskStatus as SETaskStatus
-from shared_git import branch_utils
-from shared_git.git_utils import (
+from shared.dev_models import ReviewContext, TaskType
+from shared.dev_models import Task as SETask
+from shared.dev_models import TaskStatus as SETaskStatus
+from shared.git import branch_utils
+from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
     create_feature_branch,

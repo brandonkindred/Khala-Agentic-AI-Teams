@@ -34,7 +34,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.real_postgres]
 def _branding_schema():
     if not os.environ.get("POSTGRES_HOST"):
         pytest.skip("real_postgres tests require POSTGRES_HOST")
-    from shared_postgres import get_conn, register_team_schemas
+    from shared.postgres import get_conn, register_team_schemas
 
     register_team_schemas(BRANDING_SCHEMA)
     yield

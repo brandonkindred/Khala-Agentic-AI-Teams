@@ -26,7 +26,7 @@ import logging
 import time
 from typing import Any
 
-from shared_temporal import get_temporal_client, get_temporal_loop, signal_workflow_sync
+from shared.temporal import get_temporal_client, get_temporal_loop, signal_workflow_sync
 from user_agent_founder.temporal import (
     TASK_QUEUE,
     WORKFLOW_ID_PREFIX,
@@ -44,7 +44,7 @@ CLIENT_READY_POLL_S = 0.05
 # Cancellation is best-effort and user-facing: cap BOTH legs of the round trip so
 # a /cancel never blocks on the defaults — the client-ready wait
 # (CLIENT_READY_TIMEOUT_S, 10s) and separately the signal RPC itself
-# (shared_temporal.runner.START_WORKFLOW_TIMEOUT_S, 30s) — when the worker is
+# (shared.temporal.runner.START_WORKFLOW_TIMEOUT_S, 30s) — when the worker is
 # down or the Temporal server is slow to answer.
 CANCEL_CLIENT_READY_TIMEOUT_S = 1.0
 CANCEL_SIGNAL_RPC_TIMEOUT_S = 3.0

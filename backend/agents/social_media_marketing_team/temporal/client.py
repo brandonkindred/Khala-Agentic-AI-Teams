@@ -1,15 +1,15 @@
-"""Social marketing Temporal client — thin re-export of ``shared_temporal.client``.
+"""Social marketing Temporal client — thin re-export of ``shared.temporal.client``.
 
-The Temporal connection helpers now live in ``shared_temporal.client`` so every
+The Temporal connection helpers now live in ``shared.temporal.client`` so every
 team shares one cached client and event loop (one source of truth) — and, in
 particular, one ``DataConverter`` with the shared gzip payload codec
-(``shared_temporal.codec``). This module stays as a compatibility shim for
+(``shared.temporal.codec``). This module stays as a compatibility shim for
 existing ``social_media_marketing_team.temporal.client`` imports.
 """
 
 from __future__ import annotations
 
-from shared_temporal.client import (  # noqa: F401
+from shared.temporal.client import (  # noqa: F401
     connect_temporal_client,
     get_temporal_address,
     get_temporal_client,

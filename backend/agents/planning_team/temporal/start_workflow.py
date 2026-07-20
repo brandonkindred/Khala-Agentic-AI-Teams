@@ -1,9 +1,9 @@
 """Start the Planning Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
 bridge that waits for the worker's connected client + loop, then schedules the
 workflow start on the worker loop). We deliberately do NOT use
-``shared_temporal.run_team_job`` here: it creates its own job row and marks it
+``shared.temporal.run_team_job`` here: it creates its own job row and marks it
 running, which would collide with the API's ``create_job`` and the activity-owned
 RUNNING/COMPLETED bookkeeping.
 """
@@ -14,7 +14,7 @@ import logging
 from typing import Optional
 
 from planning_team.temporal import TASK_QUEUE, WORKFLOW_ID_PREFIX, PlanningWorkflow
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

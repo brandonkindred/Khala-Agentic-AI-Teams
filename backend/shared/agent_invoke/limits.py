@@ -1,7 +1,7 @@
 """Size and timeout limits for the agent invoke path.
 
 Shared by the unified API proxy (``unified_api/routes/agents.py``) and the
-sandbox shim (``shared_agent_invoke/shim.py``) so both enforcement points use
+sandbox shim (``shared/agent_invoke/shim.py``) so both enforcement points use
 the same defaults and env-var overrides. See GitHub issue #256.
 
 Three axes are bounded:
@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
-from shared_env import parse_float, parse_int
+from shared.env import parse_float, parse_int
 
 DEFAULT_MAX_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB
 DEFAULT_MAX_OUTPUT_BYTES = 1 * 1024 * 1024  # 1 MiB

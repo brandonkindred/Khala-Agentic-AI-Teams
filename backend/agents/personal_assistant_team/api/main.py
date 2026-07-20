@@ -38,7 +38,7 @@ try:
 except ImportError:
     slack_notify_pa_response = None
 
-from shared_app import create_team_app
+from shared.app import create_team_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

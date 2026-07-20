@@ -505,13 +505,13 @@ def test_event_top_n_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # Live-Postgres end-to-end (skipped without POSTGRES_HOST)
 # ===========================================================================
 @pytest.mark.skipif(
-    not __import__("shared_postgres").is_postgres_enabled(),
+    not __import__("shared.postgres").is_postgres_enabled(),
     reason="POSTGRES_HOST not set; skipping live-Postgres retrieval test",
 )
 def test_build_digest_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     from agent_cognition.postgres import SCHEMA
-    from shared_postgres import register_team_schemas
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres import register_team_schemas
+    from shared.postgres.testing import truncate_team_tables
 
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)

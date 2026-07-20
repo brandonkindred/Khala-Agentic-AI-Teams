@@ -611,13 +611,13 @@ The contracts below describe the *intended* self-healing behavior for whenever t
 
 ## 12. Agent Cognition Core
 
-The **Agent Cognition Core** (`backend/agents/agent_cognition/`) is a reusable substrate that gives every Agentic-team-generated agent the faculties of "a reasonable thinking person" rather than a bare LLM wrapper: a durable, time-structured **memory** layer (day → week → month → year rollups), a hybrid **rules engine** (advisory rules injected into prompts + enforced rules gated deterministically) that *learns* behavioral rules from those memories, and a per-agent **tools** layer whose calls feed memory. Because per-agent sandboxes are torn down (`docker compose down -v`) after idle and are network-isolated, all cognitive state lives in the long-lived platform Postgres, namespaced by `agent_id` (via `shared_postgres`), and the agent reaches it only across the invoke boundary — never directly. Design rationale and data model: `backend/agents/agent_cognition/DESIGN.md`.
+The **Agent Cognition Core** (`backend/agents/agent_cognition/`) is a reusable substrate that gives every Agentic-team-generated agent the faculties of "a reasonable thinking person" rather than a bare LLM wrapper: a durable, time-structured **memory** layer (day → week → month → year rollups), a hybrid **rules engine** (advisory rules injected into prompts + enforced rules gated deterministically) that *learns* behavioral rules from those memories, and a per-agent **tools** layer whose calls feed memory. Because per-agent sandboxes are torn down (`docker compose down -v`) after idle and are network-isolated, all cognitive state lives in the long-lived platform Postgres, namespaced by `agent_id` (via `shared.postgres`), and the agent reaches it only across the invoke boundary — never directly. Design rationale and data model: `backend/agents/agent_cognition/DESIGN.md`.
 
 The closed learning loop — and the invariant proven by the end-to-end test (`tests/test_e2e_pipeline.py`) — runs as follows:
 
 ```mermaid
 flowchart TB
-    Invoke["Agent invoke\n(unified_api/routes/agents.py +\nshared_agent_invoke shim)"]
+    Invoke["Agent invoke\n(unified_api/routes/agents.py +\nshared.agent_invoke shim)"]
     Events["Episodic events\nagent_cognition_events"]
     Rollup["Rollup engine\nmemory/rollup.py\nensure_rollups_current"]
     Summaries["Period summaries\nday/week/month/year"]

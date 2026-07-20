@@ -151,7 +151,7 @@ New / modified:
   — optional, helps grocery aggregation when the recipe specifies a
   different unit than the canonical purchase unit.
 - `grocery_lists`, `pantry_items`, `cooking_events` Postgres tables,
-  registered via `shared_postgres.register_team_schemas`.
+  registered via `shared.postgres.register_team_schemas`.
 - `preferences.mealtime_windows` on `ClientProfile`, `timezone` on
   `ClientProfile`.
 

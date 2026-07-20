@@ -24,7 +24,7 @@ if str(_agents) not in sys.path:
     sys.path.insert(0, str(_agents))
 
 from agent_cognition.tools.envelope import ENVELOPE_MARKER  # noqa: E402
-from shared_agent_invoke import mount_invoke_shim  # noqa: E402
+from shared.agent_invoke import mount_invoke_shim  # noqa: E402
 
 
 def _write_manifest(tmp_path: Path, filename: str, body: str) -> None:

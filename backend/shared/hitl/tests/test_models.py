@@ -1,11 +1,11 @@
-"""Tests for shared_hitl.models — the reconciled superset schemas."""
+"""Tests for shared.hitl.models — the reconciled superset schemas."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from shared_hitl.models import (
+from shared.hitl.models import (
     AnswerSubmission,
     PendingQuestion,
     QuestionOption,

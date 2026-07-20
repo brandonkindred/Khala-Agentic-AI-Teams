@@ -63,7 +63,7 @@ def stream_job_status(job_id: str) -> StreamingResponse:
     from agents.blogging.api import main as _main
     from agents.blogging.shared.job_event_bus import subscribe, unsubscribe
 
-    from shared_sse import sse_job_stream_sync, sse_line
+    from shared.sse import sse_job_stream_sync, sse_line
 
     if _main.get_blog_job is None:
         raise HTTPException(status_code=501, detail="Job store not available")

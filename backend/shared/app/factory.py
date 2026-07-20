@@ -1,14 +1,14 @@
 """Factory for the standard team FastAPI app wiring.
 
 Almost every team's ``api/main.py`` opens with the same four moves: call
-:func:`shared_observability.init_otel`, build a ``FastAPI`` with a lifespan that
+:func:`shared.observability.init_otel`, build a ``FastAPI`` with a lifespan that
 registers the team's Postgres schema on startup and closes the pool on shutdown,
-then :func:`shared_observability.instrument_fastapi_app`. :func:`create_team_app`
+then :func:`shared.observability.instrument_fastapi_app`. :func:`create_team_app`
 collapses that boilerplate into one call while leaving room for team-specific
 startup/shutdown work via optional hooks.
 
 Degrades cleanly: ``postgres_schema=None`` skips all Postgres wiring, and the
-``shared_postgres`` import is lazy so a team without it is never forced to depend
+``shared.postgres`` import is lazy so a team without it is never forced to depend
 on it. Schema registration and pool teardown are defensive (logged, never raised
 into app startup), matching the per-team lifespans this replaces.
 """
@@ -22,10 +22,10 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Sequence, 
 
 from fastapi import FastAPI
 
-from shared_observability import init_otel, instrument_fastapi_app
+from shared.observability import init_otel, instrument_fastapi_app
 
 if TYPE_CHECKING:
-    from shared_postgres import TeamSchema
+    from shared.postgres import TeamSchema
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,9 @@ def create_team_app(
 
     Preconditions:
         - ``service_name``/``team_key``/``title``/``version`` are non-empty strings.
-        - ``postgres_schema`` (when given) is a ``shared_postgres.TeamSchema``.
+        - ``postgres_schema`` (when given) is a ``shared.postgres.TeamSchema``.
         - ``extra_postgres_schemas`` (when given) is a sequence of additional
-          ``shared_postgres.TeamSchema`` values (no ``None`` elements) a team
+          ``shared.postgres.TeamSchema`` values (no ``None`` elements) a team
           needs registered alongside its primary schema — e.g. a second schema
           it would otherwise register from an ``on_startup`` hook, which runs
           too late to close the Temporal cold-start race (see ``postgres_schemas``
@@ -133,7 +133,7 @@ def create_team_app(
     async def _lifespan(application: FastAPI):
         if _all_schemas:
             try:
-                from shared_postgres import register_team_schemas
+                from shared.postgres import register_team_schemas
             except Exception:
                 logger.exception("%s postgres schema registration failed (import)", team_key)
             else:
@@ -160,11 +160,11 @@ def create_team_app(
                 logger.exception("%s on_shutdown hook failed", team_key)
             if _all_schemas:
                 try:
-                    from shared_postgres import close_pool
+                    from shared.postgres import close_pool
 
                     close_pool()
                 except Exception:
-                    logger.warning("%s shared_postgres close_pool failed", team_key, exc_info=True)
+                    logger.warning("%s shared.postgres close_pool failed", team_key, exc_info=True)
 
     app = FastAPI(title=title, version=version, lifespan=_lifespan, **fastapi_kwargs)
     # Expose the team's primary schema (or None) — unchanged, for backward

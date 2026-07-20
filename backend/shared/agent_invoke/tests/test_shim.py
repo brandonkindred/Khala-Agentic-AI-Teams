@@ -25,7 +25,7 @@ _agents = _backend / "agents"
 if str(_agents) not in sys.path:
     sys.path.insert(0, str(_agents))
 
-from shared_agent_invoke import mount_invoke_shim  # noqa: E402
+from shared.agent_invoke import mount_invoke_shim  # noqa: E402
 
 
 def _write_manifest(tmp_path: Path, filename: str, body: str) -> None:
@@ -300,7 +300,7 @@ def test_per_manifest_timeout_overrides_env_default(
 
 
 def test_bounded_logs_caps_line_count_and_length() -> None:
-    from shared_agent_invoke.shim import (
+    from shared.agent_invoke.shim import (
         _MAX_LOG_LINE_CHARS,
         _MAX_LOG_LINES,
         _bounded_logs,

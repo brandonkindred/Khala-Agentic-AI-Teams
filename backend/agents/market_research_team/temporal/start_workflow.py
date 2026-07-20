@@ -1,7 +1,7 @@
 """Start the market_research Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
-bridge). We deliberately do NOT use ``shared_temporal.run_team_job`` here: it
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
+bridge). We deliberately do NOT use ``shared.temporal.run_team_job`` here: it
 creates its own job row (under the ``market_research`` team slug) and sets
 ``status=running`` itself, which would collide with the API's ``create_job``
 (namespaced under ``market_research_team``) and the activity-owned
@@ -18,7 +18,7 @@ from market_research_team.temporal import (
     WORKFLOW_ID_PREFIX,
     MarketResearchWorkflow,
 )
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

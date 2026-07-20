@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 
 from temporalio.exceptions import CancelledError
 
-from shared_concurrency import BackgroundHeartbeat
+from shared.concurrency import BackgroundHeartbeat
 
 logger = logging.getLogger(__name__)
 

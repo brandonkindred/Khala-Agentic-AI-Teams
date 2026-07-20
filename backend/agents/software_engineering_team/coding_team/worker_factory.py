@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-from shared_dev_models import ReviewContext
+from shared.dev_models import ReviewContext
 from software_engineering_team.coding_team.models import StackSpec
 from software_engineering_team.coding_team.team_routing import _v2_team_kind_for_stack
 

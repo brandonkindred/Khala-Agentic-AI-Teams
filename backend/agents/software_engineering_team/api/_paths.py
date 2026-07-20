@@ -11,11 +11,11 @@ Invariants:
 
 from pathlib import Path
 
-from shared_app import bootstrap_syspath
+from shared.app import bootstrap_syspath
 
 # ``backend/agents`` is already importable in every SE execution context (that is
-# how this module and ``shared_app`` are reached), so delegating to the shared
+# how this module and ``shared.app`` are reached), so delegating to the shared
 # helper is safe here — unlike coding_team, whose ``_paths`` must bootstrap the
-# agents root itself before ``shared_app`` can be imported.
+# agents root itself before ``shared.app`` can be imported.
 _team_dir = Path(__file__).resolve().parent.parent
 bootstrap_syspath(_team_dir, _team_dir / "architect_agents", must_exist=True)

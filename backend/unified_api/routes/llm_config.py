@@ -4,7 +4,7 @@ The Postgres-backed ordered **provider list** is the sole source of LLM
 configuration (there is no single-provider env fallback). An operator manages the
 list — each entry's provider/model/base URL and its own API key — from the UI.
 Values are stored Fernet-encrypted in shared Postgres, so every team container
-reads them back through ``shared_postgres`` / ``llm_service.provider_store`` — see
+reads them back through ``shared.postgres`` / ``llm_service.provider_store`` — see
 ``llm_service/README.md``.
 
 Endpoints:
@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, field_validator
 from llm_service import clear_client_cache, provider_store, runtime_config
 from llm_service import config as llm_config
 from llm_service.clients import list_ollama_models
-from shared_postgres import (
+from shared.postgres import (
     StorageStatus,
     bounded_probe,
     connect_timeout,
@@ -54,7 +54,7 @@ async def _probe_storage_status() -> StorageStatus:
     Preconditions: none.
     Postconditions: returns the shared :func:`resolve_storage_status` classification
         (``available`` / ``unconfigured`` / ``unreachable``). The blocking probe runs in
-        a worker thread via the shared :func:`shared_postgres.bounded_probe`, whose budget
+        a worker thread via the shared :func:`shared.postgres.bounded_probe`, whose budget
         (``connect_timeout + statement_timeout + 1s``) gives the inner ``SELECT 1`` real
         headroom so a slow-but-alive store isn't falsely reported unreachable, and which
         logs the cause on timeout/error rather than masking a non-connectivity bug as

@@ -7,7 +7,7 @@ never participates in an import cycle.
 
 Invariants:
     - The orchestrator-thread registry itself lives in
-      ``shared_run_thread_registry.RunThreadRegistry``; ``_active_orchestrator_threads`` is a
+      ``shared.run_thread_registry.RunThreadRegistry``; ``_active_orchestrator_threads`` is a
       back-compat alias onto its live internal map, so background threads and routes see the same
       map regardless of whether they go through the registry or poke the alias directly.
 """
@@ -24,9 +24,9 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from shared_concurrency import BackgroundHeartbeat
-from shared_hitl.progress import coerce_progress
-from shared_run_thread_registry import RunThreadRegistry
+from shared.concurrency import BackgroundHeartbeat
+from shared.hitl.progress import coerce_progress
+from shared.run_thread_registry import RunThreadRegistry
 from software_engineering_team.api.models import (
     CurrentActivityEntry,
     TaskStateEntry,
@@ -240,7 +240,7 @@ def _parse_team_progress(raw: Any) -> Optional[Dict[str, TeamProgressEntry]]:
 def _coerce_progress(value: Any) -> Optional[int]:
     """Coerce a stored progress value to an int in [0, 100], or None.
 
-    Thin wrapper over ``shared_hitl.progress.coerce_progress`` (see it for the full
+    Thin wrapper over ``shared.hitl.progress.coerce_progress`` (see it for the full
     contract). Kept as a named function on this module so callers importing
     ``_coerce_progress`` are unchanged. Unlike SE's previous local version, the shared
     helper clamps to [0, 100], so a corrupt record can no longer render an

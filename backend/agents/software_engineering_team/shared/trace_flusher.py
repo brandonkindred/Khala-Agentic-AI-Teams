@@ -11,7 +11,7 @@ A :class:`BackgroundHeartbeat` daemon thread drains the deque on an interval and
 writes the whole batch in one ``executemany`` (:func:`trace_store.write_rows`).
 On clean shutdown :func:`shutdown` stops the heartbeat, unregisters the
 observer, and does a final synchronous drain — all before the shared Postgres
-pool is closed (see ``api/lifecycle.py`` → ``shared_app/factory.py``).
+pool is closed (see ``api/lifecycle.py`` → ``shared/app/factory.py``).
 
 Invariants:
     - The deque never exceeds ``SE_TRACE_BUFFER_MAX`` entries; overflow drops
@@ -34,7 +34,7 @@ import threading
 from collections import deque
 from typing import Any, Optional
 
-from shared_concurrency.heartbeat import BackgroundHeartbeat
+from shared.concurrency.heartbeat import BackgroundHeartbeat
 from software_engineering_team.shared import trace_store
 from software_engineering_team.shared.env_config import env_float, env_int
 

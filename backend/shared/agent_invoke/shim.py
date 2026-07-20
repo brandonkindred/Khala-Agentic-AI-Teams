@@ -2,7 +2,7 @@
 
 Usage::
 
-    from shared_agent_invoke import mount_invoke_shim
+    from shared.agent_invoke import mount_invoke_shim
     mount_invoke_shim(app)
 
 Mounts ``POST /_agents/{agent_id}/invoke`` on ``app``. The per-agent

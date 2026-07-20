@@ -1,4 +1,4 @@
-"""Shared dict-backed fake for ``shared_postgres.get_conn`` used by branding tests.
+"""Shared dict-backed fake for ``shared.postgres.get_conn`` used by branding tests.
 
 Matching contract (read before changing store SQL):
     ``_FakeCursor.execute`` normalizes each statement with

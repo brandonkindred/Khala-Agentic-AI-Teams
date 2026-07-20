@@ -17,14 +17,14 @@ in-package import and carries no team dependency.
 
 Preconditions:
     - ``backend/agents`` is on ``sys.path`` (the repo-wide convention for
-      ``shared_*`` packages), so ``import shared_command_runner`` resolves.
+      ``shared_*`` packages), so ``import shared.command_runner`` resolves.
 Postconditions:
     - Importing this package has no side effects and starts no threads.
 """
 
 from __future__ import annotations
 
-from shared_command_runner.error_parsing import (
+from shared.command_runner.error_parsing import (
     FailureClass,
     ParsedFailure,
     build_agent_feedback,
@@ -36,7 +36,7 @@ from shared_command_runner.error_parsing import (
     parse_ng_build_failure,
     parse_pytest_failure,
 )
-from shared_command_runner.runner import (
+from shared.command_runner.runner import (
     BUILD_TIMEOUT,
     SERVE_TIMEOUT,
     TEST_TIMEOUT,

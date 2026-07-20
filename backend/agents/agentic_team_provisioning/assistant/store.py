@@ -1,6 +1,6 @@
 """Postgres-backed persistence for agentic teams and process-design conversations.
 
-Backed by the shared Khala Postgres instance via ``shared_postgres.get_conn``.
+Backed by the shared Khala Postgres instance via ``shared.postgres.get_conn``.
 DDL lives in ``agentic_team_provisioning.postgres`` and is registered from
 the team's FastAPI lifespan.
 """
@@ -22,8 +22,8 @@ from agentic_team_provisioning.models import (
     ConversationMessage,
     ProcessDefinition,
 )
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class AgenticTeamStore:
     """Postgres-backed store for teams, processes, and conversations."""
 
     def __init__(self) -> None:
-        # Stateless; the connection pool lives inside shared_postgres.
+        # Stateless; the connection pool lives inside shared.postgres.
         pass
 
     # ------------------------------------------------------------------

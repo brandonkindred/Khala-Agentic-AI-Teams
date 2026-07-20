@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping, Optional
 
-from shared_postgres.client import get_conn
+from shared.postgres.client import get_conn
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

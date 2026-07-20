@@ -1,4 +1,4 @@
-# shared_llm_recovery
+# shared.llm_recovery
 
 Neutral, team-agnostic **recovery parsers** for imperfect LLM output.
 
@@ -17,7 +17,7 @@ team gets the same resilience.
 
 ```python
 import json
-from shared_llm_recovery import extract_json_object
+from shared.llm_recovery import extract_json_object
 
 try:
     data = json.loads(raw)
