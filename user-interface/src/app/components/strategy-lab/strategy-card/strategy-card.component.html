@@ -59,18 +59,6 @@
         <span class="metric-value losing">{{ record.backtest.result.max_drawdown_pct | number:'1.1-1' }}%</span>
         <span class="metric-label">Max DD</span>
       </div>
-      <div class="metric">
-        <span class="metric-value">{{ record.backtest.result.win_rate_pct | number:'1.1-1' }}%</span>
-        <span class="metric-label">Win Rate</span>
-      </div>
-      <div class="metric">
-        <span class="metric-value">{{ record.backtest.result.profit_factor | number:'1.2-2' }}</span>
-        <span class="metric-label">Profit Factor</span>
-      </div>
-      <div class="metric">
-        <span class="metric-value">{{ record.backtest.result.volatility_pct | number:'1.1-1' }}%</span>
-        <span class="metric-label">Volatility</span>
-      </div>
     </div>
 
     <button
@@ -108,6 +96,23 @@
       <p>{{ record.analysis_narrative }}</p>
     </div>
 
+    <!-- Secondary metrics (Win Rate, Profit Factor, Volatility) — kept out of the
+         always-visible summary row to keep the collapsed card scannable. -->
+    <div class="secondary-metrics-row">
+      <div class="metric">
+        <span class="metric-value">{{ record.backtest.result.win_rate_pct | number:'1.1-1' }}%</span>
+        <span class="metric-label">Win Rate</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value">{{ record.backtest.result.profit_factor | number:'1.2-2' }}</span>
+        <span class="metric-label">Profit Factor</span>
+      </div>
+      <div class="metric">
+        <span class="metric-value">{{ record.backtest.result.volatility_pct | number:'1.1-1' }}%</span>
+        <span class="metric-label">Volatility</span>
+      </div>
+    </div>
+
     <!-- Expandable panels -->
     <mat-accordion class="card-accordion" multi>
 
@@ -141,6 +146,10 @@
               <span [class]="totalNetPnl() >= 0 ? 'pnl-pos' : 'pnl-neg'">
                 {{ totalNetPnl() | currency:'USD':'symbol':'1.0-0' }}
               </span>
+              &bull;
+              {{ record.backtest.config.start_date | dateOnly }}–{{ record.backtest.config.end_date | dateOnly }}
+              &bull;
+              Capital: {{ record.backtest.config.initial_capital | currency:'USD':'symbol':'1.0-0' }}
             </mat-panel-description>
           </mat-expansion-panel-header>
 
@@ -163,18 +172,6 @@
                 {{ totalNetPnl() | currency:'USD':'symbol':'1.0-0' }}
               </span>
               <span class="ls-label">Net P&amp;L</span>
-            </div>
-            <div class="ledger-stat">
-              <span class="ls-value">{{ record.backtest.config.start_date | dateOnly }}</span>
-              <span class="ls-label">Start</span>
-            </div>
-            <div class="ledger-stat">
-              <span class="ls-value">{{ record.backtest.config.end_date | dateOnly }}</span>
-              <span class="ls-label">End</span>
-            </div>
-            <div class="ledger-stat">
-              <span class="ls-value">{{ record.backtest.config.initial_capital | currency:'USD':'symbol':'1.0-0' }}</span>
-              <span class="ls-label">Capital</span>
             </div>
           </div>
 

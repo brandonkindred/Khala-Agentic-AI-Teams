@@ -145,6 +145,16 @@
   letter-spacing: 0.04em;
 }
 
+// Secondary metrics — same tile styling as .metrics-row, shown only in the
+// expanded card body to keep the collapsed summary scannable.
+.secondary-metrics-row {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
 // ── Card divider & narrative ──────────────────────────────────────────────────
 
 .card-divider {
