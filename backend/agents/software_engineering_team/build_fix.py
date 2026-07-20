@@ -69,6 +69,12 @@ def _run_build_verification(
     Returns (success, error_output).
     For frontend: runs ng build.
     For backend: runs python syntax check (pytest if tests exist).
+
+    The v2 phase-pipeline teams (``backend_code_v2_team``/``frontend_code_v2_team``)
+    pass ``"backend_code_v2"``/``"frontend_code_v2"`` as ``agent_type`` — normalize
+    those to their base ``"backend"``/``"frontend"`` verification path so v2 jobs
+    actually run syntax check / ``ng build`` instead of silently no-op'ing to
+    ``(True, "")`` via the fallthrough at the end of this function.
     """
     from shared_command_runner.runner import (
         run_command,
@@ -76,6 +82,9 @@ def _run_build_verification(
         run_pytest,
         run_python_syntax_check,
     )
+
+    if agent_type in ("backend_code_v2", "frontend_code_v2"):
+        agent_type = agent_type.removesuffix("_code_v2")
 
     if (
         agent_type == "frontend"

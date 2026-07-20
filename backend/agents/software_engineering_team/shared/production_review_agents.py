@@ -75,9 +75,15 @@ def build_production_review_kwargs() -> Dict[str, Any]:
             "linting_tool_agent": LintingToolAgent(get_client("linting_tool_agent")),
         }
     except Exception:
-        logger.warning(
-            "build_production_review_kwargs: failed to construct review agents; "
-            "degrading to None fallbacks (today's behaviour)",
+        # ERROR (not WARNING): a degraded gate is otherwise indistinguishable
+        # from a passing one downstream -- the job still completes "successfully"
+        # with code_review/build/lint silently skipped. This must be loud enough
+        # to alert on rather than get lost with routine warnings.
+        logger.error(
+            "GATE_DEGRADED: build_production_review_kwargs failed to construct "
+            "review agents (code_review_agent/build_verifier/linting_tool_agent "
+            "all degrade to None) -- this job's build/lint/code-review gates will "
+            "be silently skipped",
             exc_info=True,
         )
         return {}
@@ -104,16 +110,18 @@ def build_production_review_kwargs_in_process() -> Dict[str, Any]:
         from software_engineering_team.linting_tool_agent import LintingToolAgent
 
         return {
-            "code_review_agent": CodeReviewAgent(
-                get_client("code_review"), force_in_process=True
-            ),
+            "code_review_agent": CodeReviewAgent(get_client("code_review"), force_in_process=True),
             "build_verifier": _run_build_verification,
             "linting_tool_agent": LintingToolAgent(get_client("linting_tool_agent")),
         }
     except Exception:
-        logger.warning(
-            "build_production_review_kwargs_in_process: failed to construct review agents; "
-            "degrading to None fallbacks (today's behaviour)",
+        # See build_production_review_kwargs: ERROR, not WARNING -- a degraded
+        # gate is otherwise indistinguishable from a passing one downstream.
+        logger.error(
+            "GATE_DEGRADED: build_production_review_kwargs_in_process failed to "
+            "construct review agents (code_review_agent/build_verifier/"
+            "linting_tool_agent all degrade to None) -- this job's build/lint/"
+            "code-review gates will be silently skipped",
             exc_info=True,
         )
         return {}

@@ -141,7 +141,9 @@ def test_run_batch_coding_fixes_llm_failure(monkeypatch):
         run_batch_coding_fixes,
     )
 
-    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent("", raise_exc=RuntimeError("boom")))
+    monkeypatch.setattr(
+        ps_mod, "Agent", lambda *a, **kw: _StubAgent("", raise_exc=RuntimeError("boom"))
+    )
     monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_batch_coding_fixes(
@@ -161,7 +163,7 @@ def test_run_batch_coding_fixes_success(monkeypatch):
     )
 
     resp = (
-        "## FILE a.py ##\nfixed code\n"
+        "## FILE a.py ##\nfixed = True\n"
         "## ISSUES_ADDRESSED ##\n"
         "issue_index: 1\ndescription: fixed\n"
         "## END ISSUES_ADDRESSED ##\n"
@@ -177,7 +179,7 @@ def test_run_batch_coding_fixes_success(monkeypatch):
         current_files={"a.py": "code"},
     )
     assert "a.py" in out.files
-    assert out.files["a.py"] == "fixed code"
+    assert out.files["a.py"] == "fixed = True"
 
 
 def test_run_batch_coding_fixes_partial_with_unresolved(monkeypatch):
@@ -204,6 +206,34 @@ def test_run_batch_coding_fixes_partial_with_unresolved(monkeypatch):
         current_files={"a.py": "code"},
     )
     # Only first issue addressed -> second is unresolved
+    assert len(out.unresolved_issues) == 1
+
+
+def test_run_batch_coding_fixes_rejects_unparsable_python(monkeypatch):
+    """A batch fix that returns an incomplete .py rewrite must not be merged."""
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_batch_coding_fixes,
+    )
+
+    resp = (
+        "## FILE a.py ##\ndef foo(:\n    pass\n"  # unparsable: broken def
+        "## ISSUES_ADDRESSED ##\n"
+        "issue_index: 1\ndescription: fixed\n"
+        "## END ISSUES_ADDRESSED ##\n"
+        "## SUMMARY ##\nall fixed\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    out = run_batch_coding_fixes(
+        llm=MagicMock(),
+        microtask=_microtask(),
+        issues=[_issue(file_path="a.py")],
+        current_files={"a.py": "original code"},
+    )
+    # Broken rewrite discarded -- prior content kept, issue stays unresolved.
+    assert out.files["a.py"] == "original code"
     assert len(out.unresolved_issues) == 1
 
 
@@ -311,7 +341,7 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
 
     tool_agent = MagicMock()
     tool_agent.problem_solve.return_value = ToolAgentPhaseOutput(
-        files={"b.py": "tool fix"},
+        files={"b.py": "tool_fix = True"},
         recommendations=["consider X"],
         summary="tool ran",
     )

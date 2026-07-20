@@ -383,6 +383,20 @@ def _run_general_microtask_impl(
     data = parse_files_and_summary(raw)
     files = data.get("files") or {}
 
+    from software_engineering_team.shared.phases.problem_solving import (
+        _reject_invalid_python,
+    )
+
+    files, rejected_files = _reject_invalid_python(files)
+    if rejected_files:
+        logger.warning(
+            "Microtask %s: codegen returned unparsable Python for %d file(s); "
+            "dropping so the build-verification retry loop can catch it: %s",
+            microtask.id,
+            len(rejected_files),
+            sorted(rejected_files),
+        )
+
     return files
 
 

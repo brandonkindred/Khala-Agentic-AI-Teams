@@ -17,8 +17,9 @@ phase-specific fix functions (which interlock with the out-of-scope backend
 
 from __future__ import annotations
 
+import ast
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
@@ -73,6 +74,34 @@ def _format_issues_for_batch(issues: List[Any]) -> str:
         lines.append(f"- **Recommendation:** {issue.recommendation or 'Fix the issue.'}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _reject_invalid_python(files: Dict[str, str]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Split ``files`` into syntactically valid and invalid Python entries.
+
+    An LLM full-file rewrite can stop mid-file (e.g. abandon a class body)
+    while still returning a response the API considers complete, so
+    ``stop_reason``/``finish_reason`` truncation checks in the LLM client
+    can't catch it. This is the last line of defense before a rewritten file
+    is merged into the working file set.
+
+    Preconditions:
+        ``files`` maps repo-relative paths to full file content.
+    Postconditions:
+        Returns ``(valid, rejected)``; ``rejected`` maps path to the parse
+        error message. Non-``.py`` paths are always considered valid. Pure.
+    """
+    valid: Dict[str, str] = {}
+    rejected: Dict[str, str] = {}
+    for path, content in files.items():
+        if path.endswith(".py"):
+            try:
+                ast.parse(content)
+            except SyntaxError as exc:
+                rejected[path] = f"{exc.__class__.__name__}: {exc}"
+                continue
+        valid[path] = content
+    return valid, rejected
 
 
 def _relevant_code_for_issue(issue: Any, current_files: Dict[str, str]) -> str:
@@ -184,6 +213,20 @@ def run_batch_coding_fixes_impl(
     issues_addressed = parsed.get("issues_addressed") or []
     summary = parsed.get("summary") or f"Batch fixed {len(fixed_files)} file(s)"
 
+    fixed_files, rejected_files = _reject_invalid_python(fixed_files)
+    if rejected_files:
+        logger.warning(
+            "[%s] Microtask %s: batch fix returned unparsable Python for %d file(s); "
+            "discarding and keeping the prior version: %s",
+            task_id,
+            microtask_id,
+            len(rejected_files),
+            sorted(rejected_files),
+        )
+        summary += (
+            f" ({len(rejected_files)} file(s) rejected: unparsable Python, kept prior version)"
+        )
+
     merged = dict(current_files)
     merged.update(fixed_files)
 
@@ -206,6 +249,15 @@ def run_batch_coding_fixes_impl(
         for idx, issue in enumerate(actionable):
             if idx not in addressed_indices:
                 unresolved_issues.append(issue)
+
+    # A rejected file's issue must stay unresolved even if the LLM claimed to
+    # have addressed it -- the merge kept the prior (unfixed) version.
+    if rejected_files:
+        already_unresolved = set(id(issue) for issue in unresolved_issues)
+        for issue in actionable:
+            if issue.file_path in rejected_files and id(issue) not in already_unresolved:
+                unresolved_issues.append(issue)
+                already_unresolved.add(id(issue))
 
     resolved = len(unresolved_issues) == 0
 
@@ -331,6 +383,22 @@ def _fix_issues_one_at_a_time_impl(
                     resolved_this = True
                 break
 
+            fixed_files, rejected_files = _reject_invalid_python(fixed_files)
+            if rejected_files:
+                logger.warning(
+                    "[%s] %s%sfix (issue %d, attempt %d) returned unparsable Python for "
+                    "%d file(s); discarding and retrying: %s",
+                    task_id,
+                    mt_ctx,
+                    phase_ctx,
+                    issue_idx + 1,
+                    attempt,
+                    len(rejected_files),
+                    sorted(rejected_files),
+                )
+            if not fixed_files:
+                continue
+
             working.update(fixed_files)
             merged.update(fixed_files)
             entry: Dict[str, Any] = {}
@@ -386,7 +454,18 @@ def _apply_tool_agents_problem_solve(
         try:
             out = agent.problem_solve(phase_inp)
             if out.files:
-                merged.update(out.files)
+                valid_files, rejected_files = _reject_invalid_python(out.files)
+                if rejected_files:
+                    logger.warning(
+                        "[%s] %stool agent %s returned unparsable Python for %d file(s); "
+                        "discarding and keeping the prior version: %s",
+                        task_id,
+                        f"Microtask {microtask_id}: " if microtask_id else "",
+                        kind.value,
+                        len(rejected_files),
+                        sorted(rejected_files),
+                    )
+                merged.update(valid_files)
             if out.recommendations:
                 for r in out.recommendations:
                     entry: Dict[str, Any] = {"source": kind.value, "recommendation": r}

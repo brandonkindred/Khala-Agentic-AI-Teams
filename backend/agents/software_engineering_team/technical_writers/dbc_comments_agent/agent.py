@@ -157,6 +157,24 @@ class DbcCommentsAgent:
             if isinstance(path, str) and isinstance(content, str) and content.strip()
         }
 
+        # Reject any re-emitted file that isn't syntactically complete: the DbC
+        # pass re-emits the whole file, and a model that abandons mid-rewrite
+        # can still return a "complete" (non-truncated) response, so this
+        # can't be caught by stop_reason checks alone. Keep the pre-DbC
+        # version of that file rather than merging a broken rewrite.
+        from software_engineering_team.shared.phases.problem_solving import (
+            _reject_invalid_python,
+        )
+
+        files, rejected_files = _reject_invalid_python(files)
+        if rejected_files:
+            logger.warning(
+                "DbcComments: LLM returned unparsable Python for %d file(s); "
+                "discarding and keeping the pre-DbC version: %s",
+                len(rejected_files),
+                sorted(rejected_files),
+            )
+
         comments_added = int(data.get("comments_added", 0))
         comments_updated = int(data.get("comments_updated", 0))
         already_compliant = bool(data.get("already_compliant", False))
