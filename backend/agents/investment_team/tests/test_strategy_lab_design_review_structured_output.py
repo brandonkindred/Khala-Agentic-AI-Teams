@@ -128,6 +128,28 @@ def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.Monk
     assert len(stub_client.calls) == 1
 
 
+def test_structured_success_logs_outcome_succeeded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The design-review happy path emits an INFO ``outcome=succeeded`` marker
+    so the resend-free path is observable in production logs."""
+    stub_client = _StubClient(dict(_READY))
+    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(
+        design_review_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client)
+    )
+    monkeypatch.setattr(design_review_mod, "Agent", _raise_if_agent_built)
+
+    logger_name = "investment_team.strategy_lab.agents.design_review"
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    succeeded = [r for r in caplog.records if "outcome=succeeded" in r.message]
+    assert len(succeeded) == 1
+    assert "agent=strategy_design_review" in succeeded[0].message
+    assert "phase=design_review_structured" in succeeded[0].message
+
+
 def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     stub_client = _StubClient(dict(_READY))
     monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)

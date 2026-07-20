@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import websockets
+import websockets.exceptions  # noqa: F401 — populate the ``websockets.exceptions`` attribute
 
 from investment_team.trading_service.data_stream.resampler import NativeBar, NativeTick
 from investment_team.trading_service.providers.base import (
