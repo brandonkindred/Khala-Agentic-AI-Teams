@@ -93,11 +93,13 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     Execution → Documentation → Deliver) with per-microtask review gates embedded
     in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
-    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
+    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
+    ``_run_preflight`` / ``_run_planning_and_branch_setup`` from
     :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
     repo-briefing sets, progress callback, and the integration-only ``run_workflow``,
-    which delegates its planning + feature-branch-creation step to the base
-    class's ``_run_planning_and_branch_setup``.
+    which calls the base class's ``_run_preflight`` and
+    ``_run_planning_and_branch_setup`` for its branch-checkout/tooling-verification
+    and planning/feature-branch-creation steps respectively.
     """
 
     @staticmethod
