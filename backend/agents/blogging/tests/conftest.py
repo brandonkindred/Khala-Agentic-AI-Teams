@@ -112,14 +112,24 @@ def make_stub_writer_class(*, escalation_summary: str = "") -> type:
     return _StubWriter
 
 
-def make_stub_editor_class() -> type:
-    """Build a BlogCopyEditorAgent stand-in class that always approves on the first pass.
+def make_stub_editor_class(
+    *,
+    approved: bool = True,
+    summary: str = "ok",
+    feedback_items: list | None = None,
+) -> type:
+    """Build a BlogCopyEditorAgent stand-in class with configurable approval behavior.
 
     Preconditions:
-        - None.
+        - ``feedback_items`` is ``None`` or a list of ``FeedbackItem``-compatible values.
     Postconditions:
         - Returns a class (not an instance) suitable for monkeypatching a module's
-          ``BlogCopyEditorAgent`` reference; its ``run`` always returns an approved report.
+          ``BlogCopyEditorAgent`` reference; its ``run`` always returns a
+          ``CopyEditorOutput`` built from ``approved``, ``summary``, and
+          ``feedback_items`` (an empty list when ``feedback_items`` is ``None``). Defaults
+          reproduce the original always-approves-on-first-pass behavior; pass
+          ``approved=False`` (optionally with ``summary``/``feedback_items``) for a stub
+          that never approves.
     """
     from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput
 
@@ -128,9 +138,128 @@ def make_stub_editor_class() -> type:
             pass
 
         def run(self, *a, **kw):
-            return CopyEditorOutput(approved=True, summary="ok", feedback_items=[])
+            return CopyEditorOutput(
+                approved=approved,
+                summary=summary,
+                feedback_items=feedback_items or [],
+            )
 
     return _StubEditor
+
+
+def make_stub_llm_class() -> type:
+    """Build a DummyLLMClient subclass whose ``complete_json`` returns canned, deterministic JSON.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a class (not an instance) implementing the Strands Model ABC (via
+          ``DummyLLMClient``), suitable for use as ``ResearchAgent(llm_client=...)`` or
+          ``strands.Agent(model=...)``. ``complete_json`` inspects the prompt text for
+          keywords distinguishing the blog research pipeline's topic-analysis, query-plan,
+          candidate-scoring, summarization, and similar-topics stages, and returns the
+          matching canned response; prompts matching none of those keyword sets get a
+          generic analysis/outline response.
+    """
+    from llm_service import DummyLLMClient
+
+    class _StubLLM(DummyLLMClient):
+        def complete_json(self, prompt: str, *, temperature: float = 0.0, think=None, **kwargs):
+            lowered = prompt.lower()
+            if "core_topics" in lowered and "angle" in lowered and "constraints" in lowered:
+                return {
+                    "core_topics": ["test topic"],
+                    "angle": "overview",
+                    "constraints": [],
+                }
+            if '"queries"' in lowered and "query_text" in lowered:
+                return {
+                    "queries": [
+                        {"query_text": "test overview query", "intent": "overview"},
+                        {"query_text": "test how-to query", "intent": "how-to"},
+                    ]
+                }
+            if "relevance_score" in lowered and "type" in lowered:
+                return {
+                    "relevance_score": 0.9,
+                    "authority_score": 0.8,
+                    "accuracy_score": 0.85,
+                    "type": "guides",
+                    "tags": ["testing"],
+                }
+            if "summary:" in lowered and "key_points" in lowered:
+                return {
+                    "summary": "Test summary.",
+                    "key_points": ["Key point A", "Key point B"],
+                    "is_promotional": False,
+                }
+            if "similar_topics" in lowered and "similarity_score" in lowered:
+                return {
+                    "similar_topics": [
+                        {"topic": "Related topic A", "similarity_score": 0.85},
+                        {"topic": "Related topic B", "similarity_score": 0.75},
+                    ],
+                }
+            return {
+                "analysis": "Test analysis.",
+                "outline": ["Intro", "Body", "Conclusion"],
+            }
+
+    return _StubLLM
+
+
+def make_stub_search_class() -> type:
+    """Build a web-search stand-in class returning one deterministic candidate per query.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a class (not an instance) whose ``search(query, *, max_results,
+          recency_preference=None)`` returns a single-item list of ``CandidateResult`` derived
+          from ``query.query_text``, suitable for injecting as ``ResearchAgent(web_search=...)``.
+    """
+    from agents.blogging.blog_research_agent.models import CandidateResult
+
+    class _StubSearch:
+        def search(self, query, *, max_results, recency_preference=None):
+            return [
+                CandidateResult(
+                    title=f"{query.query_text} result",
+                    url="https://example.com",
+                    snippet="Example snippet",
+                    source="stub",
+                    rank=1,
+                )
+            ]
+
+    return _StubSearch
+
+
+def make_stub_fetcher_class() -> type:
+    """Build a web-fetcher stand-in class returning a canned ``SourceDocument`` for any URL.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a class (not an instance) whose ``fetch(url)`` returns a deterministic
+          ``SourceDocument`` echoing the given ``url``, suitable for injecting as
+          ``ResearchAgent(web_fetcher=...)``.
+    """
+    from agents.blogging.blog_research_agent.models import SourceDocument
+
+    class _StubFetcher:
+        def fetch(self, url):
+            return SourceDocument(
+                url=url,
+                title="Example title",
+                content="Example content about the test topic.",
+                publish_date=None,
+                domain="example.com",
+                language="en",
+                metadata={},
+            )
+
+    return _StubFetcher
 
 
 # Job-store helpers captured by reference inside ``api/main`` at import time. The
@@ -193,8 +322,9 @@ def patched_client(patched_blog_client, monkeypatch, fake_job_client) -> Any:
           implementation. Imports the shared app module lazily so test modules that never use
           this fixture do not pay the ``api/main`` import cost.
     """
-    from _api_test_utils import api_main
     from agents.blogging.shared import blog_job_store as bjs
+
+    from ._api_test_utils import api_main
 
     for name in _BLOG_JOB_HELPERS:
         helper = getattr(bjs, name, None)
@@ -206,7 +336,8 @@ def patched_client(patched_blog_client, monkeypatch, fake_job_client) -> Any:
 @pytest.fixture
 def client(patched_client) -> Any:
     """A ``TestClient`` for the blogging app, backed by the fake job store."""
-    from _api_test_utils import app
     from fastapi.testclient import TestClient
+
+    from ._api_test_utils import app
 
     return TestClient(app)

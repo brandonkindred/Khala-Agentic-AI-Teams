@@ -10,7 +10,6 @@ import json
 from typing import Any
 
 import pytest
-from _content_plan_test_utils import make_content_plan, make_requirements_analysis
 from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -27,6 +26,8 @@ from agents.blogging.shared.content_planning_loop import (
 )
 from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
 from agents.blogging.shared.errors import PlanningError
+
+from ._content_plan_test_utils import make_content_plan, make_requirements_analysis
 
 
 def _policy_standard():

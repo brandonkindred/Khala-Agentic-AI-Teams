@@ -341,9 +341,10 @@ def test_planning_agent_make_default_init() -> None:
 
 def test_planning_agent_runner_delegates(monkeypatch) -> None:
     """The _BlogPlanningAgentRunner.run() delegates to BlogPlanningAgent.run."""
-    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
     from agents.blogging.blog_planning_agent.agent import make_blog_planning_agent
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan, make_planning_phase_result
 
     runner = make_blog_planning_agent()
 

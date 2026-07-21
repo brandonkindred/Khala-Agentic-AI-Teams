@@ -16,9 +16,10 @@ monkeypatch to avoid racing a live worker (see that module for details).
 import time
 
 import pytest
-from _api_test_utils import api_main as _api_main
-from _api_test_utils import app
 from fastapi.testclient import TestClient
+
+from ._api_test_utils import api_main as _api_main
+from ._api_test_utils import app
 
 
 @pytest.fixture(autouse=True)
