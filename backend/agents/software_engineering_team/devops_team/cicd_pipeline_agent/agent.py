@@ -2,25 +2,32 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from typing import Any, Dict
+
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
 
 
-class CICDPipelineAgent:
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
+class CICDPipelineAgent(DevOpsSingleShotAgent):
+    """Produce CI/CD pipeline artifacts via a single structured LLM call.
 
-    def run(self, input_data: CICDPipelineAgentInput) -> CICDPipelineAgentOutput:
+    Invariants: instance state is limited to ``llm`` and ``_model`` from the
+    base; ``run`` is stateless across calls.
+    """
+
+    PROMPT = CICD_PIPELINE_PROMPT
+
+    def build_context(self, input_data: CICDPipelineAgentInput) -> str:
+        """Build the CI/CD prompt context from the task spec and existing pipeline.
+
+        Preconditions: ``input_data`` is a valid ``CICDPipelineAgentInput``.
+        Postconditions: returns the same context string shape the pre-migration
+        agent appended after the prompt separator.
+        """
         spec = input_data.task_spec
-        context = (
+        return (
             f"task_id={spec.task_id}\n"
             f"title={spec.title}\n"
             f"environments={spec.platform_scope.environments}\n"
@@ -28,9 +35,16 @@ class CICDPipelineAgent:
             f"acceptance_criteria={spec.acceptance_criteria}\n"
             f"existing_pipeline={input_data.existing_pipeline}\n"
         )
-        data = complete_json_with_continuation(
-            self._model, CICD_PIPELINE_PROMPT + "\n\n---\n\n" + context, temperature=0.1, think=True
-        )
+
+    def build_output(
+        self, input_data: CICDPipelineAgentInput, data: Dict[str, Any]
+    ) -> CICDPipelineAgentOutput:
+        """Map the LLM JSON dict onto ``CICDPipelineAgentOutput``.
+
+        Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
+        Postconditions: returns ``CICDPipelineAgentOutput`` with the same field
+        defaults as the pre-migration agent.
+        """
         return CICDPipelineAgentOutput(
             artifacts=data.get("artifacts") or {},
             pipeline_job_graph_summary=data.get("pipeline_job_graph_summary", ""),
