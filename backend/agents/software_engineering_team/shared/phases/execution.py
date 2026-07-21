@@ -25,12 +25,6 @@ from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 
-# Hard char caps on the existing-code excerpt inlined into the general coder's
-# prompt (no LLM-aware compaction here, unlike the code-review coordinator's
-# excerpts -- this is a plain truncation to bound prompt size cheaply).
-_GENERAL_MICROTASK_EXISTING_CODE_CHARS = 8_000
-_TOOL_AGENT_EXISTING_CODE_CHARS = 6_000
-
 # Iteration budget for the gated loop's own final documentation self-review pass.
 # Deliberately its own (lower) constants rather than reusing
 # review_utils.MIN/MAX_DOC_SELF_REVIEW_ITERATIONS (3/3): this pass runs once per

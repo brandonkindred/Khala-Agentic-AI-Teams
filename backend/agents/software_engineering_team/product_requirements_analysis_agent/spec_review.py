@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from software_engineering_team.shared.context_sizing import compute_pra_spec_review_spec_chars
 from software_engineering_team.shared.json_utils import parse_json_with_recovery
 
 from .constraint_analysis import analyze_constraint_status, generate_constraint_hints
@@ -126,7 +125,6 @@ def run_spec_review(
         )
 
     # Single whole-spec prompt; include full Q&A only when non-empty (edge-empty-qa)
-    max_spec_chars = compute_pra_spec_review_spec_chars(llm)
     if qa_for_prompt:
         prompt = SPEC_REVIEW_PROMPT.format(
             spec_content=full_spec_content,

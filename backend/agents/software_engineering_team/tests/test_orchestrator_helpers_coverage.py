@@ -449,14 +449,15 @@ def test_get_spec_content_for_job_returns_empty_on_file_not_found(tmp_path: Path
     assert out == ""
 
 
-def test_get_spec_content_for_job_truncates_to_12000_chars(tmp_path: Path):
-    """Get spec content for job truncates to 12000 chars."""
+def test_get_spec_content_for_job_returns_full_content(tmp_path: Path):
+    """Get spec content for job returns the full spec without truncation."""
     from software_engineering_team.api import main as api_main
 
     huge = "X" * 20000
     with patch("software_engineering_team.spec_parser.get_latest_spec_content", return_value=huge):
         out = api_main._get_spec_content_for_job({"repo_path": str(tmp_path)})
-    assert len(out) == 12000
+    assert out == huge
+    assert len(out) == 20000
 
 
 def test_get_projects_root_uses_workspace_root_when_set(monkeypatch, tmp_path: Path):

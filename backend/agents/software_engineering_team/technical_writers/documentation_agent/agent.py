@@ -33,9 +33,6 @@ logger = logging.getLogger(__name__)
 # Maximum time (seconds) for the full documentation workflow before forced cleanup
 MAX_WORKFLOW_SECONDS = 300
 
-# Maximum characters of codebase content to send to the LLM
-MAX_CODEBASE_CHARS = 40000
-
 
 def _read_repo_code(repo_path: Path, extensions: List[str] | None = None) -> str:
     """Read code files from repo, concatenated. Delegates to shared.repo_utils."""
@@ -94,7 +91,6 @@ class DocumentationAgent:
             getattr(input_data, "is_final_review", False),
         )
 
-        # Truncate codebase if too large
         codebase = input_data.codebase_content or ""
 
         # --- Step 1: Update README.md (root + frontend/backend/devops) ---
