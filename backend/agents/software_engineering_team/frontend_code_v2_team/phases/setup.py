@@ -3,7 +3,8 @@ Setup phase: ensure repo exists, README, main branch, development branch,
 and linting/testing are configured.
 
 Runs as the first phase of the Frontend Tech Lead Agent.
-Uses shared.git_utils only. No frontend_team code.
+Uses shared.git_utils and shared.command_runner.scaffolding (for ESLint/Vitest
+config templates). No frontend_team code.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
     # Angular projects can use ng lint
     if (path / "angular.json").exists():
         logger.info("Setup: Angular project detected; creating eslint.config.js for ng lint")
-        from shared.command_runner.runner import MINIMAL_ANGULAR_ESLINT_CONFIG
+        from shared.command_runner.scaffolding import MINIMAL_ANGULAR_ESLINT_CONFIG
 
         config_file = path / "eslint.config.js"
         if not config_file.exists():
@@ -53,7 +54,7 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
 
     # React/generic project — create ESLint flat config
     logger.info("Setup: no linting configuration found; creating eslint.config.mjs")
-    from shared.command_runner.runner import MINIMAL_REACT_ESLINT_CONFIG
+    from shared.command_runner.scaffolding import MINIMAL_REACT_ESLINT_CONFIG
 
     config_file = path / "eslint.config.mjs"
     if not config_file.exists():
@@ -102,7 +103,7 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
     is_angular = (path / "angular.json").exists()
     if is_angular:
         logger.info("Setup: creating vitest.config.mts for Angular project")
-        from shared.command_runner.runner import (
+        from shared.command_runner.scaffolding import (
             MINIMAL_ANGULAR_TEST_SETUP,
             MINIMAL_ANGULAR_VITEST_CONFIG,
         )
@@ -120,7 +121,7 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
             written.add("src/test-setup.ts")
     else:
         logger.info("Setup: creating vitest.config.ts for React project")
-        from shared.command_runner.runner import MINIMAL_REACT_VITEST_CONFIG
+        from shared.command_runner.scaffolding import MINIMAL_REACT_VITEST_CONFIG
 
         config_file = path / "vitest.config.ts"
         if not config_file.exists():
@@ -135,11 +136,12 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
 
 
 def _ensure_package_script(path: Path, script_name: str, script_cmd: str) -> bool:
-    """Add a script to package.json if it doesn't already exist.
+    """Add a script to package.json if it doesn't already exist, or overwrite it
+    if the existing script is a placeholder that just fails (contains "exit 1").
 
     Returns:
         True when package.json was modified, False otherwise (missing file,
-        script already present, or a read/parse error).
+        a real script already present, or a read/parse error).
     """
     pkg_json = path / "package.json"
     if not pkg_json.exists():
