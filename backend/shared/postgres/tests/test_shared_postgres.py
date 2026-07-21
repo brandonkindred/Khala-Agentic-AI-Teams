@@ -185,6 +185,29 @@ def test_register_team_schemas_noop_when_disabled(monkeypatch, caplog):
     assert any("postgres disabled" in rec.message for rec in caplog.records)
 
 
+def test_register_team_schemas_noop_for_every_schema_in_a_multi_schema_set(monkeypatch):
+    """The wrapper's pre-worker loop calls register_team_schemas once per schema
+    in app.state.postgres_schemas; with POSTGRES_HOST unset every call in that
+    loop must no-op identically (no new connection attempts), matching the
+    single-schema no-op above — proving the multi-schema change didn't alter
+    the unconfigured/no-op behavior teams with Postgres disabled rely on."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+
+    def _fail_if_called(*_a, **_k):
+        raise AssertionError("get_conn must not be called when POSTGRES_HOST is unset")
+
+    monkeypatch.setattr("shared.postgres.client.get_conn", _fail_if_called)
+
+    schemas = [
+        TeamSchema(team="demo-primary", statements=["SELECT 1"]),
+        TeamSchema(team="demo-extra-1", statements=["SELECT 2"]),
+        TeamSchema(team="demo-extra-2", statements=["SELECT 3"]),
+    ]
+    results = [register_team_schemas(s) for s in schemas]
+
+    assert results == [False, False, False]
+
+
 def test_register_team_schemas_runs_when_enabled(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
     called = {"n": 0}

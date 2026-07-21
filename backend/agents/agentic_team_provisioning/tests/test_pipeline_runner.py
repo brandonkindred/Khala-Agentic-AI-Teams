@@ -589,3 +589,35 @@ def test_sweeper_reaps_orphans_periodically() -> None:
         assert _wait_for(lambda: store.get_pipeline_run("orphan")["status"] == "failed")
     finally:
         sweeper.stop()
+
+
+def test_constructor_start_sweeper_true_starts_thread_and_reaps_orphans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The start_sweeper=True constructor path (gated on is_postgres_enabled) actually
+    starts the orphan-sweeper daemon thread, and that thread reaps orphans on its own
+    cadence — not just when _sweep_once is called directly or driven manually."""
+    monkeypatch.setattr(
+        "agentic_team_provisioning.runtime.pipeline_runner.is_postgres_enabled",
+        lambda: True,
+    )
+    # Shrink the sweeper's interval (== _stale_s) before construction — it's baked
+    # into the BackgroundHeartbeat built inside __init__, so post-construction
+    # attribute overrides (the _make_runner pattern) can't reach it here.
+    monkeypatch.setenv("AGENTIC_TEAM_PIPELINE_WAIT_POLL_S", "1")
+    monkeypatch.setenv("AGENTIC_TEAM_PIPELINE_STALE_S", "3")
+
+    store = _FakeStore()
+    store.seed("orphan", status="waiting_for_input", heartbeat_at=None)
+
+    runner = PipelineRunner(store, start_sweeper=True)
+    try:
+        assert any(t.name == "pipeline-orphan-sweeper" for t in threading.enumerate())
+        assert _wait_for(
+            lambda: store.get_pipeline_run("orphan")["status"] == "failed", timeout=10.0
+        )
+    finally:
+        runner._sweeper_stop.set()
+        assert _wait_for(
+            lambda: not any(t.name == "pipeline-orphan-sweeper" for t in threading.enumerate())
+        )

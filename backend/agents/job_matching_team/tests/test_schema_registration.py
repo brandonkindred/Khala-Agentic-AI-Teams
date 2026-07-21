@@ -135,3 +135,99 @@ def test_missing_user_profile_schema_reproduces_the_original_bug(
     with caplog.at_level(logging.WARNING, logger=_CAREER_STORE_LOGGER):
         load_career_profile()
     _assert_fallback_logged(caplog, expected=True)
+
+
+# ---------------------------------------------------------------------------
+# Activity-level coverage: the actual queued `job_matching_prepare_scan`
+# Temporal activity, not just the career_store read it delegates to.
+# ---------------------------------------------------------------------------
+
+
+class _NullJobStore:
+    """Minimal job-store double: untracked job, no cancellation, records nothing.
+
+    ``prepare_scan_activity`` also touches the job store and the run store —
+    unrelated to the Postgres schema race under test here — so these fakes
+    isolate the activity to just its profile-read path, the same isolation
+    pattern ``test_temporal_activity.py`` uses for its own activity tests.
+    """
+
+    def get_job(self, job_id):
+        return None
+
+    def update_job(self, job_id, **fields):
+        pass
+
+    def is_job_cancelled(self, job_id):
+        return False
+
+
+class _NullRunStore:
+    def create_run(self, run_id, profile, request):
+        pass
+
+    def seen_fingerprints(self):
+        return set()
+
+
+def _patch_activity_stores(monkeypatch) -> None:
+    job = _NullJobStore()
+    monkeypatch.setattr("job_matching_team.shared.job_store.get_job", job.get_job)
+    monkeypatch.setattr("job_matching_team.shared.job_store.update_job", job.update_job)
+    monkeypatch.setattr("job_matching_team.shared.job_store.is_job_cancelled", job.is_job_cancelled)
+    monkeypatch.setattr("job_matching_team.store.get_store", lambda: _NullRunStore())
+
+
+def test_prepare_scan_activity_reads_real_profile_when_schemas_registered(
+    fresh_user_profile_tables, caplog, monkeypatch
+) -> None:
+    """Runs the real, queued `job_matching_prepare_scan` activity (not a mock of
+    `load_job_seeker_profile`) against a fresh database with every schema in
+    `app.state.postgres_schemas` registered first — the guarantee the
+    team-service wrapper now provides before starting the Temporal worker.
+    Proves the activity's real profile read no longer races `user_profiles`."""
+    from temporalio.testing import ActivityEnvironment
+
+    from job_matching_team.api.main import app as job_matching_app
+    from job_matching_team.temporal.workflows import prepare_scan_activity
+    from shared.postgres import register_team_schemas
+
+    schemas = job_matching_app.state.postgres_schemas
+    assert len(schemas) >= 2  # sanity: both JOB_MATCHING_SCHEMA and USER_PROFILE_SCHEMA present
+    for schema in schemas:
+        assert register_team_schemas(schema) is True
+
+    _patch_activity_stores(monkeypatch)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=_CAREER_STORE_LOGGER):
+        result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {}, "run-xyz")
+
+    assert result["status"] == "ready"
+    _assert_fallback_logged(caplog, expected=False)
+
+
+def test_prepare_scan_activity_falls_back_when_user_profile_schema_missing(
+    fresh_user_profile_tables, caplog, monkeypatch
+) -> None:
+    """Negative control at the activity level: with only JOB_MATCHING_SCHEMA
+    registered (the pre-fix wrapper behavior), the queued activity's real
+    profile read hits the original race — `user_profiles` doesn't exist yet —
+    and falls back, proving this harness (not just the career_store-level one
+    above) actually detects the bug."""
+    from temporalio.testing import ActivityEnvironment
+
+    from job_matching_team.postgres import SCHEMA as JOB_MATCHING_SCHEMA
+    from job_matching_team.temporal.workflows import prepare_scan_activity
+    from shared.postgres import register_team_schemas
+
+    assert register_team_schemas(JOB_MATCHING_SCHEMA) is True  # only the primary schema
+
+    _patch_activity_stores(monkeypatch)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=_CAREER_STORE_LOGGER):
+        result = ActivityEnvironment().run(prepare_scan_activity, "job-1", {}, "run-xyz")
+
+    assert result["status"] == "ready"
+    _assert_fallback_logged(caplog, expected=True)
