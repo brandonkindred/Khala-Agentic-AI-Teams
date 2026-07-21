@@ -3100,6 +3100,7 @@ class TestWholeFileReview:
 
         # The merged narrative drops the blank whole-file summary and keeps
         # the hunk-fallback summary -- proves _MergedReviewerOutput ran.
+        assert len(gh.reviews) >= 1, "Expected at least one review submission"
         assert "Hunk summary text" in gh.reviews[-1]["body"]
 
     def test_endpoint_noop_when_nothing_whole_file_reviewable(

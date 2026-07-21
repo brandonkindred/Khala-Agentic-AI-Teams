@@ -1144,9 +1144,10 @@ def _partition_review_issues(
           applied to ``pr_issues``, plus every non-``None``
           :func:`anchor_to_first_file` result for the leftovers
           ``map_issues_to_comments`` could not place.
-        - Never raises: the existing-comments fetch and duplicate-detection
-          are both best-effort and degrade internally; any other exception
-          propagates to the caller's outer handler.
+        - The existing-comments fetch and duplicate-detection are both
+          best-effort and degrade internally (never raise). Any other
+          exception (e.g. from ``map_issues_to_comments``) propagates to the
+          caller's outer handler.
     """
     # Split the reviewer's findings by whether they belong to this PR.
     # Defects in the code the PR added or modified drive the review
