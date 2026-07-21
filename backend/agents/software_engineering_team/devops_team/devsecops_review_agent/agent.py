@@ -2,43 +2,47 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from typing import Any, Dict
+
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 from software_engineering_team.devops_team.models import ReviewFinding
-from software_engineering_team.shared.llm import complete_json_with_continuation
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import DevSecOpsReviewInput, DevSecOpsReviewOutput
 from .prompts import DEVSECOPS_REVIEW_PROMPT
 
 
-class DevSecOpsReviewAgent:
+class DevSecOpsReviewAgent(DevOpsSingleShotAgent):
     """Infra security reviewer for DevOps artifacts (IAM/secrets/network).
 
     Invariants: instance state is limited to ``llm`` and the resolved Strands
-    ``_model``; ``run`` is stateless across calls (a fresh ``Agent`` per call).
+    ``_model`` from the base; ``run`` is stateless across calls.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        """Resolve the review model.
+    PROMPT = DEVSECOPS_REVIEW_PROMPT
+    temperature = 0.0
 
-        Preconditions: ``llm_client`` is not None (an ``LLMClient`` or a Strands
-        ``Model``).
-        Postconditions: ``self._model`` is a usable Strands model — the passed
-        client when it is already a Strands ``Model``, else the ``devops`` model.
+    def build_context(self, input_data: DevSecOpsReviewInput) -> str:
+        """Build the review prompt context from task, requirements, and artifacts.
+
+        Preconditions: ``input_data`` is a valid ``DevSecOpsReviewInput``.
+        Postconditions: returns the same context string shape the pre-migration
+        agent appended after the prompt separator.
         """
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
+        return (
+            f"task={input_data.task_description}\n"
+            f"requirements={input_data.requirements}\n"
+            f"artifacts={list(input_data.artifacts.keys())}\n"
         )
 
-    def run(self, input_data: DevSecOpsReviewInput) -> DevSecOpsReviewOutput:
-        """Review DevOps artifacts and derive a blocking decision.
+    def build_output(
+        self, input_data: DevSecOpsReviewInput, data: Dict[str, Any]
+    ) -> DevSecOpsReviewOutput:
+        """Map the LLM JSON dict onto ``DevSecOpsReviewOutput``.
 
         Preconditions:
-            ``input_data`` is a ``DevSecOpsReviewInput``; the model returns a JSON
-            object with optional ``findings``/``approved``/``summary``.
+            ``data`` is the dict from ``complete_json_with_continuation``; it may
+            include optional ``findings``/``approved``/``summary``.
         Postconditions:
             Returns a ``DevSecOpsReviewOutput`` whose ``approved`` follows the
             unified rule (:func:`derive_approved`): any blocking finding
@@ -48,17 +52,6 @@ class DevSecOpsReviewAgent:
             (fail closed), matching the legacy contract; an absent key defers to
             the finding-derived default.
         """
-        context = (
-            f"task={input_data.task_description}\n"
-            f"requirements={input_data.requirements}\n"
-            f"artifacts={list(input_data.artifacts.keys())}\n"
-        )
-        data = complete_json_with_continuation(
-            self._model,
-            DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context,
-            temperature=0.0,
-            think=True,
-        )
         findings = [ReviewFinding(**f) for f in (data.get("findings") or []) if isinstance(f, dict)]
         # Distinguish an absent ``approved`` key (no opinion -> defer to findings)
         # from a present-but-null value (an explicit non-approval -> fail closed).
