@@ -2717,6 +2717,23 @@ class InvestmentJobsListResponse(BaseModel):
     jobs: List[InvestmentJobSummary] = Field(default_factory=list)
 
 
+def _job_progress_percent(completed: int, total: int) -> int:
+    """Compute a job's completion percentage, tolerating a non-positive total.
+
+    Preconditions:
+        - ``completed`` and ``total`` are integers (possibly 0 or negative,
+          e.g. from malformed persisted state).
+
+    Postconditions:
+        - Returns ``0`` when ``total <= 0`` (never divides by a non-positive
+          total, so this can never raise ``ZeroDivisionError``).
+        - Otherwise returns ``int((completed / total) * 100)``.
+    """
+    if total <= 0:
+        return 0
+    return int((completed / total) * 100)
+
+
 @app.get(
     "/strategy-lab/jobs",
     response_model=InvestmentJobsListResponse,
@@ -2753,7 +2770,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
                 hypothesis = cycle["strategy"].get("hypothesis", "")[:60]
             completed = state.get("completed_cycles", 0)
             total = state.get("total_cycles", 1)
-            progress = int((completed / total) * 100) if total else 0
+            progress = _job_progress_percent(completed, total)
             label = hypothesis or f"Strategy batch ({completed}/{total})"
             jobs.append(
                 InvestmentJobSummary(
@@ -2779,7 +2796,7 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             data = job.get("data", job)
             completed = data.get("completed_cycles", 0)
             total = data.get("total_cycles", 1)
-            progress = int((completed / total) * 100) if total else 0
+            progress = _job_progress_percent(completed, total)
             jobs.append(
                 InvestmentJobSummary(
                     job_id=jid,

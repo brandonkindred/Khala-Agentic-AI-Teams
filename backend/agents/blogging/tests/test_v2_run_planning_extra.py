@@ -8,8 +8,9 @@ import pytest
 
 
 def _make_planning_result(iterations: int = 1, critic_report: dict | None = None):
-    from _content_plan_test_utils import make_content_plan, make_planning_phase_result
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan, make_planning_phase_result
 
     plan = make_content_plan(
         overarching_topic="Topic",
@@ -190,8 +191,9 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
 
 def test_extract_plan_keywords_returns_filtered_unique() -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     plan = make_content_plan(
         overarching_topic="observability essentials",

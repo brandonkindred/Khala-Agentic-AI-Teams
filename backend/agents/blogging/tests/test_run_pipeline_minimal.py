@@ -11,11 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import make_stub_editor_class, make_stub_writer_class
+
+from .conftest import make_stub_editor_class, make_stub_writer_class
 
 
 def _make_plan():
-    from _content_plan_test_utils import make_minimal_planning_phase_result
+    from ._content_plan_test_utils import make_minimal_planning_phase_result
 
     return make_minimal_planning_phase_result()
 
@@ -96,28 +97,25 @@ def test_run_pipeline_copy_editor_stalls_then_accepts(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(v2, "run_planning", lambda *a, **kw: _make_plan())
     monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
 
-    from agents.blogging.blog_copy_editor_agent.models import CopyEditorOutput, FeedbackItem
-
-    class _StubEditorNeverApproves:
-        def __init__(self, *a, **kw):
-            pass
-
-        def run(self, *a, **kw):
-            return CopyEditorOutput(
-                approved=False,
-                summary="needs work",
-                feedback_items=[
-                    FeedbackItem(
-                        category="grammar",
-                        severity="minor",
-                        location="para 1",
-                        issue="comma",
-                    )
-                ],
-            )
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 
     monkeypatch.setattr(v2, "BlogWriterAgent", make_stub_writer_class())
-    monkeypatch.setattr(v2, "BlogCopyEditorAgent", _StubEditorNeverApproves)
+    monkeypatch.setattr(
+        v2,
+        "BlogCopyEditorAgent",
+        make_stub_editor_class(
+            approved=False,
+            summary="needs work",
+            feedback_items=[
+                FeedbackItem(
+                    category="grammar",
+                    severity="minor",
+                    location="para 1",
+                    issue="comma",
+                )
+            ],
+        ),
+    )
 
     from agents.blogging.blog_research_agent.models import ResearchBriefInput
 

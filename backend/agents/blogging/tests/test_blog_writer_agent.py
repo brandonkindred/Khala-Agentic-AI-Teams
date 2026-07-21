@@ -6,13 +6,14 @@ Uses the shared ContentPlan factory from ``_content_plan_test_utils``.
 import re
 
 import pytest
-from _content_plan_test_utils import make_content_plan
 from agents.blogging.blog_research_agent.models import ResearchReference
 from agents.blogging.blog_writer_agent import WriterInput, WriterOutput
 from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
-from conftest import make_writer_agent
 
 from llm_service import DummyLLMClient
+
+from ._content_plan_test_utils import make_content_plan
+from .conftest import make_writer_agent
 
 
 def _minimal_plan() -> ContentPlan:

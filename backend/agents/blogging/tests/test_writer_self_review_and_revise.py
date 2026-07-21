@@ -13,7 +13,7 @@ import json
 
 
 def _make_agent_with_guidelines():
-    from conftest import make_writer_agent
+    from .conftest import make_writer_agent
 
     return make_writer_agent(
         writing_style_guide_content="Style Guide", brand_spec_content="Brand Spec"
@@ -152,9 +152,10 @@ def test_writer_format_feedback_item_line() -> None:
 
 def test_writer_revise_empty_draft() -> None:
     """revise() returns empty draft unchanged."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _make_agent_with_guidelines()
     plan = make_content_plan(
@@ -177,9 +178,10 @@ def test_writer_revise_empty_draft() -> None:
 
 
 def test_writer_revise_no_feedback_items() -> None:
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _make_agent_with_guidelines()
     plan = make_content_plan(
