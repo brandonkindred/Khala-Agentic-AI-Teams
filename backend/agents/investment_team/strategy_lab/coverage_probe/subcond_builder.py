@@ -242,7 +242,9 @@ def _build_compound_subcond(
         # AND mode collapses to the single inner leg when only one
         # conjunct survived and no symbol gate applies — avoids a
         # redundant ``AndOp(legs=(only_leg,))`` wrapper.
-        if len(inner) == 1 and and_gate is None:
+        if (
+            len(inner) == 1 and and_gate is None
+        ):  # pragma: no cover — AND mode is only invoked with a genuine 2+-term BoolOp (see call sites); any symbol-gate term among those terms already sets and_gate non-None, so len(inner)==1 with and_gate None can't occur — kept for defensive symmetry with the OR-mode single-leg collapse below
             return inner[0]
     else:
         if (
