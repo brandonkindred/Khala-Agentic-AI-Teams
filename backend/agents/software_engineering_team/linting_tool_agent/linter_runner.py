@@ -186,7 +186,7 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
 
     if agent_type == "frontend" and plan.linter_name == "ng_lint":
         try:
-            from shared.command_runner.runner import run_command_with_nvm
+            from shared.command_runner.nvm import run_command_with_nvm
 
             cmd_result = run_command_with_nvm(plan.linter_command, cwd=repo_path)
         except ImportError:

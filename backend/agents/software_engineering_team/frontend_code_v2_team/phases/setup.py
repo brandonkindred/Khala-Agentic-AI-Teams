@@ -43,7 +43,7 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
     # Angular projects can use ng lint
     if (path / "angular.json").exists():
         logger.info("Setup: Angular project detected; creating eslint.config.js for ng lint")
-        from shared.command_runner.runner import MINIMAL_ANGULAR_ESLINT_CONFIG
+        from shared.command_runner.scaffolding import MINIMAL_ANGULAR_ESLINT_CONFIG
 
         config_file = path / "eslint.config.js"
         if not config_file.exists():
@@ -53,7 +53,7 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
 
     # React/generic project — create ESLint flat config
     logger.info("Setup: no linting configuration found; creating eslint.config.mjs")
-    from shared.command_runner.runner import MINIMAL_REACT_ESLINT_CONFIG
+    from shared.command_runner.scaffolding import MINIMAL_REACT_ESLINT_CONFIG
 
     config_file = path / "eslint.config.mjs"
     if not config_file.exists():
@@ -102,7 +102,7 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
     is_angular = (path / "angular.json").exists()
     if is_angular:
         logger.info("Setup: creating vitest.config.mts for Angular project")
-        from shared.command_runner.runner import (
+        from shared.command_runner.scaffolding import (
             MINIMAL_ANGULAR_TEST_SETUP,
             MINIMAL_ANGULAR_VITEST_CONFIG,
         )
@@ -120,7 +120,7 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
             written.add("src/test-setup.ts")
     else:
         logger.info("Setup: creating vitest.config.ts for React project")
-        from shared.command_runner.runner import MINIMAL_REACT_VITEST_CONFIG
+        from shared.command_runner.scaffolding import MINIMAL_REACT_VITEST_CONFIG
 
         config_file = path / "vitest.config.ts"
         if not config_file.exists():

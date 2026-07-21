@@ -63,7 +63,7 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
 
     # No linting config found — create minimal ruff config in pyproject.toml
     logger.info("Setup: no linting configuration found; creating pyproject.toml with ruff config")
-    from shared.command_runner.runner import _MINIMAL_PYPROJECT_TOML
+    from shared.command_runner.scaffolding import _MINIMAL_PYPROJECT_TOML
 
     if pyproject.exists():
         # Append ruff config to existing pyproject.toml

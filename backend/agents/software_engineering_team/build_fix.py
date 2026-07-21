@@ -76,9 +76,9 @@ def _run_build_verification(
     actually run syntax check / ``ng build`` instead of silently no-op'ing to
     ``(True, "")`` via the fallthrough at the end of this function.
     """
+    from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.runner import (
         run_command,
-        run_ng_build_with_nvm_fallback,
         run_pytest,
         run_python_syntax_check,
     )
@@ -283,9 +283,9 @@ def _try_build_fix_one_at_a_time(
         ``"frontend"``) by the caller (:func:`_run_build_verification`) — this
         function never receives a ``_code_v2``-suffixed value.
     """
+    from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.runner import (
         run_command,
-        run_ng_build_with_nvm_fallback,
         run_pytest,
         run_python_syntax_check,
     )
