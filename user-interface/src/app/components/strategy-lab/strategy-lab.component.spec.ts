@@ -420,6 +420,22 @@ describe('StrategyLabComponent — destructive confirmations', () => {
     expect(notifySpy.saved).toHaveBeenCalledWith('Strategy lab run deleted.');
   });
 
+  it('opens the confirm dialog without throwing when strategy.hypothesis is missing', () => {
+    confirmResult = true;
+    const recordWithoutHypothesis = {
+      lab_record_id: 'rec-2',
+      strategy: undefined,
+    } as unknown as Parameters<typeof component.deleteRecord>[0];
+
+    expect(() => component.deleteRecord(recordWithoutHypothesis)).not.toThrow();
+
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1);
+    const message = dialogSpy.open.mock.calls[0][1].data.message as string;
+    expect(message).not.toContain('undefined');
+    expect(message).toContain('Delete this strategy lab run?\n\n\n\nThis removes the record');
+    expect(apiSpy.deleteStrategyLabRecord).toHaveBeenCalledWith('rec-2');
+  });
+
   it('does not delete when the dialog is cancelled', () => {
     confirmResult = false;
 
