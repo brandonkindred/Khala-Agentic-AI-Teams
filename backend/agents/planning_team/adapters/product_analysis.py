@@ -1,7 +1,7 @@
 """
 Adapter to call the Software Engineering API's Product Requirements Analysis.
 
-Verified paths (software_engineering_team.api.main):
+Calls the Software Engineering API:
 - POST /api/software-engineering/product-analysis/run -> { job_id }
 - GET  /api/software-engineering/product-analysis/status/{job_id} -> status, waiting_for_answers, pending_questions, validated_spec_path, ...
 - POST /api/software-engineering/product-analysis/{job_id}/answers -> SubmitAnswersRequest { answers: [{ question_id, selected_option_id?, other_text? }] }
