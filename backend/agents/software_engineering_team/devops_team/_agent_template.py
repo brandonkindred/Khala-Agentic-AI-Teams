@@ -21,10 +21,14 @@ Monkeypatchability
 ------------------
 This module imports and calls ``complete_json_with_continuation`` from
 ``software_engineering_team.shared.llm`` directly (no per-subclass-module
-lookup). When a consumer agent is migrated onto this base, any test that
-monkeypatches ``…devops_team.<agent>.agent.complete_json_with_continuation``
-must retarget the patch to
-``software_engineering_team.shared.llm.complete_json_with_continuation``
+lookup). Because the import binds the name on this module, the effective
+patch target is
+``software_engineering_team.devops_team._agent_template.complete_json_with_continuation``,
+not the attribute on ``shared.llm``. When a consumer agent is migrated onto
+this base, any test that monkeypatches
+``…devops_team.<agent>.agent.complete_json_with_continuation`` must retarget
+the patch to
+``software_engineering_team.devops_team._agent_template.complete_json_with_continuation``
 (or continue patching ``shared.llm.Agent``, which fence-recovery helpers
 already do via ``_patch_fenced_response``).
 """
