@@ -15,8 +15,9 @@ import uuid
 
 
 def _plan():
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     return make_content_plan(
         overarching_topic="My Topic",

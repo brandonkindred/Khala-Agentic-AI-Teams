@@ -238,7 +238,6 @@ def test_run_validators_from_work_dir_missing_brand_spec(tmp_path: Path, monkeyp
 
 
 def test_content_plan_to_content_brief_markdown_all_fields() -> None:
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.shared.content_plan import (
         ContentPlanSection,
         TitleCandidate,
@@ -246,6 +245,8 @@ def test_content_plan_to_content_brief_markdown_all_fields() -> None:
         content_plan_to_content_brief_markdown,
         content_plan_to_markdown_doc,
     )
+
+    from ._content_plan_test_utils import make_content_plan
 
     plan = make_content_plan(
         overarching_topic="Topic",

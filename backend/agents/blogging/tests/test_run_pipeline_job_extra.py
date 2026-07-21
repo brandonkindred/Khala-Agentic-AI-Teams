@@ -8,12 +8,12 @@ import threading
 import uuid
 from pathlib import Path
 
-from conftest import patch_job_event_bus_publish
-from conftest import setup_artifacts_root as _setup_artifacts_root
+from .conftest import patch_job_event_bus_publish
+from .conftest import setup_artifacts_root as _setup_artifacts_root
 
 
 def _make_pipeline_doubles():
-    from _content_plan_test_utils import make_pipeline_doubles
+    from ._content_plan_test_utils import make_pipeline_doubles
 
     return make_pipeline_doubles()
 
