@@ -4,15 +4,17 @@ Shared base for the code-v2 Development Agents (backend + frontend).
 ``BackendDevelopmentAgent`` and ``FrontendDevelopmentAgent`` share their
 constructor, their repo-briefing read (including the incremental
 :class:`~software_engineering_team.shared.repo_context_cache.RepoContextCache`
-fast path), and their tool-runner construction verbatim; only the per-team
+fast path), their tool-runner construction, and their planning + feature-branch
+setup (``_run_planning_and_branch_setup``) verbatim; only the per-team
 tool-agent roster, tooling detection, repo extension/exclude sets, and the
-integration-only ``run_workflow`` differ. This base holds the shared members;
+remainder of the integration-only ``run_workflow`` (execution, documentation,
+deliver, and final status wiring) differ. This base holds the shared members;
 each team subclasses it and supplies the divergent parts.
 
-The bulk-divergent ``run_workflow`` bodies deliberately stay per-team: they are
-``# pragma: no cover`` integration code carrying ~100 lines of team-specific
-status/progress/result wiring, so converging them safely is a separate,
-test-guarded change rather than part of this base.
+The still-divergent parts of ``run_workflow`` deliberately stay per-team: they
+are ``# pragma: no cover`` integration code carrying ~100 lines of
+team-specific status/progress/result wiring, so converging them safely is a
+separate, test-guarded change rather than part of this base.
 """
 
 from __future__ import annotations
