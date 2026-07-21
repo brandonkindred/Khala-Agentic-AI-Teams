@@ -8,18 +8,15 @@ extracted from
 :mod:`investment_team.strategy_lab.coverage_probe.subcondition_visitor`
 in #1960). Pure: no I/O, no LLM, no subprocess.
 
-This module needs ``_BLOCK_FIELDS`` from ``indicator_probe`` (a
-one-directional dependency — ``indicator_probe`` no longer imports
-anything from this module; its two callers of ``_extract_subconditions``/
-``_union_target_symbols`` are ``run_indicator_probe`` and
-``CoverageAggregator``, which live in
+``indicator_probe`` no longer imports anything from this module; its two
+callers of ``_extract_subconditions``/``_union_target_symbols`` are
+``run_indicator_probe`` and ``CoverageAggregator``, which live in
 :mod:`investment_team.strategy_lab.coverage_probe.aggregator_report`
-since Part 4 of the decomposition and import those two helpers directly).
-``_BLOCK_FIELDS`` is imported at this module's bottom, after every
-same-file definition it needs, alongside ``_numeric_literal`` — needed
-by this module — which now lives in
+since Part 4 of the decomposition and import those two helpers directly.
+This module needs ``_numeric_literal``, which lives in
 :mod:`investment_team.strategy_lab.coverage_probe.subcond_builder`
-(Part 3 of the decomposition) and is imported back from there instead.
+(Part 3 of the decomposition) and is imported back from there at this
+module's bottom, after every same-file definition it needs.
 
 ``_extract_subconditions`` additionally needs ``SubconditionVisitor``
 from ``subcondition_visitor``, which itself imports back from both this
@@ -619,63 +616,6 @@ def _find_on_bar(tree: ast.AST) -> Optional[ast.AST]:
     return fallback
 
 
-def _iter_entry_path_assigns(
-    node: ast.AST,
-):  # pragma: no cover — legacy AST walker; current call sites pass function_node=None so this path is unreachable from the live entry path
-    """Yield ``Assign`` / ``AnnAssign`` nodes on the entry control-flow path.
-
-    Skips the non-entry branch of any ``if`` whose test is (or is gated
-    by) a position check — the same routing :func:`_visit` applies on
-    the main traversal. Without this filter, an exit-branch reassignment
-    like ``ma = sma(close, 200)`` would shadow the entry-branch's
-    ``ma = sma(close, 5)`` because the binding pass uses overwrite
-    semantics; the probe would then evaluate the entry comparison
-    against the exit-path indicator and falsely flag
-    ``INDICATOR_FILTER_TOO_RESTRICTIVE``.
-
-    Module/class scope (where there is no entry/exit distinction) calls
-    :func:`ast.walk` directly; this helper is for the function-local
-    pass only.
-    """
-    if isinstance(node, (ast.Assign, ast.AnnAssign)):
-        yield node
-
-    if isinstance(node, ast.If):
-        # ``_strip_position_gate`` handles both bare ``if pos is None:``
-        # and combined ``if pos is None and <entry>:`` shapes — same
-        # logic _visit uses to route the main traversal.
-        position_check, _residual = _strip_position_gate(node.test)
-        if position_check == "vacant":
-            for child in node.body:
-                yield from _iter_entry_path_assigns(child)
-            return
-        if position_check == "occupied":
-            for child in node.orelse:
-                yield from _iter_entry_path_assigns(child)
-            return
-        for child in node.body:
-            yield from _iter_entry_path_assigns(child)
-        for child in node.orelse:
-            yield from _iter_entry_path_assigns(child)
-        return
-
-    # Non-if compound statements: descend through standard block fields.
-    for field in _BLOCK_FIELDS:
-        children = getattr(node, field, None)
-        if isinstance(children, list):
-            for child in children:
-                if isinstance(child, ast.AST):
-                    yield from _iter_entry_path_assigns(child)
-    handlers = getattr(node, "handlers", None)
-    if isinstance(handlers, list):
-        for h in handlers:
-            h_body = getattr(h, "body", None)
-            if isinstance(h_body, list):
-                for child in h_body:
-                    if isinstance(child, ast.AST):
-                        yield from _iter_entry_path_assigns(child)
-
-
 def _flatten_top_terms(test: ast.expr) -> List[ast.expr]:
     """Split a top-level ``and`` chain into individual term expressions.
 
@@ -1232,15 +1172,11 @@ def _collect_name_periods(
     return recorder.result
 
 
-# _BLOCK_FIELDS lives in indicator_probe.py; _numeric_literal lives in
-# subcond_builder.py (the probe-construction slice extracted from
-# indicator_probe.py). Imported at the bottom, after every name in this
-# module is defined, so this module can be imported first or after
-# either of those two without hitting a partial-init ImportError either
-# way — see the module docstring.
-from investment_team.strategy_lab.coverage_probe.indicator_probe import (  # noqa: E402
-    _BLOCK_FIELDS,
-)
+# _numeric_literal lives in subcond_builder.py (the probe-construction
+# slice extracted from indicator_probe.py). Imported at the bottom,
+# after every name in this module is defined, so this module can be
+# imported first or after either of those two without hitting a
+# partial-init ImportError either way — see the module docstring.
 from investment_team.strategy_lab.coverage_probe.subcond_builder import (  # noqa: E402
     _numeric_literal,
 )

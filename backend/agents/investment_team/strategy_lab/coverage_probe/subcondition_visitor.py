@@ -155,9 +155,9 @@ class SubconditionVisitor:
     def _apply_assign_inplace(self, stmt: ast.stmt) -> None:
         """Update self._name_evaluators / self._name_periods from a single assignment.
 
-        Mirrors the per-target logic of the previous global pre-pass
-        (``_collect_name_evaluators`` and the function-local pass of
-        ``_collect_name_periods``) but applied **flow-sensitively** —
+        Mirrors the per-target logic of the former global pre-pass
+        (a deleted ``_collect_name_evaluators`` and the function-local
+        pass of ``_collect_name_periods``) but applied **flow-sensitively** —
         the walker calls this in source order so an assignment only
         affects predicates that lexically follow it. Without this,
         ``ma = sma(close, 5); if close > ma; ma = 999`` evaluated the
