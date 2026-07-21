@@ -28,6 +28,20 @@ def build_routing_graph() -> Graph:
     All specialists are connected from the classifier. In practice,
     the graph's conditional routing will activate only the relevant
     specialist(s) based on the classified intent.
+
+    Preconditions:
+        None.
+
+    Postconditions:
+        Returns a configured `Graph` whose entry point is the
+        `intent_classifier` node and which includes one node per
+        entry in `specialists` (email, calendar, tasks, deals,
+        reservations, documentation, general).
+
+    Invariants:
+        Every specialist node has an edge from the classifier node,
+        so the classifier can route to any specialist regardless of
+        which intent(s) are ultimately classified.
     """
     builder = GraphBuilder()
     builder.set_graph_id("personal_assistant_routing")
