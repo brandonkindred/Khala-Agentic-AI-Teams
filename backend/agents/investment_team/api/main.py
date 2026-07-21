@@ -1394,7 +1394,7 @@ def _run_one_strategy_lab_cycle(
     precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
     prior_records: Optional[List[StrategyLabRecord]] = None,
-    on_phase: Optional[Any] = None,
+    on_phase: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     exclude_asset_classes: Optional[List[str]] = None,
     paper_trading_enabled: bool = True,
     paper_trading_lookback_days: int = 365,
@@ -1477,7 +1477,7 @@ def _finalize_strategy_lab_cycle_record(
     signal_brief_storage: Optional[Dict[str, Any]] = None,
     paper_trading_enabled: bool = True,
     paper_trading_lookback_days: int = 365,
-    on_phase: Optional[Any] = None,
+    on_phase: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> StrategyLabRecord:
     """Attach the signal brief, run the gated paper-trading step, and persist.
 
