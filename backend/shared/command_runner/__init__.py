@@ -7,13 +7,27 @@ failures. It was promoted out of ``software_engineering_team.shared`` so that bo
 the software-engineering team and the coding team can depend on it without
 importing one another.
 
-Layout (mirrors the ``shared_*`` convention):
-    - ``runner``        — the command runner (was ``shared/command_runner.py``)
-    - ``error_parsing`` — the failure parser (was ``shared/error_parsing.py``)
+Layout:
+    - ``runner``         — core: subprocess primitives, frontend framework
+      detection, ``run_pytest``/``run_python_syntax_check``/``run_linter``
+    - ``nvm``             — NVM (Node Version Manager) install/detect and
+      running commands under a managed Node version
+    - ``angular_repair``  — best-effort fixes applied to an Angular project
+      before a build (package.json deps, tsconfig, app.config.ts, ...)
+    - ``scaffolding``     — writes a minimal Angular/React/FastAPI project
+      skeleton
+    - ``smoke_test``      — starts a frontend dev server briefly to confirm
+      it compiles and runs
+    - ``error_parsing``   — the failure parser (was ``shared/error_parsing.py``)
 
-Both submodules are stdlib-only at import time. ``runner`` lazily imports
-``error_parsing`` (inside ``CommandResult.parsed_failures``); that is an
-in-package import and carries no team dependency.
+``runner`` is the dependency-free base (stdlib-only at import time). The other
+submodules import from sibling modules at load time along an acyclic graph:
+``runner`` <- ``nvm`` <- ``angular_repair`` / ``scaffolding`` / ``smoke_test``.
+``runner`` itself lazily imports ``error_parsing``
+(inside ``CommandResult.parsed_failures``) and the two leaf modules it
+dispatches to from ``run_frontend_build``/``run_linter``; ``scaffolding``
+lazily imports ``shared.git`` (inside ``ensure_backend_project_initialized``).
+All are in-package or in-platform imports and carry no team dependency.
 
 Preconditions:
     - ``backend/`` is on ``sys.path`` (the repo-wide convention for
@@ -24,6 +38,10 @@ Postconditions:
 
 from __future__ import annotations
 
+from shared.command_runner.angular_repair import (
+    ensure_frontend_dependencies_installed,
+    run_ng_build_with_nvm_fallback,
+)
 from shared.command_runner.error_parsing import (
     FailureClass,
     ParsedFailure,
@@ -36,34 +54,42 @@ from shared.command_runner.error_parsing import (
     parse_ng_build_failure,
     parse_pytest_failure,
 )
+from shared.command_runner.nvm import (
+    NvmInstallResult,
+    ensure_nvm_installed,
+    run_command_with_nvm,
+    run_npm_build_with_nvm,
+)
 from shared.command_runner.runner import (
     BUILD_TIMEOUT,
     SERVE_TIMEOUT,
     TEST_TIMEOUT,
     CommandResult,
-    NvmInstallResult,
     detect_frontend_framework,
-    ensure_backend_project_initialized,
-    ensure_frontend_dependencies_installed,
-    ensure_frontend_project_initialized,
-    ensure_nvm_installed,
     is_ng_build_environment_failure,
     patch_json_file,
     patch_text_file,
     run_command,
-    run_command_with_nvm,
     run_frontend_build,
     run_linter,
     run_ng_build,
     run_pytest,
     run_python_syntax_check,
 )
+from shared.command_runner.scaffolding import (
+    ensure_backend_project_initialized,
+    ensure_frontend_project_initialized,
+)
+from shared.command_runner.smoke_test import (
+    run_frontend_serve_smoke_test,
+    run_ng_serve_smoke_test,
+    run_npm_start_smoke_test,
+)
 
 __all__ = [
     # runner — subprocess primitives
     "CommandResult",
     "run_command",
-    "run_command_with_nvm",
     "patch_json_file",
     "patch_text_file",
     # runner — frontend build/serve
@@ -71,19 +97,29 @@ __all__ = [
     "run_frontend_build",
     "run_ng_build",
     "is_ng_build_environment_failure",
-    "NvmInstallResult",
-    "ensure_nvm_installed",
-    "ensure_frontend_dependencies_installed",
-    # runner — backend test/lint/scaffold
+    # runner — backend test/lint
     "run_pytest",
     "run_python_syntax_check",
     "run_linter",
-    "ensure_frontend_project_initialized",
-    "ensure_backend_project_initialized",
     # runner — timeouts
     "BUILD_TIMEOUT",
     "SERVE_TIMEOUT",
     "TEST_TIMEOUT",
+    # nvm
+    "NvmInstallResult",
+    "ensure_nvm_installed",
+    "run_command_with_nvm",
+    "run_npm_build_with_nvm",
+    # angular_repair
+    "ensure_frontend_dependencies_installed",
+    "run_ng_build_with_nvm_fallback",
+    # scaffolding
+    "ensure_frontend_project_initialized",
+    "ensure_backend_project_initialized",
+    # smoke_test
+    "run_frontend_serve_smoke_test",
+    "run_npm_start_smoke_test",
+    "run_ng_serve_smoke_test",
     # error_parsing
     "FailureClass",
     "ParsedFailure",

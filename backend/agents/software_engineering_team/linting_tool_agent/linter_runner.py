@@ -9,19 +9,18 @@ import logging
 import re
 import shutil
 from pathlib import Path
-from typing import List
 
 from shared.command_runner.runner import run_command
 
 from .models import LintExecutionResult, LintIssue, LintPlan
+
+logger = logging.getLogger(__name__)
 
 
 def _is_command_available(cmd: str) -> bool:
     """Check if a command is available on the system PATH."""
     return shutil.which(cmd) is not None
 
-
-logger = logging.getLogger(__name__)
 
 # Regex for ruff / flake8 output: ``file.py:10:1: E501 Line too long``
 _RUFF_FLAKE8_RE = re.compile(
@@ -60,7 +59,9 @@ def detect_linter(repo_path: Path, agent_type: str) -> LintPlan:
     Preconditions:
         - ``repo_path`` exists and is a directory.
     Postconditions:
-        - Returns a ``LintPlan`` with a valid ``linter_command``.
+        - Returns a ``LintPlan`` with a valid ``linter_command``, or
+          ``linter_name="none"`` with an empty ``linter_command`` when no
+          backend linter (ruff/flake8) is available.
     """
     if agent_type == "backend":
         return _detect_python_linter(repo_path)
@@ -169,7 +170,8 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
         - ``plan`` is a valid ``LintPlan`` produced by ``detect_linter``.
         - ``repo_path`` exists and is a directory.
     Postconditions:
-        - Returns ``LintExecutionResult`` with ``success=True`` when no violations.
+        - Returns ``LintExecutionResult`` with ``success=True`` when no violations,
+          or when ``plan.linter_name == "none"`` (no linter available to run).
     """
     # Handle skip case when no linter is available
     if plan.linter_name == "none" or not plan.linter_command:
@@ -186,7 +188,7 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
 
     if agent_type == "frontend" and plan.linter_name == "ng_lint":
         try:
-            from shared.command_runner.runner import run_command_with_nvm
+            from shared.command_runner.nvm import run_command_with_nvm
 
             cmd_result = run_command_with_nvm(plan.linter_command, cwd=repo_path)
         except ImportError:
@@ -208,7 +210,7 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
     )
 
 
-def parse_lint_output(raw_output: str, linter_name: str) -> List[LintIssue]:
+def parse_lint_output(raw_output: str, linter_name: str) -> list[LintIssue]:
     """Parse linter stdout/stderr into structured ``LintIssue`` objects.
 
     Supports ruff, flake8, ng_lint, and eslint output formats.
@@ -222,8 +224,8 @@ def parse_lint_output(raw_output: str, linter_name: str) -> List[LintIssue]:
     return _parse_ruff_flake8(raw_output)
 
 
-def _parse_ruff_flake8(raw: str) -> List[LintIssue]:
-    issues: List[LintIssue] = []
+def _parse_ruff_flake8(raw: str) -> list[LintIssue]:
+    issues: list[LintIssue] = []
     for line in raw.splitlines():
         m = _RUFF_FLAKE8_RE.match(line.strip())
         if m:
@@ -242,8 +244,8 @@ def _parse_ruff_flake8(raw: str) -> List[LintIssue]:
     return issues
 
 
-def _parse_ng_lint(raw: str) -> List[LintIssue]:
-    issues: List[LintIssue] = []
+def _parse_ng_lint(raw: str) -> list[LintIssue]:
+    issues: list[LintIssue] = []
     current_file = ""
     for line in raw.splitlines():
         stripped = line.strip()
@@ -280,8 +282,8 @@ def _parse_ng_lint(raw: str) -> List[LintIssue]:
     return issues
 
 
-def _parse_eslint(raw: str) -> List[LintIssue]:
-    issues: List[LintIssue] = []
+def _parse_eslint(raw: str) -> list[LintIssue]:
+    issues: list[LintIssue] = []
     current_file = ""
     for line in raw.splitlines():
         stripped = line.strip()
