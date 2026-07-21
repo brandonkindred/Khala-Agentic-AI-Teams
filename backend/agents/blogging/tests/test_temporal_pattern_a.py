@@ -479,7 +479,7 @@ def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
 
 
 def _real_planning_phase_result():
-    from _content_plan_test_utils import make_minimal_planning_phase_result
+    from ._content_plan_test_utils import make_minimal_planning_phase_result
 
     return make_minimal_planning_phase_result()
 

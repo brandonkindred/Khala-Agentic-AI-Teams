@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import AgentReviewCache
+from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.gate_outcomes import record_gate_outcome
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import (
@@ -354,7 +355,10 @@ def _run_general_microtask_impl(
         ``execution_prompt`` carries a ``{language_conventions}`` slot iff
         ``profile.has_language_conventions``.
     Postconditions:
-        Returns the parsed ``{path: content}`` map (possibly empty).
+        Returns the parsed ``{path: content}`` map (possibly empty). Any
+        ``.py`` file whose content fails ``ast.parse`` is dropped and logged
+        rather than returned; the caller (the build-verification retry loop)
+        is expected to detect the missing file.
     """
     arch_ctx = ""
     if architecture:
@@ -382,6 +386,16 @@ def _run_general_microtask_impl(
     raw = runner.run(llm, prompt)
     data = parse_files_and_summary(raw)
     files = data.get("files") or {}
+
+    files, rejected_files = reject_invalid_python(files)
+    if rejected_files:
+        logger.warning(
+            "Microtask %s: codegen returned unparsable Python for %d file(s); "
+            "dropping so the build-verification retry loop can catch it: %s",
+            microtask.id,
+            len(rejected_files),
+            sorted(rejected_files),
+        )
 
     return files
 

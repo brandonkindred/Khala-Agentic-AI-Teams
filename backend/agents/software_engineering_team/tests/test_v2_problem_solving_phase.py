@@ -141,7 +141,9 @@ def test_run_batch_coding_fixes_llm_failure(monkeypatch):
         run_batch_coding_fixes,
     )
 
-    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent("", raise_exc=RuntimeError("boom")))
+    monkeypatch.setattr(
+        ps_mod, "Agent", lambda *a, **kw: _StubAgent("", raise_exc=RuntimeError("boom"))
+    )
     monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_batch_coding_fixes(
@@ -161,7 +163,7 @@ def test_run_batch_coding_fixes_success(monkeypatch):
     )
 
     resp = (
-        "## FILE a.py ##\nfixed code\n"
+        "## FILE a.py ##\nfixed = True\n"
         "## ISSUES_ADDRESSED ##\n"
         "issue_index: 1\ndescription: fixed\n"
         "## END ISSUES_ADDRESSED ##\n"
@@ -177,7 +179,7 @@ def test_run_batch_coding_fixes_success(monkeypatch):
         current_files={"a.py": "code"},
     )
     assert "a.py" in out.files
-    assert out.files["a.py"] == "fixed code"
+    assert out.files["a.py"] == "fixed = True"
 
 
 def test_run_batch_coding_fixes_partial_with_unresolved(monkeypatch):
@@ -207,6 +209,34 @@ def test_run_batch_coding_fixes_partial_with_unresolved(monkeypatch):
     assert len(out.unresolved_issues) == 1
 
 
+def test_run_batch_coding_fixes_rejects_unparsable_python(monkeypatch):
+    """A batch fix that returns an incomplete .py rewrite must not be merged."""
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_batch_coding_fixes,
+    )
+
+    resp = (
+        "## FILE a.py ##\ndef foo(:\n    pass\n"  # unparsable: broken def
+        "## ISSUES_ADDRESSED ##\n"
+        "issue_index: 1\ndescription: fixed\n"
+        "## END ISSUES_ADDRESSED ##\n"
+        "## SUMMARY ##\nall fixed\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    out = run_batch_coding_fixes(
+        llm=MagicMock(),
+        microtask=_microtask(),
+        issues=[_issue(file_path="a.py")],
+        current_files={"a.py": "original code"},
+    )
+    # Broken rewrite discarded -- prior content kept, issue stays unresolved.
+    assert out.files["a.py"] == "original code"
+    assert len(out.unresolved_issues) == 1
+
+
 def test_run_batch_coding_fixes_with_callback(monkeypatch):
     from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
     from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
@@ -230,6 +260,7 @@ def test_run_batch_coding_fixes_with_callback(monkeypatch):
         language="java",
     )
     assert msgs  # callback was invoked
+    assert any("issue" in m.lower() for m in msgs)
 
 
 def test_run_problem_solving_no_actionable():
@@ -291,6 +322,43 @@ def test_run_problem_solving_fix_success(monkeypatch):
     assert out.resolved is True
 
 
+def test_run_problem_solving_rejects_unparsable_python_even_if_resolved(monkeypatch):
+    """A mixed response (one valid file + the issue's own file broken) that
+    claims resolved=yes must NOT be trusted -- the issue's file was
+    discarded, so the issue must stay unresolved and retry."""
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_problem_solving,
+    )
+
+    # a.py (the issue's own file) is unparsable; b.py is valid. The LLM
+    # claims resolved=yes despite a.py never actually landing.
+    resp = (
+        "## FILE a.py ##\ndef broken(:\n    pass\n"
+        "## FILE b.py ##\nvalid = True\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nfixed\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    out = run_problem_solving(
+        llm=MagicMock(),
+        task=_task(),
+        review_result=_review_result([_issue(file_path="a.py")]),
+        current_files={"a.py": "original code"},
+    )
+    # a.py's broken rewrite was discarded -- prior content kept.
+    assert out.files["a.py"] == "original code"
+    # b.py, valid, did land.
+    assert out.files["b.py"] == "valid = True"
+    # The issue is NOT considered resolved despite the LLM's claim.
+    assert out.resolved is False
+    assert len(out.unresolved_issues) == 1
+    # No fix entry recorded for an attempt that didn't land the issue's file.
+    assert out.fixes_applied == []
+
+
 def test_run_problem_solving_with_tool_agents(monkeypatch):
     from software_engineering_team.backend_code_v2_team.models import (
         ToolAgentKind,
@@ -311,7 +379,7 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
 
     tool_agent = MagicMock()
     tool_agent.problem_solve.return_value = ToolAgentPhaseOutput(
-        files={"b.py": "tool fix"},
+        files={"b.py": "tool_fix = True"},
         recommendations=["consider X"],
         summary="tool ran",
     )
@@ -323,7 +391,49 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
         current_files={"a.py": "old"},
         tool_agents={ToolAgentKind.SECURITY: tool_agent},
     )
-    assert "b.py" in out.files
+    assert out.files["b.py"] == "tool_fix = True"
+    assert out.files["a.py"] == "fixed"
+    assert out.resolved is True
+    assert out.unresolved_issues == []
+
+
+def test_run_problem_solving_tool_agent_partial_rejection(monkeypatch):
+    """A tool agent returning a mix of valid and unparsable Python files must
+    only merge the valid ones; the unparsable file is discarded."""
+    from software_engineering_team.backend_code_v2_team.models import (
+        ToolAgentKind,
+        ToolAgentPhaseOutput,
+    )
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_problem_solving,
+    )
+
+    resp = (
+        "## FILE a.py ##\nfixed\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    tool_agent = MagicMock()
+    tool_agent.problem_solve.return_value = ToolAgentPhaseOutput(
+        files={"b.py": "valid = True", "c.py": "def broken(:\n    pass\n"},
+        recommendations=["consider X"],
+        summary="tool ran",
+    )
+
+    out = run_problem_solving(
+        llm=MagicMock(),
+        task=_task(),
+        review_result=_review_result([_issue()]),
+        current_files={"a.py": "old", "c.py": "prior c content"},
+        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+    )
+    assert out.files["b.py"] == "valid = True"
+    # c.py's broken rewrite was discarded -- prior content kept.
+    assert out.files["c.py"] == "prior c content"
 
 
 def test_run_problem_solving_tool_agent_raises(monkeypatch):

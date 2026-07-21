@@ -21,6 +21,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
+from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
@@ -122,7 +123,11 @@ def run_batch_coding_fixes_impl(
         language conventions.
     Postconditions:
         Returns a ``ProblemSolvingResult``; on LLM failure returns an unresolved
-        result carrying the actionable issues.
+        result carrying the actionable issues. A ``.py`` rewrite that fails to
+        parse (see :func:`~software_engineering_team.shared.code_completeness.reject_invalid_python`)
+        is discarded -- the prior version of that file is kept in ``files`` --
+        and any issue whose ``file_path`` matches a rejected file stays in
+        ``unresolved_issues`` even if the LLM reported it as addressed.
     """
     problem_solving_result_cls = models.ProblemSolvingResult
 
@@ -184,6 +189,20 @@ def run_batch_coding_fixes_impl(
     issues_addressed = parsed.get("issues_addressed") or []
     summary = parsed.get("summary") or f"Batch fixed {len(fixed_files)} file(s)"
 
+    fixed_files, rejected_files = reject_invalid_python(fixed_files)
+    if rejected_files:
+        logger.warning(
+            "[%s] Microtask %s: batch fix returned unparsable Python for %d file(s); "
+            "discarding and keeping the prior version: %s",
+            task_id,
+            microtask_id,
+            len(rejected_files),
+            sorted(rejected_files),
+        )
+        summary += (
+            f" ({len(rejected_files)} file(s) rejected: unparsable Python, kept prior version)"
+        )
+
     merged = dict(current_files)
     merged.update(fixed_files)
 
@@ -206,6 +225,15 @@ def run_batch_coding_fixes_impl(
         for idx, issue in enumerate(actionable):
             if idx not in addressed_indices:
                 unresolved_issues.append(issue)
+
+    # A rejected file's issue must stay unresolved even if the LLM claimed to
+    # have addressed it -- the merge kept the prior (unfixed) version.
+    if rejected_files:
+        already_unresolved = set(id(issue) for issue in unresolved_issues)
+        for issue in actionable:
+            if issue.file_path in rejected_files and id(issue) not in already_unresolved:
+                unresolved_issues.append(issue)
+                already_unresolved.add(id(issue))
 
     resolved = len(unresolved_issues) == 0
 
@@ -265,7 +293,12 @@ def _fix_issues_one_at_a_time_impl(
         ``has_language_conventions``.
     Postconditions:
         Returns ``(merged_files, fixes_applied, unresolved_issues)``;
-        ``merged_files`` is a fresh dict (never the caller's input object).
+        ``merged_files`` is a fresh dict (never the caller's input object). A
+        ``.py`` rewrite that fails to parse is discarded per-attempt (the
+        prior version of that file is kept); if the discarded file is the
+        current issue's own ``file_path``, that attempt is never counted as a
+        resolution -- even if the LLM's response claimed ``resolved`` -- and
+        the loop retries up to ``MAX_ITERATIONS_PER_ISSUE``.
     """
     merged = dict(current_files)
     fixes_applied: List[Dict[str, Any]] = []
@@ -331,8 +364,34 @@ def _fix_issues_one_at_a_time_impl(
                     resolved_this = True
                 break
 
+            fixed_files, rejected_files = reject_invalid_python(fixed_files)
+            if rejected_files:
+                logger.warning(
+                    "[%s] %s%sfix (issue %d, attempt %d) returned unparsable Python for "
+                    "%d file(s); discarding and retrying: %s",
+                    task_id,
+                    mt_ctx,
+                    phase_ctx,
+                    issue_idx + 1,
+                    attempt,
+                    len(rejected_files),
+                    sorted(rejected_files),
+                )
+            if not fixed_files:
+                continue
+
             working.update(fixed_files)
             merged.update(fixed_files)
+
+            # The LLM may claim "resolved" even though the fix for THIS issue's
+            # file was rejected above (a mixed response can have other, valid
+            # files) -- never trust "resolved" when the issue's own file didn't
+            # survive the completeness check, and don't record a fix entry for
+            # an attempt that didn't actually land the issue's file; retry
+            # instead.
+            if issue.file_path in rejected_files:
+                continue
+
             entry: Dict[str, Any] = {}
             if microtask_id:
                 entry["microtask"] = microtask_id
@@ -378,7 +437,9 @@ def _apply_tool_agents_problem_solve(
         ``ToolAgentPhaseInput``.
     Postconditions:
         Mutates ``merged``, ``fixes_applied`` and ``summary_parts`` in place; a
-        failing agent is logged and skipped.
+        failing agent is logged and skipped. A ``.py`` file a tool agent
+        returns that fails to parse is discarded before merging -- the prior
+        version of that file in ``merged`` is left untouched.
     """
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "problem_solve"):
@@ -386,7 +447,18 @@ def _apply_tool_agents_problem_solve(
         try:
             out = agent.problem_solve(phase_inp)
             if out.files:
-                merged.update(out.files)
+                valid_files, rejected_files = reject_invalid_python(out.files)
+                if rejected_files:
+                    logger.warning(
+                        "[%s] %stool agent %s returned unparsable Python for %d file(s); "
+                        "discarding and keeping the prior version: %s",
+                        task_id,
+                        f"Microtask {microtask_id}: " if microtask_id else "",
+                        kind.value,
+                        len(rejected_files),
+                        sorted(rejected_files),
+                    )
+                merged.update(valid_files)
             if out.recommendations:
                 for r in out.recommendations:
                     entry: Dict[str, Any] = {"source": kind.value, "recommendation": r}

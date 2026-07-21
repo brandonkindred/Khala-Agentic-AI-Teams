@@ -847,9 +847,10 @@ def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None
 
 def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
     import agents.blogging.agent_implementations.run_writer_agent as mod
-    from conftest import _STUB_WRITER_DRAFT
 
     from llm_service import DummyLLMClient
+
+    from .conftest import _STUB_WRITER_DRAFT
 
     monkeypatch.setattr(mod, "get_strands_model", lambda key: DummyLLMClient())
     monkeypatch.setattr(mod, "load_style_file", lambda *a, **kw: "")

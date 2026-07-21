@@ -12,11 +12,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import make_stub_editor_class, make_stub_writer_class
+from .conftest import make_stub_editor_class, make_stub_writer_class
 
 
 def _make_plan():
-    from _content_plan_test_utils import make_minimal_planning_phase_result
+    from ._content_plan_test_utils import make_minimal_planning_phase_result
 
     return make_minimal_planning_phase_result()
 

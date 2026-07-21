@@ -239,6 +239,25 @@ def test_run_general_microtask_impl_gates_conventions():
     assert "desc=do it" in seen_prompt["prompt"]
 
 
+def test_run_general_microtask_impl_drops_unparsable_python():
+    """Codegen returning an incomplete .py file must not be handed back as output."""
+    files = sh_exec._run_general_microtask_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1", description="do it", title="t"),
+        task=_task(),
+        language="python",
+        existing_code="",
+        architecture=None,
+        execution_prompt="desc={microtask_description}",
+        parse_files_and_summary=lambda _r: {
+            "files": {"a.py": "def foo(:\n    pass\n", "b.py": "def ok():\n    return 1\n"}
+        },
+        profile=_BACKEND_PROFILE,
+        runner=_runner("resp"),
+    )
+    assert files == {"b.py": "def ok():\n    return 1\n"}
+
+
 def test_run_general_microtask_impl_omits_conventions_for_frontend():
     """Run general microtask impl omits conventions for frontend."""
     files = sh_exec._run_general_microtask_impl(
@@ -647,7 +666,9 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
 
     # Snapshot the pre-write baselines the way the loop does, then write.
     rollback = sh_exec._MicrotaskRollback()
-    sh_exec._record_prior_values(rollback, tmp_path, all_files, {"gen.py": "g2", "shared.py": "clob"})
+    sh_exec._record_prior_values(
+        rollback, tmp_path, all_files, {"gen.py": "g2", "shared.py": "clob"}
+    )
     ok = sh_exec.write_microtask_output_or_fail(
         tmp_path,
         {"gen.py": "g2", "shared.py": "clob"},

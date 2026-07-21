@@ -1069,7 +1069,9 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *
    * Preconditions:
    *   `record` must be a valid `StrategyLabRecord` with a populated
-   *   `lab_record_id` and `strategy.hypothesis`.
+   *   `lab_record_id`. `strategy.hypothesis` may be missing on legacy
+   *   records; the confirmation message falls back to an empty string
+   *   in that case rather than throwing.
    *
    * Postconditions:
    *   Either no observable change occurs (cancelled), or the record is
@@ -1079,7 +1081,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    */
   deleteRecord(record: StrategyLabRecord): void {
     const id = record.lab_record_id;
-    const shortHyp = record.strategy.hypothesis.slice(0, 60) + (record.strategy.hypothesis.length > 60 ? '…' : '');
+    const hypothesis = record.strategy?.hypothesis ?? '';
+    const shortHyp = hypothesis.slice(0, 60) + (hypothesis.length > 60 ? '…' : '');
     this.confirmDestructive({
       title: 'Delete strategy lab run',
       message: `Delete this strategy lab run?\n\n${shortHyp}\n\nThis removes the record, its backtest, and any paper-trading sessions for it. This cannot be undone.`,

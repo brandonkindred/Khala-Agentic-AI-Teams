@@ -10,9 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from _api_test_utils import api_main as _api_main
-from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
+
+from ._api_test_utils import api_main as _api_main
+from ._api_test_utils import create_job as _create_job
 
 # ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
 # ``_api_test_utils`` and ``conftest.py`` — shared across the API test modules.
@@ -42,7 +43,7 @@ def _raise(exc: Exception):
 
 def _make_pipeline_doubles():
     """Build minimal planning_phase_result + draft_result + status fake."""
-    from _content_plan_test_utils import make_pipeline_doubles
+    from ._content_plan_test_utils import make_pipeline_doubles
 
     return make_pipeline_doubles(
         title=_EXPECTED_TITLE, probability=0.8, planning_wall_ms_total=10.0

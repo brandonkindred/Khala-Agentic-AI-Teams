@@ -543,11 +543,12 @@ def test_ghost_writer_agent_construction() -> None:
 
 def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
     """find_story_gaps falls back to LLM when plan has no story_opportunity fields."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from llm_service import DummyLLMClient
+
+    from ._content_plan_test_utils import make_content_plan
 
     plan = make_content_plan(
         overarching_topic="X",
@@ -564,11 +565,12 @@ def test_ghost_writer_extract_gaps_from_plan_no_opportunities() -> None:
 
 
 def test_ghost_writer_extract_gaps_from_plan_with_opportunities(monkeypatch) -> None:
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from llm_service import DummyLLMClient
+
+    from ._content_plan_test_utils import make_content_plan
 
     sec_a = ContentPlanSection(
         title="A", coverage_description="cov", order=0, story_opportunity="A debug story"

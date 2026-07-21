@@ -509,7 +509,9 @@ def test_strategy_lab_results_empty_lists(api_client) -> None:
     assert body["losing_count"] == 0
 
 
-def test_strategy_lab_results_filter_by_winning(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
+def test_strategy_lab_results_filter_by_winning(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
     from investment_team.api import main as api_main
     from investment_team.models import (
         BacktestConfig,
@@ -735,9 +737,7 @@ def test_get_backtest_job_status_404(monkeypatch: pytest.MonkeyPatch, api_client
     assert resp.status_code == 404
 
 
-def test_list_backtest_jobs_returns_items(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_list_backtest_jobs_returns_items(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
     monkeypatch.setattr(
@@ -857,3 +857,43 @@ def test_get_advisor_session_returns_found_false_for_missing(api_client) -> None
     resp = api_client.get("/advisor/sessions/missing")
     assert resp.status_code == 200
     assert resp.json()["found"] is False
+
+
+def test_start_advisor_session_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    """A workflow result missing expected keys surfaces as a clean 500, not a KeyError."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_execute_advisory", lambda op, payload, *, key: {"session": {}})
+    resp = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    assert resp.status_code == 500
+    assert resp.json()["detail"]
+
+
+def test_send_advisor_message_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"advisor_message": "hi"}
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/messages", json={"message": "hello"})
+    assert resp.status_code == 500
+    assert resp.json()["detail"]
+
+
+def test_complete_advisor_session_500_on_malformed_advisory_result(api_client, monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    start = api_client.post("/advisor/sessions", json={"user_id": "u1"})
+    sid = start.json()["session_id"]
+
+    # Bypass the "missing required fields" 400 branch so we reach the guard under test.
+    monkeypatch.setattr(api_main._advisor_agent, "missing_fields", lambda collected: [])
+    monkeypatch.setattr(
+        api_main, "_execute_advisory", lambda op, payload, *, key: {"user_id": "u1"}
+    )
+    resp = api_client.post(f"/advisor/sessions/{sid}/complete")
+    assert resp.status_code == 500
+    assert resp.json()["detail"]

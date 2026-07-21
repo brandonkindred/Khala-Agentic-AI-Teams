@@ -10,9 +10,10 @@ None so the route returns 501.
 
 from __future__ import annotations
 
-from _api_test_utils import api_main as _api_main
-from _api_test_utils import create_job as _create_job
 from fastapi.testclient import TestClient
+
+from ._api_test_utils import api_main as _api_main
+from ._api_test_utils import create_job as _create_job
 
 # ``api_main``/``app`` load and the ``patched_client``/``client`` fixtures live in
 # ``_api_test_utils`` and ``conftest.py`` — shared across the API test modules.

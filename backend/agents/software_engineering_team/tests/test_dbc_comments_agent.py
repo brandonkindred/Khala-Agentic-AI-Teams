@@ -149,6 +149,25 @@ def test_dbc_run_filters_invalid_file_entries(monkeypatch) -> None:
     assert set(out.files.keys()) == {"good.py"}
 
 
+def test_dbc_run_rejects_unparsable_python(monkeypatch) -> None:
+    """A DbC re-emit that abandons a file mid-rewrite must not be accepted --
+    even though the LLM response is well-formed JSON (not a truncation)."""
+    fake = _FakeCompleteJson(
+        {
+            "files": {
+                "good.py": "# x\ndef f():\n    pass\n",
+                "broken.py": "class Foo:\n    def bar(self):\n        pass\n\n    def baz(",
+            },
+            "already_compliant": False,
+            "comments_added": 2,
+            "summary": "added comments",
+        }
+    )
+    a = _build_agent(monkeypatch, fake)
+    out = a.run(DbcCommentsInput(code="def f(): pass", language="python"))
+    assert set(out.files.keys()) == {"good.py"}
+
+
 def test_dbc_run_safety_override(monkeypatch) -> None:
     """LLM says not compliant but returned no files -> override to compliant."""
     fake = _FakeCompleteJson({"files": {}, "already_compliant": False, "summary": ""})

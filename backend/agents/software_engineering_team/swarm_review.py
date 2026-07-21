@@ -439,8 +439,6 @@ class _ReviewMixin:
               method's Postconditions. Never left IN_REVIEW with no state change, so the swarm
               loop cannot deadlock on it.
         """
-        from software_engineering_team import coding_team_orchestrator as _orch
-
         entry = {
             "source": "tech_lead",
             "reason": review.get("reason", ""),
@@ -452,8 +450,10 @@ class _ReviewMixin:
         # feedback is now persisted for the status writes below.
         if self._escalate_if_no_change(task, [entry], diff=diff):
             return
-        revision_count = task.revision_count + 1
-        if revision_count >= _orch.MAX_TASK_REVISIONS:
+
+        def _fail(revision_count: int) -> None:
+            from software_engineering_team import coding_team_orchestrator as _orch
+
             logger.warning(
                 "Task %s exceeded max revisions (%d) on Tech Lead review; marking FAILED. Reason: %s",
                 task.id,
@@ -466,20 +466,23 @@ class _ReviewMixin:
                 revision_count=revision_count,
             )
             self._cascade_fail_dependents(task.id)
-            return
-        logger.info(
-            "Task %s rejected by Tech Lead (revision %d); returning to engineer %s",
-            task.id,
-            revision_count,
-            task.assigned_agent_id,
-        )
-        # Keep the assignment (do not clear assigned_agent_id / the agent->task mapping) so the
-        # same engineer picks it up next round and revises the current work.
-        self.graph.update_task(
-            task.id,
-            status=TaskStatus.IN_PROGRESS,
-            revision_count=revision_count,
-        )
+
+        def _continue(revision_count: int) -> None:
+            logger.info(
+                "Task %s rejected by Tech Lead (revision %d); returning to engineer %s",
+                task.id,
+                revision_count,
+                task.assigned_agent_id,
+            )
+            # Keep the assignment (do not clear assigned_agent_id / the agent->task mapping) so
+            # the same engineer picks it up next round and revises the current work.
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.IN_PROGRESS,
+                revision_count=revision_count,
+            )
+
+        self._bump_and_check_revision_cap(task, on_exhausted=_fail, on_continue=_continue)
 
     def _fail_task(self, task: Task, review: Dict[str, Any], context: str) -> None:
         """Terminally fail a task (and its dependents) without spinning the revision loop.

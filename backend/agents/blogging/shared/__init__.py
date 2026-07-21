@@ -58,6 +58,11 @@ from .gate_report import (
     GateStatus,
     GateViolation,
 )
+from .json_retry import (
+    AgentFactory,
+    AgentInvoker,
+    call_json_with_retry,
+)
 from .models import (
     PHASE_ORDER,
     PHASE_PROGRESS_RANGES,
@@ -110,6 +115,9 @@ __all__ = [
     "GateSeverity",
     "GateStatus",
     "GateViolation",
+    "AgentFactory",
+    "AgentInvoker",
+    "call_json_with_retry",
     "ContentProfile",
     "LengthPolicy",
     "SeriesContext",

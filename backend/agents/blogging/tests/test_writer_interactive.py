@@ -13,7 +13,7 @@ import json
 
 
 def _make_agent():
-    from conftest import make_writer_agent
+    from .conftest import make_writer_agent
 
     return make_writer_agent()
 
@@ -279,11 +279,12 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
 
 def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
     """revise() with a non-empty feedback list runs through batch revision."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _make_agent()
 
@@ -322,11 +323,12 @@ def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
 
 def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
     """If all retries fail and json fallback fails, return original draft."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _make_agent()
 
@@ -370,11 +372,12 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
 
 def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
     """_generate_revision_plan parses structured response."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _make_agent()
     plan = make_content_plan(
@@ -415,11 +418,12 @@ def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
 
 
 def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _make_agent()
     plan = make_content_plan(
@@ -444,11 +448,12 @@ def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
 
 def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
     """When the structured plan fails, fall back to a plain text plan."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _make_agent()
     plan = make_content_plan(

@@ -12,7 +12,8 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from conftest import patch_job_event_bus_publish
+
+from .conftest import patch_job_event_bus_publish
 
 # ---------------------------------------------------------------------------
 # build_brief_input
@@ -185,7 +186,7 @@ def test_mark_job_cancelled_sets_status_and_returns_true(
 
 
 def _pipeline_doubles():
-    from _content_plan_test_utils import make_pipeline_doubles
+    from ._content_plan_test_utils import make_pipeline_doubles
 
     ppr, draft, _ = make_pipeline_doubles()
     return ppr, draft
