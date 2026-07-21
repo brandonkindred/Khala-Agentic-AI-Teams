@@ -164,6 +164,22 @@ def test_poll_short_circuits_on_status_fn_none(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_poll_short_circuits_on_status_fn_exception(monkeypatch):
+    monkeypatch.setattr(
+        "shared.http.job_polling.time.sleep",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+    calls = {"n": 0}
+
+    def _status_fn():
+        calls["n"] += 1
+        raise httpx.ConnectError("refused")
+
+    result = poll_until_terminal(_status_fn, total_timeout=10)
+    assert result == {"status": "failed", "error": "Failed to get status"}
+    assert calls["n"] == 1
+
+
 def test_poll_respects_custom_status_key_and_terminal_statuses():
     result = poll_until_terminal(
         lambda: {"state": "cancelled"},
