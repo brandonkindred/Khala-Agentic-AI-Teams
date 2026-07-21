@@ -70,6 +70,11 @@ The Planning team calls other teams via HTTP:
 | **market_research** | Market Research API: user/customer discovery; map response into context/evidence. |
 | **ai_systems** | AI Systems Team: build a new agent from a spec; poll status; store blueprint. |
 
+Each adapter resolves its target service's base URL and builds request URLs
+through a shared `BaseAdapter` (`adapters/_base.py`) rather than reimplementing
+that resolution itself; HTTP calls and polling still go through
+`shared_http.job_polling` directly in each adapter module.
+
 ## Environment variables
 
 - **`UNIFIED_API_BASE_URL`** – Base URL for all adapters (e.g. `http://localhost:8080` when using the unified API).
@@ -153,6 +158,7 @@ planning_team/
 │   └── sub_agent_provisioning/{__init__,agent,models}.py
 ├── adapters/
 │   ├── __init__.py
+│   ├── _base.py         # BaseAdapter: shared base-URL resolution + URL building
 │   ├── product_analysis.py
 │   ├── market_research.py
 │   └── ai_systems.py

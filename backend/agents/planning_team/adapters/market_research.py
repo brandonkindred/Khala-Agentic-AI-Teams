@@ -7,9 +7,9 @@ Submits a job and polls until it completes; optional fallback when unavailable.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, Optional
 
+from planning_team.adapters._base import BaseAdapter
 from shared.http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
@@ -18,9 +18,11 @@ _REQUEST_TIMEOUT_S = 30.0
 _POLL_INTERVAL_S = 2.0
 _TOTAL_TIMEOUT_S = 600.0
 
-
-def _base_url() -> Optional[str]:
-    return os.environ.get("PLANNING_MARKET_RESEARCH_URL") or os.environ.get("UNIFIED_API_BASE_URL")
+_adapter = BaseAdapter(
+    env_var="PLANNING_MARKET_RESEARCH_URL",
+    path_prefix="/api/market-research",
+    unconfigured_log="market research",
+)
 
 
 def request_market_research(
@@ -36,11 +38,9 @@ def request_market_research(
     on any failure (service unavailable, timeout, non-completed terminal
     status).
     """
-    base = _base_url()
-    if not base:
-        logger.debug("No base URL for market research; skipping.")
+    run_url = _adapter.build_url("/market-research/run")
+    if not run_url:
         return None
-    root = f"{base.rstrip('/')}/api/market-research"
     payload = {
         "product_concept": product_concept,
         "target_users": target_users,
@@ -50,7 +50,7 @@ def request_market_research(
     }
 
     submitted = post_json(
-        f"{root}/market-research/run",
+        run_url,
         payload,
         timeout=_REQUEST_TIMEOUT_S,
         log_context="Market research submit",
@@ -64,7 +64,7 @@ def request_market_research(
 
     result = poll_until_terminal(
         lambda: get_json(
-            f"{root}/market-research/status/{job_id}",
+            _adapter.build_url(f"/market-research/status/{job_id}"),
             timeout=_REQUEST_TIMEOUT_S,
             log_context=f"Market research status for {job_id}",
         ),
