@@ -110,9 +110,9 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
     """
-    Frontend Development Agent: runs the 4-phase cycle (Planning → Execution →
-    Documentation → Deliver) with per-microtask review gates embedded in the
-    Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
+    Frontend Development Agent: runs the 5-phase lifecycle (Pre-flight → Planning →
+    Execution → Documentation → Deliver) with per-microtask review gates embedded
+    in the Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
     :class:`BaseV2DevelopmentAgent`; supplies the frontend tooling detection,
@@ -221,44 +221,25 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
             "[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id
         )
 
-        # ── Check out the review feature branch FIRST, then ensure tooling ──
+        # ── Check out the review feature branch, then ensure tooling ───
         # Setup commits lint/test scaffolding to ``development``, but a handoff
         # feature branch created before setup does not inherit it. Configure the
         # tooling on the branch we will actually edit so the pre-flight check and
         # later quality gates see the config (idempotent when already present).
         feature_branch_name = (task.feature_branch_name or "").strip() or None
-        if feature_branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
-            if not ok:
-                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] %s", task_id, result.failure_reason)
-                return result
-            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
-            configure_quality_tooling(repo_path)
-
-        # ── Pre-flight: verify linting & testing are configured ───────
-        # Runs after the feature-branch checkout so it validates the branch that
-        # will actually be edited, not whatever branch setup last left checked out.
-        _has_lint, _has_test = self._detect_tooling(repo_path)
-
-        if not _has_lint or not _has_test:
-            missing = []
-            if not _has_lint:
-                missing.append("linting")
-            if not _has_test:
-                missing.append("testing")
-            logger.error(
-                "[%s] Pre-flight check failed: %s not configured at %s",
-                task_id,
-                " and ".join(missing),
-                repo_path,
-            )
-            result.failure_reason = (
-                f"Pre-flight check failed: {' and '.join(missing)} not configured. "
-                "The build process requires linting and testing to be set up before coding tasks begin."
-            )
+        preflight_failure = self._run_preflight(
+            task_id=task_id,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            detect_tooling=self._detect_tooling,
+            checkout_branch=checkout_branch,
+            configure_quality_tooling=configure_quality_tooling,
+            update_job=_update_job,
+            logger=logger,
+        )
+        if preflight_failure is not None:
+            result.failure_reason = preflight_failure
             return result
-        logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
         existing_code = self._read_existing_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)

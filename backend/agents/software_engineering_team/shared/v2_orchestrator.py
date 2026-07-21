@@ -17,8 +17,9 @@ test-guarded change rather than part of this base.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
@@ -108,6 +109,80 @@ class BaseV2DevelopmentAgent:
             )
 
         return _progress_cb
+
+    @staticmethod
+    def _run_preflight(
+        *,
+        task_id: str,
+        repo_path: Path,
+        feature_branch_name: Optional[str],
+        detect_tooling: Callable[[Path], Tuple[bool, bool]],
+        checkout_branch: Callable[[Path, str], Tuple[bool, str]],
+        configure_quality_tooling: Callable[[Path], Any],
+        update_job: Callable[..., None],
+        logger: logging.Logger,
+        emit_branch_ready_progress: bool = False,
+    ) -> Optional[str]:
+        """Check out the feature branch (if any) and verify lint/test tooling.
+
+        Extracted from ``run_workflow`` so the branch-checkout + tooling-dispatch +
+        missing-tooling failure-result block is defined once; ``detect_tooling``
+        stays genuinely team-specific and is passed in rather than shared.
+
+        Preconditions: ``repo_path`` is an existing directory. ``checkout_branch``
+          and ``configure_quality_tooling`` are the caller module's own
+          (monkeypatch-patchable) names, not imported fresh here, so tests that
+          patch a team's orchestrator module keep working unchanged. Both are
+          assumed not to raise; ``_run_preflight`` does not wrap them in
+          ``try``/``except``, so a raising callable is the caller's to handle.
+        Postconditions: returns ``None`` when checkout (if any) succeeded and
+          both lint and test tooling are detected; otherwise returns the
+          failure-reason string the caller should set on its result and return
+          early with (already logged via ``logger.error``). Never raises on its
+          own; propagates any exception raised by the injected
+          ``checkout_branch`` or ``configure_quality_tooling`` callables.
+          ``emit_branch_ready_progress`` controls whether a "Branch ... ready"
+          progress update fires after a successful checkout — backend emits it,
+          frontend does not, and this preserves that one real behavioral
+          difference between the two teams explicitly rather than losing it.
+        """
+        if feature_branch_name:
+            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
+            if not ok:
+                failure_reason = f"Feature branch checkout failed: {checkout_msg}"
+                logger.error("[%s] %s", task_id, failure_reason)
+                return failure_reason
+            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
+            configure_quality_tooling(repo_path)
+            if emit_branch_ready_progress:
+                update_job(
+                    current_phase="planning",
+                    progress=4,
+                    status_text=f"Branch {feature_branch_name} ready",
+                )
+
+        # ── Pre-flight: verify linting & testing are configured ───────
+        # Runs after the feature-branch checkout so it validates the branch that
+        # will actually be edited, not whatever branch setup last left checked out.
+        has_lint, has_test = detect_tooling(repo_path)
+        if not has_lint or not has_test:
+            missing = []
+            if not has_lint:
+                missing.append("linting")
+            if not has_test:
+                missing.append("testing")
+            logger.error(
+                "[%s] Pre-flight check failed: %s not configured at %s",
+                task_id,
+                " and ".join(missing),
+                repo_path,
+            )
+            return (
+                f"Pre-flight check failed: {' and '.join(missing)} not configured. "
+                "The build process requires linting and testing to be set up before coding tasks begin."
+            )
+        logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
+        return None
 
     def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
         """Per-team repo briefing reader.
