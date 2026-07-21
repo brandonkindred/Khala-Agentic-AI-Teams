@@ -117,6 +117,18 @@ def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
         "investment_team.strategy_lab.agents.design.get_strands_model",
         lambda *_a, **_k: object(),
     )
+    # The legacy unconstrained retry loop delegates to
+    # `_agent_runner.run_json_with_parse_retry`, which builds its `Agent` via
+    # that module's own `Agent`/`get_strands_model` names — patch those too so
+    # this stub is what the loop actually calls.
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
+        lambda **kwargs: _FakeStrandsAgentReturning(payload),
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
+        lambda *_a, **_k: object(),
+    )
     # This suite exercises the legacy unconstrained parse path directly; force
     # the structured-output seam off so it's deterministic regardless of
     # ambient LLM_PROVIDER (unset defaults to "ollama", whose capability flag

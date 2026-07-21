@@ -28,6 +28,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+from investment_team.strategy_lab.agents import _agent_runner as agent_runner_mod
 from investment_team.strategy_lab.agents import design as design_mod
 from investment_team.strategy_lab.agents import design_review as design_review_mod
 from investment_team.strategy_lab.agents._response_schemas import (
@@ -375,6 +376,9 @@ def test_structured_success_dsl_invalid_falls_through_to_correction_retry(
     monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: legacy_agent)
+    # The legacy fallback loop builds its Agent via `_agent_runner`, not `design`.
+    monkeypatch.setattr(agent_runner_mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(agent_runner_mod, "Agent", lambda **_k: legacy_agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
     parsed, rationale = DesignAgent().run(prior_records=[])
@@ -402,6 +406,8 @@ def test_real_bedrock_provider_degrades_to_legacy_loop(monkeypatch: pytest.Monke
     agent = _ScriptedAgent([json.dumps(_good_design_payload())])
     monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: object())
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: agent)
+    monkeypatch.setattr(agent_runner_mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(agent_runner_mod, "Agent", lambda **_k: agent)
 
     parsed, _ = DesignAgent().run(prior_records=[])
 
@@ -427,6 +433,8 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
     agent = _ScriptedAgent([json.dumps(_good_design_payload())])
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: agent)
+    monkeypatch.setattr(agent_runner_mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(agent_runner_mod, "Agent", lambda **_k: agent)
 
     logger_name = "investment_team.strategy_lab.agents.design"
     with caplog.at_level(logging.WARNING, logger=logger_name):

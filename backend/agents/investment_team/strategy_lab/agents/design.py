@@ -40,7 +40,8 @@ from ...strategy_lab_context import (
 )
 from ..exceptions import StrategyLabLLMError
 from ..market_regime import RegimeSummary, regime_to_prompt_block
-from ._llm_budget import DesignBudgetExhausted
+from ._agent_runner import run_json_with_parse_retry
+from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import (
     StrategySpecParseError,
@@ -518,13 +519,13 @@ class DesignAgent:
     def _legacy_parse_retry_loop(
         self, system_prompt: str, prompt: str, user_prompt: str, structured_attempted: bool
     ) -> Tuple[Dict[str, Any], str]:
-        """Unconstrained JSON-and-DSL retry loop, one fresh ``Agent`` per attempt.
+        """Unconstrained JSON-and-DSL retry loop, delegated to the shared parse-retry driver.
 
         Pre: ``system_prompt`` / ``user_prompt`` are non-empty strings;
         ``prompt`` is the prompt to send on the first attempt — either
         ``user_prompt`` unchanged, or a DSL-correction prompt handed off by
-        :meth:`_structured_preflight`; ``structured_attempted`` is a
-        diagnostic flag used only in log messages.
+        :meth:`_structured_preflight`; ``structured_attempted`` is unused
+        here (kept for call-site symmetry with :meth:`_invoke_and_parse`).
         Post: returns ``(parsed, rationale)`` on success. Raises
         ``ValueError`` on malformed JSON, or
         :class:`StrategySpecParseError` on prose/off-shape rules, once the
@@ -536,76 +537,48 @@ class DesignAgent:
         often slips the DSL by exactly one field — wrapping a bar-field
         literal in an IndicatorRef, or naming an indicator in ``source``).
 
-        Each attempt builds a fresh ``Agent``: the correction re-prompt must
-        be read as "reissue the whole object correctly given this guidance",
-        not "fix what you just emitted". ``strands.Agent`` accumulates
-        conversation history in ``self.messages``, so reusing one instance
-        would feed the model its own rejected JSON back as context and bias
-        it toward defending the malformed shape it just produced.
+        Delegates the attempt loop itself — fresh history-free ``Agent`` per
+        attempt, per-attempt budget charging, retry-on-``ValueError``,
+        retry-on-validation-failure — to
+        :func:`_agent_runner.run_json_with_parse_retry`; see its module
+        docstring for that contract. The correction-prompt builders below
+        deliberately ignore the ``base_user_prompt`` the driver echoes back
+        to them and close over this method's own ``user_prompt`` instead:
+        the driver always re-sends corrections built from whatever prompt it
+        was given first (here, ``prompt``, which on the
+        :meth:`_structured_preflight` DSL-rejection fallback path is
+        already a correction prompt, not the pristine original) — building
+        *further* corrections on top of that would nest correction text
+        instead of re-deriving cleanly from ``user_prompt``, as this loop
+        has always done.
         """
         retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
+        rationale_box: Dict[str, str] = {}
 
-        for attempt in range(retries + 1):
-            # A history-free agent per attempt (see method docstring). Strands
-            # Agent construction is cheap — no I/O, just env reads + object
-            # init via get_strands_model — so building one per attempt is safe.
-            agent = Agent(
-                model=get_strands_model("strategy_design"),
-                system_prompt=system_prompt,
-                tools=[],
-            )
-            # Charge before the call so the cycle stops *before* exceeding
-            # the per-cycle budget. Each parse-retry is a real LLM call and
-            # so counts individually.
-            #
-            # Malformed JSON is a retriable parse failure, not a fatal cycle
-            # abort: with schema-constrained decoding it should be rare, but
-            # when the decoder is unconstrained (toggle off / Bedrock / a
-            # model that ignores ``format``) a stray ``ValueError`` here would
-            # otherwise burn the whole cycle. Re-prompt with the same budget
-            # as a structured-DSL slip so the model gets a clean retry.
-            try:
-                parsed = run_structured_agent(
-                    agent,
-                    prompt,
-                    agent_key="strategy_design",
-                    phase="design_generate",
-                    parse=extract_json_object,
-                    charge=True,
-                    logger=logger,
-                )
-            except ValueError as exc:
-                logger.warning(
-                    "DesignAgent emitted unparseable JSON (attempt %d/%d) "
-                    "(structured_attempted=%s): %s",
-                    attempt + 1,
-                    retries + 1,
-                    structured_attempted,
-                    exc,
-                )
-                if attempt >= retries:
-                    raise
-                prompt = build_json_correction_prompt(user_prompt, exc)
-                continue
+        def _on_parse_error(_base_prompt: str, exc: ValueError) -> str:
+            return build_json_correction_prompt(user_prompt, exc)
 
-            try:
-                return _finalize_parsed(parsed)
-            except StrategySpecParseError as exc:
-                logger.warning(
-                    "DesignAgent emitted invalid rule shape (attempt %d/%d) "
-                    "(structured_attempted=%s): %s",
-                    attempt + 1,
-                    retries + 1,
-                    structured_attempted,
-                    exc,
-                )
-                if attempt >= retries:
-                    raise
-                prompt = _build_correction_prompt(user_prompt, exc)
+        def _on_validation_error(_base_prompt: str, exc: Exception) -> str:
+            return _build_correction_prompt(user_prompt, exc)  # type: ignore[arg-type]
 
-        # Unreachable: the loop either returns on success or re-raises on
-        # the final attempt. Kept so type-checkers see a definite return.
-        raise AssertionError("unreachable: _legacy_parse_retry_loop exited without return")
+        def _validate(parsed: Dict[str, Any]) -> Dict[str, Any]:
+            finalized, rationale = _finalize_parsed(parsed)
+            rationale_box["value"] = rationale
+            return finalized
+
+        parsed = run_json_with_parse_retry(
+            agent_key="strategy_design",
+            phase="design_generate",
+            system_prompt=system_prompt,
+            base_user_prompt=prompt,
+            retry_budget=retries,
+            logger=logger,
+            before_attempt=charge_active_budget,
+            on_parse_error=_on_parse_error,
+            validate=_validate,
+            on_validation_error=_on_validation_error,
+        )
+        return parsed, rationale_box["value"]
 
     def _with_self_review(
         self,

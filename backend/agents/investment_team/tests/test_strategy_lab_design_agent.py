@@ -159,6 +159,20 @@ def _patch_design(
         "investment_team.strategy_lab.agents.design.get_strands_model",
         lambda *_a, **_k: object(),
     )
+    # The design-generation retry loop itself now builds its ``Agent`` inside
+    # ``_agent_runner.run_json_with_parse_retry`` rather than in ``design.py``
+    # directly (see DesignAgent._legacy_parse_retry_loop) — patch that
+    # module's names too so the same capturing stub intercepts those calls.
+    # ``design.Agent``/``design.get_strands_model`` above remain patched for
+    # the still-untouched self-review call site.
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
+        lambda **_kwargs: capture,
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
+        lambda *_a, **_k: object(),
+    )
     monkeypatch.setenv(
         "STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED",
         "true" if enable_self_review else "false",
@@ -851,11 +865,11 @@ def test_parse_retry_builds_fresh_agent_per_attempt(
         return agent
 
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.design.Agent",
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
         _factory,
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.design.get_strands_model",
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda *_a, **_k: object(),
     )
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
