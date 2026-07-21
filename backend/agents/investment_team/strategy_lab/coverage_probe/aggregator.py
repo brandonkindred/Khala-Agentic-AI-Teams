@@ -28,7 +28,7 @@ from investment_team.models import (
     StrategySpec,
     ZeroTradeCategory,
 )
-from investment_team.strategy_lab.coverage_probe.indicator_probe import run_indicator_probe
+from investment_team.strategy_lab.coverage_probe.aggregator_report import run_indicator_probe
 from investment_team.strategy_lab.coverage_probe.runtime_instrument import (
     instrument_strategy_code,
 )

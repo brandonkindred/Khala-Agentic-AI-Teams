@@ -11,7 +11,7 @@ from .aggregator import (
     run_coverage_stage,
     should_run_probes,
 )
-from .indicator_probe import run_indicator_probe
+from .aggregator_report import run_indicator_probe
 from .runtime_instrument import instrument_strategy_code
 from .static_probe import run_static_probe
 

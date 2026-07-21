@@ -8,20 +8,18 @@ extracted from
 :mod:`investment_team.strategy_lab.coverage_probe.subcondition_visitor`
 in #1960). Pure: no I/O, no LLM, no subprocess.
 
-This module and ``indicator_probe`` import back from each other:
-``indicator_probe`` calls into two of the resolution helpers defined
-here (``_extract_subconditions``, ``_union_target_symbols``), while this
-module needs ``_BLOCK_FIELDS`` from ``indicator_probe``. Both
-cross-imports are placed as the **last top-level statement** in their
-respective module — after every same-file definition that module
-needs — which keeps the two-way cycle safe regardless of which of the
-two modules a caller imports first (whichever loads first runs to
-completion, then hands back to the other, which by then finds
-everything it needs already bound). ``_numeric_literal`` — needed by
-this module — now lives in
+This module needs ``_BLOCK_FIELDS`` from ``indicator_probe`` (a
+one-directional dependency — ``indicator_probe`` no longer imports
+anything from this module; its two callers of ``_extract_subconditions``/
+``_union_target_symbols`` are ``run_indicator_probe`` and
+``CoverageAggregator``, which live in
+:mod:`investment_team.strategy_lab.coverage_probe.aggregator_report`
+since Part 4 of the decomposition and import those two helpers directly).
+``_BLOCK_FIELDS`` is imported at this module's bottom, after every
+same-file definition it needs, alongside ``_numeric_literal`` — needed
+by this module — which now lives in
 :mod:`investment_team.strategy_lab.coverage_probe.subcond_builder`
-(Part 3 of the decomposition) and is imported back from there instead,
-alongside ``_BLOCK_FIELDS``, at this module's bottom.
+(Part 3 of the decomposition) and is imported back from there instead.
 
 ``_extract_subconditions`` additionally needs ``SubconditionVisitor``
 from ``subcondition_visitor``, which itself imports back from both this
@@ -1184,7 +1182,9 @@ def _collect_name_bindings(
                         ):
                             _dispatch(sub, "record_constructor")
                     continue
-                for sub in _collect_unconditional_constructor_assigns([child], class_param_defaults):
+                for sub in _collect_unconditional_constructor_assigns(
+                    [child], class_param_defaults
+                ):
                     _dispatch(sub, "record_class_body")
             return
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
