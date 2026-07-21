@@ -49,8 +49,8 @@ from sales_team.outcome_store import (
     record_stage_outcome,
 )
 from sales_team.postgres import SCHEMA as SALES_POSTGRES_SCHEMA
-from shared_agent_invoke import mount_invoke_shim
-from shared_app import create_team_app
+from shared.agent_invoke import mount_invoke_shim
+from shared.app import create_team_app
 
 logger = logging.getLogger(__name__)
 
@@ -205,14 +205,14 @@ def _dispatch_pipeline_job(job_id: str, request: SalesPipelineRequest) -> str:
           ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
           started as a durable ``SalesWorkflow``; otherwise the legacy thread
           path runs unchanged.
-        - A missing ``shared_temporal`` (Temporal not installed) falls through
+        - A missing ``shared.temporal`` (Temporal not installed) falls through
           to the thread path; any *other* failure while starting the workflow
           (broken import in the team's own Temporal stack, or a client that
           never connected) propagates to the caller, which marks the job
           FAILED — a Temporal-enabled run is never silently downgraded.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         is_temporal_enabled = None
 
@@ -546,13 +546,13 @@ def _dispatch_deep_research_job(job_id: str, request: DeepResearchRequest) -> st
     Postconditions:
         - Starts exactly one execution path and returns its label
           ("Temporal" or "thread"), mirroring ``_dispatch_pipeline_job``. A
-          missing ``shared_temporal`` falls through to the thread path; any
+          missing ``shared.temporal`` falls through to the thread path; any
           other failure while starting the workflow propagates to the caller,
           which marks the job FAILED — a Temporal-enabled run is never silently
           downgraded.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         is_temporal_enabled = None
 

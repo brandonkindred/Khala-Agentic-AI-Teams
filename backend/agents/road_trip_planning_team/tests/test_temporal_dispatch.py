@@ -26,7 +26,7 @@ def test_plan_dispatches_to_temporal_when_enabled(client, monkeypatch, sample_tr
     # The dispatch helper imports both names lazily from their live modules.
     # Patch via string paths so the patch targets whatever module object
     # sys.modules currently holds.
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: True)
 
     captured: dict = {}
     monkeypatch.setattr(
@@ -52,7 +52,7 @@ def test_plan_marks_job_failed_when_dispatch_raises(
 ):
     """A dispatch failure (e.g. Temporal worker client never connected) must
     leave the job in a terminal FAILED state, not orphaned in PENDING."""
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: True)
 
     def _boom(job_id, request):
         raise RuntimeError("worker client not available")
@@ -75,7 +75,7 @@ def test_plan_marks_job_failed_when_dispatch_raises(
 
 def test_dispatch_helper_returns_thread_label_when_disabled(monkeypatch, sample_plan_request):
     """Direct unit check of the helper's thread fallback and its label."""
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
 
     started: dict = {}
 

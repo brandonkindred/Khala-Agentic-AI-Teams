@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-import shared_temporal
+import shared.temporal
 from software_engineering_team.api import coding_team_main as api
 from software_engineering_team.temporal import coding_team_start_workflow as sw
 
@@ -18,7 +18,7 @@ client = TestClient(api.app)
 def test_run_dispatches_via_temporal_when_enabled(monkeypatch):
     created: list = []
     monkeypatch.setattr(api, "create_job", lambda **kw: created.append(kw), raising=True)
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     dispatched: dict = {}
     monkeypatch.setattr(
@@ -49,7 +49,7 @@ def test_run_dispatches_via_temporal_when_enabled(monkeypatch):
 def test_run_uses_thread_path_when_temporal_disabled(monkeypatch):
     created: list = []
     monkeypatch.setattr(api, "create_job", lambda **kw: created.append(kw), raising=True)
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
 
     def _fail_dispatch(*a, **k):
         raise AssertionError("Temporal dispatch ran while disabled")
@@ -77,7 +77,7 @@ def test_run_marks_job_failed_and_503_when_temporal_dispatch_raises(monkeypatch)
     updates: list = []
     monkeypatch.setattr(api, "create_job", lambda **kw: created.append(kw), raising=True)
     monkeypatch.setattr(api, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _raise(*a, **k):
         raise RuntimeError("Temporal client not available; is the team's worker running?")
@@ -104,7 +104,7 @@ def test_run_without_plan_input_creates_row_and_stays_pending(monkeypatch):
     """A job-only request (no plan) never dispatches to either surface."""
     created: list = []
     monkeypatch.setattr(api, "create_job", lambda **kw: created.append(kw), raising=True)
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(
         sw,
         "start_coding_team_workflow",

@@ -203,7 +203,7 @@ def _submit_brand_run(
     # main.py's import cost low and defers the Pattern A worker boot in
     # branding_team.temporal until the first dispatch.
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
 
         temporal_on = is_temporal_enabled()
     except ImportError:
@@ -268,12 +268,12 @@ def _signal_branding_cancel(job_id: str) -> None:
     unavailable, workflow already gone) is swallowed — the flag still stops the run.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
 
         if not is_temporal_enabled():
             return
         from branding_team.temporal.constants import WORKFLOW_ID_PREFIX
-        from shared_temporal import signal_workflow_sync
+        from shared.temporal import signal_workflow_sync
 
         # client_ready_timeout_s=0 so the cancel endpoint never blocks waiting for
         # the worker client — the signal is only an optimization (the job-store

@@ -188,13 +188,13 @@ def test_record_planning_run_swallows_bounded_probe_setup_failure(monkeypatch) -
 
 
 def test_record_planning_run_round_trip() -> None:
-    from shared_postgres import get_conn, is_postgres_enabled, register_team_schemas
+    from shared.postgres import get_conn, is_postgres_enabled, register_team_schemas
 
     if not is_postgres_enabled():
         pytest.skip("POSTGRES_HOST not set; skipping live-Postgres writer test")
 
     from planning_team.postgres import SCHEMA
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres.testing import truncate_team_tables
 
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)
@@ -235,13 +235,13 @@ def test_record_planning_run_round_trip() -> None:
 
 
 def test_record_planning_run_idempotent_on_conflict() -> None:
-    from shared_postgres import get_conn, is_postgres_enabled, register_team_schemas
+    from shared.postgres import get_conn, is_postgres_enabled, register_team_schemas
 
     if not is_postgres_enabled():
         pytest.skip("POSTGRES_HOST not set; skipping live-Postgres writer test")
 
     from planning_team.postgres import SCHEMA
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres.testing import truncate_team_tables
 
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)

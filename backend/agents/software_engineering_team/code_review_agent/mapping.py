@@ -64,8 +64,8 @@ from llm_service import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
-from shared_concurrency import parallel_map
-from shared_env_config import env_bool
+from shared.concurrency import parallel_map
+from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
     parse_env_int,

@@ -2,7 +2,7 @@
 
 Follows the same idiom as :mod:`agent_cognition.memory.store`:
 
-  * stateless module-level functions (the pool lives in ``shared_postgres``)
+  * stateless module-level functions (the pool lives in ``shared.postgres``)
   * one public function per operation, decorated with ``@timed_query``
   * synchronous psycopg v3; ``with _conn()`` commits on clean exit and rolls
     back on exception, so there are no explicit ``commit()`` calls
@@ -58,8 +58,8 @@ from agent_cognition.models import (
 )
 from agent_cognition.rules.predicate import PredicateError, validate_predicate
 from agent_cognition.rules.seed_packs import SEED_PACKS
-from shared_postgres import get_conn, is_postgres_enabled
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn, is_postgres_enabled
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 _STORE = "agent_cognition"
@@ -709,7 +709,7 @@ def _conn():
           :class:`AgentCognitionStorageUnavailable`; errors raised inside the
           ``with`` body propagate unchanged (and roll back), so a genuine query
           bug is never masked as an infrastructure outage. Commit-on-success and
-          rollback-on-error are delegated to the ``shared_postgres`` pool context.
+          rollback-on-error are delegated to the ``shared.postgres`` pool context.
     """
     if not is_postgres_enabled():
         raise AgentCognitionStorageUnavailable(

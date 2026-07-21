@@ -1,6 +1,6 @@
 """Unit tests for ``startup_advisor.store`` (PR 2, Postgres backend).
 
-These tests mock ``shared_postgres.get_conn`` with a tiny dict-backed
+These tests mock ``shared.postgres.get_conn`` with a tiny dict-backed
 fake that approximates Postgres behaviour just enough to exercise the
 store's SQL shape, parameter binding, and control flow. They run
 without a live Postgres; the integration coverage against a real

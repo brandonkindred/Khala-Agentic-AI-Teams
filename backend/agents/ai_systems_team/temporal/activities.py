@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 
 from temporalio import activity
 
-from shared_temporal.activity_utils import is_last_attempt
+from shared.temporal.activity_utils import is_last_attempt
 
 logger = logging.getLogger(__name__)
 

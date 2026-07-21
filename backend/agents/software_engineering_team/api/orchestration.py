@@ -13,8 +13,8 @@ import threading
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared_env_config import env_bool
-from shared_git.git_utils import DEVELOPMENT_BRANCH
+from shared.env_config import env_bool
+from shared.git.git_utils import DEVELOPMENT_BRANCH
 from software_engineering_team import hitl
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (

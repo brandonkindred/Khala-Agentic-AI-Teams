@@ -56,9 +56,9 @@ from branding_team.shared.job_store import (  # noqa: F401
 )
 from branding_team.store import get_default_store
 from job_service_client import JobServiceClient, start_stale_job_monitor
-from shared_app import create_team_app
-from shared_concurrency import BackgroundHeartbeat
-from shared_env_config import env_float, env_int
+from shared.app import create_team_app
+from shared.concurrency import BackgroundHeartbeat
+from shared.env_config import env_float, env_int
 
 logger = logging.getLogger(__name__)
 

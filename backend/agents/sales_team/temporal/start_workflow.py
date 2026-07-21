@@ -1,7 +1,7 @@
 """Start the sales pipeline Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
-bridge). We deliberately do NOT use ``shared_temporal.run_team_job`` here: it
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
+bridge). We deliberately do NOT use ``shared.temporal.run_team_job`` here: it
 creates its own job row (under the ``sales`` team slug) and sets
 ``status=running`` itself, which would collide with the API's
 ``_job_manager.create_job`` (namespaced under ``sales_team``) and the
@@ -20,7 +20,7 @@ from sales_team.temporal import (
     DeepResearchWorkflow,
     SalesWorkflow,
 )
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

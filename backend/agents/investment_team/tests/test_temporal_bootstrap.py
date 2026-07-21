@@ -98,10 +98,10 @@ def test_advisory_workflows_and_activities_are_registered() -> None:
 
 def test_importing_temporal_package_does_not_call_start_team_worker() -> None:
     """Loading the package (or its submodules) must NOT spin up a worker."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("investment_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("investment_team.temporal")
         importlib.import_module("investment_team.temporal.workflows")
         importlib.import_module("investment_team.temporal.start_workflow")
@@ -293,12 +293,12 @@ def api_client(monkeypatch):
 
 
 def _enable_temporal(monkeypatch, starter_name, starter, module=None):
-    import shared_temporal
+    import shared.temporal
 
     if module is None:
         from investment_team.temporal import start_workflow as module
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(module, starter_name, starter)
 
 
@@ -327,10 +327,10 @@ def test_strategy_lab_dispatch_uses_temporal_when_enabled(monkeypatch, api_clien
 
 
 def test_strategy_lab_dispatch_uses_thread_when_disabled(monkeypatch, api_client) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     thread_ctor = mock.Mock()
     monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
 
@@ -385,10 +385,10 @@ def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -
 
 
 def test_dispatch_via_temporal_downgrades_starter_error_to_false(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _boom() -> None:
         raise RuntimeError("Temporal client not available")
@@ -399,10 +399,10 @@ def test_dispatch_via_temporal_downgrades_starter_error_to_false(monkeypatch) ->
 
 
 def test_dispatch_via_temporal_false_when_disabled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     called = []
     assert api_main._dispatch_via_temporal(lambda: called.append(1)) is False
     assert called == []  # starter not invoked when Temporal is disabled
@@ -413,11 +413,11 @@ def test_strategy_lab_dispatch_falls_back_to_thread_on_dispatch_failure(
 ) -> None:
     """Finding 1 regression: a RuntimeError from the starter must NOT 500 or
     leave a stuck 'running' entry — it falls back to the daemon thread."""
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
     from investment_team.strategy_lab.temporal import start_workflow as sl_sw
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _boom(run_id, request):
         raise RuntimeError("Temporal client not available")
@@ -440,7 +440,7 @@ def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
 ) -> None:
     """Finding 5 regression: a starter RuntimeError falls back to the thread so
     the created job still runs (not orphaned at 'pending')."""
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
     from investment_team.models import StrategySpec
     from investment_team.temporal import start_workflow as sw
@@ -449,7 +449,7 @@ def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
     monkeypatch.setattr(api_main, "_strategies", {"strat-x": {"strategy_id": "strat-x"}})
     monkeypatch.setattr(api_main.StrategySpec, "parse_persisted", staticmethod(lambda s: strat))
     monkeypatch.setattr(api_main, "_bt_create_job", lambda *a, **k: None)
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _boom(*a):
         raise RuntimeError("Temporal client not available")
@@ -511,7 +511,7 @@ def test_strategy_lab_run_failure_reports_only_hard_failure(monkeypatch) -> None
 
 def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) -> None:
     """Finding 6: resume must also route through Temporal when enabled."""
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
     from investment_team.strategy_lab.temporal import start_workflow as sl_sw
@@ -531,7 +531,7 @@ def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) ->
     # ``resume`` looks the run up via ``_get_run_state``, whose durable fallback
     # is ``run_state.load_run_from_job_service`` — patch that (not the api.main alias).
     monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: dict(state))
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     started = []
     monkeypatch.setattr(
         sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)
@@ -550,7 +550,7 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     """Finding 6 + restart offset reset: restart routes through Temporal and the
     persisted state it writes must carry contiguous_cycles=0 so the activity
     re-runs from scratch."""
-    import shared_temporal
+    import shared.temporal
     from investment_team.api import main as api_main
     from investment_team.strategy_lab import run_state
     from investment_team.strategy_lab.temporal import start_workflow as sl_sw
@@ -571,7 +571,7 @@ def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_clie
     monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: dict(state))
     persisted = {}
     monkeypatch.setattr(api_main, "_persist_run_state", lambda rid, s, **k: persisted.update(s))
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     started = []
     monkeypatch.setattr(
         sl_sw, "start_strategy_lab_batch_workflow", lambda rid, req: started.append(rid)

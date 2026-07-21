@@ -1,7 +1,7 @@
 """Unit + integration tests for the Branding team's per-phase Temporal wiring.
 
 These tests do not need a live Temporal server. They mock at the ``temporalio`` /
-``shared_temporal`` boundary and verify:
+``shared.temporal`` boundary and verify:
 
 * the ``constants`` / ``worker`` / ``start_workflow`` surfaces honor their
   contracts;
@@ -99,14 +99,14 @@ def test_stop_index_maps_non_runnable_phase_to_all() -> None:
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:
-    import shared_temporal
+    import shared.temporal
     from branding_team.temporal import worker as worker_mod
 
     # Patch the delegate too: start_team_worker has its own gate, so asserting
     # it is NOT called proves the early return comes from the function's guard.
     with (
-        patch.object(shared_temporal, "is_temporal_enabled", return_value=False),
-        patch.object(shared_temporal, "start_team_worker") as mock_start,
+        patch.object(shared.temporal, "is_temporal_enabled", return_value=False),
+        patch.object(shared.temporal, "start_team_worker") as mock_start,
     ):
         assert worker_mod.start_branding_temporal_worker_thread() is False
         mock_start.assert_not_called()
@@ -114,13 +114,13 @@ def test_start_worker_thread_no_op_when_disabled() -> None:
 
 def test_start_worker_thread_delegates_to_start_team_worker() -> None:
     """The entrypoint contract (TEAM_TEMPORAL_WORKER_FUNC) resolves to a real,
-    idempotent function that boots the worker via shared_temporal."""
-    import shared_temporal
+    idempotent function that boots the worker via shared.temporal."""
+    import shared.temporal
     from branding_team.temporal import worker as worker_mod
 
     with (
-        patch.object(shared_temporal, "is_temporal_enabled", return_value=True),
-        patch.object(shared_temporal, "start_team_worker", return_value=True) as mock_start,
+        patch.object(shared.temporal, "is_temporal_enabled", return_value=True),
+        patch.object(shared.temporal, "start_team_worker", return_value=True) as mock_start,
     ):
         assert worker_mod.start_branding_temporal_worker_thread() is True
         mock_start.assert_called_once()
@@ -157,7 +157,7 @@ def test_registration_exports_workflow_and_all_activities() -> None:
 
 
 def test_start_branding_workflow_delegates_to_start_workflow_sync() -> None:
-    """The dispatcher is a thin wrapper over shared_temporal.start_workflow_sync
+    """The dispatcher is a thin wrapper over shared.temporal.start_workflow_sync
     (which owns the client-ready wait), forwarding the payload and a
     deterministic workflow id on the branding task queue."""
     from branding_team.temporal import start_workflow as sw
@@ -247,16 +247,16 @@ def test_begin_activity_raises_job_not_found_when_missing() -> None:
 
 
 def test_phase_activity_runs_phase_and_checkpoints(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
     from branding_team.models import StrategicCoreOutput
     from branding_team.temporal import activities
 
     model = StrategicCoreOutput(positioning_statement="POS-123")
     saved: dict = {}
-    monkeypatch.setattr(shared_temporal, "load_checkpoint", lambda team, jid, phase: None)
+    monkeypatch.setattr(shared.temporal, "load_checkpoint", lambda team, jid, phase: None)
     monkeypatch.setattr(
-        shared_temporal,
+        shared.temporal,
         "save_checkpoint",
         lambda team, jid, phase, payload: saved.update(
             team=team, jid=jid, phase=phase, payload=payload
@@ -278,15 +278,15 @@ def test_phase_activity_runs_phase_and_checkpoints(monkeypatch) -> None:
 
 def test_phase_activity_checkpoint_short_circuits(monkeypatch) -> None:
     """A pre-existing checkpoint short-circuits the (expensive) phase re-run."""
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
     from branding_team.temporal import activities
 
     cached = {"positioning_statement": "CACHED"}
     monkeypatch.setattr(
-        shared_temporal, "load_checkpoint", lambda team, jid, phase: {"payload": cached}
+        shared.temporal, "load_checkpoint", lambda team, jid, phase: {"payload": cached}
     )
-    monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
 
     with patch.object(main_mod.orchestrator, "run_single_phase") as mock_rsp:
         out = activities.run_branding_phase_activity(_phase_payload(), "strategic_core", {})
@@ -298,15 +298,15 @@ def test_phase_activity_checkpoint_short_circuits(monkeypatch) -> None:
 def test_phase_activity_none_payload_checkpoint_does_not_short_circuit(monkeypatch) -> None:
     """A checkpoint whose payload is None must NOT short-circuit — the phase re-runs
     (guards against `existing.get("payload") is not None` treating None as cached)."""
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
     from branding_team.models import StrategicCoreOutput
     from branding_team.temporal import activities
 
     monkeypatch.setattr(
-        shared_temporal, "load_checkpoint", lambda team, jid, phase: {"payload": None}
+        shared.temporal, "load_checkpoint", lambda team, jid, phase: {"payload": None}
     )
-    monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
 
     model = StrategicCoreOutput(positioning_statement="FRESH")
     with patch.object(main_mod.orchestrator, "run_single_phase", return_value=model) as mock_rsp:
@@ -381,13 +381,13 @@ def test_design_assets_activity_handles_missing_strategic_core() -> None:
 def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
     """finalize runs real compliance + assembly, persists the brand version once,
     and marks the job COMPLETED with a serialized TeamOutput."""
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
     from branding_team.shared import job_store
     from branding_team.temporal import activities
 
-    monkeypatch.setattr(shared_temporal, "load_checkpoint", lambda team, jid, phase: None)
-    monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
+    monkeypatch.setattr(shared.temporal, "load_checkpoint", lambda team, jid, phase: None)
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
 
     phase_outputs = {
         "strategic_core": {
@@ -421,15 +421,15 @@ def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
 def test_finalize_activity_finalized_checkpoint_blocks_double_append(monkeypatch) -> None:
     """A finalize retry after a prior append must not append again, but must still
     (idempotently) complete the job."""
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
     from branding_team.shared import job_store
     from branding_team.temporal import activities
 
     monkeypatch.setattr(
-        shared_temporal, "load_checkpoint", lambda team, jid, phase: {"payload": True}
+        shared.temporal, "load_checkpoint", lambda team, jid, phase: {"payload": True}
     )
-    monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
 
     with (
         patch(
@@ -445,14 +445,14 @@ def test_finalize_activity_finalized_checkpoint_blocks_double_append(monkeypatch
 
 
 def test_finalize_activity_skips_completion_when_cancelled(monkeypatch) -> None:
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
     from branding_team.temporal import activities
 
     monkeypatch.setattr(
-        shared_temporal, "load_checkpoint", lambda team, jid, phase: {"payload": True}
+        shared.temporal, "load_checkpoint", lambda team, jid, phase: {"payload": True}
     )
-    monkeypatch.setattr(shared_temporal, "save_checkpoint", MagicMock())
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
 
     with (
         patch(
@@ -1046,25 +1046,25 @@ def test_run_branding_background_swallows_core_failure() -> None:
 
 
 def test_signal_branding_cancel_noop_when_temporal_disabled() -> None:
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
 
     with (
-        patch.object(shared_temporal, "is_temporal_enabled", return_value=False),
-        patch.object(shared_temporal, "signal_workflow_sync") as mock_signal,
+        patch.object(shared.temporal, "is_temporal_enabled", return_value=False),
+        patch.object(shared.temporal, "signal_workflow_sync") as mock_signal,
     ):
         main_mod._signal_branding_cancel("job-1")
         mock_signal.assert_not_called()
 
 
 def test_signal_branding_cancel_sends_cancel_signal() -> None:
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
     from branding_team.temporal.constants import WORKFLOW_ID_PREFIX
 
     with (
-        patch.object(shared_temporal, "is_temporal_enabled", return_value=True),
-        patch.object(shared_temporal, "signal_workflow_sync") as mock_signal,
+        patch.object(shared.temporal, "is_temporal_enabled", return_value=True),
+        patch.object(shared.temporal, "signal_workflow_sync") as mock_signal,
     ):
         main_mod._signal_branding_cancel("job-9")
 
@@ -1075,13 +1075,13 @@ def test_signal_branding_cancel_sends_cancel_signal() -> None:
 
 
 def test_signal_branding_cancel_swallows_errors() -> None:
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
 
     with (
-        patch.object(shared_temporal, "is_temporal_enabled", return_value=True),
+        patch.object(shared.temporal, "is_temporal_enabled", return_value=True),
         patch.object(
-            shared_temporal, "signal_workflow_sync", side_effect=RuntimeError("worker down")
+            shared.temporal, "signal_workflow_sync", side_effect=RuntimeError("worker down")
         ),
     ):
         # Best-effort: a signal failure must not raise (the job flag still stops it).
@@ -1115,13 +1115,13 @@ def _make_brand(client: TestClient) -> tuple[str, str]:
 
 @pytest.mark.integration
 def test_run_dispatches_via_temporal_when_enabled(branding_client: TestClient) -> None:
-    import shared_temporal
+    import shared.temporal
     from branding_team.api import main as main_mod
 
     cid, bid = _make_brand(branding_client)
     spy = MagicMock()
     with (
-        patch.object(shared_temporal, "is_temporal_enabled", return_value=True),
+        patch.object(shared.temporal, "is_temporal_enabled", return_value=True),
         patch("branding_team.temporal.start_workflow.start_branding_workflow", spy),
         patch.object(main_mod._run_executor, "submit") as mock_submit,
     ):
@@ -1147,11 +1147,11 @@ def test_run_dispatches_via_temporal_when_enabled(branding_client: TestClient) -
 def test_run_temporal_dispatch_failure_returns_503_and_fails_job(
     branding_client: TestClient,
 ) -> None:
-    import shared_temporal
+    import shared.temporal
 
     cid, bid = _make_brand(branding_client)
     with (
-        patch.object(shared_temporal, "is_temporal_enabled", return_value=True),
+        patch.object(shared.temporal, "is_temporal_enabled", return_value=True),
         patch(
             "branding_team.temporal.start_workflow.start_branding_workflow",
             side_effect=RuntimeError("worker down"),

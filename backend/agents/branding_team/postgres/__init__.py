@@ -8,7 +8,7 @@ prefixed with ``branding_`` to avoid collisions in the shared
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="branding",

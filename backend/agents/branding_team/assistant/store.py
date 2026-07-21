@@ -1,7 +1,7 @@
 """Postgres-backed store for branding conversation state.
 
 Data is persisted in the shared Khala Postgres instance via
-``shared_postgres.get_conn``. DDL lives in ``branding_team.postgres`` and
+``shared.postgres.get_conn``. DDL lives in ``branding_team.postgres`` and
 is registered from the team's FastAPI lifespan.
 
 The unique-per-brand conversation invariant is enforced by a unique
@@ -20,8 +20,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from branding_team.models import BrandingMission, TeamOutput
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ class BrandingConversationStore:
     """Postgres-backed store for chat conversations and mission state."""
 
     def __init__(self) -> None:
-        # Stateless; the connection pool lives inside shared_postgres.
+        # Stateless; the connection pool lives inside shared.postgres.
         pass
 
     @timed_query(store=_STORE, op="create")

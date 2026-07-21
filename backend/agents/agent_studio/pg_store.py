@@ -26,8 +26,8 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 from .models import AgentDefinition, ConversationMessage, StudioMode
 from .store import ConversationRecord, ConversationTurn
@@ -48,7 +48,7 @@ class PostgresAgentStudioConversationStore:
     """Postgres-backed store for Agent Studio authoring conversations.
 
     Stateless with respect to connections — each method acquires its own from the
-    pool managed by ``shared_postgres`` and returns it on exit; nothing is held on
+    pool managed by ``shared.postgres`` and returns it on exit; nothing is held on
     the instance. Invariants mirror the in-memory store's: a ``conversation_id``
     returned by :meth:`create` resolves via :meth:`get` until discarded, and ids
     are never reused.

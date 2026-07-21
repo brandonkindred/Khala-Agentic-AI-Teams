@@ -7,7 +7,7 @@ team_assistant module is imported for mounting.
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="team_assistant",

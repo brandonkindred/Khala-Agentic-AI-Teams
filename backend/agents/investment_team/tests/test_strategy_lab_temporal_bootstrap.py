@@ -1,7 +1,7 @@
 """Bootstrap tests for the ``strategy_lab.temporal`` Pattern-A package.
 
 Covers the package exports, the worker boot helper, and the sync dispatch helper
-— all thin wrappers with lazy imports, mocked at the ``shared_temporal`` /
+— all thin wrappers with lazy imports, mocked at the ``shared.temporal`` /
 ``api.main`` boundary so no live Temporal server or job service is needed.
 """
 
@@ -29,10 +29,10 @@ def test_importing_package_starts_no_worker(monkeypatch):
     restored afterward, so this test never pollutes the class identities other
     tests (and temporalio's ``@workflow.defn`` registry) depend on.
     """
-    import shared_temporal
+    import shared.temporal
 
     started: list = []
-    monkeypatch.setattr(shared_temporal, "start_team_worker", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(shared.temporal, "start_team_worker", lambda *a, **k: started.append(a))
 
     prefix = "investment_team.strategy_lab.temporal"
     saved = {n: m for n, m in sys.modules.items() if n == prefix or n.startswith(prefix + ".")}
@@ -54,26 +54,26 @@ def test_importing_package_starts_no_worker(monkeypatch):
 
 
 def test_worker_returns_false_when_temporal_disabled(monkeypatch):
-    import shared_temporal
+    import shared.temporal
     from investment_team.strategy_lab.temporal.worker import (
         start_strategy_lab_temporal_worker_thread,
     )
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     called: list = []
-    monkeypatch.setattr(shared_temporal, "start_team_worker", lambda *a, **k: called.append(a))
+    monkeypatch.setattr(shared.temporal, "start_team_worker", lambda *a, **k: called.append(a))
     assert start_strategy_lab_temporal_worker_thread() is False
     assert called == []
 
 
 def test_worker_starts_on_strategy_lab_queue_when_enabled(monkeypatch):
-    import shared_temporal
+    import shared.temporal
     from investment_team.strategy_lab.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
     from investment_team.strategy_lab.temporal.worker import (
         start_strategy_lab_temporal_worker_thread,
     )
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     captured: dict = {}
 
     def _fake_start(team, workflows, activities, *, task_queue, max_concurrent_activities):
@@ -86,7 +86,7 @@ def test_worker_starts_on_strategy_lab_queue_when_enabled(monkeypatch):
         )
         return True
 
-    monkeypatch.setattr(shared_temporal, "start_team_worker", _fake_start)
+    monkeypatch.setattr(shared.temporal, "start_team_worker", _fake_start)
     monkeypatch.setenv("STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES", "12")
 
     assert start_strategy_lab_temporal_worker_thread() is True
@@ -174,7 +174,7 @@ def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
 
 
 def test_start_batch_workflow_dispatches(monkeypatch):
-    import shared_temporal
+    import shared.temporal
     from investment_team.strategy_lab.temporal import start_workflow as sw
 
     captured: dict = {}
@@ -187,7 +187,7 @@ def test_start_batch_workflow_dispatches(monkeypatch):
             task_queue=task_queue,
         )
 
-    monkeypatch.setattr(shared_temporal, "start_workflow_sync", _fake_start_sync)
+    monkeypatch.setattr(shared.temporal, "start_workflow_sync", _fake_start_sync)
     monkeypatch.setattr(
         sw, "build_strategy_lab_batch_input", lambda run_id, request: {"rid": run_id}
     )

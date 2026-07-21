@@ -56,7 +56,7 @@ def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown
     """Flush buffered traces and mark active SE jobs as failed for resume.
 
     Runs before the factory closes the Postgres pool (see
-    ``shared_app/factory.py``), so the trace flusher's final drain can still use
+    ``shared/app/factory.py``), so the trace flusher's final drain can still use
     the pool. Log-and-continue — a single failure never aborts shutdown or leaks
     the pool the factory closes next.
     """

@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
-from shared_command_runner.runner import run_command
+from shared.command_runner.runner import run_command
 
 
 class DeploymentDryRunInput(BaseModel):

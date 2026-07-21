@@ -2,7 +2,7 @@
 
 Pure data module — importing it has no side effects (no psycopg import, no
 connection). DDL runs when the unified API lifespan calls
-``shared_postgres.register_team_schemas(SCHEMA)``.
+``shared.postgres.register_team_schemas(SCHEMA)``.
 
 This table backs cross-worker visibility of **dynamically registered** manifests
 (Agent Studio saves + ``agentic_team_provisioning`` generated agents). Disk-YAML
@@ -12,7 +12,7 @@ worker's filesystem (and in every sandbox image). See ``dynamic_store``.
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA: TeamSchema = TeamSchema(
     team="agent_registry",

@@ -28,12 +28,12 @@ _PAYLOAD = {
 
 def test_run_dispatches_to_temporal_when_enabled(monkeypatch):
     # The dispatch helper imports both names lazily from their live modules
-    # (``from shared_temporal import ...`` / ``from market_research_team.
+    # (``from shared.temporal import ...`` / ``from market_research_team.
     # temporal.start_workflow import ...``). Patch via string paths so the
     # patch targets whatever module object sys.modules currently holds — the
     # bootstrap test's importlib purge can otherwise swap it out from under a
     # reference bound at import time.
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: True)
 
     captured: dict = {}
     monkeypatch.setattr(
@@ -57,7 +57,7 @@ def test_run_dispatches_to_temporal_when_enabled(monkeypatch):
 def test_run_marks_job_failed_when_dispatch_raises(monkeypatch, fake_job_client):
     """A dispatch failure (e.g. Temporal worker client never connected) must
     leave the job in a terminal FAILED state, not orphaned in PENDING."""
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: True)
 
     def _boom(job_id, request):
         raise RuntimeError("worker client not available")
@@ -77,7 +77,7 @@ def test_run_marks_job_failed_when_dispatch_raises(monkeypatch, fake_job_client)
 
 def test_dispatch_helper_returns_thread_label_when_disabled(monkeypatch):
     """Direct unit check of the helper's thread fallback and its label."""
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
 
     started: dict = {}
 

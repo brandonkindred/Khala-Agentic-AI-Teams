@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service.interface import LLMSemanticExhaustionError
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block

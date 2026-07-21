@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # and avoids needing per-team Dockerfiles.
 COPY agents/ /app/agents/
 
+# Platform shared packages (shared.env, shared.postgres, shared.temporal, …).
+COPY shared/ /app/shared/
+
 # Unified API modules needed by some teams (Medium integration, credential store)
 COPY unified_api/__init__.py /app/unified_api/__init__.py
 COPY unified_api/integrations_store.py /app/unified_api/integrations_store.py
@@ -35,7 +38,9 @@ RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
 USER appuser
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app/agents:/app/agents/blogging:/app
+# /app must precede /app/agents/blogging: both expose a top-level `shared`
+# package (platform shared.* vs blogging/shared); wrong order shadows the platform module.
+ENV PYTHONPATH=/app:/app/agents:/app/agents/blogging
 
 ARG TEAM_PORT=8090
 ENV TEAM_PORT=${TEAM_PORT}

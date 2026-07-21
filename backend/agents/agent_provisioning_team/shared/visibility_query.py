@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from shared_temporal.runner import _await_client
+from shared.temporal import await_client
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ _AGENT_ID_ARG_INDEX = {
 LOCK_PATCH_CUTOFF_ENV_VAR = "AGENT_PROVISIONING_LOCK_PATCH_CUTOFF_AT"
 
 # Query-side RPC ceiling, independent of the client-readiness wait
-# (_await_client's own default). Generous because resolving agent_id may
+# (await_client's own default). Generous because resolving agent_id may
 # fetch one history event per open execution found.
 DEFAULT_QUERY_TIMEOUT_S = 30.0
 
@@ -218,7 +218,7 @@ def find_open_pre_patch_executions(
     """
     if agent_id is not None:
         assert agent_id, "agent_id must be non-empty when provided"
-    client, loop = _await_client(client_ready_timeout_s)
+    client, loop = await_client(client_ready_timeout_s)
     future = asyncio.run_coroutine_threadsafe(
         _find_open_pre_patch_executions_async(
             client, agent_id=agent_id, cutoff=_lock_patch_cutoff()

@@ -42,7 +42,7 @@ def _pipeline_timeout_s() -> float:
         - Returns ``MARKET_RESEARCH_PIPELINE_TIMEOUT_S`` clamped to
           ``[30, _MAX_PIPELINE_TIMEOUT_S]`` (garbage/unset → the 600s default).
     """
-    from shared_env_config import env_float
+    from shared.env_config import env_float
 
     return env_float(
         "MARKET_RESEARCH_PIPELINE_TIMEOUT_S",

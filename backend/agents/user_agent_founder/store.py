@@ -7,7 +7,7 @@ team's FastAPI lifespan. Public API (constructor, method names,
 dataclass shapes) is identical to the pre-migration SQLite version so
 ``api/main.py`` and ``orchestrator.py`` need no changes.
 
-All data access goes through ``shared_postgres.get_conn`` (pool-backed
+All data access goes through ``shared.postgres.get_conn`` (pool-backed
 since PR 0). Every public method is wrapped in ``@timed_query`` so
 slow reads and writes surface as structured log lines.
 """
@@ -23,8 +23,8 @@ from uuid import uuid4
 
 from psycopg.rows import dict_row
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
@@ -179,13 +179,13 @@ class FounderRunStore:
     """Postgres-backed store for founder agent workflow runs.
 
     The constructor takes no arguments — the Postgres DSN is read from
-    the ``POSTGRES_*`` env vars by ``shared_postgres.get_conn``. The
+    the ``POSTGRES_*`` env vars by ``shared.postgres.get_conn``. The
     lazy ``get_founder_store()`` accessor defers instantiation so
     ``import user_agent_founder.store`` stays cheap.
     """
 
     def __init__(self) -> None:
-        # Stateless; connection pooling lives in shared_postgres.
+        # Stateless; connection pooling lives in shared.postgres.
         pass
 
     @timed_query(store=_STORE, op="create_run")

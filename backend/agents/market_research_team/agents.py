@@ -40,7 +40,7 @@ def _build_strands_agent(system_prompt: str, tools: list | None = None) -> Stran
 
     The model is resolved through ``llm_service.get_strands_model`` — the same
     per-agent routing (Postgres provider list, failover, retry) the retired
-    Strands graph obtained via ``shared_graph.build_agent`` — with ``lazy=True``
+    Strands graph obtained via ``shared.graph.build_agent`` — with ``lazy=True``
     so constructing an agent never eagerly resolves a provider: resolution (and
     any ``LLMNotConfiguredError``) is deferred to the first agent call. This
     keeps per-activity orchestrator construction cheap and side-effect-free.

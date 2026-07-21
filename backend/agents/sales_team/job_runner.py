@@ -23,7 +23,7 @@ from job_service_client import (
 )
 from sales_team.models import DeepResearchRequest, SalesPipelineRequest
 from sales_team.orchestrator import SalesPodOrchestrator
-from shared_concurrency import BackgroundHeartbeat
+from shared.concurrency import BackgroundHeartbeat
 
 logger = logging.getLogger(__name__)
 

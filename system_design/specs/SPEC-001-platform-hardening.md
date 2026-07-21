@@ -209,9 +209,9 @@ graph LR
 ### 2.5 Key Strengths (Preserve)
 
 1. **Clean team mounting pattern** (`config.py`): Declarative `TeamConfig` with per-team timeouts, cell-based blast radius containment, circuit breakers, and lazy proxy registration
-2. **Shared Postgres schema registry** (`shared_postgres/`): Pattern B (explicit lifespan call, pure-data `TeamSchema` exports) -- no import-time side effects, safe for testing
+2. **Shared Postgres schema registry** (`shared.postgres/`): Pattern B (explicit lifespan call, pure-data `TeamSchema` exports) -- no import-time side effects, safe for testing
 3. **LLM abstraction with typed error hierarchy** (`llm_service/`): `LLMClient` ABC with provider-agnostic error types and per-agent model selection via `LLM_MODEL_{agent_key}` env vars
-4. **Observability scaffolding**: OpenTelemetry + Prometheus deps, `shared_observability/init_otel()` at startup, FastAPI/httpx auto-instrumentation
+4. **Observability scaffolding**: OpenTelemetry + Prometheus deps, `shared.observability/init_otel()` at startup, FastAPI/httpx auto-instrumentation
 5. **Temporal integration**: SE team supports durable long-running workflows when `TEMPORAL_ADDRESS` is set
 6. **Pydantic models throughout**: Consistent use of typed request/response contracts across teams
 
@@ -290,10 +290,10 @@ graph LR
 
 #### 4.2.2 Integrate Database Migration Tooling (Alembic)
 
-**Problem**: Schema changes are hand-rolled `CREATE TABLE IF NOT EXISTS` in `shared_postgres/`. No versioning, no rollback.
+**Problem**: Schema changes are hand-rolled `CREATE TABLE IF NOT EXISTS` in `shared.postgres/`. No versioning, no rollback.
 
 **Files to modify**:
-- `backend/agents/shared_postgres/` -- add Alembic integration
+- `backend/shared/postgres/` -- add Alembic integration
 - Per-team `postgres/` directories -- add migration scripts
 
 **Approach**: Per-team Alembic `env.py` + `versions/` directories. CI gate validates `alembic upgrade head` succeeds.
@@ -457,7 +457,7 @@ gantt
 ### Week 5-6: Data & Observability (P1-P2)
 - [ ] Integrate Alembic for schema migrations
 - [ ] Migrate to structlog with correlation IDs
-- [ ] Add pool wait timeout + circuit breaker to shared_postgres
+- [ ] Add pool wait timeout + circuit breaker to shared.postgres
 - [ ] Add business metrics (job success rate, LLM cost, planning duration)
 
 ### Week 7-8: Architecture & DX (P2)

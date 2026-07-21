@@ -55,18 +55,18 @@ def test_app_lifespan_registers_schema_runs_scheduler_and_closes_pool(
     trend-scheduler start/stop hooks, then closes the pool on teardown.
 
     (Schema-registration and close_pool error handling is covered centrally in
-    ``shared_app/tests/test_factory.py``.)
+    ``shared/app/tests/test_factory.py``.)
     """
     import asyncio
 
-    import shared_postgres
+    import shared.postgres
     from social_media_marketing_team.api import trend_scheduler
 
     calls: list[str] = []
     monkeypatch.setattr(
-        shared_postgres, "register_team_schemas", lambda *a, **k: calls.append("register")
+        shared.postgres, "register_team_schemas", lambda *a, **k: calls.append("register")
     )
-    monkeypatch.setattr(shared_postgres, "close_pool", lambda: calls.append("close"))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: calls.append("close"))
 
     class _DummyScheduler:
         running = True

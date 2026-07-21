@@ -2,7 +2,7 @@
 
 :class:`ResetSweepState` is the reusable mechanism behind moving a per-call
 "reset this id" write off a caller's hot path: a caller enqueues an id (pure
-Python, no I/O) and a lazily-started :class:`~shared_concurrency.heartbeat.BackgroundHeartbeat`
+Python, no I/O) and a lazily-started :class:`~shared.concurrency.heartbeat.BackgroundHeartbeat`
 drains the pending set on an interval, invoking an injected callback for each
 id off-thread. Mirrors the batching half of
 ``software_engineering_team/shared/trace_flusher.py``, generalized: this module
@@ -21,7 +21,7 @@ from __future__ import annotations
 import threading
 from typing import Callable, Optional
 
-from shared_concurrency.heartbeat import BackgroundHeartbeat
+from shared.concurrency.heartbeat import BackgroundHeartbeat
 
 # Default floor applied to the resolved interval before starting the
 # heartbeat: a 0 (or near-0) interval would busy-loop the sweep thread.

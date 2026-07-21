@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from strands.multiagent.graph import Graph
 
-from shared_graph import build_agent, build_sequential
+from shared.graph import build_agent, build_sequential
 
 
 def build_advisor_graph() -> Graph:

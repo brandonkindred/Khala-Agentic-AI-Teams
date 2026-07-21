@@ -5,7 +5,7 @@ These tests do not depend on a real Temporal server: ``temporalio``'s client is
 monkeypatched, the workflow ``run`` body is exercised with a fake
 ``workflow.execute_activity``, the fine-grained stage activities are called
 directly against the in-memory fake job store, and the worker starter delegates to
-a monkeypatched ``shared_temporal.start_team_worker``.
+a monkeypatched ``shared.temporal.start_team_worker``.
 """
 
 from __future__ import annotations
@@ -1175,7 +1175,7 @@ def test_workflow_rejects_empty_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# worker — delegates to shared_temporal.start_team_worker
+# worker — delegates to shared.temporal.start_team_worker
 # ---------------------------------------------------------------------------
 
 

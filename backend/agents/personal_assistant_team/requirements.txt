@@ -27,7 +27,7 @@ python-dateutil>=2.9,<3.0
 # YAML support for profile storage
 PyYAML>=6.0,<7.0
 
-# OpenTelemetry: shared_observability.init_otel runs at every startup
+# OpenTelemetry: shared.observability.init_otel runs at every startup
 opentelemetry-api>=1.41,<2.0
 opentelemetry-sdk>=1.41,<2.0
 opentelemetry-exporter-otlp-proto-http>=1.41,<2.0

@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from job_service_client import start_stale_job_monitor
-from shared_app import create_team_app
+from shared.app import create_team_app
 from soc2_compliance_team import job_store
 from soc2_compliance_team.models import SOC2AuditResult
 from soc2_compliance_team.orchestrator import SOC2AuditOrchestrator
@@ -81,12 +81,12 @@ def _is_temporal_enabled() -> bool:
     """Whether Temporal mode is active (``TEMPORAL_ADDRESS`` set).
 
     Postconditions:
-        - Returns ``True`` only if ``shared_temporal`` is importable and
+        - Returns ``True`` only if ``shared.temporal`` is importable and
           ``TEMPORAL_ADDRESS`` is set; ``False`` otherwise (defaults to the
           thread-mode path).
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
 
         return is_temporal_enabled()
     except ImportError:

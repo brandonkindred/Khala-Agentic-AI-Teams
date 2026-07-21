@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from shared_http.job_polling import get_json, poll_until_terminal, post_json
+from shared.http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
 

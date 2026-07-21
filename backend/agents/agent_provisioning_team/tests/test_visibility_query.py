@@ -345,7 +345,7 @@ def test_find_open_pre_patch_executions_rejects_empty_agent_id() -> None:
 def test_find_open_pre_patch_executions_propagates_client_unavailable() -> None:
     from agent_provisioning_team.shared import visibility_query as vq
 
-    with patch.object(vq, "_await_client", side_effect=RuntimeError("client not ready")):
+    with patch.object(vq, "await_client", side_effect=RuntimeError("client not ready")):
         with pytest.raises(RuntimeError, match="client not ready"):
             vq.find_open_pre_patch_executions()
 
@@ -370,7 +370,7 @@ def test_find_open_pre_patch_executions_wires_sync_bridge_and_returns_result() -
         return future
 
     with (
-        patch.object(vq, "_await_client", return_value=(MagicMock(), MagicMock())),
+        patch.object(vq, "await_client", return_value=(MagicMock(), MagicMock())),
         patch.object(asyncio, "run_coroutine_threadsafe", side_effect=_submit),
     ):
         result = vq.find_open_pre_patch_executions(query_timeout_s=5.0)

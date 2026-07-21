@@ -5,7 +5,7 @@ at call time so ``monkeypatch.setattr(main, ...)`` keeps taking effect after the
 split; models are imported directly.
 
 Invariants:
-    - The run-thread registry itself lives in ``shared_run_thread_registry.RunThreadRegistry``;
+    - The run-thread registry itself lives in ``shared.run_thread_registry.RunThreadRegistry``;
       ``_active_run_threads``/``_starting_run_jobs``/``_run_thread_lock`` are back-compat aliases
       onto its live internals, so background threads and the answers/resume routes observe the
       same maps regardless of whether they go through the registry or poke these aliases directly.
@@ -17,9 +17,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from shared_hitl.progress import coerce_progress
-from shared_hitl.validation import validate_answers
-from shared_run_thread_registry import RunThreadRegistry
+from shared.hitl.progress import coerce_progress
+from shared.hitl.validation import validate_answers
+from shared.run_thread_registry import RunThreadRegistry
 from software_engineering_team.api.coding_team_models import (
     SubmitAnswersRequest,
 )
@@ -43,7 +43,7 @@ _claim_run_thread = _registry.claim
 def _coerce_progress(value: Any) -> Optional[int]:
     """Coerce a stored progress value to an int in [0, 100], or None.
 
-    Thin wrapper over ``shared_hitl.progress.coerce_progress`` (see it for the full
+    Thin wrapper over ``shared.hitl.progress.coerce_progress`` (see it for the full
     contract). Kept as a named function on this module so the ``main`` re-export and
     its ``monkeypatch.setattr(main, ...)`` target are unchanged after the extraction.
     """
@@ -53,7 +53,7 @@ def _coerce_progress(value: Any) -> Optional[int]:
 def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> List[Dict[str, Any]]:
     """Validate submitted answers against the job's pending questions; return them as plain dicts.
 
-    Thin wrapper over ``shared_hitl.validation.validate_answers`` (see it for the full
+    Thin wrapper over ``shared.hitl.validation.validate_answers`` (see it for the full
     contract: the 400/500 rule set and the ``question_text``-carrying return shape).
     Kept as a named function on this module so the ``main`` re-export and its
     ``monkeypatch.setattr(main, ...)`` target are unchanged after the extraction.

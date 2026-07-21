@@ -705,12 +705,12 @@ def _stub_heavy_modules(monkeypatch: pytest.MonkeyPatch) -> None:
         stub.run_coding_team_orchestrator = _noop  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "software_engineering_team.coding_team_orchestrator", stub)
 
-    # git_utils now lives in the neutral, stdlib-only shared_git package, so the
+    # git_utils now lives in the neutral, stdlib-only shared.git package, so the
     # real module imports cheaply. Importing it (instead of injecting a fake into
     # sys.modules) avoids leaking a stub that poisons other test files under xdist.
-    import shared_git.git_utils  # noqa: F401
+    import shared.git.git_utils  # noqa: F401
 
-    gu_mod = sys.modules["shared_git.git_utils"]
+    gu_mod = sys.modules["shared.git.git_utils"]
     if not hasattr(gu_mod, "git_identity_env"):
         # Functional stand-in mirroring the real helper: api.main imports it
         # for the recovered-WIP merge, which needs a complete commit identity

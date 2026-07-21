@@ -593,7 +593,7 @@ def test_get_job_status_includes_server_time(client: TestClient, temp_work_path:
 
 
 def test_get_job_status_clamps_progress(client: TestClient, temp_work_path: Path) -> None:
-    """Progress is clamped to [0, 100] via shared_hitl.progress.coerce_progress, so a corrupt
+    """Progress is clamped to [0, 100] via shared.hitl.progress.coerce_progress, so a corrupt
     stored value can no longer render an out-of-range bar. This is an intentional behavior
     change from SE's previous unclamped int() coercion."""
     from software_engineering_team.shared.job_store import create_job, update_job
@@ -611,7 +611,7 @@ def test_get_job_status_clamps_progress(client: TestClient, temp_work_path: Path
 def test_get_job_status_preserves_recommendation_and_allow_multiple(
     client: TestClient, temp_work_path: Path
 ) -> None:
-    """The status route materializes pending questions via shared_hitl.pending_questions_from_raw
+    """The status route materializes pending questions via shared.hitl.pending_questions_from_raw
     (model_validate), so recommendation/allow_multiple survive the round-trip. The previous
     hand-enumeration silently dropped both fields."""
     from software_engineering_team.shared.job_store import create_job, update_job

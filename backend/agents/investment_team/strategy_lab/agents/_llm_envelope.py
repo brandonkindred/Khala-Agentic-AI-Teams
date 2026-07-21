@@ -62,7 +62,7 @@ from llm_service.interface import (
     LLMSemanticExhaustionError,
     LLMTemporaryError,
 )
-from shared_env_config import env_float, env_int
+from shared.env_config import env_float, env_int
 
 from ..exceptions import StrategyLabLLMError
 from ._llm_budget import charge_active_budget

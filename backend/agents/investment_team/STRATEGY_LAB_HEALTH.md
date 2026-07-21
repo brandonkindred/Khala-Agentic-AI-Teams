@@ -8,7 +8,7 @@ a pass/fail/skip verdict per check per record.
 
 ```bash
 cd backend
-PYTHONPATH=agents python3 -m investment_team.scripts.audit_recent_runs \
+PYTHONPATH=.:agents python3 -m investment_team.scripts.audit_recent_runs \
     --since=30d --sample=10
 ```
 

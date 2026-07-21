@@ -413,7 +413,7 @@ def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> tup
           rendered text), so provenance reports the true count.
     """
     try:
-        from shared_neo4j import is_neo4j_enabled  # noqa: PLC0415
+        from shared.neo4j import is_neo4j_enabled  # noqa: PLC0415
 
         if not is_neo4j_enabled():
             return "", 0

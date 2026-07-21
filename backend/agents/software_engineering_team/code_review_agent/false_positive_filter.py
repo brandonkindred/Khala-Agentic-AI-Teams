@@ -46,7 +46,7 @@ from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
-from shared_env import env_flag_enabled
+from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 from software_engineering_team.shared.llm import extract_json_from_response
 

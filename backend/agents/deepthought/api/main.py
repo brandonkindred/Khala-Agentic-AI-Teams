@@ -31,8 +31,8 @@ from deepthought.shared.job_store import (
     list_jobs,
     update_job,
 )
-from shared_app import create_team_app
-from shared_sse import SSE_KEEPALIVE
+from shared.app import create_team_app
+from shared.sse import SSE_KEEPALIVE
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def _dispatch_via_temporal(job_id: str, request: DeepthoughtRequest) -> bool:
           surface rather than silently degrading the durability guarantee.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
 
         if not is_temporal_enabled():
             return False

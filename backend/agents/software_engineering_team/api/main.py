@@ -29,7 +29,7 @@ import threading  # noqa: F401  (public re-export: tests patch main.threading.Th
 
 from fastapi.middleware.cors import CORSMiddleware
 
-from shared_app import create_team_app
+from shared.app import create_team_app
 from software_engineering_team.api.background import (  # noqa: F401
     _run_backend_code_v2_background,
     _run_frontend_code_v2_background,

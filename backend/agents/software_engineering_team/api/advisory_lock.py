@@ -40,12 +40,12 @@ def advisory_lock(process_lock: threading.Lock, namespace: str, key: str) -> Ite
     """
     with process_lock, contextlib.ExitStack() as stack:
         try:
-            from shared_postgres import (  # noqa: PLC0415 - optional dep path
+            from shared.postgres import (  # noqa: PLC0415 - optional dep path
                 get_conn,
                 is_postgres_enabled,
             )
         except ImportError:
-            logger.debug("shared_postgres not available; advisory lock will be process-local only")
+            logger.debug("shared.postgres not available; advisory lock will be process-local only")
         else:
             if is_postgres_enabled():
                 try:

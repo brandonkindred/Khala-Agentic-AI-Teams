@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from shared_postgres import pg_cursor
+from shared.postgres import pg_cursor
 from software_engineering_team.shared.env_config import env_bool, env_float
 
 logger = logging.getLogger(__name__)

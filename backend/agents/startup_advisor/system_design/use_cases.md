@@ -48,7 +48,7 @@ flowchart LR
 - **Trigger.** The founder opens the advisor UI or hits the
   endpoint for the first time.
 - **Preconditions.**
-  - Postgres is reachable and the `shared_postgres` pool is
+  - Postgres is reachable and the `shared.postgres` pool is
     healthy.
   - `register_team_schemas(SCHEMA)` has completed in the FastAPI
     lifespan so the three tables exist (`api/main.py:20-28`).

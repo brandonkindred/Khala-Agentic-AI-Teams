@@ -1,7 +1,7 @@
 """Postgres-backed store for clients and brands with versioning.
 
 Data is persisted in the shared Khala Postgres instance via
-``shared_postgres.get_conn``. DDL lives in ``branding_team.postgres`` and
+``shared.postgres.get_conn``. DDL lives in ``branding_team.postgres`` and
 is registered from the team's FastAPI lifespan.
 
 Every public method is wrapped in ``@timed_query`` so slow reads and
@@ -27,8 +27,8 @@ from psycopg import Cursor
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe
 
 from .models import (
@@ -86,12 +86,12 @@ class BrandingStore:
     """Postgres-backed store for clients and brands.
 
     The constructor takes no arguments — the Postgres DSN is read from
-    the ``POSTGRES_*`` env vars by ``shared_postgres.get_conn``. The
-    store itself is stateless; the pool is owned by shared_postgres.
+    the ``POSTGRES_*`` env vars by ``shared.postgres.get_conn``. The
+    store itself is stateless; the pool is owned by shared.postgres.
     """
 
     def __init__(self) -> None:
-        # Stateless; the connection pool lives inside shared_postgres.
+        # Stateless; the connection pool lives inside shared.postgres.
         pass
 
     # ------------------------------------------------------------------

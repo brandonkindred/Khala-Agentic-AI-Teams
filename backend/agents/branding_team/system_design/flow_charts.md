@@ -302,7 +302,7 @@ sequenceDiagram
 When `TEMPORAL_ADDRESS` is set, the async brand-run dispatch
 (`_submit_brand_run`) starts a durable `BrandingWorkflow` on the
 `"branding-queue"` task queue instead of submitting to the in-process thread
-pool. The worker is booted by `shared_temporal.start_team_worker` (Pattern A on
+pool. The worker is booted by `shared.temporal.start_team_worker` (Pattern A on
 import and via the `team_service` entrypoint worker vars). This provides durable
 execution for long-running brand builds. The client still polls
 `GET /branding/status/{job_id}` — the activity performs the same job-store

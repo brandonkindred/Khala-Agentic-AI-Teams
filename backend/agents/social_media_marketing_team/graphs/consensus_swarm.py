@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from strands.multiagent.swarm import Swarm
 
-from shared_graph import build_agent
+from shared.graph import build_agent
 
 
 def build_consensus_swarm() -> Swarm:

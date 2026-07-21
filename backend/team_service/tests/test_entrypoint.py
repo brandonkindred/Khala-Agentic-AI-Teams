@@ -203,7 +203,7 @@ def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failur
     monkeypatch,
 ) -> None:
     """Executes the generated Temporal-block source (not just compiles it)
-    against the REAL shared_postgres module — only its register_team_schemas
+    against the REAL shared.postgres module — only its register_team_schemas
     function is faked — proving the generated per-schema loop actually
     delegates every schema in app.state.postgres_schemas and that one
     schema's failure doesn't stop the rest from being attempted or block the
@@ -212,7 +212,7 @@ def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failur
     import sys
     import types
 
-    import shared_postgres
+    import shared.postgres
 
     body = entrypoint.build_wrapper_body(
         "planning_team",
@@ -236,7 +236,7 @@ def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failur
         registered.append(schema.team)
         return True
 
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", _fake_rts)
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", _fake_rts)
 
     worker_started: list[bool] = []
     fake_worker_mod = types.ModuleType("planning_team.temporal.worker")

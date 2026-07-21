@@ -12,7 +12,7 @@ import time
 import pytest
 
 from agent_studio.models import AgentDefinition
-from shared_postgres import is_postgres_enabled
+from shared.postgres import is_postgres_enabled
 
 pytestmark = pytest.mark.skipif(
     not is_postgres_enabled(), reason="POSTGRES_HOST not set; skipping live-Postgres store tests"
@@ -23,8 +23,8 @@ pytestmark = pytest.mark.skipif(
 def store():
     from agent_studio.pg_store import PostgresAgentStudioConversationStore
     from agent_studio.postgres import SCHEMA
-    from shared_postgres import register_team_schemas
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres import register_team_schemas
+    from shared.postgres.testing import truncate_team_tables
 
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)

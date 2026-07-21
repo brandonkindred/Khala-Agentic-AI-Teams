@@ -174,10 +174,10 @@ def test_find_covering_snapshot_postgres_hit_returns_row(
     monkeypatch.setattr(store_mod, "dict_row", object(), raising=False)
     import sys
 
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "dict_row", object(), raising=False)
-    sys.modules["shared_postgres"].dict_row = object()  # type: ignore[attr-defined]
+    monkeypatch.setattr(shared.postgres, "dict_row", object(), raising=False)
+    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
 
     out = cache._find_covering_snapshot(
         symbol="AAA",
@@ -206,7 +206,7 @@ def test_find_covering_snapshot_postgres_miss_returns_none(
 
     monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    sys.modules["shared_postgres"].dict_row = object()  # type: ignore[attr-defined]
+    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
 
     out = cache._find_covering_snapshot(
         symbol="ZZZ",
@@ -237,7 +237,7 @@ def test_find_covering_snapshot_postgres_error_falls_back_to_memory(
 
     monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    sys.modules["shared_postgres"].dict_row = object()  # type: ignore[attr-defined]
+    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
 
     out = cache._find_covering_snapshot(
         symbol="AAA",

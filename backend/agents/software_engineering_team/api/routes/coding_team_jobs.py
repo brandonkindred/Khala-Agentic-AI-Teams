@@ -14,7 +14,7 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException
 
-from shared_hitl.status import pending_questions_from_raw
+from shared.hitl.status import pending_questions_from_raw
 from software_engineering_team.agent_status import build_agent_statuses
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.coding_team_models import (
@@ -50,7 +50,7 @@ def _temporal_dispatch(job_id: str, request: RunRequest) -> bool:
           The caller marks the job failed and surfaces the error instead.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         return False
     if not is_temporal_enabled():

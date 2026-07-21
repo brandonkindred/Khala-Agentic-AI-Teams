@@ -11,14 +11,14 @@ This module is the cross-container data layer for that list. It lives in
 ``llm_service`` (not ``unified_api``) so **every team container** can read the
 ordered list on the hot ``get_client`` path and mark limit-state at call time,
 exactly like :mod:`llm_service.runtime_config`. It depends only on
-``shared_postgres`` (``get_conn`` / ``is_postgres_enabled`` / ``get_fernet`` /
+``shared.postgres`` (``get_conn`` / ``is_postgres_enabled`` / ``get_fernet`` /
 ``timed_query``) — never on ``unified_api``.
 
 Storage is a dedicated ``llm_provider_configs`` table (not a JSON blob) so a
 single-row ``UPDATE`` marks/clears limit-state without a lost-update-prone
 read-modify-write of the whole list under concurrent writers. The API key column
 holds a Fernet token produced by the one process-wide key
-(``shared_postgres.secrets.get_fernet``) — the plaintext key is never stored.
+(``shared.postgres.secrets.get_fernet``) — the plaintext key is never stored.
 
 Invariants:
     - ``api_key_ciphertext`` is always either ``""`` (no key) or a Fernet token
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Canonical DDL for the ordered-provider table. Kept here (the data layer) so the
 # lazy self-heal below and the schema registered by ``unified_api/postgres`` apply
 # the exact same definition and cannot drift — mirrors how ``SECRETS_TABLE_DDL``
-# lives in ``shared_postgres.secrets``. ``CREATE TABLE IF NOT EXISTS`` is idempotent.
+# lives in ``shared.postgres.secrets``. ``CREATE TABLE IF NOT EXISTS`` is idempotent.
 PROVIDER_TABLE_DDL = (
     "CREATE TABLE IF NOT EXISTS llm_provider_configs ("
     "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
@@ -142,10 +142,10 @@ def _ttl_seconds() -> float:
 def _postgres_enabled() -> bool:
     """True when Postgres is configured. Lazy import so non-PG envs stay clean."""
     try:
-        from shared_postgres import is_postgres_enabled
+        from shared.postgres import is_postgres_enabled
 
         return is_postgres_enabled()
-    except Exception:  # noqa: BLE001 - shared_postgres optional at import time
+    except Exception:  # noqa: BLE001 - shared.postgres optional at import time
         return False
 
 
@@ -154,7 +154,7 @@ def _ensure_table() -> None:
 
     Self-heals the table so a team container that marks limit-state before the
     unified_api migration has run still works (mirrors
-    ``shared_postgres.secrets._ensure_table``).
+    ``shared.postgres.secrets._ensure_table``).
 
     Preconditions: none (no-op when Postgres is disabled).
     Postconditions: the ``llm_provider_configs`` table and its index exist after a
@@ -168,7 +168,7 @@ def _ensure_table() -> None:
         if _table_ensured:
             return
         try:
-            from shared_postgres import get_conn
+            from shared.postgres import get_conn
 
             with get_conn() as conn, conn.cursor() as cur:
                 cur.execute(PROVIDER_TABLE_DDL)
@@ -191,7 +191,7 @@ def _encrypt_key(plaintext: str) -> str:
     """
     if not plaintext:
         return ""
-    from shared_postgres import get_fernet
+    from shared.postgres import get_fernet
 
     return get_fernet().encrypt(plaintext.encode()).decode()
 
@@ -206,7 +206,7 @@ def _decrypt_key(ciphertext: str) -> str:
     if not ciphertext:
         return ""
     try:
-        from shared_postgres import get_fernet
+        from shared.postgres import get_fernet
 
         return get_fernet().decrypt(ciphertext.encode()).decode()
     except Exception as e:  # noqa: BLE001 - corrupt/foreign ciphertext
@@ -274,7 +274,7 @@ def _load_ordered_uncached() -> list[ProviderEntry]:
         return []
     _ensure_table()
     try:
-        from shared_postgres import get_conn
+        from shared.postgres import get_conn
 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -335,7 +335,7 @@ def get_entry(entry_id: int) -> Optional[ProviderEntry]:
         return None
     _ensure_table()
     try:
-        from shared_postgres import get_conn
+        from shared.postgres import get_conn
 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -382,7 +382,7 @@ def create_entry(
         raise RuntimeError("Postgres is not configured; cannot persist provider config")
     _ensure_table()
     ciphertext = _encrypt_key(api_key.strip())
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -455,7 +455,7 @@ def update_entry(
     if config_changed:
         sets.extend(["limit_exceeded = FALSE", "limit_type = ''", "reset_at = NULL"])
     sets.append("updated_at = NOW()")
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -479,7 +479,7 @@ def delete_entry(entry_id: int) -> bool:
     if not _postgres_enabled():
         raise RuntimeError("Postgres is not configured; cannot modify provider config")
     _ensure_table()
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM llm_provider_configs WHERE id = %s", (entry_id,))
@@ -512,7 +512,7 @@ def reorder(entry_ids: "list[int] | tuple[int, ...]") -> None:
     if not _postgres_enabled():
         raise RuntimeError("Postgres is not configured; cannot modify provider config")
     _ensure_table()
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
         # Lock the full row set for the duration of the transaction so the membership
@@ -560,7 +560,7 @@ def mark_exhausted(entry_id: int, *, limit_type: str, reset_at: datetime) -> Non
         return
     _ensure_table()
     try:
-        from shared_postgres import get_conn
+        from shared.postgres import get_conn
 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -598,7 +598,7 @@ def reset_entry(entry_id: int) -> None:
         return
     _ensure_table()
     try:
-        from shared_postgres import get_conn
+        from shared.postgres import get_conn
 
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(

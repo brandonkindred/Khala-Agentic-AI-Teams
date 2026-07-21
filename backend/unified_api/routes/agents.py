@@ -59,7 +59,7 @@ from agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
 from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox as acquire
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
-from shared_agent_invoke.limits import (
+from shared.agent_invoke.limits import (
     RESPONSE_ENVELOPE_OVERHEAD_BYTES,
     max_output_bytes,
     max_payload_bytes,

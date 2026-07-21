@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from shared_repo_context.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
+from shared.repo_context.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,

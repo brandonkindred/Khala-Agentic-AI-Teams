@@ -17,7 +17,7 @@ from llm_service.reset_sweep import ResetSweepState
 
 
 class _FakeHeartbeat:
-    """Stand-in for shared_concurrency.heartbeat.BackgroundHeartbeat.
+    """Stand-in for shared.concurrency.heartbeat.BackgroundHeartbeat.
 
     Exercises the real start-once idempotency logic in
     ``ResetSweepState._ensure_started`` without ever spinning up a real OS

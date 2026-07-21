@@ -331,7 +331,7 @@ def test_invoke_proxy_cap_accounts_for_output_writeback_and_overhead(
     """The proxy cap must be output + writeback + envelope overhead, so a tool-using
     response whose `output` and `tool_audit` are each near their own cap (plus the
     envelope metadata framing) is not falsely 502'd."""
-    from shared_agent_invoke.limits import RESPONSE_ENVELOPE_OVERHEAD_BYTES
+    from shared.agent_invoke.limits import RESPONSE_ENVELOPE_OVERHEAD_BYTES
 
     monkeypatch.setenv("AGENT_INVOKE_MAX_OUTPUT_BYTES", "1000")
     monkeypatch.setenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", "1000")
@@ -867,7 +867,7 @@ def test_invoke_oversized_response_releases_claim_for_immediate_retry(
     """When the agent ran but its response blew the proxy cap (502), the claim
     is abandoned — an immediate retry re-executes instead of 409-ing until the
     lease expires (there is nothing to gate, persist, or replay)."""
-    from shared_agent_invoke.limits import RESPONSE_ENVELOPE_OVERHEAD_BYTES
+    from shared.agent_invoke.limits import RESPONSE_ENVELOPE_OVERHEAD_BYTES
 
     monkeypatch.setenv("AGENT_INVOKE_MAX_OUTPUT_BYTES", "100")
     monkeypatch.setenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", "100")

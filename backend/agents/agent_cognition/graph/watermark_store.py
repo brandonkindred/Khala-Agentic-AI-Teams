@@ -27,7 +27,7 @@ from datetime import datetime
 from psycopg.rows import dict_row
 
 from agent_cognition.memory.store import _conn
-from shared_postgres.metrics import timed_query
+from shared.postgres.metrics import timed_query
 
 _STORE = "agent_cognition_graph"
 

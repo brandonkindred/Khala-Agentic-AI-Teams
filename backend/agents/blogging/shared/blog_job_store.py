@@ -20,8 +20,8 @@ from typing import Any, Dict, List, Optional
 from job_service_client import JobServiceClient, start_stale_job_monitor
 
 # Re-export generic checkpoint helpers so blogging-specific callers can keep
-# importing from blog_job_store while new teams use ``shared_temporal`` directly.
-from shared_temporal.checkpoints import (  # noqa: F401
+# importing from blog_job_store while new teams use ``shared.temporal`` directly.
+from shared.temporal.checkpoints import (  # noqa: F401
     load_checkpoint,
     save_checkpoint,
     submit_input,

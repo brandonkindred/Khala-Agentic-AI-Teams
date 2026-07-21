@@ -32,7 +32,7 @@ if str(_agents_dir) not in sys.path:
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from shared_env_config import env_float
+from shared.env_config import env_float
 from unified_api.bounded_executor import get_or_recreate_executor
 from unified_api.config import TEAM_CONFIGS, get_enabled_teams
 
@@ -46,11 +46,11 @@ logger = logging.getLogger("unified_api")
 # imported below — including the team proxy, security gateway, and any
 # assistant sub-apps — uses the real tracer/meter providers.
 try:
-    from shared_observability import init_otel
+    from shared.observability import init_otel
 
     init_otel(service_name="unified-api", team_key="unified_api")
 except Exception:
-    logger.warning("shared_observability init_otel failed", exc_info=True)
+    logger.warning("shared.observability init_otel failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ async def _start_sandbox_reaper_with_retry() -> None:
 
     Passes a short ``client_ready_timeout_s`` to ``start_sandbox_reaper_workflow``
     so its internal client-readiness poll (default 10s,
-    ``shared_temporal.runner.CLIENT_READY_TIMEOUT_S``) doesn't stack underneath
+    ``shared.temporal.runner.CLIENT_READY_TIMEOUT_S``) doesn't stack underneath
     this loop's own backoff — this loop already retries the whole call, so it
     should own all the waiting; each attempt should fail fast if the client
     isn't ready *yet* rather than block for up to 10s before this loop's own
@@ -404,7 +404,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     #    (unified_api itself + the team_assistant conversation store that we
     #    mount as sub-apps). No-op when POSTGRES_HOST is unset.
     try:
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
         from unified_api.postgres import SCHEMA as UNIFIED_API_SCHEMA
 
         register_team_schemas(UNIFIED_API_SCHEMA)
@@ -412,7 +412,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("unified_api postgres schema registration failed")
 
     try:
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
         from team_assistant.postgres import SCHEMA as TEAM_ASSISTANT_SCHEMA
 
         register_team_schemas(TEAM_ASSISTANT_SCHEMA)
@@ -421,7 +421,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
     try:
         from agent_console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_CONSOLE_SCHEMA)
     except Exception:
@@ -429,7 +429,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
     try:
         from agent_registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_REGISTRY_SCHEMA)
     except Exception:
@@ -437,14 +437,14 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
     try:
         from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_STUDIO_SCHEMA)
     except Exception:
         logger.exception("agent_studio postgres schema registration failed")
 
     try:
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
         from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
 
         register_team_schemas(USER_PROFILE_SCHEMA)
@@ -453,7 +453,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
     try:
         from agent_cognition.postgres import SCHEMA as AGENT_COGNITION_SCHEMA
-        from shared_postgres import register_team_schemas
+        from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_COGNITION_SCHEMA)
     except Exception:
@@ -466,7 +466,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     if TEAM_CONFIGS["product_delivery"].enabled:
         try:
             from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
-            from shared_postgres import ensure_team_schema, is_postgres_enabled
+            from shared.postgres import ensure_team_schema, is_postgres_enabled
 
             # Use `ensure_team_schema` directly (rather than the
             # `register_team_schemas` boolean wrapper) so we can detect
@@ -535,7 +535,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     #    otherwise it's an in-process asyncio task (thread mode). The Temporal
     #    branch is a background retry loop, not a single blocking attempt: the
     #    worker's client can legitimately still be connecting at this point
-    #    (see shared_temporal.runner._await_client), and a lost race here must
+    #    (see shared.temporal.runner._await_client), and a lost race here must
     #    not mean the reaper never starts for the life of the process. See
     #    _start_sandbox_reaper_task's docstring for why the sandbox worker must
     #    be booted here rather than shared with this team's general worker.
@@ -592,21 +592,21 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         sandbox_reaper_task.cancel()
     health_task.cancel()
 
-    # Close the Graphiti client (and its Neo4j driver) owned by shared_neo4j.
+    # Close the Graphiti client (and its Neo4j driver) owned by shared.neo4j.
     try:
-        from shared_neo4j import close_graphiti
+        from shared.neo4j import close_graphiti
 
         await close_graphiti()
     except Exception:
-        logger.warning("shared_neo4j close_graphiti failed", exc_info=True)
+        logger.warning("shared.neo4j close_graphiti failed", exc_info=True)
 
-    # Close Postgres connection pools owned by shared_postgres.
+    # Close Postgres connection pools owned by shared.postgres.
     try:
-        from shared_postgres import close_pool
+        from shared.postgres import close_pool
 
         close_pool()
     except Exception:
-        logger.warning("shared_postgres close_pool failed", exc_info=True)
+        logger.warning("shared.postgres close_pool failed", exc_info=True)
 
     # Shut down the dedicated health-probe executor so worker threads
     # don't outlive the app. The shutdown helper also clears the
@@ -653,7 +653,7 @@ app.add_middleware(SecurityGatewayMiddleware)
 # trace IDs injected into logs, and outbound httpx calls nested under the
 # request span automatically.
 try:
-    from shared_observability import instrument_fastapi_app
+    from shared.observability import instrument_fastapi_app
 
     # Anchored exclusions: this app hosts the /api/se/metrics business alias, whose
     # path contains "metrics". Excluding only the exact scrape/health endpoints keeps
@@ -837,7 +837,7 @@ async def _probe_postgres_live() -> bool:
         # and GitHub-integration routes use the same helper). It returns
         # False when Postgres is disabled, the host is unreachable, or the
         # bounded acquisition times out — exactly this branch's contract.
-        from shared_postgres import check_connection
+        from shared.postgres import check_connection
 
         return check_connection(timeout_s=_PROBE_DB_TIMEOUT_S)
 
@@ -858,7 +858,7 @@ async def _probe_postgres_live() -> bool:
 
 
 def _is_postgres_enabled_cached() -> bool:
-    """``shared_postgres.is_postgres_enabled()`` without the import dance.
+    """``shared.postgres.is_postgres_enabled()`` without the import dance.
 
     Just reads the env var directly so the health handler doesn't pay
     an import on every call. Postgres-disabled environments use this
@@ -906,8 +906,8 @@ async def _verify_in_process_schema_present(team_key: str) -> bool:
         return True
 
     def _check() -> bool:
-        from shared_postgres import client as _pg_client
-        from shared_postgres import is_postgres_enabled, probe_cursor
+        from shared.postgres import client as _pg_client
+        from shared.postgres import is_postgres_enabled, probe_cursor
 
         if not is_postgres_enabled():
             return False
@@ -962,7 +962,7 @@ def _retry_in_process_schema_registration(team_key: str) -> bool:
     try:
         if team_key == "product_delivery":
             from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
-            from shared_postgres import ensure_team_schema
+            from shared.postgres import ensure_team_schema
 
             applied = ensure_team_schema(PRODUCT_DELIVERY_SCHEMA)
             total = len(PRODUCT_DELIVERY_SCHEMA.statements)

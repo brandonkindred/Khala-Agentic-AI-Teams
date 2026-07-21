@@ -109,7 +109,7 @@ def create_job_router(team: str) -> APIRouter:
         """Resume a paused job by submitting input for a ``waiting_for`` key.
 
         Works uniformly for Temporal and thread-mode jobs because both
-        record pauses via :func:`shared_temporal.wait_for_input`.
+        record pauses via :func:`shared.temporal.wait_for_input`.
         """
         manager = _get_manager()
         job = manager.get_job(job_id)
@@ -134,14 +134,14 @@ def create_job_router(team: str) -> APIRouter:
                 status_code=409, detail=f"Job is not waiting for key '{key}'"
             )
 
-        from shared_temporal.checkpoints import submit_input
+        from shared.temporal.checkpoints import submit_input
 
         submit_input(team, job_id, key, request.value)
 
         # If running under Temporal, also signal the workflow so
         # ``workflow.wait_condition`` handlers wake up immediately.
         try:
-            from shared_temporal.client import (
+            from shared.temporal.client import (
                 get_temporal_client,
                 get_temporal_loop,
                 is_temporal_enabled,

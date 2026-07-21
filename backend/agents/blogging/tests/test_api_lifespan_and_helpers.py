@@ -8,8 +8,11 @@ import sys
 from pathlib import Path
 
 _blogging_root = Path(__file__).resolve().parent.parent
+_backend_root = _blogging_root.parent.parent
+if str(_backend_root) not in sys.path:
+    sys.path.insert(0, str(_backend_root))
 if str(_blogging_root) not in sys.path:
-    sys.path.insert(0, str(_blogging_root))
+    sys.path.append(str(_blogging_root))
 
 _spec = importlib.util.spec_from_file_location(
     "blogging_api_main_lifespan",
@@ -118,11 +121,11 @@ def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
     cannot be monkeypatched after the fact; instead we monkeypatch the first thing the
     hook touches (``stop_blog_stale_monitor``) and assert it ran during teardown.
     """
-    fake_shared_postgres = type(sys)("shared_postgres")
+    fake_shared_postgres = type(sys)("shared.postgres")
     registered: list = []
     fake_shared_postgres.register_team_schemas = lambda s: registered.append(s)
     fake_shared_postgres.close_pool = lambda: None
-    monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
+    monkeypatch.setitem(sys.modules, "shared.postgres", fake_shared_postgres)
 
     from agents.blogging.shared import blog_job_store
 
@@ -144,7 +147,7 @@ def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
 
 def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
     """A failing schema registration or pool close must not break app startup/teardown."""
-    fake_shared_postgres = type(sys)("shared_postgres")
+    fake_shared_postgres = type(sys)("shared.postgres")
 
     def boom_register(*a, **kw):
         raise RuntimeError("register failed")
@@ -154,7 +157,7 @@ def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
 
     fake_shared_postgres.register_team_schemas = boom_register
     fake_shared_postgres.close_pool = boom_close
-    monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
+    monkeypatch.setitem(sys.modules, "shared.postgres", fake_shared_postgres)
 
     # NB: the real _run_blogging_service_shutdown runs on teardown — create_team_app
     # captured it as on_shutdown at construction time, so it cannot be monkeypatched

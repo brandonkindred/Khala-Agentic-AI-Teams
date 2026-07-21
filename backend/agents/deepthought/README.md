@@ -17,7 +17,7 @@ Recursive self-organising agent that dynamically creates specialist sub-agents t
 - The cross-request **`ResultCache`** (TTL/wall-clock based) is **bypassed** in Temporal mode — it cannot run deterministically inside a workflow. Thread and SSE modes still use it.
 - In-flight `DeepthoughtWorkflow` histories started before the decomposition keep replaying through the legacy single-activity path via `workflow.patched("deepthought-decomposed-pipeline")`.
 
-Temporal wiring lives in `deepthought/temporal/` (`workflows.py`, `activities.py`, `constants.py`, `phase_models.py`); the worker boots via `deepthought.temporal.worker` (Pattern A — importing the package has no side effects). See `backend/agents/shared_temporal/README.md`.
+Temporal wiring lives in `deepthought/temporal/` (`workflows.py`, `activities.py`, `constants.py`, `phase_models.py`); the worker boots via `deepthought.temporal.worker` (Pattern A — importing the package has no side effects). See `backend/shared/temporal/README.md`.
 
 ## Khala platform
 

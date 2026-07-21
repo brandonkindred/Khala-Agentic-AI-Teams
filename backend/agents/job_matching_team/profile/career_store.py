@@ -60,7 +60,7 @@ def load_career_profile(user_id: str = DEFAULT_USER_ID) -> Optional[JobSeekerPro
           hard-fail every scan and profile read; re-saving repairs it.
     """
     assert user_id, "user_id must be non-empty"
-    from shared_postgres import is_postgres_enabled
+    from shared.postgres import is_postgres_enabled
 
     if not is_postgres_enabled():
         return None
@@ -103,7 +103,7 @@ def save_career_profile(
             write fails operationally — the API surfaces this as a 503.
     """
     assert user_id, "user_id must be non-empty"
-    from shared_postgres import is_postgres_enabled
+    from shared.postgres import is_postgres_enabled
 
     if not is_postgres_enabled():
         raise CareerProfileUnavailableError(

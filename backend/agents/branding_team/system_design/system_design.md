@@ -29,7 +29,7 @@ backend/agents/branding_team/
 │   ├── market_research.py   # HTTP adapter to Market Research team
 │   └── design_assets.py     # Design service adapter (stub today)
 ├── postgres/
-│   └── __init__.py          # SCHEMA = TeamSchema(...) for shared_postgres
+│   └── __init__.py          # SCHEMA = TeamSchema(...) for shared.postgres
 ├── temporal/
 │   ├── __init__.py          # WORKFLOWS/ACTIVITIES exports + Pattern A auto-boot
 │   ├── constants.py         # TASK_QUEUE, WORKFLOW_ID_PREFIX
@@ -484,8 +484,8 @@ unchanged.
 | `UNIFIED_API_BASE_URL` | `adapters/market_research.py:14`, `adapters/design_assets.py:13` | unset | Base URL for sibling team API calls |
 | `BRANDING_MARKET_RESEARCH_URL` | `adapters/market_research.py:14` | unset | Explicit override for Market Research base URL |
 | `BRANDING_DESIGN_SERVICE_URL` | `adapters/design_assets.py:13` | unset | Reserved for the future design service |
-| `POSTGRES_HOST` / `POSTGRES_DB` / ... | `shared_postgres` via `api/main.py:48-50` | unset | When set, the Postgres schema is registered at startup |
-| `TEMPORAL_ADDRESS` | `temporal/__init__.py` (via `shared_temporal.is_temporal_enabled`) | unset | When set, Temporal worker is registered on import |
+| `POSTGRES_HOST` / `POSTGRES_DB` / ... | `shared.postgres` via `api/main.py:48-50` | unset | When set, the Postgres schema is registered at startup |
+| `TEMPORAL_ADDRESS` | `temporal/__init__.py` (via `shared.temporal.is_temporal_enabled`) | unset | When set, Temporal worker is registered on import |
 | `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL` | `llm_service` via `assistant/agent.py:131` | provider-specific | Used by the conversational assistant |
 
 ### Unified API config entry

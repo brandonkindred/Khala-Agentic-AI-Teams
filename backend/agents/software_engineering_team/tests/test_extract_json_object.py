@@ -1,8 +1,8 @@
-"""Tests for shared_llm_recovery.recovery.extract_json_object (generic salvage)."""
+"""Tests for shared.llm_recovery.recovery.extract_json_object (generic salvage)."""
 
 from __future__ import annotations
 
-from shared_llm_recovery import extract_json_object, extract_task_assignment_from_content
+from shared.llm_recovery import extract_json_object, extract_task_assignment_from_content
 
 
 def test_empty_or_blank_returns_none() -> None:

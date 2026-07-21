@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from strands.multiagent.graph import Graph
 
-from shared_graph import build_agent, build_sequential
+from shared.graph import build_agent, build_sequential
 
 from .discovery_subgraph import build_discovery_subgraph
 from .verification_subgraph import build_verification_subgraph

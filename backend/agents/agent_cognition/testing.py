@@ -1,4 +1,4 @@
-"""Shared test doubles for the Agent Cognition Core (mirrors ``shared_postgres.testing``).
+"""Shared test doubles for the Agent Cognition Core (mirrors ``shared.postgres.testing``).
 
 Test-only helpers importable by any suite that exercises the invoke gate or
 the run ledger without a live Postgres — currently the gate unit tests

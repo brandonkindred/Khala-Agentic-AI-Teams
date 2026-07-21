@@ -138,7 +138,7 @@ def _read_cognition_context() -> dict[str, Any] | None:
     Postconditions: returns the proxy-injected ``{"rules": [...],
     "memory_digest": str}`` dict when a channel is open, else ``None`` — including
     when the ``agent_cognition`` package is absent from the image (no-op
-    degradation, mirroring ``shared_agent_invoke``).
+    degradation, mirroring ``shared.agent_invoke``).
     """
     try:
         from agent_cognition.tools.channel import get_cognition_context

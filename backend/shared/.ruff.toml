@@ -1,0 +1,26 @@
+target-version = "py310"
+line-length = 120
+src = ["../agents"]
+
+[lint]
+select = ["E", "F", "I", "C901", "PLR0915"]
+ignore = ["E501"]
+
+[lint.isort]
+# Without this, isort treats the post-move `shared.*` imports (formerly
+# `shared_*` single-word imports under agents/) as third-party and reports
+# spurious I001 findings — mirrors the root pyproject.toml's setting.
+known-first-party = ["shared"]
+
+# These packages moved here verbatim from agents/shared_* (see git history),
+# where agents/.ruff.toml — not the stricter root pyproject.toml — governed
+# lint. That narrower ruleset (no N/W/UP/B/SIM) already accounted for this
+# code's existing style; this file preserves that behavior post-move so the
+# relocation doesn't newly surface unrelated pre-existing style debt as a CI
+# lint failure. Ratchet up to the root pyproject.toml ruleset in a dedicated
+# follow-up, not as a side effect of a pure relocation.
+[lint.mccabe]
+max-complexity = 40
+
+[lint.pylint]
+max-statements = 130

@@ -41,7 +41,7 @@ Routes are mounted on the unified API from
 
 ## Storage contract
 
-Reuses `shared_postgres` exactly like blogging and branding:
+Reuses `shared.postgres` exactly like blogging and branding:
 
 - `SCHEMA: TeamSchema` exported from `agent_console.postgres` (pure data).
 - `register_team_schemas(SCHEMA)` called once from the unified API lifespan.

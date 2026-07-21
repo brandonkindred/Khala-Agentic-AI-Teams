@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Optional
 import httpx
 from pydantic import BaseModel
 
-from shared_llm_recovery import (
+from shared.llm_recovery import (
     extract_json_object as _shared_extract_json_object,
 )
 
@@ -836,7 +836,7 @@ class OllamaLLMClient(LLMClient):
     def _extract_json(self, text: str) -> Dict[str, Any]:
         """Extract a single JSON object from model output. Raises LLMJsonParseError on failure.
 
-        The salvage core is the shared ``shared_llm_recovery`` engine (one
+        The salvage core is the shared ``shared.llm_recovery`` engine (one
         string-aware brace scanner + one ``json-repair`` site for the whole
         codebase); this method keeps only the two Ollama-specific pre-checks the
         shared engine can't know about:

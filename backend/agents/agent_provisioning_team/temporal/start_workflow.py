@@ -25,8 +25,8 @@ from agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,
 )
-from shared_temporal import get_temporal_client, get_temporal_loop
-from shared_temporal.runner import _await_client, execute_workflow_sync
+from shared.temporal import get_temporal_client, get_temporal_loop
+from shared.temporal.runner import _await_client, execute_workflow_sync
 
 logger = logging.getLogger(__name__)
 

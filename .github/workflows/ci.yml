@@ -76,18 +76,22 @@ jobs:
             # team_service is the generic wrapper that can run any team, so
             # changes there ripple to every team's runtime path.
             shared_backend:
-              - 'backend/agents/shared_postgres/**'
-              - 'backend/agents/shared_temporal/**'
-              - 'backend/agents/shared_agent_invoke/**'
-              - 'backend/agents/shared_graph/**'
-              - 'backend/agents/shared_observability/**'
-              - 'backend/agents/shared_command_runner/**'
-              - 'backend/agents/shared_repo_context/**'
-              - 'backend/agents/shared_llm_recovery/**'
-              - 'backend/agents/shared_dev_models/**'
-              - 'backend/agents/shared_git/**'
-              - 'backend/agents/shared_hitl/**'
-              - 'backend/agents/shared_run_thread_registry/**'
+              # Catch-all so any package added under backend/shared/ later
+              # fans out to every team even before it gets its own entry
+              # below — keeps this filter from silently missing new packages.
+              - 'backend/shared/**'
+              - 'backend/shared/postgres/**'
+              - 'backend/shared/temporal/**'
+              - 'backend/shared/agent_invoke/**'
+              - 'backend/shared/graph/**'
+              - 'backend/shared/observability/**'
+              - 'backend/shared/command_runner/**'
+              - 'backend/shared/repo_context/**'
+              - 'backend/shared/llm_recovery/**'
+              - 'backend/shared/dev_models/**'
+              - 'backend/shared/git/**'
+              - 'backend/shared/hitl/**'
+              - 'backend/shared/run_thread_registry/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/event_bus/**'
               - 'backend/agents/artifact_registry/**'
@@ -106,9 +110,9 @@ jobs:
             # on the team plus the shared infra and test harness it depends on.
             branding:
               - 'backend/agents/branding_team/**'
-              - 'backend/agents/shared_postgres/**'
-              - 'backend/agents/shared_temporal/**'
-              - 'backend/agents/shared_observability/**'
+              - 'backend/shared/postgres/**'
+              - 'backend/shared/temporal/**'
+              - 'backend/shared/observability/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/job_service_client.py'
               - 'backend/agents/job_service_client_fake.py'
@@ -127,10 +131,10 @@ jobs:
             # team's package __init__ first — so a non-postgres change in
             # any of those teams can break schema registration. Trigger
             # paths therefore include every team listed in
-            # shared_postgres/registry.py:TEAM_POSTGRES_MODULES (root)
+            # shared/postgres/registry.py:TEAM_POSTGRES_MODULES (root)
             # plus the postgres/dependency-related files.
             shared_postgres:
-              - 'backend/agents/shared_postgres/**'
+              - 'backend/shared/postgres/**'
               - 'backend/agents/**/postgres/**'
               - 'backend/agents/branding_team/**'
               - 'backend/agents/startup_advisor/**'
@@ -146,7 +150,7 @@ jobs:
             # shared_neo4j: env-gated Graphiti client; its tests fake graphiti_core
             # and need no live backend, but transitively import llm_service.
             shared_neo4j:
-              - 'backend/agents/shared_neo4j/**'
+              - 'backend/shared/neo4j/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
@@ -156,8 +160,8 @@ jobs:
             # on its own tree plus the shared infra it imports.
             agent_cognition:
               - 'backend/agents/agent_cognition/**'
-              - 'backend/agents/shared_neo4j/**'
-              - 'backend/agents/shared_postgres/**'
+              - 'backend/shared/neo4j/**'
+              - 'backend/shared/postgres/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/agent_registry/**'
               - 'backend/agents/requirements.txt'
@@ -171,8 +175,8 @@ jobs:
             job_matching:
               - 'backend/agents/job_matching_team/**'
               - 'backend/agents/user_profile/**'
-              - 'backend/agents/shared_postgres/**'
-              - 'backend/agents/shared_app/**'
+              - 'backend/shared/postgres/**'
+              - 'backend/shared/app/**'
               - 'backend/team_service/**'
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
@@ -238,9 +242,9 @@ jobs:
               - 'backend/agents/blogging/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/integrations/**'
-              - 'backend/agents/shared_postgres/**'
-              - 'backend/agents/shared_temporal/**'
-              - 'backend/agents/shared_observability/**'
+              - 'backend/shared/postgres/**'
+              - 'backend/shared/temporal/**'
+              - 'backend/shared/observability/**'
               - 'backend/agents/job_service_client.py'
               - 'backend/unified_api/__init__.py'
               - 'backend/unified_api/integrations_store.py'
@@ -300,12 +304,12 @@ jobs:
               - '!backend/agents/user_agent_founder/**'
               - '!backend/agents/agentic_team_provisioning/**'
               # shared_backend paths (already trigger fan-out separately)
-              - '!backend/agents/shared_postgres/**'
-              - '!backend/agents/shared_neo4j/**'
-              - '!backend/agents/shared_temporal/**'
-              - '!backend/agents/shared_agent_invoke/**'
-              - '!backend/agents/shared_graph/**'
-              - '!backend/agents/shared_observability/**'
+              - '!backend/shared/postgres/**'
+              - '!backend/shared/neo4j/**'
+              - '!backend/shared/temporal/**'
+              - '!backend/shared/agent_invoke/**'
+              - '!backend/shared/graph/**'
+              - '!backend/shared/observability/**'
               - '!backend/agents/llm_service/**'
               - '!backend/agents/event_bus/**'
               - '!backend/agents/artifact_registry/**'
@@ -510,14 +514,14 @@ jobs:
           restore-keys: |
             ruff-${{ runner.os }}-${{ hashFiles('backend/pyproject.toml') }}-
       - run: pip install ruff
-      - run: ruff check agents/ unified_api/ blogging_service/ team_service/
+      - run: ruff check agents/ shared/ unified_api/ blogging_service/ team_service/
 
   # ── Tests ───────────────────────────────────────────────────────────────────
   # Test jobs run in parallel with lint — lint failures are surfaced via the
   # `all-checks` gate, not by serializing the critical path.
 
   test-shared-postgres:
-    name: Test – shared_postgres (live Postgres)
+    name: Test – shared.postgres (live Postgres)
     runs-on: ubuntu-latest
     needs: changes
     if: >-
@@ -560,18 +564,21 @@ jobs:
       - name: register_all_team_schemas against live Postgres
         env:
           PYTHONPATH: ..
-        run: python -c "from shared_postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
+        run: python -c "from shared.postgres import register_all_team_schemas; r = register_all_team_schemas(); assert all(r.values()), r"
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
+      # ../shared/postgres/tests/ is a filesystem path (backend/shared/ is one
+      # level up from backend/agents/); --cov=shared.postgres is the dotted
+      # module name, resolved via PYTHONPATH=.. above.
       - run: >-
-          pytest shared_postgres/tests/ -v --tb=short -n 4
-          --cov=shared_postgres
+          pytest ../shared/postgres/tests/ -v --tb=short -n 4
+          --cov=shared.postgres
           --cov-report=term-missing
           --cov-fail-under=90
 
   # shared_neo4j: the env-gated Graphiti client. Its tests fake graphiti_core and
   # need no live Neo4j or Postgres, so this job carries no service container.
   test-shared-neo4j:
-    name: Test – shared_neo4j
+    name: Test – shared.neo4j
     runs-on: ubuntu-latest
     needs: changes
     if: >-
@@ -590,23 +597,27 @@ jobs:
           cache: pip
           cache-dependency-path: backend/agents/requirements.txt
       - run: pip install -r requirements.txt
+      # PYTHONPATH=.. adds backend/ to sys.path so `shared.neo4j` resolves;
+      # ../shared/neo4j/tests/ is the filesystem path from backend/agents/.
       - run: >-
-          pytest shared_neo4j/tests/ -v --tb=short -n 4
-          --cov=shared_neo4j
+          pytest ../shared/neo4j/tests/ -v --tb=short -n 4
+          --cov=shared.neo4j
           --cov-report=term-missing
           --cov-fail-under=90
+        env:
+          PYTHONPATH: ..
 
   # shared-infra: the neutral packages extracted from software_engineering_team
   # (command runner + error parsing, repo context, LLM recovery, dev models,
-  # shared_git, shared_hitl, shared_run_thread_registry). Their unit tests live
+  # shared.git, shared.hitl, shared.run_thread_registry). Their unit tests live
   # in the SE suite (which now also includes coding_team's tests, an in-package
   # sub-team moved into software_engineering_team/tests/), which ALSO records
   # shared coverage into a data-file artifact (see the `emit_shared_cov` entry
   # in test-backend). This job re-runs NOTHING — it downloads that artifact,
   # `coverage combine`s it, and gates the moved code at the repo's 90% floor.
-  # shared_git/git_utils.py is omitted with the same integration-heavy
+  # shared.git/git_utils.py is omitted with the same integration-heavy
   # rationale the SE gate used before the shared-infra extraction (see
-  # shared_infra.coveragerc).
+  # shared/infra.coveragerc).
   combine-shared-infra:
     name: Test – shared infra packages (coverage combine)
     runs-on: ubuntu-latest
@@ -643,12 +654,14 @@ jobs:
           path: backend/agents/
       - run: coverage combine
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md. --include
-      # is required: shared_infra.coveragerc's omit does not drop SE
+      # is required: shared/infra.coveragerc's omit does not drop SE
       # application files, so without it the shared gate would be diluted. omit
-      # still wins over --include, so shared_git/git_utils.py stays excluded.
+      # still wins over --include, so shared.git/git_utils.py stays excluded.
+      # rcfile is a filesystem path; backend/shared/ is one level up from
+      # backend/agents/ (this job's cwd), hence ../shared/infra.coveragerc.
       - run: >-
-          coverage report --rcfile=shared_infra.coveragerc
-          --include='*/shared_command_runner/*,*/shared_repo_context/*,*/shared_llm_recovery/*,*/shared_dev_models/*,*/shared_git/*,*/shared_hitl/*,*/shared_run_thread_registry/*'
+          coverage report --rcfile=../shared/infra.coveragerc
+          --include='*/shared/command_runner/*,*/shared/repo_context/*,*/shared/llm_recovery/*,*/shared/dev_models/*,*/shared/git/*,*/shared/hitl/*,*/shared/run_thread_registry/*'
           --show-missing
           --fail-under=90
 
@@ -850,13 +863,13 @@ jobs:
             # (--cov-fail-under=0) so `.coverage` is always produced.
             pytest ${{ matrix.tests }} -v --tb=short -n 4 -m "not integration" \
               --cov=${{ matrix.source }} \
-              --cov=shared_command_runner \
-              --cov=shared_repo_context \
-              --cov=shared_llm_recovery \
-              --cov=shared_dev_models \
-              --cov=shared_git \
-              --cov=shared_hitl \
-              --cov=shared_run_thread_registry \
+              --cov=shared.command_runner \
+              --cov=shared.repo_context \
+              --cov=shared.llm_recovery \
+              --cov=shared.dev_models \
+              --cov=shared.git \
+              --cov=shared.hitl \
+              --cov=shared.run_thread_registry \
               $COV_CONFIG_ARG \
               --cov-report=term-missing \
               --cov-fail-under=0
@@ -947,11 +960,13 @@ jobs:
           pip install -r ../job_service/requirements.txt
       # Boot the job-service sidecar AND run pytest in a single step so the
       # background process is guaranteed to be alive when pytest collects.
-      # PYTHONPATH=../agents is required because job_service/postgres.py
-      # imports `shared_postgres`, which lives under backend/agents/.
+      # PYTHONPATH=..:../agents is required: `..` lets the job-service
+      # process (cwd backend/job_service) import `shared.postgres`, which
+      # now lives under backend/shared/; `../agents` keeps backend/agents/
+      # on the path for team-module imports.
       - name: Start job-service + run integration tests
         env:
-          PYTHONPATH: ../agents
+          PYTHONPATH: ..:../agents
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres
@@ -1045,11 +1060,13 @@ jobs:
           pip install -r ../job_service/requirements.txt
       # Boot the job-service sidecar AND run pytest in a single step so the
       # background process is guaranteed to be alive when pytest collects.
-      # PYTHONPATH=../agents is required because job_service/postgres.py
-      # imports `shared_postgres`, which lives under backend/agents/.
+      # PYTHONPATH=..:../agents is required: `..` lets the job-service
+      # process (cwd backend/job_service) import `shared.postgres`, which
+      # now lives under backend/shared/; `../agents` keeps backend/agents/
+      # on the path for team-module imports.
       - name: Start job-service + run branding suite with coverage
         env:
-          PYTHONPATH: ../agents
+          PYTHONPATH: ..:../agents
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres

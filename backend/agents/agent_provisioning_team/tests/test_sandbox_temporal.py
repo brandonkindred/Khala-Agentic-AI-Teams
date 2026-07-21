@@ -349,7 +349,7 @@ def _fake_workflow_failure(app: _FakeApplicationError) -> Exception:
     """Build a WorkflowFailureError-shaped exception using the standard
     __cause__ chaining attribute (matching real Temporal — FailureError.cause
     is documented as an alias of __cause__ — and the shared
-    shared_temporal.translate_workflow_failure walk, which reads
+    shared.temporal.translate_workflow_failure walk, which reads
     __cause__/__context__, not a nonstandard '.cause' attribute)."""
     failure = Exception("workflow failed")
     failure.__cause__ = app

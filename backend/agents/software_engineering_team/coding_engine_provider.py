@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 # The two-insert idiom is inlined (rather than delegating to
-# ``shared_app.paths.bootstrap_syspath``) because importing ``shared_app`` runs its
+# ``shared.app.paths.bootstrap_syspath``) because importing ``shared.app`` runs its
 # package ``__init__``, which pulls in FastAPI — too heavy for a provider whose
 # contract is to be cheap and import-safe. ``__file__`` lives in the SE team root.
 _TEAM_DIR = Path(__file__).resolve().parent

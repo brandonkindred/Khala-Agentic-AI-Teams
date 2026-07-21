@@ -1,7 +1,7 @@
 """Postgres data-access layer for episodic memory events and rollups.
 
 Follows the ``agent_console`` store idiom:
-  * stateless module-level functions (the pool lives in ``shared_postgres``)
+  * stateless module-level functions (the pool lives in ``shared.postgres``)
   * one public function per operation, decorated with ``@timed_query``
   * synchronous psycopg v3; ``with get_conn()`` commits on clean exit and
     rolls back on exception, so there are no explicit ``commit()`` calls
@@ -23,7 +23,7 @@ Design by Contract:
 * **Invariant** — *every* statement in this module is filtered by
   ``agent_id``; no query reads or writes another agent's rows.
 
-When ``POSTGRES_HOST`` is unset, ``shared_postgres.get_conn`` is unavailable,
+When ``POSTGRES_HOST`` is unset, ``shared.postgres.get_conn`` is unavailable,
 so :func:`_conn` raises :class:`AgentCognitionStorageUnavailable` for the API
 layer to translate into a clean 503.
 """
@@ -39,8 +39,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from agent_cognition.models import MemoryEvent, PeriodSummary, Scale
-from shared_postgres import get_conn, is_postgres_enabled
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn, is_postgres_enabled
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 _STORE = "agent_cognition"
@@ -1008,7 +1008,7 @@ def _conn():
           :class:`AgentCognitionStorageUnavailable`; errors raised inside the
           ``with`` body propagate unchanged, so a genuine query bug is never
           masked as an infrastructure outage. Commit-on-success and
-          rollback-on-error are delegated to the underlying ``shared_postgres``
+          rollback-on-error are delegated to the underlying ``shared.postgres``
           pool context.
     """
     if not is_postgres_enabled():

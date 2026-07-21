@@ -1,7 +1,7 @@
 """Postgres-backed store for job matching runs and ranked results.
 
 Pure data access: opens short-lived pool-backed connections through
-``shared_postgres.get_conn``. DDL lives in ``job_matching_team.postgres`` and
+``shared.postgres.get_conn``. DDL lives in ``job_matching_team.postgres`` and
 is registered from the team's FastAPI lifespan. Every public method is wrapped
 in ``@timed_query`` so slow reads/writes surface as structured log lines.
 """
@@ -15,8 +15,8 @@ from typing import List, Optional
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 from .models import (
     LISTING_FILTERS,
@@ -127,7 +127,7 @@ class JobMatchingStore:
     """
 
     def __init__(self) -> None:
-        # Stateless; the connection pool lives inside shared_postgres.
+        # Stateless; the connection pool lives inside shared.postgres.
         pass
 
     @timed_query(store=_STORE, op="create_run")

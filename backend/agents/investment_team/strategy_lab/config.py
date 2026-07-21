@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 logger = logging.getLogger(__name__)
 

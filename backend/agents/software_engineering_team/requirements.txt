@@ -8,7 +8,7 @@ jinja2>=3.1,<4.0
 # <0.137: FastAPI 0.137 added _IncludedRouter route nodes that prometheus-fastapi-instrumentator (<8) can't resolve (route.path)
 fastapi>=0.135,<0.137
 uvicorn[standard]>=0.44,<1.0
-# OpenTelemetry: shared_observability.init_otel runs at every startup
+# OpenTelemetry: shared.observability.init_otel runs at every startup
 opentelemetry-api>=1.41,<2.0
 opentelemetry-sdk>=1.41,<2.0
 opentelemetry-exporter-otlp-proto-http>=1.41,<2.0

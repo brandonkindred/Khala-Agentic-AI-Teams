@@ -1,4 +1,4 @@
-"""Shared dict-backed fake for ``shared_postgres.get_conn``.
+"""Shared dict-backed fake for ``shared.postgres.get_conn``.
 
 Approximates the Postgres behaviour the agentic_team_provisioning stores
 rely on — only as much as tests need. Tests monkey-patch the module-level

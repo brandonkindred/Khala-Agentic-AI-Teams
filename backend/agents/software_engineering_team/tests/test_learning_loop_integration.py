@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def _se_schema():
-    from shared_postgres import is_postgres_enabled, register_team_schemas
+    from shared.postgres import is_postgres_enabled, register_team_schemas
 
     if not is_postgres_enabled():
         pytest.skip("Postgres not configured")
@@ -25,7 +25,7 @@ def _se_schema():
 
     register_team_schemas(SCHEMA)
     # Clean slate for learnings.
-    from shared_postgres import get_conn
+    from shared.postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("TRUNCATE se_learnings")

@@ -11,7 +11,7 @@ import httpx
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
 from branding_team.shared.coro_runner import run_coroutine
-from shared_env_config import env_float
+from shared.env_config import env_float
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 

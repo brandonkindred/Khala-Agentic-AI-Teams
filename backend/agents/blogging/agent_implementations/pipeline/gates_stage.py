@@ -15,7 +15,7 @@ from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
 from temporalio.exceptions import CancelledError
 
 from llm_service.interface import LLMRateLimitError, LLMTemporaryError
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 from ._common import _load_required_guidelines, _make_update, _run_title_selection
 from .constants import BRAND_SPEC_PROMPT_PATH

@@ -4,7 +4,7 @@
 > 1. Concrete orchestrator internals (the PNG shows an opaque `Orchestrator Agent` box);
 > 2. The two API categories `Assets` and `Form Information` that the legacy internal PNG omits but the [`AgenticTeamApiInteractionsArchitecture.png`](../designs/AgenticTeamApiInteractionsArchitecture.png) already shows;
 > 3. Testing-mode and Pipeline-run endpoints (not in either legacy PNG);
-> 4. External dependencies (LLM service, Agent Provisioning team, Temporal, shared_postgres, shared_observability) as dashed-outline nodes, so the additions are visually distinct from the inherited boxes.
+> 4. External dependencies (LLM service, Agent Provisioning team, Temporal, shared.postgres, shared.observability) as dashed-outline nodes, so the additions are visually distinct from the inherited boxes.
 
 ## 1. Expanded internal architecture
 
@@ -66,8 +66,8 @@ graph TB
         LLM["LLM Service<br/>(llm_service)"]
         APT["Agent Provisioning Team<br/>(sandboxed envs)"]
         Temporal["Temporal<br/>(optional)"]
-        PG["shared_postgres"]
-        OTEL["shared_observability"]
+        PG["shared.postgres"]
+        OTEL["shared.observability"]
     end
 
     %% ---- API Layer → Orchestrator ----
@@ -132,7 +132,7 @@ graph TB
 | `Agents` pool (`Agent 1 … Agent N`) | **Kept verbatim** |
 | `Processes` pool (`Process 1 … Process N`) | **Kept verbatim** |
 | `Job Tracking`, `Question Tracking` side boxes | **Kept** (same placement, wired to `JobServiceClient`) |
-| `LLM Service`, `Agent Provisioning Team`, `Temporal`, `shared_postgres`, `shared_observability` | **Added** as dashed-outline external strip |
+| `LLM Service`, `Agent Provisioning Team`, `Temporal`, `shared.postgres`, `shared.observability` | **Added** as dashed-outline external strip |
 
 ## 2. Orchestrator Agent — why the service *is* the orchestrator
 
@@ -198,14 +198,14 @@ flowchart LR
 ```
 
 - **Thread mode (default).** `PipelineRunner.start_run` (`runtime/pipeline_runner.py:41-56`) starts a daemon thread named `pipeline-{run_id[:16]}`; `AgentEnvProvisioner._spawn_provision_thread` (`agent_env_provisioning.py:88-129`) starts a daemon thread named `prov-{provisioning_agent_id[:24]}`.
-- **Temporal mode (optional).** When `shared_temporal.is_temporal_enabled()` returns true (`temporal/__init__.py:38-44`), a worker is bootstrapped on import for task queue `agentic_team_provisioning-queue` with workflow `AgenticTeamProvisioningWorkflow` and activity `agentic_team_provisioning_run_pipeline`.
+- **Temporal mode (optional).** When `shared.temporal.is_temporal_enabled()` returns true (`temporal/__init__.py:38-44`), a worker is bootstrapped on import for task queue `agentic_team_provisioning-queue` with workflow `AgenticTeamProvisioningWorkflow` and activity `agentic_team_provisioning_run_pipeline`.
 
 ## 5. Reused shared infrastructure
 
 | Shared module | Usage |
 |---|---|
-| `shared_observability` (`init_otel`, `instrument_fastapi_app`) | OpenTelemetry spans on every route (`api/main.py:70-99`) |
-| `shared_postgres` (`register_team_schemas`, `close_pool`) | Registers `AGENTIC_POSTGRES_SCHEMA` in the FastAPI lifespan (`api/main.py:77-92`) — no-op when `POSTGRES_HOST` unset |
-| `shared_temporal` (`is_temporal_enabled`, `start_team_worker`) | Per-team worker bootstrap on module import (`temporal/__init__.py:36-44`) |
+| `shared.observability` (`init_otel`, `instrument_fastapi_app`) | OpenTelemetry spans on every route (`api/main.py:70-99`) |
+| `shared.postgres` (`register_team_schemas`, `close_pool`) | Registers `AGENTIC_POSTGRES_SCHEMA` in the FastAPI lifespan (`api/main.py:77-92`) — no-op when `POSTGRES_HOST` unset |
+| `shared.temporal` (`is_temporal_enabled`, `start_team_worker`) | Per-team worker bootstrap on module import (`temporal/__init__.py:36-44`) |
 | `job_service_client` (`JobServiceClient`) | Per-team job lifecycle and pending question tracking via `infrastructure.py` |
 | `llm_service.get_client()` | Single LLM client consumed by both `ProcessDesignerAgent` (chat) and `AgentBuilder` (test chat + starter prompts) |

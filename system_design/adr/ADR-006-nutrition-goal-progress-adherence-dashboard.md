@@ -195,7 +195,7 @@ honest about its own uncertainty.
 
 ### 8. Data model
 
-New tables (registered via `shared_postgres.register_team_schemas`):
+New tables (registered via `shared.postgres.register_team_schemas`):
 
 - `biometric_observations` (§2).
 - `off_plan_intakes` (§4).

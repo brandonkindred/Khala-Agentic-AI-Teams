@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from shared_repo_context.repo_utils import read_repo_code_budgeted
+from shared.repo_context.repo_utils import read_repo_code_budgeted
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 
 

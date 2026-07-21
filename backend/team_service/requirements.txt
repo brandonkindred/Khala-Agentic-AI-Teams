@@ -18,7 +18,7 @@ ollama>=0.6,<1.0
 # Tolerant JSON repair for LLM output. Its consumers import it lazily and
 # swallow ImportError by design (salvage must never crash), so a missing wheel
 # silently disables repair in production instead of failing loudly:
-# llm_service/clients/ollama.py and shared_llm_recovery/recovery.py.
+# llm_service/clients/ollama.py and shared/llm_recovery/recovery.py.
 # Keep the pin in lockstep with backend/agents/requirements.txt.
 json-repair>=0.28,<1.0
 python-multipart>=0.0.26,<1.0
@@ -38,7 +38,7 @@ numpy>=1.26,<3.0
 pandas>=2.2,<3.0
 # Observability: team services auto-expose /metrics via team_service/entrypoint.py
 prometheus-fastapi-instrumentator>=7.1,<8.0
-# OpenTelemetry: every team container runs shared_observability.init_otel at startup
+# OpenTelemetry: every team container runs shared.observability.init_otel at startup
 opentelemetry-api>=1.41,<2.0
 opentelemetry-sdk>=1.41,<2.0
 opentelemetry-exporter-otlp-proto-http>=1.41,<2.0

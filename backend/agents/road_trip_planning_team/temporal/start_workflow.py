@@ -1,7 +1,7 @@
 """Start the road-trip Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
-bridge). We deliberately do NOT use ``shared_temporal.run_team_job`` here: it
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
+bridge). We deliberately do NOT use ``shared.temporal.run_team_job`` here: it
 creates its own job row (under the ``road_trip_planning`` team slug) and sets
 ``status=running`` itself, which would collide with the API's ``create_job``
 (namespaced under ``road_trip_planning_team``) and the activity-owned
@@ -15,7 +15,7 @@ from typing import Any
 
 from road_trip_planning_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 from road_trip_planning_team.temporal.workflows import RoadTripWorkflow
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

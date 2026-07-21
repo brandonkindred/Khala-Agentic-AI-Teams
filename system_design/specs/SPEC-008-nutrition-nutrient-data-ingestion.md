@@ -144,7 +144,7 @@ Closed. Additions are a minor version bump with reviewer sign-off.
 
 ### 4.3 Postgres schema
 
-Registered via `shared_postgres.register_team_schemas` in the
+Registered via `shared.postgres.register_team_schemas` in the
 nutrition team's lifespan. Migration
 `005_nutrient_data.sql`:
 

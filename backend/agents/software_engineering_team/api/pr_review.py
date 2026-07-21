@@ -485,7 +485,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
     # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
     # The context manager guarantees the beat stops on every exit path; on_error keeps
     # a job-service blip from killing the beat thread (or the review).
-    from shared_concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
+    from shared.concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
 
     review_hb = BackgroundHeartbeat(
         lambda: heartbeat_job(job_id),

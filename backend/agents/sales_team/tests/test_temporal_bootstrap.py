@@ -3,7 +3,7 @@
 Guards two failure modes the wiring was designed to avoid:
 
 1. **Self-bootstrap at import time.** The package ``__init__`` used to call
-   ``shared_temporal.start_team_worker(...)`` at module load. The worker
+   ``shared.temporal.start_team_worker(...)`` at module load. The worker
    thread connects the Temporal client asynchronously, so the first
    ``start_sales_workflow`` call could lose the race and raise
    ``RuntimeError: Temporal client not available``. Boot is now the
@@ -45,10 +45,10 @@ def _purge(prefix: str) -> None:
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("sales_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("sales_team.temporal")
         importlib.import_module("sales_team.temporal.workflows")
         importlib.import_module("sales_team.temporal.start_workflow")
@@ -64,7 +64,7 @@ def test_workflow_registers_in_temporalio_sandbox():
     """Ground truth for sandbox safety: ``SalesWorkflow`` (which now imports the
     sales models + activities under ``workflow.unsafe.imports_passed_through()``)
     must import and instantiate inside the real ``SandboxedWorkflowRunner`` with
-    ``shared_temporal``'s passthrough restrictions, without a
+    ``shared.temporal``'s passthrough restrictions, without a
     ``RestrictedWorkflowAccessError``.
 
     This supersedes the old "zero ``os.getenv`` at import" spy: the workflow now
@@ -77,7 +77,7 @@ def test_workflow_registers_in_temporalio_sandbox():
 
     import temporalio.workflow as _wf
 
-    from shared_temporal.worker import _build_workflow_runner
+    from shared.temporal.worker import _build_workflow_runner
 
     _purge("sales_team.temporal")
     from sales_team.temporal import WORKFLOWS
@@ -198,7 +198,7 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
 
 
 def test_start_sales_workflow_delegates_to_shared_bridge(monkeypatch):
-    """The team wrapper forwards to ``shared_temporal.start_workflow_sync`` with
+    """The team wrapper forwards to ``shared.temporal.start_workflow_sync`` with
     the sales workflow id + task queue."""
     from sales_team.temporal import SalesWorkflow
     from sales_team.temporal import start_workflow as sw

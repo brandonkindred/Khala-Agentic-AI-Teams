@@ -45,14 +45,14 @@ def test_require_provision_starter_is_agent_provisioning_workflow_entry() -> Non
     """API provision/resume/restart must start AgentProvisioningWorkflow via the Temporal starter."""
     from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
 
-    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True):
+    with patch("shared.temporal.client.is_temporal_enabled", return_value=True):
         starter = api_main._require_provision_starter()
     assert starter is start_provisioning_workflow
 
 
 def test_require_provision_starter_returns_503_when_temporal_check_raises() -> None:
     with patch(
-        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        "shared.temporal.client.is_temporal_enabled",
         side_effect=RuntimeError("misconfigured"),
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -62,7 +62,7 @@ def test_require_provision_starter_returns_503_when_temporal_check_raises() -> N
 
 def test_require_provision_starter_returns_503_when_temporal_disabled() -> None:
     with patch(
-        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        "shared.temporal.client.is_temporal_enabled",
         return_value=False,
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -73,7 +73,7 @@ def test_require_provision_starter_returns_503_when_temporal_disabled() -> None:
 
 def test_require_deprovision_runner_returns_503_when_temporal_check_raises() -> None:
     with patch(
-        "agent_provisioning_team.temporal.client.is_temporal_enabled",
+        "shared.temporal.client.is_temporal_enabled",
         side_effect=RuntimeError("misconfigured"),
     ):
         with pytest.raises(HTTPException) as exc_info:

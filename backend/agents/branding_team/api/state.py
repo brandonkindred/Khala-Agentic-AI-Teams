@@ -23,8 +23,8 @@ from branding_team.api.models import (
     BrandingSessionResponse,
 )
 from branding_team.models import BrandingMission, BrandPhase, TeamOutput
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 # ---------------------------------------------------------------------------
 # Session store

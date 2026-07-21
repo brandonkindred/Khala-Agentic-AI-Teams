@@ -20,8 +20,8 @@ from typing import Any, Dict, Iterable
 
 from pydantic import ValidationError
 
-from shared_env_config import env_int
-from shared_llm_recovery import extract_json_object as _shared_extract_json_object
+from shared.env_config import env_int
+from shared.llm_recovery import extract_json_object as _shared_extract_json_object
 
 from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
 
@@ -29,7 +29,7 @@ from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
 def extract_json_object(text: str) -> Dict[str, Any]:
     """Extract a JSON object from an LLM response, tolerating markdown fences.
 
-    A thin **strict** wrapper over ``shared_llm_recovery.extract_json_object``
+    A thin **strict** wrapper over ``shared.llm_recovery.extract_json_object``
     (``repair=False``): the shared engine's string-aware brace scanner locates
     the authoritative balanced ``{...}`` — braces and quotes inside a JSON string
     literal do not affect nesting depth, which matters because the refinement

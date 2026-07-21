@@ -3,12 +3,12 @@
 Three tables: one row per scan run, one row per ranked posting within a run,
 and one row per user-triaged listing (keyed by posting fingerprint so the
 disposition survives re-discovery in later runs). Registered from the team's
-FastAPI lifespan via ``shared_postgres.register_team_schemas``.
+FastAPI lifespan via ``shared.postgres.register_team_schemas``.
 """
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="job_matching",

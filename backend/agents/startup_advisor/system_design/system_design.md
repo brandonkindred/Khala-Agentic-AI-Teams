@@ -112,10 +112,10 @@ bootstrapped deterministically without touching the LLM.
 ### Schema (`postgres/__init__.py:11-46`)
 
 Three tables plus two indexes. The DDL is registered by the FastAPI
-lifespan via `shared_postgres.register_team_schemas(SCHEMA)`
+lifespan via `shared.postgres.register_team_schemas(SCHEMA)`
 (`api/main.py:20-28`) and the team registers its `TeamSchema`
 constant at module-import time so the schema registry stays pure
-data (Pattern B in the `shared_postgres` README).
+data (Pattern B in the `shared.postgres` README).
 
 ```mermaid
 erDiagram
@@ -173,7 +173,7 @@ which checks the parent row exists before inserting
 | `get_or_create_singleton()` | 230-247 | SELECT oldest by `created_at` LIMIT 1; CREATE if empty | The entry point used by every API handler. |
 
 Every method is wrapped in `@timed_query(store="startup_advisor",
-op=...)` from `shared_postgres.metrics`
+op=...)` from `shared.postgres.metrics`
 (`store.py:92,105,132,156,167,186,206,230`) so slow queries are
 logged as structured JSON without needing a Prometheus exporter.
 
@@ -244,7 +244,7 @@ client on the calling thread. No background workers are required.
 
 ### Temporal mode (optional)
 
-When `shared_temporal.is_temporal_enabled()` returns true,
+When `shared.temporal.is_temporal_enabled()` returns true,
 `temporal/__init__.py:38-41` starts a `startup_advisor-queue`
 worker at import time. The worker exposes:
 
@@ -264,7 +264,7 @@ ACTIVITIES = [run_pipeline_activity]
 ```
 
 which is the Pattern A shape expected by
-`shared_temporal.start_team_worker`.
+`shared.temporal.start_team_worker`.
 
 ## Configuration
 
@@ -272,9 +272,9 @@ which is the Pattern A shape expected by
 
 | Variable | Used for | Read by |
 |---|---|---|
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Connection to Postgres (required — no SQLite fallback). | `shared_postgres.get_conn()` (called from `store.py:96,107,137,159,176,188,208,239`). |
-| `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE` / `POSTGRES_SLOW_QUERY_MS` | Pool sizing + slow-query threshold. | `shared_postgres` pool + `@timed_query`. |
-| `TEMPORAL_ADDRESS` (+ `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`) | Enable the optional Temporal worker. | `shared_temporal.is_temporal_enabled()` at `temporal/__init__.py:38`. |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Connection to Postgres (required — no SQLite fallback). | `shared.postgres.get_conn()` (called from `store.py:96,107,137,159,176,188,208,239`). |
+| `POSTGRES_POOL_MIN_SIZE` / `POSTGRES_POOL_MAX_SIZE` / `POSTGRES_SLOW_QUERY_MS` | Pool sizing + slow-query threshold. | `shared.postgres` pool + `@timed_query`. |
+| `TEMPORAL_ADDRESS` (+ `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`) | Enable the optional Temporal worker. | `shared.temporal.is_temporal_enabled()` at `temporal/__init__.py:38`. |
 | `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` / `OLLAMA_API_KEY` | LLM provider selection. | `llm_service.get_client("startup_advisor")` at `assistant/agent.py:112`. |
 
 ### Team mount (`unified_api/config.py:202-209`)

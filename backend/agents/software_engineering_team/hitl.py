@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
-from shared_env import parse_float
+from shared.env import parse_float
 from software_engineering_team.models import JobStatus
 
 logger = logging.getLogger(__name__)

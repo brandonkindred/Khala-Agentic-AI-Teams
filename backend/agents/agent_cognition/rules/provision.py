@@ -25,7 +25,7 @@ import threading
 from agent_cognition import manifest_scope
 from agent_cognition.memory.store import AgentCognitionStorageUnavailable
 from agent_cognition.rules import store
-from shared_postgres import is_postgres_enabled
+from shared.postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 

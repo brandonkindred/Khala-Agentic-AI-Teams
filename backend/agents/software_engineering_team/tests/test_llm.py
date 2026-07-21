@@ -338,7 +338,7 @@ def test_get_client_resolves_same_model_across_calls(_ollama_provider_list) -> N
 
 def test_extract_task_assignment_from_content_recovers_tasks() -> None:
     """When LLM returns raw content with embedded JSON, extract_task_assignment_from_content recovers it."""
-    from shared_llm_recovery.recovery import (
+    from shared.llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
@@ -363,7 +363,7 @@ def test_extract_task_assignment_from_content_recovers_tasks() -> None:
 
 def test_extract_task_assignment_from_content_returns_none_for_empty() -> None:
     """extract_task_assignment_from_content returns None when no tasks in content."""
-    from shared_llm_recovery.recovery import (
+    from shared.llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 

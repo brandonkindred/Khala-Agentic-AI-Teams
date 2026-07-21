@@ -80,11 +80,11 @@ def _worker_thread_target() -> (
     except Exception as e:
         logger.exception("AI Systems Temporal worker failed: %s", e)
     finally:
-        # client.py now re-exports shared_temporal.client's process-wide slots
+        # client.py now re-exports shared.temporal.client's process-wide slots
         # (shared with every other team on the same shim), so guard on
         # identity: only clear if this worker's loop is still the registered
         # one, never clobbering a different worker that has since taken
-        # ownership. See shared_temporal/worker.py's identical guard.
+        # ownership. See shared/temporal/worker.py's identical guard.
         if get_temporal_loop() is loop:
             set_temporal_loop(None)
             set_temporal_client(None)

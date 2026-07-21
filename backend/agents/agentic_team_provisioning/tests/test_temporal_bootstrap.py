@@ -3,7 +3,7 @@
 Guards two failure modes the wiring was designed to avoid:
 
 1. **Self-bootstrap at import time.** The package ``__init__`` used to call
-   ``shared_temporal.start_team_worker(...)`` at module load. The worker thread
+   ``shared.temporal.start_team_worker(...)`` at module load. The worker thread
    connects the Temporal client asynchronously, so the first ``start_...workflow`` call
    could lose the race and raise ``RuntimeError: Temporal client not available``. Boot
    is now the team_service entrypoint's job (or the API lifespan as a backstop).
@@ -40,10 +40,10 @@ def _purge(prefix: str) -> None:
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("agentic_team_provisioning.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("agentic_team_provisioning.temporal")
         importlib.import_module("agentic_team_provisioning.temporal.workflows")
         importlib.import_module("agentic_team_provisioning.temporal.start_workflow")
@@ -129,7 +129,7 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
 
 
 def test_start_workflow_delegates_to_shared_bridge(monkeypatch):
-    """The team wrapper forwards to ``shared_temporal.start_workflow_sync`` with the
+    """The team wrapper forwards to ``shared.temporal.start_workflow_sync`` with the
     agentic pipeline workflow id + task queue and the correct arg order."""
     from agentic_team_provisioning.temporal import AgenticPipelineWorkflow
     from agentic_team_provisioning.temporal import start_workflow as sw

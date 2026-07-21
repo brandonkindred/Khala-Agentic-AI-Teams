@@ -350,7 +350,7 @@ def test_v2_worker_runs_implement_in_worktree_while_development_checked_out_else
     (attached) at the main repo path — proving the worktree parallelization
     design works through the actual worker entry point, not just git_utils.
     """
-    from shared_git.git_utils import DEVELOPMENT_BRANCH, add_worktree
+    from shared.git.git_utils import DEVELOPMENT_BRANCH, add_worktree
 
     main_repo = tmp_path / "main"
     main_repo.mkdir()

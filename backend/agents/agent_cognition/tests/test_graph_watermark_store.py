@@ -16,7 +16,7 @@ import pytest
 
 from agent_cognition.graph import watermark_store
 from agent_cognition.postgres import SCHEMA
-from shared_postgres import is_postgres_enabled
+from shared.postgres import is_postgres_enabled
 
 _UTC = timezone.utc
 _T0 = datetime(2026, 6, 1, 10, 0, tzinfo=_UTC)
@@ -64,8 +64,8 @@ pg = pytest.mark.skipif(
 def _provision_schema():
     if not is_postgres_enabled():
         return
-    from shared_postgres import register_team_schemas
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres import register_team_schemas
+    from shared.postgres.testing import truncate_team_tables
 
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)

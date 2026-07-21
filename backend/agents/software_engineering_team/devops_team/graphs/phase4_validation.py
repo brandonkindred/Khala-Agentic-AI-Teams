@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from strands.multiagent.graph import Graph, GraphBuilder
 
-from shared_graph import build_agent
+from shared.graph import build_agent
 
 
 def build_phase4_validation_graph() -> Graph:

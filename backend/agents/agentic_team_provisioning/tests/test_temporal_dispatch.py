@@ -144,7 +144,7 @@ def test_submit_input_signals_workflow_when_temporal_owned(api_main, client, mon
 
     signalled: dict = {}
     monkeypatch.setattr(
-        "shared_temporal.signal_workflow_sync",
+        "shared.temporal.signal_workflow_sync",
         lambda workflow_id, signal, value: signalled.update(
             workflow_id=workflow_id, signal=signal, value=value
         ),
@@ -185,7 +185,7 @@ def test_submit_input_conflict_when_resume_cas_lost(api_main, client, monkeypatc
     def _no_signal(*_a, **_k):  # pragma: no cover - must not signal on a lost CAS
         raise AssertionError("must not signal the workflow when the resume CAS is lost")
 
-    monkeypatch.setattr("shared_temporal.signal_workflow_sync", _no_signal)
+    monkeypatch.setattr("shared.temporal.signal_workflow_sync", _no_signal)
 
     resp = client.post(f"/teams/{team_id}/test-pipeline/runs/{run_id}/input", json={"input": "hi"})
     assert resp.status_code == 409
@@ -198,7 +198,7 @@ def test_cancel_cancels_workflow_when_temporal_owned(api_main, client, monkeypat
 
     cancelled: dict = {}
     monkeypatch.setattr(
-        "shared_temporal.cancel_workflow_sync",
+        "shared.temporal.cancel_workflow_sync",
         lambda workflow_id: cancelled.update(workflow_id=workflow_id),
     )
 
@@ -214,6 +214,6 @@ def test_cancel_cancels_workflow_when_temporal_owned(api_main, client, monkeypat
 
 
 def test_temporal_enabled_false_without_shared_temporal(api_main, monkeypatch):
-    """_temporal_enabled tolerates shared_temporal being importable and disabled."""
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
+    """_temporal_enabled tolerates shared.temporal being importable and disabled."""
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
     assert api_main._temporal_enabled() is False

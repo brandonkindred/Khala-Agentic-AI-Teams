@@ -2,7 +2,7 @@
 the agent's invoke shim.
 
 Cognition must **not** be added as a sibling key to the agent's own input: the
-sandbox shim (``shared_agent_invoke.dispatch.invoke_entrypoint``) passes the POST
+sandbox shim (``shared.agent_invoke.dispatch.invoke_entrypoint``) passes the POST
 body straight to the manifest entrypoint, so an extra field would break agents
 with strict request models or non-object inputs. Instead the proxy wraps the body
 with an explicit, namespaced marker::

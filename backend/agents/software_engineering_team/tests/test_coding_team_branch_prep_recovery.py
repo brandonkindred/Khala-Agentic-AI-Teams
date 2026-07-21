@@ -21,13 +21,13 @@ def _ensure_real_modules() -> None:
     """Evict synthetic module stubs other test files may have installed.
 
     test_github_source._stub_heavy_modules() registers a fake
-    shared_git.git_utils in sys.modules with no
+    shared.git.git_utils in sys.modules with no
     __file__; these tests need the real implementation (and an api.main
     bound to it), under any test-execution order.
     """
     stale = False
     for name in (
-        "shared_git.git_utils",
+        "shared.git.git_utils",
         "software_engineering_team.shared",
         "software_engineering_team",
         "software_engineering_team.coding_team_orchestrator",

@@ -59,7 +59,7 @@ class RepoContextCache:
     ``stat``), renders them in sorted order reusing a cached part whenever
     ``(st_mtime_ns, st_size)`` is unchanged (re-reading only when the key differs
     or the file is new), and applies the same whole-file char budget as
-    :func:`shared_repo_context.read_repo_code_budgeted` *during* rendering — the
+    :func:`shared.repo_context.read_repo_code_budgeted` *during* rendering — the
     first chunk that would exceed ``max_chars`` stops the briefing, so tail
     files beyond the budget are never rendered or cached (a large repo never
     reads+stores hundreds of MB of never-emitted tail files on the first task).

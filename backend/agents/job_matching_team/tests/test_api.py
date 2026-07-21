@@ -135,10 +135,10 @@ def test_scan_lifecycle(client):
 
 def test_scan_dispatches_via_temporal_when_enabled(client, monkeypatch):
     """With Temporal enabled the scan is handed to the workflow, not a thread."""
-    import shared_temporal
+    import shared.temporal
     from job_matching_team.temporal import start_workflow as sw
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
     dispatched: list[tuple[str, dict]] = []
     monkeypatch.setattr(
         sw,
@@ -165,10 +165,10 @@ def test_scan_dispatches_via_temporal_when_enabled(client, monkeypatch):
 def test_scan_returns_503_and_marks_failed_when_temporal_dispatch_fails(client, monkeypatch):
     """A Temporal dispatch failure must not orphan a PENDING job: the job is
     marked FAILED and the caller gets a 503, not a bare 500 with a stuck row."""
-    import shared_temporal
+    import shared.temporal
     from job_matching_team.temporal import start_workflow as sw
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _boom(job_id, request):
         raise RuntimeError("Temporal client not available")
@@ -187,10 +187,10 @@ def test_scan_still_503s_when_failed_write_also_fails(client, monkeypatch):
     """If dispatch fails AND the FAILED write to a degraded job service also
     raises, the caller must still get the contracted 503 — not a bare 500 that
     leaks the second error."""
-    import shared_temporal
+    import shared.temporal
     from job_matching_team.temporal import start_workflow as sw
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: True)
 
     def _boom(job_id, request):
         raise RuntimeError("Temporal client not available")
@@ -208,9 +208,9 @@ def test_scan_still_503s_when_failed_write_also_fails(client, monkeypatch):
 def test_scan_falls_back_to_thread_when_temporal_disabled(client, monkeypatch):
     """When Temporal is disabled the dispatch helper reports no-dispatch and the
     thread path runs the scan to completion."""
-    import shared_temporal
+    import shared.temporal
 
-    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(shared.temporal, "is_temporal_enabled", lambda: False)
     job_id = client.post("/scan", json={}).json()["job_id"]
     data = _wait_for_completion(client, job_id)
     assert data["status"] == "completed"
