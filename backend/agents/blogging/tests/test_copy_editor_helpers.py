@@ -94,19 +94,16 @@ def test_build_prompt_no_style_guide_branch() -> None:
     assert "STYLE GUIDE (evaluate the draft against these rules):" not in prompt
 
 
-def test_build_prompt_content_plan_is_included_and_truncated() -> None:
-    """A content plan appears in the prompt and is truncated to _MAX_CONTENT_PLAN_CHARS."""
-    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
-
+def test_build_prompt_content_plan_is_included_in_full() -> None:
+    """A content plan appears in the prompt without truncation."""
     agent = _make_agent()
-    plan = "P" * (ce_mod._MAX_CONTENT_PLAN_CHARS + 1000)
+    plan = "P" * 13000
     inp = CopyEditorInput(draft="ignored", content_plan_context=plan)
 
     prompt = agent._build_editor_prompt(inp, draft="Body.", style_guide_text="Style")
 
     assert "CONTENT PLAN (align feedback with this structure and section intent):" in prompt
-    assert "P" * ce_mod._MAX_CONTENT_PLAN_CHARS in prompt
-    assert "P" * (ce_mod._MAX_CONTENT_PLAN_CHARS + 1) not in prompt
+    assert plan in prompt
 
 
 # --------------------------------------------------------------------------- #

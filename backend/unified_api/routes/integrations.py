@@ -2207,7 +2207,7 @@ def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
     return GitHubPullRequestItem(
         number=detail.number,
         title=detail.title,
-        body_preview=detail.body[:200] if detail.body else "",
+        body_preview=detail.body or "",
         author=detail.author,
         html_url=detail.html_url,
         head=detail.head,
@@ -2525,7 +2525,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                     # Redact any embedded credentials before surfacing the remote in the error.
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "
-                        f"(remote origin: {_redact_url_userinfo(url_out)[:120]})"
+                        f"(remote origin: {_redact_url_userinfo(url_out)})"
                     )
 
                 result = subprocess.run(
@@ -2653,7 +2653,7 @@ async def _forward_to_coding_team(
         except Exception:
             upstream_detail = resp.text
         logger.warning("%s: coding team service returned %s: %s", log_prefix, resp.status_code, upstream_detail)
-        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else generic_failure_detail
+        client_detail = str(upstream_detail) if resp.status_code < 500 else generic_failure_detail
         raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:

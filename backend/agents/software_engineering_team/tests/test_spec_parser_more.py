@@ -168,14 +168,15 @@ def test_gather_context_files_missing_dir(tmp_path) -> None:
     assert out == {}
 
 
-def test_format_context_for_prompt_truncates(tmp_path) -> None:
+def test_format_context_for_prompt_includes_full_content(tmp_path) -> None:
     from software_engineering_team.spec_parser import format_context_for_prompt
 
     files = {"a.md": "x" * 9000, "b.md": "short"}
     text = format_context_for_prompt(files)
     assert "### File: a.md" in text
     assert "### File: b.md" in text
-    assert "truncated" in text
+    assert "x" * 9000 in text
+    assert "truncated" not in text
 
 
 def test_format_context_for_prompt_empty() -> None:

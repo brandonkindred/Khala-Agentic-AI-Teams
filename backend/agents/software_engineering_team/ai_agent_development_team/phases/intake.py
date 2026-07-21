@@ -28,7 +28,7 @@ def run_intake(*, llm=None, task: Task, spec_content: str) -> IntakeResult:
         f"Task description: {task.description}\n"
         f"Requirements: {task.requirements}\n"
         f"Acceptance criteria: {task.acceptance_criteria}\n"
-        f"Spec:\n{(spec_content or '')[:8000]}"
+        f"Spec:\n{(spec_content or '')}"
     )
     raw = complete_json_with_continuation(llm, prompt, system_prompt=INTAKE_PROMPT)
     if not isinstance(raw, dict):

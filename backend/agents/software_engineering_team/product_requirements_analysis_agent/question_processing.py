@@ -517,7 +517,7 @@ def add_recommendations(
         for q in open_questions
     ]
     questions_json = json.dumps(questions_payload, indent=2)
-    spec_excerpt = (spec_content or "")[:15000]
+    spec_excerpt = (spec_content or "")
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
         spec_excerpt=spec_excerpt,
         questions_json=questions_json,

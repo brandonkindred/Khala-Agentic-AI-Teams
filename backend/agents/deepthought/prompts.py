@@ -234,8 +234,6 @@ def format_specialist_results(results: list[dict], max_chars_per_result: int = 3
     parts = []
     for i, r in enumerate(results, 1):
         answer = r["answer"]
-        if len(answer) > max_chars_per_result:
-            answer = answer[:max_chars_per_result] + "\n\n[... truncated for length]"
         parts.append(
             f"### Specialist {i}: {r['agent_name']}\n"
             f"**Focus:** {r['focus_question']}\n"
@@ -254,7 +252,5 @@ def format_conversation_history(history: list[dict], max_turns: int = 10) -> str
     for turn in recent:
         role = turn.get("role", "user").capitalize()
         content = turn.get("content", "")
-        if len(content) > 500:
-            content = content[:500] + "..."
         lines.append(f"{role}: {content}")
     return "\n".join(lines)

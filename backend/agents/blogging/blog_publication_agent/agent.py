@@ -56,7 +56,7 @@ def _content_plan_from_outline(outline: str) -> ContentPlan:
         sections=[
             ContentPlanSection(
                 title="Main",
-                coverage_description=body[:8000],
+                coverage_description=body,
                 order=0,
             )
         ],

@@ -315,7 +315,7 @@ def _build_response_blocks(
         },
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": reply_text[:2900]},
+            "text": {"type": "mrkdwn", "text": reply_text},
         },
     ]
     if suggested_questions:
@@ -429,7 +429,7 @@ def process_slack_message(event: dict[str, Any]) -> None:
     _post_slack_message(
         bot_token,
         channel,
-        reply_text[:3000],
+        reply_text,
         blocks=blocks,
         thread_ts=thread_ts,
     )
@@ -575,7 +575,7 @@ def process_slash_command(form_data: dict[str, str]) -> dict[str, Any]:
 
             suggested = result.get("suggested_questions") or []
             blocks = _build_response_blocks(team_name, reply_text, suggested)
-            _post_to_response_url(response_url, reply_text[:3000], blocks=blocks)
+            _post_to_response_url(response_url, reply_text, blocks=blocks)
         except Exception:
             logger.exception("Slash command background processing failed")
             _post_to_response_url(response_url, "An error occurred processing your request.")

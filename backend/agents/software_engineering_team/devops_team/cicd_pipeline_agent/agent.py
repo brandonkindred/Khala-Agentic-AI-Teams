@@ -26,7 +26,7 @@ class CICDPipelineAgent:
             f"environments={spec.platform_scope.environments}\n"
             f"constraints={spec.constraints.model_dump()}\n"
             f"acceptance_criteria={spec.acceptance_criteria}\n"
-            f"existing_pipeline={input_data.existing_pipeline[:4000]}\n"
+            f"existing_pipeline={input_data.existing_pipeline}\n"
         )
         data = complete_json_with_continuation(
             self._model, CICD_PIPELINE_PROMPT + "\n\n---\n\n" + context, temperature=0.1, think=True

@@ -36,7 +36,7 @@ def run_context_constraints_discovery(
     Postconditions: returns a non-empty question list — the LLM's when valid, else the
         fixed fallback; never raises.
     """
-    spec_excerpt = (spec_content or "")[:4000]
+    spec_excerpt = (spec_content or "")
     prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
     try:
         parsed = call_llm_json(model, prompt)

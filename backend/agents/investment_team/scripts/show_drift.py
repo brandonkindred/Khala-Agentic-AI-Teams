@@ -25,7 +25,7 @@ def _print_spec_history(revisions: List[Dict[str, Any]]) -> None:
         return
     for i, rev in enumerate(revisions):
         print(f"\n  [{i}] phase={rev.get('phase')}  agent={rev.get('agent')}")
-        print(f"      reason: {rev.get('reason', '')[:120]}")
+        print(f"      reason: {rev.get('reason', '')}")
         print(f"      before: {rev.get('before_hash', '')[:16]}...")
         print(f"      after:  {rev.get('after_hash', '')[:16]}...")
         if rev.get("gate_failures"):
@@ -44,7 +44,7 @@ def _print_code_history(revisions: List[Dict[str, Any]]) -> None:
         return
     for i, rev in enumerate(revisions):
         print(f"\n  [{i}] phase={rev.get('phase')}  agent={rev.get('agent')}")
-        print(f"      reason: {rev.get('reason', '')[:120]}")
+        print(f"      reason: {rev.get('reason', '')}")
         print(f"      before: {rev.get('before_hash', '')[:16]}...")
         print(f"      after:  {rev.get('after_hash', '')[:16]}...")
         diff = rev.get("diff", "")
@@ -63,7 +63,7 @@ def _print_gate_timeline(events: List[Dict[str, Any]]) -> None:
     for e in events:
         if not e.get("passed"):
             mark = "FAIL"
-            print(f"    [{mark}] {e.get('gate_name')} ({e.get('severity')}) — {e.get('details', '')[:80]}")
+            print(f"    [{mark}] {e.get('gate_name')} ({e.get('severity')}) — {e.get('details', '')}")
 
 
 def _print_rule_map(rules: List[Dict[str, Any]]) -> None:

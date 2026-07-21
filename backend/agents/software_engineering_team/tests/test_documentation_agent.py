@@ -7,7 +7,6 @@ from pathlib import Path
 
 from software_engineering_team.technical_writers.documentation_agent import agent as doc_agent_mod
 from software_engineering_team.technical_writers.documentation_agent.agent import (
-    MAX_CODEBASE_CHARS,
     DocumentationAgent,
 )
 from software_engineering_team.technical_writers.documentation_agent.models import (
@@ -122,7 +121,8 @@ def test_doc_agent_run_happy_path(monkeypatch) -> None:
     assert out.suggested_commit_message == "docs: update readme"
 
 
-def test_doc_agent_run_truncates_long_codebase(monkeypatch) -> None:
+def test_doc_agent_run_passes_full_codebase_to_llm(monkeypatch) -> None:
+    """Long codebase content is included in the LLM prompt without truncation."""
     fake = _patch_complete_json(
         monkeypatch,
         [
@@ -130,7 +130,7 @@ def test_doc_agent_run_truncates_long_codebase(monkeypatch) -> None:
             {"contributors_content": "", "contributors_changed": False, "summary": "no-op"},
         ],
     )
-    huge = "x" * (MAX_CODEBASE_CHARS + 5000)
+    huge = "x" * 45000
     a = DocumentationAgent()
     a.run(
         DocumentationInput(
@@ -139,7 +139,8 @@ def test_doc_agent_run_truncates_long_codebase(monkeypatch) -> None:
             codebase_content=huge,
         )
     )
-    assert any("truncated" in c for c in fake.calls)
+    assert any(huge in c for c in fake.calls)
+    assert not any("truncated" in c for c in fake.calls)
 
 
 def test_doc_agent_run_forces_creation_when_no_readme_existed(monkeypatch) -> None:
