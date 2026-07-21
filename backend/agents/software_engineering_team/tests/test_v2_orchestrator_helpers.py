@@ -794,3 +794,114 @@ class TestRunPlanningAndBranchSetup:
         assert planning_result is fake_result
         assert feature_branch_name is None
         assert failure_reason is None
+
+
+class _FakeMicrotask:
+    def __init__(self, status: str):
+        self.status = status
+
+
+class _FakeExecResult:
+    def __init__(self, statuses: list[str]):
+        self.microtasks = [_FakeMicrotask(s) for s in statuses]
+
+
+class _FakeWorkflowResult:
+    def __init__(self):
+        self.iterations_used = 0
+
+
+class TestRecordExecutionBookkeeping:
+    """Tests for ``BaseV2DevelopmentAgent._record_execution_bookkeeping``."""
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_record_execution_bookkeeping")
+
+    def test_counts_sets_iterations_and_commits(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        result = _FakeWorkflowResult()
+        exec_result = _FakeExecResult(
+            ["completed", "completed", "review_failed", "pending"]
+        )
+
+        completed_count, failed_count = BaseV2DevelopmentAgent._record_execution_bookkeeping(
+            task_id="t1",
+            result=result,
+            exec_result=exec_result,
+            repo_path=tmp_path,
+            feature_branch_name="feature/t1",
+            git_agent=git_agent,
+            logger=self._logger(),
+        )
+
+        assert completed_count == 2
+        assert failed_count == 1
+        assert result.iterations_used == 2
+        git_agent.commit_current_changes.assert_called_once_with(
+            tmp_path, "feat: 2 microtasks completed"
+        )
+
+    def test_skips_commit_without_branch_or_method(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = _FakeWorkflowResult()
+        exec_result = _FakeExecResult(["completed"])
+
+        completed_count, failed_count = BaseV2DevelopmentAgent._record_execution_bookkeeping(
+            task_id="t1",
+            result=result,
+            exec_result=exec_result,
+            repo_path=tmp_path,
+            feature_branch_name=None,
+            git_agent=MagicMock(),
+            logger=self._logger(),
+        )
+        assert (completed_count, failed_count) == (1, 0)
+        assert result.iterations_used == 1
+
+        class _NoCommitAgent:
+            pass
+
+        result2 = _FakeWorkflowResult()
+        BaseV2DevelopmentAgent._record_execution_bookkeeping(
+            task_id="t1",
+            result=result2,
+            exec_result=exec_result,
+            repo_path=tmp_path,
+            feature_branch_name="feature/t1",
+            git_agent=_NoCommitAgent(),
+            logger=self._logger(),
+        )
+        assert result2.iterations_used == 1
+
+    def test_commit_exception_is_logged_and_swallowed(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.commit_current_changes.side_effect = RuntimeError("git boom")
+        result = _FakeWorkflowResult()
+        exec_result = _FakeExecResult(["completed", "review_failed"])
+
+        with caplog.at_level("WARNING", logger="test_record_execution_bookkeeping"):
+            completed_count, failed_count = (
+                BaseV2DevelopmentAgent._record_execution_bookkeeping(
+                    task_id="t1",
+                    result=result,
+                    exec_result=exec_result,
+                    repo_path=tmp_path,
+                    feature_branch_name="feature/t1",
+                    git_agent=git_agent,
+                    logger=self._logger(),
+                )
+            )
+
+        assert (completed_count, failed_count) == (1, 1)
+        assert result.iterations_used == 1
+        assert any(
+            "Git agent commit_current_changes raised" in r.message for r in caplog.records
+        )

@@ -4,8 +4,9 @@ Shared base for the code-v2 Development Agents (backend + frontend).
 ``BackendDevelopmentAgent`` and ``FrontendDevelopmentAgent`` share their
 constructor, their repo-briefing read (including the incremental
 :class:`~software_engineering_team.shared.repo_context_cache.RepoContextCache`
-fast path), their tool-runner construction, and their planning + feature-branch
-setup (``_run_planning_and_branch_setup``) verbatim; only the per-team
+fast path), their tool-runner construction, their planning + feature-branch
+setup (``_run_planning_and_branch_setup``), and their post-execution
+bookkeeping (``_record_execution_bookkeeping``) verbatim; only the per-team
 tool-agent roster, tooling detection, repo extension/exclude sets, and the
 remainder of the integration-only ``run_workflow`` (execution, documentation,
 deliver, and final status wiring) differ. This base holds the shared members;
@@ -288,6 +289,62 @@ class BaseV2DevelopmentAgent:
                 logger.warning("[%s] Git agent create_feature_branch raised: %s", task_id, exc)
 
         return planning_result, feature_branch_name, None
+
+    @staticmethod
+    def _record_execution_bookkeeping(
+        *,
+        task_id: str,
+        result: Any,
+        exec_result: Any,
+        repo_path: Path,
+        feature_branch_name: Optional[str],
+        git_agent: Any,
+        logger: logging.Logger,
+    ) -> Tuple[int, int]:
+        """Count execution outcomes, set ``iterations_used``, and commit mid-workflow.
+
+        Extracted from ``run_workflow`` so completed/failed counting,
+        ``result.iterations_used``, and the optional
+        ``commit_current_changes`` call are defined once. Status values are
+        compared as strings (``"completed"`` / ``"review_failed"``) so this
+        base never imports a team-specific ``MicrotaskStatus`` enum; both
+        teams' enums use those values today. ``git_agent`` is pre-resolved by
+        the caller since ``ToolAgentKind`` differs per team.
+
+        Preconditions: ``exec_result.microtasks`` is iterable; each item has a
+          ``status`` comparable to ``"completed"`` / ``"review_failed"``.
+          ``result`` has a writable ``iterations_used`` attribute.
+        Postconditions: ``result.iterations_used`` equals the completed count.
+          Returns ``(completed_count, failed_count)``. When
+          ``feature_branch_name`` is truthy and ``git_agent`` exposes
+          ``commit_current_changes``, that method is invoked once with
+          ``repo_path`` and a ``feat: {N} microtasks completed`` message;
+          exceptions from the commit are logged as warnings and never raised.
+          Never raises on its own.
+        """
+        completed_count = sum(
+            1 for mt in exec_result.microtasks if mt.status == "completed"
+        )
+        failed_count = sum(
+            1 for mt in exec_result.microtasks if mt.status == "review_failed"
+        )
+        result.iterations_used = completed_count
+
+        if (
+            feature_branch_name
+            and git_agent is not None
+            and hasattr(git_agent, "commit_current_changes")
+        ):
+            try:
+                git_agent.commit_current_changes(
+                    repo_path, f"feat: {completed_count} microtasks completed"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Git agent commit_current_changes raised: %s", task_id, exc
+                )
+
+        return completed_count, failed_count
 
     def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
         """Per-team repo briefing reader.
