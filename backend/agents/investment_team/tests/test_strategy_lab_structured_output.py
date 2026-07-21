@@ -100,12 +100,15 @@ def test_design_agent_retries_malformed_json_then_succeeds(
 ) -> None:
     """A first unparseable response is re-prompted, not fatal, and the
     second (valid) response is accepted."""
+    from investment_team.strategy_lab.agents import _agent_runner as runner_mod
     from investment_team.strategy_lab.agents import design as mod
 
     agent = _ScriptedAgent(["no json here", _valid_spec_payload()])
     monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
     monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    monkeypatch.setattr(runner_mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(runner_mod, "Agent", lambda **_k: agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "2")
 
@@ -120,12 +123,15 @@ def test_design_agent_malformed_json_raises_after_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With retries exhausted, the malformed-JSON ValueError still surfaces."""
+    from investment_team.strategy_lab.agents import _agent_runner as runner_mod
     from investment_team.strategy_lab.agents import design as mod
 
     agent = _ScriptedAgent(["never json"])
     monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
     monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    monkeypatch.setattr(runner_mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(runner_mod, "Agent", lambda **_k: agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "0")
 
