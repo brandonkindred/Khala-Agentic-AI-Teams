@@ -520,7 +520,7 @@ class DevOpsTeamLeadAgent:
             try:
                 debug_out = self.infra_debug_agent.run(
                     IaCDebugInput(
-                        execution_output=combined_output[:4000],
+                        execution_output=combined_output,
                         tool_name=first_tool,
                         command=first_cmd,
                         artifacts=aggregated_artifacts,

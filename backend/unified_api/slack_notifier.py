@@ -136,7 +136,7 @@ def _build_open_questions_blocks(
         blocks.append(
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": block_text[:2900]},
+                "text": {"type": "mrkdwn", "text": block_text},
             }
         )
     if len(questions) > 20:
@@ -211,7 +211,7 @@ def notify_pa_response(
     if not cfg.get("enabled") or not bool(cfg.get("notify_pa_responses", True)):
         return
 
-    text = f"*User ({user_id}):* {user_message[:500]}\n*Assistant:* {response_message[:1500]}"
+    text = f"*User ({user_id}):* {user_message}\n*Assistant:* {response_message}"
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",

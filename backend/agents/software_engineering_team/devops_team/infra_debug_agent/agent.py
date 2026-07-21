@@ -32,7 +32,7 @@ class InfraDebugAgent:
         context = (
             f"Tool: {input_data.tool_name}\n"
             f"Command: {input_data.command}\n\n"
-            f"--- Execution Output ---\n{input_data.execution_output[:4000]}\n\n"
+            f"--- Execution Output ---\n{input_data.execution_output}\n\n"
             f"--- Artifacts ---\n{artifacts_snippet}\n"
         )
 

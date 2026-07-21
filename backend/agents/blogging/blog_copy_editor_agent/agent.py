@@ -207,7 +207,7 @@ class BlogCopyEditorAgent:
                     "---",
                     "CONTENT PLAN (align feedback with this structure and section intent):",
                     "---",
-                    copy_editor_input.content_plan_context.strip()[:_MAX_CONTENT_PLAN_CHARS],
+                    copy_editor_input.content_plan_context.strip(),
                     "",
                 ]
             )

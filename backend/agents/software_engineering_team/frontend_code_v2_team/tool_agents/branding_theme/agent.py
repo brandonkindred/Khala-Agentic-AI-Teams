@@ -76,5 +76,5 @@ class BrandingThemeToolAgent(PlanGeneratorToolAgent):
     def _build_plan_prompt(self, inp: ToolAgentPhaseInput) -> str:
         return DESIGN_SYSTEM_PLAN_PROMPT.format(
             task_description=inp.task_description or "N/A",
-            spec_content=(inp.task_description or "")[:5000],
+            spec_content=(inp.task_description or ""),
         )

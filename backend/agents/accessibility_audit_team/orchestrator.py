@@ -296,7 +296,7 @@ class AccessibilityAuditOrchestrator:
                     await self.arm.create_baseline(
                         audit_id=audit_id,
                         env="prod",
-                        targets=web_targets[:20],
+                        targets=web_targets,
                     )
                     logger.info("ARM created monitoring baseline for audit %s", audit_id)
 

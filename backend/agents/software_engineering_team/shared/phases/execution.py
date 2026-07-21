@@ -375,9 +375,7 @@ def _run_general_microtask_impl(
     fmt: Dict[str, Any] = dict(
         microtask_description=microtask.description or microtask.title,
         requirements=task.requirements or task.description,
-        existing_code=existing_code[:_GENERAL_MICROTASK_EXISTING_CODE_CHARS]
-        if existing_code
-        else "(none)",
+        existing_code=existing_code or "(none)",
         architecture_context=arch_ctx or "(none)",
     )
     if profile.has_language_conventions:
@@ -431,7 +429,7 @@ def generate_microtask_files(
         inp = models.ToolAgentInput(
             microtask=mt,
             repo_path=str(repo_path),
-            existing_code=existing_code[:_TOOL_AGENT_EXISTING_CODE_CHARS] if existing_code else "",
+            existing_code=existing_code or "",
             language=planning_result.language,
         )
         out = runner(inp)

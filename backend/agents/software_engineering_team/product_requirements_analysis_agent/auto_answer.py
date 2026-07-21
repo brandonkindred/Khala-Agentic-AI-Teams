@@ -124,7 +124,7 @@ def auto_answer_question(
         question_text=question.question_text,
         context=context,
         options=options_text,
-        spec_content=spec_content[:8000],
+        spec_content=spec_content,
     )
 
     try:

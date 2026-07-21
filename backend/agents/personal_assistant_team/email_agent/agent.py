@@ -129,7 +129,7 @@ class EmailAgent:
             sender=email.sender,
             subject=email.subject,
             date=email.timestamp,
-            body=email.body[:8000],
+            body=email.body,
         )
 
         try:
@@ -220,7 +220,7 @@ class EmailAgent:
             sender=email.sender,
             subject=email.subject,
             date=email.timestamp,
-            body=email.body[:8000],
+            body=email.body,
         )
 
         try:
@@ -328,7 +328,7 @@ class EmailAgent:
         prompt = SMART_REPLY_PROMPT.format(
             sender=email.sender,
             subject=email.subject,
-            body=email.body[:4000],
+            body=email.body,
         )
 
         try:

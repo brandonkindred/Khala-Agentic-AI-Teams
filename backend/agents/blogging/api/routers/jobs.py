@@ -334,7 +334,7 @@ def list_jobs(running_only: bool = False) -> List[BlogJobListItem]:
         BlogJobListItem(
             job_id=job.get("job_id", ""),
             status=job.get("status", "pending"),
-            brief=job.get("brief", "")[:100],
+            brief=job.get("brief", ""),
             phase=job.get("phase"),
             progress=job.get("progress", 0),
             created_at=job.get("created_at"),

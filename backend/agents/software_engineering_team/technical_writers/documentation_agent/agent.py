@@ -96,10 +96,6 @@ class DocumentationAgent:
 
         # Truncate codebase if too large
         codebase = input_data.codebase_content or ""
-        if len(codebase) > MAX_CODEBASE_CHARS:
-            codebase = codebase[:MAX_CODEBASE_CHARS] + (
-                f"\n\n... [truncated, {len(codebase) - MAX_CODEBASE_CHARS} more chars]"
-            )
 
         # --- Step 1: Update README.md (root + frontend/backend/devops) ---
         readme_content = ""

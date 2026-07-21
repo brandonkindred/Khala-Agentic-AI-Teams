@@ -695,9 +695,7 @@ class ResearchAgent:
         if not references:
             return []
         refs_preview = "\n".join(
-            f"- {ref.title}: {ref.summary[:150]}..."
-            if len(ref.summary) > 150
-            else f"- {ref.title}: {ref.summary}"
+            f"- {ref.title}: {ref.summary}"
             for ref in references[:5]
         )
         prompt = (

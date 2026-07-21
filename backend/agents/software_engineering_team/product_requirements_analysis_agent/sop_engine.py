@@ -105,7 +105,7 @@ def extract_sop_decisions_from_spec(model: Any, spec_content: str) -> List[SOPDe
 
     prompt = SOP_SPEC_EXTRACTION_PROMPT.format(
         sop_questions_json=json.dumps(questions_summary, indent=2),
-        spec_content=spec_content[:8000],
+        spec_content=spec_content,
     )
 
     try:
@@ -167,7 +167,7 @@ def generate_spec_aware_options(
         question_text=q_def["question_text"],
         sop_id=q_def["sop_id"],
         prior_decisions=prior_decisions_str,
-        spec_excerpt=spec_content[:4000],
+        spec_excerpt=spec_content,
     )
     try:
         parsed = call_llm_json(model, prompt)
@@ -367,7 +367,7 @@ def assess_sub_phase_gaps(
     prompt = SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT.format(
         sub_phase_name=sub_phase.value,
         sub_phase_objective=objective,
-        spec_excerpt=spec_content[:6000],
+        spec_excerpt=spec_content,
         sub_phase_decisions=json.dumps(sub_phase_decisions, indent=2),
         all_decisions=json.dumps(all_decisions_summary, indent=2),
         existing_question_ids=existing_ids_str,
@@ -765,7 +765,7 @@ def run_sop_phase2_architecture(
     # Step 1: Architecture analysis LLM call
     job_updater(status_text="Analyzing architecture based on requirements...")
     prompt = SOP_ARCHITECTURE_ANALYSIS_PROMPT.format(
-        spec_content=spec_content[:12000],
+        spec_content=spec_content,
         phase1_decisions_json=decisions_json,
     )
 

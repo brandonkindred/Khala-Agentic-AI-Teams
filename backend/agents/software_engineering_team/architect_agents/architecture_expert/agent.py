@@ -83,7 +83,7 @@ def _build_synthetic_architecture_data(reqs: ProductRequirements) -> Dict[str, A
     """Build a fully synthetic architecture dict from requirements when LLM parse fails."""
     overview = (
         f"System for {reqs.title} with focus on: "
-        f"{'; '.join(reqs.acceptance_criteria[:3]) or reqs.description[:120]}"
+        f"{'; '.join(reqs.acceptance_criteria[:3]) or reqs.description"
     )
     components = [
         {
@@ -200,8 +200,7 @@ class ArchitectureExpertAgent:
                     "",
                     "**Features and Functionality (architecture must support all of these):**",
                     "---",
-                    input_data.features_and_functionality_doc.strip()[:12000]
-                    + ("..." if len(input_data.features_and_functionality_doc) > 12000 else ""),
+                    input_data.features_and_functionality_doc.strip(),
                     "---",
                 ]
             )
@@ -299,7 +298,7 @@ class ArchitectureExpertAgent:
         if not overview:
             overview = (
                 f"System for {reqs.title} with focus on: "
-                f"{'; '.join(reqs.acceptance_criteria[:3]) or reqs.description[:120]}"
+                f"{'; '.join(reqs.acceptance_criteria[:3]) or reqs.description
             )
 
         architecture_document = (data.get("architecture_document") or "").strip()

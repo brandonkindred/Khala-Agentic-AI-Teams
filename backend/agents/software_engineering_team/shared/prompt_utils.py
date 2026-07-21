@@ -86,7 +86,7 @@ def log_llm_prompt(
     """
     try:
         prompt_len = len(str(prompt)) if prompt is not None else 0
-        hint = (task_hint or "")[:80]
+        hint = (task_hint or "")
         log.info(
             "LLM call: agent=%s mode=%s task=%s prompt_len=%d",
             agent_label,

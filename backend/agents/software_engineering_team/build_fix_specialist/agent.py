@@ -53,8 +53,7 @@ class BuildFixSpecialistAgent:
                     "",
                     "**Failing test file content:**",
                     "```",
-                    input_data.failing_test_content[:4000]
-                    + ("..." if len(input_data.failing_test_content or "") > 4000 else ""),
+                    input_data.failing_test_content,
                     "```",
                 ]
             )

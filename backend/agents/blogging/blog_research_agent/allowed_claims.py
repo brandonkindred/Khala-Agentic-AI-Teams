@@ -87,13 +87,13 @@ def extract_allowed_claims(
     """
     sources_parts = []
     for i, ref in enumerate(references[:15], 1):
-        title = getattr(ref, "title", str(ref))[:80]
+        title = getattr(ref, "title", str(ref))
         url = getattr(ref, "url", "")
         sources_parts.append(f"Source {i}: {title} | {url}")
     sources_text = "\n".join(sources_parts) if sources_parts else "No sources"
 
     prompt = EXTRACT_CLAIMS_PROMPT.format(
-        compiled_document=compiled_document[:8000],
+        compiled_document=compiled_document,
         sources_text=sources_text,
     )
 

@@ -129,7 +129,7 @@ def run_spec_review(
     max_spec_chars = compute_pra_spec_review_spec_chars(llm)
     if qa_for_prompt:
         prompt = SPEC_REVIEW_PROMPT.format(
-            spec_content=full_spec_content[:max_spec_chars],
+            spec_content=full_spec_content,
             constraint_hints=constraint_hints,
         )
         prompt += (
@@ -147,7 +147,7 @@ Previously Answered Questions:
         )
     else:
         prompt = SPEC_REVIEW_PROMPT.format(
-            spec_content=full_spec_content[:max_spec_chars],
+            spec_content=full_spec_content,
             constraint_hints=constraint_hints,
         )
 

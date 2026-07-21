@@ -127,7 +127,7 @@ class BlogComplianceAgent:
         prompt = COMPLIANCE_PROMPT.format(
             brand_spec_summary=brand_summary,
             validator_summary=validator_summary,
-            draft=draft[:15000],
+            draft=draft,
         )
 
         if on_llm_request:
