@@ -424,3 +424,149 @@ def test_be_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp
     (tmp_path / "pytest.ini").write_text("[pytest]")
     has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
     assert not has_lint and has_test
+
+
+class TestRunPreflight:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_preflight`` helper.
+
+    No current ``run_workflow`` test drives the dev-agent pre-flight's failure
+    paths directly (they only unit-test ``_detect_tooling`` in isolation), so
+    these exercise ``_run_preflight`` on its own with fake callables.
+    """
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_preflight")
+
+    def test_no_branch_skips_checkout(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        checkout_calls = []
+        configure_calls = []
+        update_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name=None,
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda *a: checkout_calls.append(a) or (True, "ok"),
+            configure_quality_tooling=lambda p: configure_calls.append(p),
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+        )
+        assert result is None
+        assert checkout_calls == []
+        assert configure_calls == []
+        assert update_calls == []
+
+    def test_checkout_failure_returns_message_and_skips_tooling(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        detect_calls = []
+        configure_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda p: detect_calls.append(p) or (True, True),
+            checkout_branch=lambda _p, _b: (False, "conflict"),
+            configure_quality_tooling=lambda p: configure_calls.append(p),
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+        )
+        assert result == "Feature branch checkout failed: conflict"
+        assert detect_calls == []
+        assert configure_calls == []
+
+    @pytest.mark.parametrize(
+        "tooling, expected_missing",
+        [
+            ((False, True), "linting"),
+            ((True, False), "testing"),
+            ((False, False), "linting and testing"),
+        ],
+    )
+    def test_missing_tooling_returns_combined_message(
+        self, tmp_path: Path, tooling, expected_missing
+    ):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name=None,
+            detect_tooling=lambda _p: tooling,
+            checkout_branch=lambda *a: (True, "ok"),
+            configure_quality_tooling=lambda p: None,
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+        )
+        assert result == (
+            f"Pre-flight check failed: {expected_missing} not configured. "
+            "The build process requires linting and testing to be set up before coding tasks begin."
+        )
+
+    def test_successful_checkout_configures_tooling(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        configure_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda _p, _b: (True, "checked out"),
+            configure_quality_tooling=lambda p: configure_calls.append(p),
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+        )
+        assert result is None
+        assert configure_calls == [tmp_path]
+
+    def test_emit_branch_ready_progress_true_updates_job(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        update_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda *a: (True, "ok"),
+            configure_quality_tooling=lambda p: None,
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+            emit_branch_ready_progress=True,
+        )
+        assert result is None
+        assert update_calls == [
+            {
+                "current_phase": "planning",
+                "progress": 4,
+                "status_text": "Branch feature/x ready",
+            }
+        ]
+
+    def test_emit_branch_ready_progress_false_by_default(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        update_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda *a: (True, "ok"),
+            configure_quality_tooling=lambda p: None,
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+        )
+        assert result is None
+        assert update_calls == []
