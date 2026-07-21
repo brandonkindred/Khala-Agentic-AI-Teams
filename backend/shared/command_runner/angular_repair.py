@@ -16,7 +16,7 @@ from pathlib import Path
 
 from shared.command_runner.nvm import _get_nvm_script_prefix, run_command_with_nvm
 from shared.command_runner.runner import (
-    _ANGULAR_VERSION,
+    ANGULAR_VERSION,
     BUILD_TIMEOUT,
     FRONTEND_NODE_VERSION,
     CommandResult,
@@ -27,6 +27,22 @@ from shared.command_runner.runner import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _insert_after_last_import(lines: list[str], new_line: str) -> None:
+    """Insert *new_line* right after the last leading `import ` line in *lines*, in place.
+
+    Preconditions: *lines* is a list of source lines (no trailing newlines).
+    Postconditions: *lines* has *new_line* inserted after the last contiguous
+        leading import line, or at index 0 if there are none.
+    """
+    insert_idx = 0
+    for i, line in enumerate(lines):
+        if line.strip().startswith("import "):
+            insert_idx = i + 1
+        elif insert_idx > 0 and not line.strip().startswith("import "):
+            break
+    lines.insert(insert_idx, new_line.rstrip())
 
 
 def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:  # pragma: no cover
@@ -91,7 +107,7 @@ def _ensure_angular_common_in_package_json(
         deps = data.setdefault("dependencies", {})
         if "@angular/common" in deps:
             return False
-        deps["@angular/common"] = _ANGULAR_VERSION
+        deps["@angular/common"] = ANGULAR_VERSION
         return True
 
     if patch_json_file(cwd / "package.json", _transform):
@@ -110,10 +126,10 @@ def _ensure_angular_material_in_package_json(
         deps = data.setdefault("dependencies", {})
         changed = False
         if "@angular/material" not in deps:
-            deps["@angular/material"] = _ANGULAR_VERSION
+            deps["@angular/material"] = ANGULAR_VERSION
             changed = True
         if "@angular/cdk" not in deps:
-            deps["@angular/cdk"] = _ANGULAR_VERSION
+            deps["@angular/cdk"] = ANGULAR_VERSION
             changed = True
         return changed
 
@@ -183,13 +199,7 @@ def _ensure_provide_animations_in_config(
             return content
         import_line = "import { provideAnimations } from '@angular/platform-browser/animations';\n"
         lines = content.split("\n")
-        insert_idx = 0
-        for i, line in enumerate(lines):
-            if line.strip().startswith("import "):
-                insert_idx = i + 1
-            elif insert_idx > 0 and not line.strip().startswith("import "):
-                break
-        lines.insert(insert_idx, import_line.rstrip())
+        _insert_after_last_import(lines, import_line)
         new_content = "\n".join(lines)
         if "provideAnimations()" not in new_content:
             if "provideHttpClient()," in new_content:
@@ -256,14 +266,8 @@ def _ensure_app_config_di_token_imports(
                 content = content.replace(old_line, new_line, 1)
             else:
                 lines = content.split("\n")
-                insert_idx = 0
-                for i, line in enumerate(lines):
-                    if line.strip().startswith("import "):
-                        insert_idx = i + 1
-                    elif insert_idx > 0 and not line.strip().startswith("import "):
-                        break
                 import_line = f"import {{ {token} }} from '{module}';\n"
-                lines.insert(insert_idx, import_line.rstrip())
+                _insert_after_last_import(lines, import_line)
                 content = "\n".join(lines)
         return content
 

@@ -102,7 +102,7 @@ ANGULAR_NODE_VERSION = FRONTEND_NODE_VERSION
 
 # Angular npm package version pin, shared by angular_repair (dependency repairs)
 # and scaffolding (new-project dependency install).
-_ANGULAR_VERSION = "^19.0.0"
+ANGULAR_VERSION = "^19.0.0"
 
 
 @dataclass

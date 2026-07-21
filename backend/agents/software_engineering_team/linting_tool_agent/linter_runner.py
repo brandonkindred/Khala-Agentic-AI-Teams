@@ -60,7 +60,9 @@ def detect_linter(repo_path: Path, agent_type: str) -> LintPlan:
     Preconditions:
         - ``repo_path`` exists and is a directory.
     Postconditions:
-        - Returns a ``LintPlan`` with a valid ``linter_command``.
+        - Returns a ``LintPlan`` with a valid ``linter_command``, or
+          ``linter_name="none"`` with an empty ``linter_command`` when no
+          backend linter (ruff/flake8) is available.
     """
     if agent_type == "backend":
         return _detect_python_linter(repo_path)

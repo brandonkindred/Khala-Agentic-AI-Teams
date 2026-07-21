@@ -4,6 +4,8 @@ Frontend (Angular/React) and backend (FastAPI) project scaffolding.
 Writes a minimal, working project skeleton — config files, entrypoints,
 lint/test setup — so a freshly created project directory builds, lints, and
 tests cleanly before any agent-generated code is added.
+``ensure_backend_project_initialized`` additionally attempts a non-blocking
+``pip install -r requirements.txt`` after scaffolding the files.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from shared.command_runner.nvm import (
     run_command_with_nvm,
 )
 from shared.command_runner.runner import (
-    _ANGULAR_VERSION,
+    ANGULAR_VERSION,
     BUILD_TIMEOUT,
     FRONTEND_NODE_VERSION,
     CommandResult,
@@ -209,27 +211,27 @@ export const environment = {
 # Angular runtime + dev dependencies (pinned to same major for compatibility)
 # @angular/common provides @angular/common/http (HttpClient, provideHttpClient)
 _ANGULAR_DEPS = [
-    f"@angular/core@{_ANGULAR_VERSION}",
-    f"@angular/common@{_ANGULAR_VERSION}",
-    f"@angular/compiler@{_ANGULAR_VERSION}",
-    f"@angular/platform-browser@{_ANGULAR_VERSION}",
-    f"@angular/platform-browser-dynamic@{_ANGULAR_VERSION}",
-    f"@angular/router@{_ANGULAR_VERSION}",
-    f"@angular/forms@{_ANGULAR_VERSION}",
-    f"@angular/animations@{_ANGULAR_VERSION}",
-    f"@angular/material@{_ANGULAR_VERSION}",
-    f"@angular/cdk@{_ANGULAR_VERSION}",
+    f"@angular/core@{ANGULAR_VERSION}",
+    f"@angular/common@{ANGULAR_VERSION}",
+    f"@angular/compiler@{ANGULAR_VERSION}",
+    f"@angular/platform-browser@{ANGULAR_VERSION}",
+    f"@angular/platform-browser-dynamic@{ANGULAR_VERSION}",
+    f"@angular/router@{ANGULAR_VERSION}",
+    f"@angular/forms@{ANGULAR_VERSION}",
+    f"@angular/animations@{ANGULAR_VERSION}",
+    f"@angular/material@{ANGULAR_VERSION}",
+    f"@angular/cdk@{ANGULAR_VERSION}",
     "rxjs",
     "zone.js",
     "tslib",
 ]
 
 _ANGULAR_DEV_DEPS = [
-    f"@angular/cli@{_ANGULAR_VERSION}",
-    f"@angular/compiler-cli@{_ANGULAR_VERSION}",
-    f"@angular/build@{_ANGULAR_VERSION}",
+    f"@angular/cli@{ANGULAR_VERSION}",
+    f"@angular/compiler-cli@{ANGULAR_VERSION}",
+    f"@angular/build@{ANGULAR_VERSION}",
     "typescript",
-    f"angular-eslint@{_ANGULAR_VERSION}",
+    f"angular-eslint@{ANGULAR_VERSION}",
     "eslint@^9.0.0",
     "@eslint/js@^9.0.0",
     "typescript-eslint@^8.0.0",
@@ -433,6 +435,9 @@ import { BrowserDynamicTestingModule, platformBrowserDynamicTesting } from '@ang
 getTestBed().initTestEnvironment(BrowserDynamicTestingModule, platformBrowserDynamicTesting());
 """
 
+# Public aliases: frontend_code_v2_team's Setup phase (a consumer outside this
+# package) writes these same lint/test config templates into agent-generated
+# projects when they're missing, so they need a non-underscore, importable name.
 MINIMAL_REACT_ESLINT_CONFIG = _MINIMAL_REACT_ESLINT_CONFIG
 MINIMAL_REACT_VITEST_CONFIG = _MINIMAL_REACT_VITEST_CONFIG
 MINIMAL_ANGULAR_ESLINT_CONFIG = _MINIMAL_ANGULAR_ESLINT_CONFIG

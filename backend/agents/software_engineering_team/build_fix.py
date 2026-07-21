@@ -68,7 +68,11 @@ def _run_build_verification(
     Run build verification for the given agent type.
     Returns (success, error_output).
     For frontend: runs ng build.
-    For backend: runs python syntax check (pytest if tests exist).
+    For backend: runs python syntax check, then (if a tests/ dir with test_*.py
+    files and requirements.txt exist) a non-fatal ``pip install -r requirements.txt``
+    before pytest.
+    For devops: validates .github/workflows and top-level *.yml/*.yaml files,
+    then runs a docker build when a Dockerfile is present and Docker is installed.
 
     The v2 phase-pipeline teams (``backend_code_v2_team``/``frontend_code_v2_team``)
     pass ``"backend_code_v2"``/``"frontend_code_v2"`` as ``agent_type`` — normalize
@@ -210,8 +214,6 @@ def _run_build_verification(
     ):  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
-
-        from shared.command_runner.runner import run_command
 
         errors: list[str] = []
         # Validate .github/workflows/*.yml
