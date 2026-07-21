@@ -132,11 +132,15 @@ class BaseV2DevelopmentAgent:
         Preconditions: ``repo_path`` is an existing directory. ``checkout_branch``
           and ``configure_quality_tooling`` are the caller module's own
           (monkeypatch-patchable) names, not imported fresh here, so tests that
-          patch a team's orchestrator module keep working unchanged.
+          patch a team's orchestrator module keep working unchanged. Both are
+          assumed not to raise; ``_run_preflight`` does not wrap them in
+          ``try``/``except``, so a raising callable is the caller's to handle.
         Postconditions: returns ``None`` when checkout (if any) succeeded and
           both lint and test tooling are detected; otherwise returns the
           failure-reason string the caller should set on its result and return
-          early with (already logged via ``logger.error``). Never raises.
+          early with (already logged via ``logger.error``). Never raises on its
+          own; propagates any exception raised by the injected
+          ``checkout_branch`` or ``configure_quality_tooling`` callables.
           ``emit_branch_ready_progress`` controls whether a "Branch ... ready"
           progress update fires after a successful checkout — backend emits it,
           frontend does not, and this preserves that one real behavioral
