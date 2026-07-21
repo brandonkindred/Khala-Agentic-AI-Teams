@@ -12,8 +12,8 @@ in #1960 and continued by
 in #1973). Pure: no I/O, no LLM, no subprocess.
 
 This module needs ``_AND_OPS``/``_CombinatorOps`` from ``indicator_probe``
-and ``_flatten_top_terms``/``_symbol_gate``/``_NameStrings``/
-``_iter_entry_path_assigns`` from ``predicate_resolution``, while
+and ``_flatten_top_terms``/``_symbol_gate``/``_NameStrings`` from
+``predicate_resolution``, while
 ``predicate_resolution`` needs ``_numeric_literal`` back from here (and
 ``indicator_probe`` needs nothing from here). Both cross-imports are
 placed as the **last top-level statements** in this file, after every
@@ -117,8 +117,9 @@ def _build_truthy_subcond(
       ``bool(close > 100)`` produces the same row as ``close > 100``.
     - ``bool(<Name>)`` and bare ``<Name>`` — resolves the name to a
       previously-bound indicator evaluator (see
-      :func:`_collect_name_evaluators`) and treats the resulting series
-      as truthy where it is non-NaN and non-zero.
+      :class:`~investment_team.strategy_lab.coverage_probe.subcondition_visitor.SubconditionVisitor`)
+      and treats the resulting series as truthy where it is non-NaN and
+      non-zero.
 
     Returns ``None`` when the inner expression is neither a recognised
     comparison nor a Name with an indicator binding — in particular the
@@ -696,95 +697,6 @@ def _is_valid_scalar(value: Union[int, float], allow_float: bool) -> bool:
     return v.is_integer()
 
 
-def _collect_name_evaluators(  # pragma: no cover
-    on_bar: ast.AST, name_periods: Dict[str, int]
-) -> Dict[str, Callable[[pd.DataFrame], pd.Series]]:
-    """Bind local ``Name = <expr>`` assignments inside ``on_bar`` whose RHS
-    resolves to a data-dependent operand.
-
-    Legacy pre-pass kept for documentation / external import compatibility.
-    The runtime walker uses ``_apply_assign_inplace`` flow-sensitively; this
-    function is no longer reached from the live entry path and is pragma'd
-    out of coverage as a deprecated AST walker helper.
-
-    Walks ``on_bar``'s body for simple ``name = <expr>`` and
-    ``name: T = <expr>`` assignments and compiles each RHS through the
-    same ``_build_operand`` pipeline used for predicate operands. This
-    covers two canonical generated-strategy shapes:
-
-    1. Bare indicator call ::
-
-           sma_var = sma(close, 200)
-           if bar.close > sma_var:
-               ...
-
-    2. Derived threshold (binop with a literal) ::
-
-           threshold = sma(close, 5) * 1.02
-           if close > threshold:
-               ...
-
-    Without (2), a refactor that pulls the constant out of the
-    comparison into a Name binding silently dropped the entire
-    subcondition and the report degenerated to UNKNOWN_LOW_COVERAGE.
-
-    Bindings are accumulated progressively so a chain like
-    ``a = sma(close, 5); b = a * 1.02; if x > b:`` resolves the second
-    binding through the first. Source order isn't formally guaranteed
-    by ``ast.walk`` but is stable for the simple, top-level assignment
-    chains generated strategies actually produce.
-    """
-    bindings: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {}
-    # Entry-path-only walk: skip exit branches of position-check ifs so
-    # an exit reassignment like ``ma = sma(close, 200)`` can't shadow
-    # the entry's ``ma = sma(close, 5)``.
-    for node in _iter_entry_path_assigns(on_bar):
-        targets: List[ast.expr] = []
-        value: Optional[ast.expr] = None
-        if isinstance(node, ast.Assign):
-            targets = list(node.targets)
-            value = node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
-            value = node.value
-        else:
-            continue
-        if value is None:
-            continue
-
-        # Tuple / list unpacking targets — ``upper, mid, lower =
-        # bollinger_bands(closes, 20)`` is the documented usage pattern
-        # for the tuple-returning helpers, and binding each name to
-        # its corresponding output series lets a downstream
-        # ``if bar.close > upper:`` resolve normally.
-        for target in targets:
-            if isinstance(target, (ast.Tuple, ast.List)):
-                _bind_tuple_unpack(target, value, name_periods, bindings)
-                continue
-            if isinstance(target, ast.Name):
-                evaluator = _resolve_assign_evaluator(value, name_periods, bindings)
-                if evaluator is not None:
-                    # Overwrite — Python semantics use the latest
-                    # assignment. A first-wins ``setdefault`` lets a
-                    # stale earlier binding survive a reassignment in
-                    # the same scope, which can mask zero-coverage
-                    # filters when the second assignment is the one
-                    # the entry test actually uses.
-                    bindings[target.id] = evaluator
-                else:
-                    # Reassignment whose RHS doesn't resolve to a
-                    # data-dependent evaluator (e.g. a scalar literal,
-                    # an unsupported call). Drop any prior indicator
-                    # binding so downstream lookups fall through to
-                    # numeric-literal / OHLCV resolution. Without this,
-                    # ``threshold = sma(close, 5); threshold = 150``
-                    # leaves the stale SMA binding in place and the
-                    # predicate ``close > threshold`` evaluates against
-                    # the SMA instead of the literal 150.
-                    bindings.pop(target.id, None)
-    return bindings
-
-
 def _bind_tuple_unpack(
     target: ast.expr,
     value: ast.expr,
@@ -1028,9 +940,9 @@ def _resolve_series_input(
        :func:`_column_from`.
     3. **Bound local Name** — when the strategy did
        ``closes = [b.close for b in history]`` (or any other shape that
-       :func:`_collect_name_evaluators` already understood) and then
-       passed the local into the indicator, look up the binding and use
-       its callable directly.
+       :class:`~investment_team.strategy_lab.coverage_probe.subcondition_visitor.SubconditionVisitor`
+       already understood) and then passed the local into the
+       indicator, look up the binding and use its callable directly.
     4. **Bare call** (``sma()``) — defaults to the close column. Rare
        in practice but harmless since no other column is implied.
 
@@ -1089,9 +1001,8 @@ def _resolve_series_input(
 
 # _AND_OPS/_CombinatorOps are defined in indicator_probe.py (also
 # needed there for its own _OR_OPS construction); _flatten_top_terms/
-# _symbol_gate/_NameStrings/_iter_entry_path_assigns are defined in
-# predicate_resolution.py. _build_compound_subcond and
-# _collect_name_evaluators above need these. Imported at the bottom,
+# _symbol_gate/_NameStrings are defined in predicate_resolution.py.
+# _build_compound_subcond above needs these. Imported at the bottom,
 # after every name in this module is defined (predicate_resolution.py
 # in turn imports _numeric_literal back from here, at ITS bottom), so
 # this module can be imported first, or after either of the other two,
@@ -1104,7 +1015,6 @@ from investment_team.strategy_lab.coverage_probe.indicator_probe import (  # noq
 )
 from investment_team.strategy_lab.coverage_probe.predicate_resolution import (  # noqa: E402
     _flatten_top_terms,
-    _iter_entry_path_assigns,
     _NameStrings,
     _symbol_gate,
 )
