@@ -2223,7 +2223,9 @@ def _strategy_lab_worker(
                 _run_state_snapshot.get("errored_details") or []
             )
             # Carry forward on resume (same reasoning as errored/errored_details).
-            tracker_merge_errors: int = int(_run_state_snapshot.get("tracker_merge_error_count") or 0)
+            tracker_merge_errors: int = int(
+                _run_state_snapshot.get("tracker_merge_error_count") or 0
+            )
         completed_indices: set[int] = set(range(start_cycle_offset))
         completed_batches = start_batch_idx
         primary_tracker = orchestrator.convergence_tracker
@@ -4277,13 +4279,30 @@ class CompleteAdvisorSessionResponse(BaseModel):
 
 @app.post("/advisor/sessions", response_model=StartAdvisorSessionResponse)
 def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSessionResponse:
-    """Start a new financial advisor conversation (runs as a Temporal workflow)."""
+    """Start a new financial advisor conversation (runs as a Temporal workflow).
+
+    Preconditions:
+        - ``request.user_id`` identifies the user starting the session.
+
+    Postconditions:
+        - Returns the new session id, the advisor's opening message, and the
+          created ``AdvisorSession``.
+
+    Raises:
+        - ``HTTPException(500)`` if the advisory workflow returns a result
+          missing ``advisor_message`` or ``session``.
+    """
     session_id = f"adv-{uuid.uuid4().hex[:8]}"
     result = _execute_advisory(
         "advisor_start",
         {"session_id": session_id, "user_id": request.user_id},
         key=session_id,
     )
+    if "advisor_message" not in result or "session" not in result:
+        raise HTTPException(
+            status_code=500,
+            detail="Advisor execution returned unexpected response structure",
+        )
     return StartAdvisorSessionResponse(
         session_id=session_id,
         advisor_message=result["advisor_message"],
@@ -4295,7 +4314,21 @@ def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSe
 def send_advisor_message(
     session_id: str, request: SendAdvisorMessageRequest
 ) -> SendAdvisorMessageResponse:
-    """Send a message to the financial advisor and receive a response."""
+    """Send a message to the financial advisor and receive a response.
+
+    Preconditions:
+        - ``session_id`` identifies a previously started advisor session.
+
+    Postconditions:
+        - Returns the advisor's reply along with the session's updated status,
+          current topic, and any still-missing required fields.
+
+    Raises:
+        - ``HTTPException(404)`` if ``session_id`` does not match a known session.
+        - ``HTTPException(500)`` if the advisory workflow returns a result
+          missing ``advisor_message``, ``session_status``, ``current_topic``,
+          or ``missing_fields``.
+    """
     with _lock:
         session = _advisor_sessions.get(session_id)
 
@@ -4307,6 +4340,12 @@ def send_advisor_message(
         {"session_id": session_id, "message": request.message},
         key=session_id,
     )
+    required_keys = ("advisor_message", "session_status", "current_topic", "missing_fields")
+    if any(key not in result for key in required_keys):
+        raise HTTPException(
+            status_code=500,
+            detail="Advisor execution returned unexpected response structure",
+        )
     return SendAdvisorMessageResponse(
         advisor_message=result["advisor_message"],
         session_status=result["session_status"],
@@ -4332,6 +4371,19 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
 
     Can be called once the session status is 'completed', or called early
     if all required fields have been collected.
+
+    Preconditions:
+        - ``session_id`` identifies a previously started advisor session.
+
+    Postconditions:
+        - Returns the user id and the ``IPS`` created from the session's
+          collected data.
+
+    Raises:
+        - ``HTTPException(404)`` if ``session_id`` does not match a known session.
+        - ``HTTPException(400)`` if required fields are still missing.
+        - ``HTTPException(500)`` if the advisory workflow returns a result
+          missing ``user_id`` or ``ips``.
     """
     with _lock:
         raw_session = _advisor_sessions.get(session_id)
@@ -4352,6 +4404,11 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
         )
 
     result = _execute_advisory("advisor_complete", {"session_id": session_id}, key=session_id)
+    if "user_id" not in result or "ips" not in result:
+        raise HTTPException(
+            status_code=500,
+            detail="Advisor completion returned unexpected response structure",
+        )
     return CompleteAdvisorSessionResponse(
         user_id=result["user_id"], ips=IPS.model_validate(result["ips"])
     )
