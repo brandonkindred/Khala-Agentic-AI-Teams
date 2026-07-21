@@ -12,9 +12,10 @@ Invariants:
       a WARNING tagged with ``log_context`` and return None. Callers decide
       what "could not complete request" means for their operation.
     - poll_until_terminal never busy-waits past ``total_timeout`` and never
-      raises; a ``status_fn()`` failure (returns None) or a timeout both yield
-      a dict shaped like a terminal-failure status (``{status_key: "failed",
-      "error": ...}``), the same shape a real terminal status would have.
+      raises; a ``status_fn()`` failure (returns None or raises) or a timeout
+      both yield a dict shaped like a terminal-failure status (``{status_key:
+      "failed", "error": ...}``), the same shape a real terminal status would
+      have.
     - Both functions delegate all connection reuse to
       shared.http.get_pooled_client(); neither opens/closes an httpx.Client.
 """
@@ -115,19 +116,24 @@ def poll_until_terminal(
     Postconditions:
         - Returns the first status dict for which
           ``status.get(status_key)`` is in ``terminal_statuses``, unmodified.
-        - If ``status_fn()`` returns None on any call, immediately returns
-          ``{status_key: "failed", "error": "Failed to get status"}`` — no
-          further polling, no sleep.
+        - If ``status_fn()`` returns None, or raises any exception, on any
+          call, immediately returns ``{status_key: "failed", "error":
+          "Failed to get status"}`` — no further polling, no sleep.
         - If no terminal status is observed within ``total_timeout`` seconds,
           returns ``{status_key: "failed", "error": f"Timed out waiting for
           {log_context}"}``.
-        - Never raises; never sleeps past a terminal/None short-circuit.
+        - Never raises; never sleeps past a terminal/None/exception
+          short-circuit.
     """
     assert poll_interval > 0, f"poll_interval must be positive, got {poll_interval!r}"
     assert total_timeout > 0, f"total_timeout must be positive, got {total_timeout!r}"
     start = time.monotonic()
     while (time.monotonic() - start) < total_timeout:
-        status = status_fn()
+        try:
+            status = status_fn()
+        except Exception as e:
+            logger.warning("%s status_fn raised: %s", log_context, e)
+            return {status_key: "failed", "error": "Failed to get status"}
         if status is None:
             return {status_key: "failed", "error": "Failed to get status"}
         if status.get(status_key) in terminal_statuses:
