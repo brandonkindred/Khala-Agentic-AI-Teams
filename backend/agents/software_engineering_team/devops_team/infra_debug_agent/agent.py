@@ -2,47 +2,54 @@
 
 from __future__ import annotations
 
-import logging
+from typing import Any, Dict
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 
 from .models import IaCDebugInput, IaCDebugOutput, IaCExecutionError
 from .prompts import INFRA_DEBUG_PROMPT
 
-logger = logging.getLogger(__name__)
-
 _FIXABLE_TYPES = frozenset({"syntax", "validation"})
 
 
-class InfraDebugAgent:
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
+class InfraDebugAgent(DevOpsSingleShotAgent):
+    """Classify IaC execution errors and derive whether they are fixable.
 
-    def run(self, input_data: IaCDebugInput) -> IaCDebugOutput:
+    Invariants: instance state is limited to ``llm`` and ``_model`` from the
+    base; ``run`` is stateless across calls. ``_FIXABLE_TYPES`` remains a
+    module-level frozenset used by ``build_output``.
+    """
+
+    PROMPT = INFRA_DEBUG_PROMPT
+
+    def build_context(self, input_data: IaCDebugInput) -> str:
+        """Build the debug prompt context from execution output and artifacts.
+
+        Preconditions: ``input_data`` is a valid ``IaCDebugInput``.
+        Postconditions: returns the same context string shape the pre-migration
+        agent appended after the prompt separator (first five artifacts,
+        2000-char snippets).
+        """
         artifacts_snippet = ""
         for fname, content in list(input_data.artifacts.items())[:5]:
             artifacts_snippet += f"\n### {fname} ###\n{content[:2000]}\n"
 
-        context = (
+        return (
             f"Tool: {input_data.tool_name}\n"
             f"Command: {input_data.command}\n\n"
             f"--- Execution Output ---\n{input_data.execution_output}\n\n"
             f"--- Artifacts ---\n{artifacts_snippet}\n"
         )
 
-        data = complete_json_with_continuation(
-            self._model,
-            INFRA_DEBUG_PROMPT + "\n\n---\n\n" + context,
-            temperature=0.1,
-            think=True,
-        )
+    def build_output(self, input_data: IaCDebugInput, data: Dict[str, Any]) -> IaCDebugOutput:
+        """Map the LLM JSON dict onto ``IaCDebugOutput`` with derived fixable.
 
+        Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
+        Postconditions: returns ``IaCDebugOutput`` with the same
+        ``IaCExecutionError`` field defaults, ``raw_output`` from the input,
+        and ``fixable=data.get("fixable", derived)`` where derived is true
+        iff every error type is in ``_FIXABLE_TYPES`` and the list is non-empty.
+        """
         errors = []
         for err_data in data.get("errors") or []:
             errors.append(
