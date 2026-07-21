@@ -3,7 +3,8 @@ Setup phase: ensure repo exists, README, main branch, development branch,
 and linting/testing are configured.
 
 Runs as the first phase of the Backend Tech Lead Agent.
-Uses shared.git_utils only (plus lightweight file checks for lint/test config).
+Uses shared.git_utils and shared.command_runner.scaffolding (for the minimal
+pyproject.toml template), plus lightweight file checks for lint/test config.
 """
 
 from __future__ import annotations

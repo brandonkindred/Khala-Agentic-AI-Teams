@@ -3,7 +3,8 @@ Setup phase: ensure repo exists, README, main branch, development branch,
 and linting/testing are configured.
 
 Runs as the first phase of the Frontend Tech Lead Agent.
-Uses shared.git_utils only. No frontend_team code.
+Uses shared.git_utils and shared.command_runner.scaffolding (for ESLint/Vitest
+config templates). No frontend_team code.
 """
 
 from __future__ import annotations

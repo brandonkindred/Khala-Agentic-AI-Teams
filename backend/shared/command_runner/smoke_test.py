@@ -47,6 +47,56 @@ def _build_nvm_command(final_cmd: str, fallback_cmd: list[str]) -> list[str]:
     return ["bash", "-c", script]
 
 
+def _run_dev_server_process(  # pragma: no cover  # integration-only: starts a real dev server subprocess
+    run_cmd: list[str],
+    cwd: Path,
+    running_log_label: str,
+    success_stdout: str,
+    not_found_stderr: str,
+    failure_log_label: str,
+) -> CommandResult:
+    """
+    Start *run_cmd* as a subprocess and wait up to SERVE_TIMEOUT seconds.
+
+    A process still running when the timeout elapses is treated as smoke-test
+    success (the dev server started) and is killed before returning. A process
+    that exits within the timeout returns ``success=proc.returncode == 0``.
+    ``FileNotFoundError`` and other startup errors are reported as failures.
+    """
+    try:
+        proc = subprocess.Popen(
+            run_cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            preexec_fn=os.setsid,
+        )
+
+        try:
+            stdout, stderr = proc.communicate(timeout=SERVE_TIMEOUT)
+            return CommandResult(
+                success=proc.returncode == 0,
+                exit_code=proc.returncode,
+                stdout=stdout or "",
+                stderr=stderr or "",
+            )
+        except subprocess.TimeoutExpired:
+            logger.info("%s is running (good) - killing smoke test process", running_log_label)
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait(timeout=5)
+            return CommandResult(success=True, exit_code=0, stdout=success_stdout, stderr="")
+    except FileNotFoundError:
+        return CommandResult(success=False, exit_code=-1, stdout="", stderr=not_found_stderr)
+    except Exception as e:
+        logger.exception("%s failed", failure_log_label)
+        return CommandResult(success=False, exit_code=-1, stdout="", stderr=str(e))
+
+
 def run_frontend_serve_smoke_test(  # pragma: no cover  # integration-only: starts a real dev server subprocess
     project_path: str | Path, port: int = 4299, framework: str = ""
 ) -> CommandResult:
@@ -94,53 +144,14 @@ def run_npm_start_smoke_test(
     if run_cmd[0] == "bash":
         logger.info("Using NVM (node %s) for npm %s smoke test", FRONTEND_NODE_VERSION, start_cmd)
 
-    try:
-        proc = subprocess.Popen(
-            run_cmd,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            preexec_fn=os.setsid,
-        )
-
-        try:
-            stdout, stderr = proc.communicate(timeout=SERVE_TIMEOUT)
-            return CommandResult(
-                success=proc.returncode == 0,
-                exit_code=proc.returncode,
-                stdout=stdout or "",
-                stderr=stderr or "",
-            )
-        except subprocess.TimeoutExpired:
-            logger.info("Dev server is running (good) - killing smoke test process")
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                proc.wait(timeout=5)
-            return CommandResult(
-                success=True,
-                exit_code=0,
-                stdout="Frontend dev server started successfully (smoke test passed)",
-                stderr="",
-            )
-    except FileNotFoundError:
-        return CommandResult(
-            success=False,
-            exit_code=-1,
-            stdout="",
-            stderr="npm not found",
-        )
-    except Exception as e:
-        logger.exception("npm start smoke test failed")
-        return CommandResult(
-            success=False,
-            exit_code=-1,
-            stdout="",
-            stderr=str(e),
-        )
+    return _run_dev_server_process(
+        run_cmd,
+        cwd,
+        running_log_label="Dev server",
+        success_stdout="Frontend dev server started successfully (smoke test passed)",
+        not_found_stderr="npm not found",
+        failure_log_label="npm start smoke test",
+    )
 
 
 def run_ng_serve_smoke_test(
@@ -170,52 +181,11 @@ def run_ng_serve_smoke_test(
             NVM_NODE_FALLBACK_VERSION,
         )
 
-    try:
-        proc = subprocess.Popen(
-            run_cmd,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            preexec_fn=os.setsid,
-        )
-
-        try:
-            stdout, stderr = proc.communicate(timeout=SERVE_TIMEOUT)
-            # If process exited within timeout, it probably failed
-            return CommandResult(
-                success=proc.returncode == 0,
-                exit_code=proc.returncode,
-                stdout=stdout or "",
-                stderr=stderr or "",
-            )
-        except subprocess.TimeoutExpired:
-            # Process is still running = server started successfully
-            logger.info("ng serve is running (good) - killing smoke test process")
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                proc.wait(timeout=5)
-            return CommandResult(
-                success=True,
-                exit_code=0,
-                stdout="Angular dev server started successfully (smoke test passed)",
-                stderr="",
-            )
-    except FileNotFoundError:  # pragma: no cover
-        return CommandResult(
-            success=False,
-            exit_code=-1,
-            stdout="",
-            stderr="npx/ng not found - Angular CLI may not be installed",
-        )
-    except Exception as e:  # pragma: no cover
-        logger.exception("ng serve smoke test failed")
-        return CommandResult(
-            success=False,
-            exit_code=-1,
-            stdout="",
-            stderr=str(e),
-        )
+    return _run_dev_server_process(
+        run_cmd,
+        cwd,
+        running_log_label="ng serve",
+        success_stdout="Angular dev server started successfully (smoke test passed)",
+        not_found_stderr="npx/ng not found - Angular CLI may not be installed",
+        failure_log_label="ng serve smoke test",
+    )

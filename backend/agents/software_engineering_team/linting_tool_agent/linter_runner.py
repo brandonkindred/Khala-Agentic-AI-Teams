@@ -9,7 +9,6 @@ import logging
 import re
 import shutil
 from pathlib import Path
-from typing import List
 
 from shared.command_runner.runner import run_command
 
@@ -211,7 +210,7 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
     )
 
 
-def parse_lint_output(raw_output: str, linter_name: str) -> List[LintIssue]:
+def parse_lint_output(raw_output: str, linter_name: str) -> list[LintIssue]:
     """Parse linter stdout/stderr into structured ``LintIssue`` objects.
 
     Supports ruff, flake8, ng_lint, and eslint output formats.
@@ -225,8 +224,8 @@ def parse_lint_output(raw_output: str, linter_name: str) -> List[LintIssue]:
     return _parse_ruff_flake8(raw_output)
 
 
-def _parse_ruff_flake8(raw: str) -> List[LintIssue]:
-    issues: List[LintIssue] = []
+def _parse_ruff_flake8(raw: str) -> list[LintIssue]:
+    issues: list[LintIssue] = []
     for line in raw.splitlines():
         m = _RUFF_FLAKE8_RE.match(line.strip())
         if m:
@@ -245,8 +244,8 @@ def _parse_ruff_flake8(raw: str) -> List[LintIssue]:
     return issues
 
 
-def _parse_ng_lint(raw: str) -> List[LintIssue]:
-    issues: List[LintIssue] = []
+def _parse_ng_lint(raw: str) -> list[LintIssue]:
+    issues: list[LintIssue] = []
     current_file = ""
     for line in raw.splitlines():
         stripped = line.strip()
@@ -283,8 +282,8 @@ def _parse_ng_lint(raw: str) -> List[LintIssue]:
     return issues
 
 
-def _parse_eslint(raw: str) -> List[LintIssue]:
-    issues: List[LintIssue] = []
+def _parse_eslint(raw: str) -> list[LintIssue]:
+    issues: list[LintIssue] = []
     current_file = ""
     for line in raw.splitlines():
         stripped = line.strip()

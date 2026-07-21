@@ -4,7 +4,11 @@ Angular-specific repair helpers.
 Best-effort fixes applied to a generated/existing Angular project before a
 build, so common agent-generated omissions (a missing @angular/common dep,
 stale tsconfig moduleResolution, a missing Material theme import, etc.)
-don't fail the build outright.
+don't fail the build outright. Repair functions:
+``_ensure_angular_common_in_package_json``, ``_ensure_angular_material_in_package_json``,
+``_ensure_tsconfig_module_resolution``, ``_ensure_material_theme_in_styles``,
+``_ensure_provide_animations_in_config``, ``_ensure_app_config_di_token_imports``,
+``_ensure_reactive_forms_module_in_components``, ``_normalize_double_at_angular``.
 """
 
 from __future__ import annotations
@@ -51,10 +55,14 @@ def _insert_after_last_import(lines: list[str], new_line: str) -> None:
 
 def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:  # pragma: no cover
     """
-    Run ng build with Node version Angular CLI needs. When NVM is available, use
-    NVM to install and use FRONTEND_NODE_VERSION first. When NVM is not
-    found, return an explicit failure instead of using system Node (which is
-    often too old for Angular CLI).
+    Apply the best-effort Angular repair helpers to *project_path* — package.json
+    deps (``@angular/common``, ``@angular/material``/``@angular/cdk``), tsconfig
+    moduleResolution, the Material theme import, ``provideAnimations``, app.config.ts
+    DI token imports, ``ReactiveFormsModule`` on components using formGroup, and
+    ``@@angular`` typo normalization — then run ng build with the Node version
+    Angular CLI needs. When NVM is available, use NVM to install and use
+    FRONTEND_NODE_VERSION first. When NVM is not found, return an explicit failure
+    instead of using system Node (which is often too old for Angular CLI).
     """
     cwd = Path(project_path).resolve()
     _ensure_angular_common_in_package_json(cwd)
@@ -306,7 +314,9 @@ def _normalize_double_at_angular(
                 logger.warning("Could not normalize @@angular in %s: %s", path.name, e)
 
 
-def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
+def _ensure_reactive_forms_module_in_components(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular component .ts files
     """
     Ensure components that use formGroup/formControlName/formArrayName in their
     template import ReactiveFormsModule. Scans .component.html files and adds
@@ -315,9 +325,7 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
     src = cwd / "src"
     if not src.exists():
         return
-    for html_path in src.rglob(
-        "*.component.html"
-    ):  # pragma: no cover  # integration-only: rewrites real Angular component .ts files
+    for html_path in src.rglob("*.component.html"):
         try:
             html_content = html_path.read_text(encoding="utf-8")
             if (

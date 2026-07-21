@@ -24,12 +24,11 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Dict
 
-from strands import Agent  # noqa: E402
+from strands import Agent
 
-from llm_service import get_strands_model  # noqa: E402
-from shared.repo_context.repo_utils import find_repo_files  # noqa: E402
+from llm_service import get_strands_model
+from shared.repo_context.repo_utils import find_repo_files
 
 logger = logging.getLogger(__name__)
 
@@ -415,7 +414,7 @@ def _try_build_fix_one_at_a_time(
         return False, "Unsupported agent_type for build fix"
 
     # Read current files from project_dir (relative paths)
-    current_files: Dict[str, str] = {}
+    current_files: dict[str, str] = {}
     ext_map = {
         "frontend": (".ts", ".tsx", ".html", ".scss", ".css", ".js", ".jsx"),
         "backend": (".py",),

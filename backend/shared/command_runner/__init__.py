@@ -20,12 +20,14 @@ Layout:
       it compiles and runs
     - ``error_parsing``   — the failure parser (was ``shared/error_parsing.py``)
 
-All submodules are stdlib-only at import time. ``runner`` lazily imports
-``error_parsing`` (inside ``CommandResult.parsed_failures``) and the two
-leaf modules it dispatches to from ``run_frontend_build``/``run_linter``;
-``scaffolding`` lazily imports ``shared.git`` (inside
-``ensure_backend_project_initialized``). All are in-package or in-platform
-imports and carry no team dependency.
+``runner`` is the dependency-free base (stdlib-only at import time). The other
+submodules import from sibling modules at load time along an acyclic graph:
+``runner`` <- ``nvm`` <- ``angular_repair`` / ``scaffolding`` / ``smoke_test``.
+``runner`` itself lazily imports ``error_parsing``
+(inside ``CommandResult.parsed_failures``) and the two leaf modules it
+dispatches to from ``run_frontend_build``/``run_linter``; ``scaffolding``
+lazily imports ``shared.git`` (inside ``ensure_backend_project_initialized``).
+All are in-package or in-platform imports and carry no team dependency.
 
 Preconditions:
     - ``backend/`` is on ``sys.path`` (the repo-wide convention for
