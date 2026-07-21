@@ -11,6 +11,18 @@ three-step incantation — build, call, coerce-or-fallback — was duplicated
 verbatim across all four; this module collapses it to one definition. Each
 agent keeps its own log messages, system prompt (or per-mode prompt
 selection), and fallback field values as call-site data.
+
+Decision record: ``devops_team``'s single-shot JSON agents standardize on
+``complete_json_with_continuation`` (``software_engineering_team.shared.llm``)
+instead, since all of them already called it before any standardization
+effort began — no helper migration is needed there. ``run_structured_persona``
+stays the pattern only for the four callers named above. Moving
+``devops_team`` onto ``run_structured_persona`` instead was considered and
+deferred: it would require defining a ``fallback_factory`` per devops agent,
+plus verifying Strands' ``structured_output_model`` mechanism against the
+nested models several devops outputs carry (``DevOpsCompletionPackage``,
+``IaCExecutionError``, ``ReviewFinding``) — work that is out of scope for the
+devops template standardization this module supports.
 """
 
 from __future__ import annotations
