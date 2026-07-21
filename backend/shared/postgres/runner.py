@@ -71,6 +71,11 @@ def register_team_schemas(schema: TeamSchema) -> bool:
     Returns ``True`` when the schema was applied, ``False`` when
     Postgres is disabled. Safe to call unconditionally from any team's
     startup hook — teams that don't run in Docker stay a no-op.
+
+    Note: the name is plural for historical reasons even though it
+    takes a single ``TeamSchema``; ``registry.register_all_team_schemas``
+    is the entry point that loops over every team and calls this once
+    per team.
     """
     if not is_postgres_enabled():
         logger.info(
