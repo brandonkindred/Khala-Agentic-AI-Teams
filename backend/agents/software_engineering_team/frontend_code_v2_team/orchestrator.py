@@ -110,9 +110,9 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
     """
-    Frontend Development Agent: runs the 4-phase cycle (Planning → Execution →
-    Documentation → Deliver) with per-microtask review gates embedded in the
-    Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
+    Frontend Development Agent: runs the 5-phase lifecycle (Pre-flight → Planning →
+    Execution → Documentation → Deliver) with per-microtask review gates embedded
+    in the Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
     :class:`BaseV2DevelopmentAgent`; supplies the frontend tooling detection,

@@ -89,9 +89,9 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     """
-    Backend Development Agent: runs the 4-phase cycle (Planning → Execution →
-    Documentation → Deliver) with per-microtask review gates embedded in the
-    Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
+    Backend Development Agent: runs the 5-phase lifecycle (Pre-flight → Planning →
+    Execution → Documentation → Deliver) with per-microtask review gates embedded
+    in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
     :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
