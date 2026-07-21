@@ -32,15 +32,19 @@ logger = logging.getLogger(__name__)
 def _insert_after_last_import(lines: list[str], new_line: str) -> None:
     """Insert *new_line* right after the last leading `import ` line in *lines*, in place.
 
+    Blank lines and `//` comment lines interspersed among the leading imports
+    don't end the scan early — only a real code line does.
+
     Preconditions: *lines* is a list of source lines (no trailing newlines).
     Postconditions: *lines* has *new_line* inserted after the last contiguous
         leading import line, or at index 0 if there are none.
     """
     insert_idx = 0
     for i, line in enumerate(lines):
-        if line.strip().startswith("import "):
+        stripped = line.strip()
+        if stripped.startswith("import "):
             insert_idx = i + 1
-        elif insert_idx > 0 and not line.strip().startswith("import "):
+        elif insert_idx > 0 and stripped and not stripped.startswith("//"):
             break
     lines.insert(insert_idx, new_line.rstrip())
 
@@ -330,18 +334,9 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
                 continue
             if "import { ReactiveFormsModule }" not in ts_content:
                 lines = ts_content.split("\n")
-                insert_idx = 0
-                for i, line in enumerate(lines):
-                    if line.strip().startswith("import "):
-                        insert_idx = i + 1
-                    elif (
-                        insert_idx > 0
-                        and not line.strip().startswith("import ")
-                        and line.strip()
-                        and not line.strip().startswith("//")
-                    ):
-                        break
-                lines.insert(insert_idx, "import { ReactiveFormsModule } from '@angular/forms';")
+                _insert_after_last_import(
+                    lines, "import { ReactiveFormsModule } from '@angular/forms';"
+                )
                 ts_content = "\n".join(lines)
             imports_match = re.search(r"imports:\s*\[", ts_content)
             if not imports_match:

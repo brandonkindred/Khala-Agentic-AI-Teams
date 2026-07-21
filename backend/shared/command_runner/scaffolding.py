@@ -14,7 +14,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from shared.command_runner.nvm import (
     _get_nvm_script_prefix,
@@ -650,24 +650,17 @@ body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
     )
 
     # Create docs folder for documentation
-    docs_dir = cwd / "docs"
-    if not docs_dir.exists():
-        docs_dir.mkdir(parents=True, exist_ok=True)
-        _write_if_missing(docs_dir / ".gitkeep", "")
+    _ensure_docs_folder(cwd)
 
-    # Update package.json with lint/test scripts
-    pkg_path = cwd / "package.json"
-    if pkg_path.exists():
-        try:
-            pkg_data = json.loads(pkg_path.read_text(encoding="utf-8"))
-            scripts = pkg_data.get("scripts", {})
-            scripts.setdefault("lint", "npx ng lint")
-            scripts.setdefault("test", "vitest run")
-            scripts.setdefault("test:coverage", "vitest run --coverage")
-            pkg_data["scripts"] = scripts
-            pkg_path.write_text(json.dumps(pkg_data, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.warning("Could not update package.json scripts: %s", e)
+    # Update package.json with lint/test scripts (preserve any existing ones)
+    def _add_angular_scripts(pkg_data: dict) -> None:
+        scripts = pkg_data.get("scripts", {})
+        scripts.setdefault("lint", "npx ng lint")
+        scripts.setdefault("test", "vitest run")
+        scripts.setdefault("test:coverage", "vitest run --coverage")
+        pkg_data["scripts"] = scripts
+
+    _update_package_json_scripts(cwd, _add_angular_scripts)
 
     logger.info("Angular project initialized successfully at %s", cwd)
     return CommandResult(
@@ -705,10 +698,7 @@ def _scaffold_react_project(
     (src / "types").mkdir(parents=True, exist_ok=True)
 
     # Create docs folder for documentation
-    docs_dir = cwd / "docs"
-    if not docs_dir.exists():
-        docs_dir.mkdir(parents=True, exist_ok=True)
-        _write_if_missing(docs_dir / ".gitkeep", "")
+    _ensure_docs_folder(cwd)
 
     # Pin Node version for nvm use
     _write_if_missing(cwd / ".nvmrc", FRONTEND_NODE_VERSION + "\n")
@@ -728,22 +718,18 @@ def _scaffold_react_project(
         "});\n",
     )
 
-    # Update package.json with scripts
-    pkg_path = cwd / "package.json"
-    if pkg_path.exists():
-        try:
-            pkg_data = json.loads(pkg_path.read_text(encoding="utf-8"))
-            pkg_data["scripts"] = {
-                "dev": "vite",
-                "build": "tsc && vite build",
-                "preview": "vite preview",
-                "test": "vitest run",
-                "test:coverage": "vitest run --coverage",
-                "lint": "eslint .",
-            }
-            pkg_path.write_text(json.dumps(pkg_data, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.warning("Could not update package.json scripts: %s", e)
+    # Update package.json with scripts (wholesale replace, unlike Angular's merge)
+    def _set_react_scripts(pkg_data: dict) -> None:
+        pkg_data["scripts"] = {
+            "dev": "vite",
+            "build": "tsc && vite build",
+            "preview": "vite preview",
+            "test": "vitest run",
+            "test:coverage": "vitest run --coverage",
+            "lint": "eslint .",
+        }
+
+    _update_package_json_scripts(cwd, _set_react_scripts)
 
     logger.info("React project initialized successfully at %s", cwd)
     return CommandResult(
@@ -760,6 +746,34 @@ def _write_if_missing(filepath: Path, content: str) -> None:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content, encoding="utf-8")
         logger.info("Created %s", filepath)
+
+
+def _ensure_docs_folder(cwd: Path) -> None:
+    """Create ``cwd/docs`` with a placeholder ``.gitkeep`` if it doesn't exist yet."""
+    docs_dir = cwd / "docs"
+    if not docs_dir.exists():
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        _write_if_missing(docs_dir / ".gitkeep", "")
+
+
+def _update_package_json_scripts(cwd: Path, mutate: Callable[[dict], None]) -> None:
+    """Read ``cwd/package.json``, apply *mutate* to its parsed contents, and write it back.
+
+    Preconditions: *mutate* mutates its dict argument in place (typically
+        ``data["scripts"]``); it does not need to return anything.
+    Postconditions: no-op if ``package.json`` doesn't exist. Best-effort — any
+        read/parse/write error is logged and swallowed, matching the rest of
+        this module's scaffolding helpers.
+    """
+    pkg_path = cwd / "package.json"
+    if not pkg_path.exists():
+        return
+    try:  # pragma: no cover  # integration-only: exercised only when a real npm init wrote package.json
+        pkg_data = json.loads(pkg_path.read_text(encoding="utf-8"))
+        mutate(pkg_data)
+        pkg_path.write_text(json.dumps(pkg_data, indent=2), encoding="utf-8")
+    except Exception as e:  # pragma: no cover  # integration-only: see try above
+        logger.warning("Could not update package.json scripts: %s", e)
 
 
 # Python/FastAPI .gitignore for backend projects (no Node patterns)
