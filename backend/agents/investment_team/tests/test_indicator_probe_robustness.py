@@ -1664,6 +1664,33 @@ def test_positive_symbol_in_return_guard_is_denylist() -> None:
     assert report.coverage_category is CC.INDICATOR_FILTER_TOO_RESTRICTIVE
 
 
+def test_second_denylist_guard_unions_with_first() -> None:
+    """Two sequential exclude-shaped early-return guards union their
+    denylists (``current_denied |= syms`` in ``_visit``) rather than the
+    second guard replacing the first."""
+    n = 30
+    aapl = flat_close_df(200.0, n=n)
+    msft = flat_close_df(200.0, n=n)
+    goog = flat_close_df(50.0, n=n)
+    code = textwrap.dedent("""
+        class S:
+            def on_bar(self, ctx, bar):
+                if bar.symbol == "AAPL":
+                    return
+                if bar.symbol == "MSFT":
+                    return
+                if close > 100:
+                    pass
+    """)
+    report = run_indicator_probe(
+        strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft, "GOOG": goog}
+    )
+    # If the second guard replaced rather than unioned the denylist, AAPL
+    # (close=200, excluded only by the first guard) would leak back in as
+    # a passing bar and the category would be COVERAGE_OK instead.
+    assert report.coverage_category is CC.INDICATOR_FILTER_TOO_RESTRICTIVE
+
+
 def test_negative_symbol_return_guard_unchanged() -> None:
     aapl = flat_close_df(200.0)
     msft = flat_close_df(50.0)
@@ -1884,3 +1911,121 @@ def test_renamed_bar_param_preserves_early_return_guard() -> None:
     report = run_indicator_probe(strategy_code=code, market_data={"AAPL": aapl, "MSFT": msft})
     assert report.coverage_category is CC.INDICATOR_FILTER_TOO_RESTRICTIVE
     assert "[AAPL]" in report.subconditions[0].label
+
+
+# ────────────────────────────────────────────────────────────────────────
+# § 19  Branch-coverage parity: unmodelled OR legs / global leg-budget cap
+#
+# Closes the branch-coverage gaps identified for issue #1786 in
+# ``SubconditionVisitor._process_if`` / ``_process_or_if`` / ``_visit``
+# (``coverage_probe/subcondition_visitor.py``). Reproduce with:
+#   pytest investment_team/tests/ -m "not integration" \
+#     --cov=investment_team.strategy_lab.coverage_probe.subcondition_visitor \
+#     --cov=investment_team.strategy_lab.coverage_probe.subcond_builder \
+#     --cov-branch --cov-report=term-missing
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_fully_unmodelled_nested_or_in_and_taints_group() -> None:
+    """A nested ``(A or B)`` AND-conjunct where BOTH legs are unrecognised
+    can't be modelled by ``_build_compound_subcond`` at all (returns
+    ``None``); ``_process_if``'s AND-conjunct loop must still tag the
+    group as unknown rather than silently dropping the whole disjunction."""
+    code = textwrap.dedent("""
+        class S:
+            def on_bar(self, ctx, bar):
+                if close > 0 and (self.custom_ok(bar) or self.other_flag(bar)):
+                    pass
+    """)
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
+    assert report.coverage_category is CC.UNKNOWN_LOW_COVERAGE
+
+
+def test_or_leg_unmodellable_compare_marks_unknown() -> None:
+    """An OR leg that's a ``Compare`` neither a symbol gate nor buildable
+    by ``_build_subcond`` (an opaque ``self.<attr> == <literal>``) must be
+    tracked as an unknown leg, not silently dropped from the group."""
+    code = make_strategy("self.flag == True or close > 1000")
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
+    assert report.coverage_category is CC.UNKNOWN_LOW_COVERAGE
+
+
+def test_or_leg_truthy_indicator_name_is_recognized() -> None:
+    """A bare truthiness OR leg (``bool(name)``) that resolves to a bound
+    indicator evaluator must be recognised and added as its own leg —
+    the OR-leg counterpart of the AND-side ``bool(_entry)`` cases in § 4."""
+    code = textwrap.dedent("""
+        class S:
+            def on_bar(self, ctx, bar):
+                _entry = sma(close, 5)
+                if bool(_entry) or close > 1000:
+                    pass
+    """)
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
+    assert report.coverage_category is CC.COVERAGE_OK
+    labels = [sc.label for sc in report.subconditions]
+    assert "bool(_entry)" in labels
+
+
+# The global per-run leg budget (``_MAX_SUBCONDITIONS`` in
+# indicator_probe.py) caps the total number of subcondition rows a single
+# ``run_indicator_probe`` call may emit. A 16-conjunct AND exactly
+# saturates it, so any predicate processed afterwards observes an
+# already-exhausted budget — exercising the ``_visit``/``_process_if``
+# failure-propagation paths without needing an unrealistically large
+# strategy.
+_SIXTEEN_LEG_AND = " and ".join(f"close > {i}" for i in range(1, 17))
+
+
+def test_budget_exhaustion_propagates_through_body_visit() -> None:
+    """A prior statement that saturates the global leg budget makes a
+    later nested-if body visit report failure; ``_process_if`` must
+    propagate that failure rather than swallow it."""
+    code = textwrap.dedent(f"""
+        class S:
+            def on_bar(self, ctx, bar):
+                if {_SIXTEEN_LEG_AND}:
+                    if close > 0:
+                        pass
+    """)
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
+    # Best-effort under the cap: the walk completes without raising even
+    # though the nested predicate's own group is dropped once the budget
+    # is spent, and at most 16 subcondition rows are ever emitted.
+    assert len(report.subconditions) <= 16
+
+
+def test_budget_exhaustion_propagates_through_orelse_visit() -> None:
+    """Same as above but the budget-exhausted nested if lives in the
+    ``orelse`` branch instead of ``body``."""
+    code = textwrap.dedent(f"""
+        class S:
+            def on_bar(self, ctx, bar):
+                if {_SIXTEEN_LEG_AND}:
+                    pass
+                else:
+                    if close > 0:
+                        pass
+    """)
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
+    assert len(report.subconditions) <= 16
+
+
+def test_budget_exhaustion_in_static_false_prescan_orelse() -> None:
+    """A statically-false AND-conjunct routes to ``orelse`` in
+    ``_process_if``'s pre-scan; when the global budget is already
+    saturated by a preceding statement, that ``orelse`` visit itself
+    reports failure and the pre-scan branch must propagate it."""
+    code = textwrap.dedent(f"""
+        class S:
+            def on_bar(self, ctx, bar):
+                if {_SIXTEEN_LEG_AND}:
+                    pass
+                if False and close > 0:
+                    pass
+                else:
+                    if close > 0:
+                        pass
+    """)
+    report = run_indicator_probe(strategy_code=code, market_data={"AAPL": flat_ohlcv()})
+    assert len(report.subconditions) <= 16

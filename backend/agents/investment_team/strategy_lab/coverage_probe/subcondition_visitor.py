@@ -643,7 +643,9 @@ class SubconditionVisitor:
                     )
                 )
             return False
-        if group_ancestors or group_or_legs:
+        if (
+            group_ancestors or group_or_legs
+        ):  # pragma: no cover — own_subs was already confirmed non-empty above (line 602 returns early otherwise), so a successful _budgeted_extend always leaves group_or_legs non-empty; the False arm is structurally unreachable
             self._groups.append(
                 build_or_group(
                     group_ancestors,

@@ -16,6 +16,38 @@ reference below is the canonical home for those knobs (CLAUDE.md and `docs/ENV_V
 point here). All numeric vars parse defensively: garbage → documented default,
 out-of-range → clamped to the documented floor/ceiling unless noted.
 
+## Branch coverage for `coverage_probe`
+
+`coverage_probe/subcondition_visitor.py` (`SubconditionVisitor._process_if` / `_process_or_if`
+/ `_visit`) and `coverage_probe/subcond_builder.py` (`_build_compound_subcond`) are the
+highest-branch-density code in the Strategy Lab team — they walk arbitrary strategy ASTs with
+deep AND/OR/position-gate/symbol-gate dispatch. The team-wide 90% **line**-coverage gate
+(`backend/pyproject.toml`, `fail_under = 90`) can pass here while a combinatorial branch path
+inside one of those conditionals stays untested, so these two modules get a dedicated
+**branch**-coverage check whenever they change, on top of the standard line-coverage gate.
+
+Re-run it locally from `backend/agents/`:
+
+```bash
+LLM_PROVIDER=dummy pytest investment_team/tests/ -m "not integration" \
+  --cov=investment_team --cov-branch --cov-report=term-missing --cov-fail-under=90
+```
+
+then check the `subcondition_visitor.py` / `subcond_builder.py` rows in the report for any
+`NN->MM` partial-branch arc or bare missing line number that falls inside
+`_process_if`/`_process_or_if`/`_visit`/`_build_compound_subcond`. (`--cov` accepts the two
+modules' dotted paths directly, e.g.
+`--cov=investment_team.strategy_lab.coverage_probe.subcondition_visitor`, for a narrower
+report — but do that from a shell where nothing else has imported `investment_team` first, as
+combining a dotted `--cov` target with an already-warm interpreter has been observed to trip
+NumPy's "cannot load module more than once per process" guard; the whole-package
+`--cov=investment_team` form above doesn't hit this.) Close any real gap with a new
+`run_indicator_probe(strategy_code=...)`-driven test case (see
+`investment_team/tests/test_indicator_probe_robustness.py` § 19 for the established pattern,
+including the global 16-leg-budget exhaustion cases); mark a branch `# pragma: no cover` only
+when it is structurally unreachable given the function's actual call sites, with a one-line
+justification, matching the existing pragma markers in both modules.
+
 ## Environment Variables
 
 ### STRATEGY_LAB_MARKET_DATA_*
