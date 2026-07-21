@@ -1,16 +1,18 @@
 """Shared Postgres access helpers for branding_team's store classes.
 
-Not yet consumed by ``store.py``, ``assistant/store.py``, or ``api/state.py``
-(that migration is tracked separately) — this module only establishes the
-helper. It reproduces the exact ``get_conn()`` / ``cursor(row_factory=dict_row)``
-semantics those stores hand-write in every method today, so adopting it later
-is a drop-in replacement.
+Consumed by ``store.py`` (``BrandingStore``); ``assistant/store.py`` and
+``api/state.py`` still hand-write their own scaffolding (tracked separately).
+This module reproduces the exact ``get_conn()`` / ``cursor(row_factory=dict_row)``
+semantics those stores hand-write in every method, so adopting it is a
+drop-in replacement.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
+from psycopg import Cursor
 from psycopg.rows import dict_row
 
 from shared.postgres import get_conn
@@ -36,3 +38,17 @@ class PostgresHelperMixin:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql, params)
             return cur.rowcount
+
+    @contextmanager
+    def _transaction(self) -> Iterator[Cursor]:
+        """Yield a dict-row cursor for statements that must share one transaction.
+
+        ``_fetch_one``/``_fetch_all``/``_execute`` each run a single statement
+        on its own connection. Some call sites — a check-then-insert, or a
+        ``SELECT ... FOR UPDATE`` guarding the write that follows — need more
+        than one statement to commit or roll back together. This opens one
+        connection and yields its cursor so the caller can issue multiple
+        ``execute()`` calls against it.
+        """
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            yield cur
