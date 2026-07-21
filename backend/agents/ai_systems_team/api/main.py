@@ -337,7 +337,7 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
         job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
     ):
         return AISystemJobResponse(
-            job_id=job_id, status="running", message="Job resumed (Temporal)."
+            job_id=job_id, status=JOB_STATUS_RUNNING, message="Job resumed (Temporal)."
         )
 
     thread = threading.Thread(
@@ -349,7 +349,7 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
     thread.start()
 
     return AISystemJobResponse(
-        job_id=job_id, status="running", message="Job resumed. Skipping completed phases."
+        job_id=job_id, status=JOB_STATUS_RUNNING, message="Job resumed. Skipping completed phases."
     )
 
 
@@ -378,7 +378,7 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
         job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
     ):
         return AISystemJobResponse(
-            job_id=job_id, status="running", message="Job restarted (Temporal)."
+            job_id=job_id, status=JOB_STATUS_RUNNING, message="Job restarted (Temporal)."
         )
 
     thread = threading.Thread(
@@ -389,7 +389,7 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
     thread.start()
 
     return AISystemJobResponse(
-        job_id=job_id, status="running", message="Job restarted from scratch."
+        job_id=job_id, status=JOB_STATUS_RUNNING, message="Job restarted from scratch."
     )
 
 
