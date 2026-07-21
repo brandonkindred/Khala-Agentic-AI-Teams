@@ -118,7 +118,7 @@ def render_knowledge_summary(entries: list[KnowledgeEntry], max_chars: int = 400
     parts: list[str] = []
     total = 0
     for e in entries:
-        line = f"- [{e.agent_name}] {e.finding[:200]}"
+        line = f"- [{e.agent_name}] {e.finding}"
         if total + len(line) > max_chars:
             parts.append(f"... and {len(entries) - len(parts)} more entries (truncated)")
             break

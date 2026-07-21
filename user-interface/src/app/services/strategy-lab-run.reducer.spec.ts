@@ -355,7 +355,12 @@ describe('reduce (strategy-lab-run.reducer)', () => {
     });
 
     it('caps errored_details at the most recent 50 entries', () => {
-      const existing = Array.from({ length: 50 }, (_, i) => ({ cycle_index: i, error: `err-${i}` }));
+      const existing = Array.from({ length: 50 }, (_, i) => ({
+        cycle_index: i,
+        batch_index: 0,
+        error: `err-${i}`,
+        exception_type: 'ValueError',
+      }));
       const state: StrategyLabRunStatus = { ...baseState, errored_cycles: 50, errored_details: existing };
       const event: StrategyLabStreamEvent = {
         type: 'cycle_errored',
@@ -374,7 +379,12 @@ describe('reduce (strategy-lab-run.reducer)', () => {
         error: 'newest',
         exception_type: 'ValueError',
       });
-      expect(result?.errored_details?.[0]).toEqual({ cycle_index: 1, error: 'err-1' });
+      expect(result?.errored_details?.[0]).toEqual({
+        cycle_index: 1,
+        batch_index: 0,
+        error: 'err-1',
+        exception_type: 'ValueError',
+      });
     });
 
     it('stores the tracker_merge_failed marker under `reason` (not exception_type), matching the backend', () => {

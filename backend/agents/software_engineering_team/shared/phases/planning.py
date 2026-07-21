@@ -54,9 +54,9 @@ def build_context(
         f"**{language_label}:** {language}",
     ]
     if architecture:
-        parts.extend(["", "**Architecture overview:**", architecture.overview[:3000]])
+        parts.extend(["", "**Architecture overview:**", architecture.overview])
     if existing_code and existing_code != "# No code files found":
-        parts.extend(["", "**Existing codebase (excerpt):**", existing_code[:6000]])
+        parts.extend(["", "**Existing codebase (excerpt):**", existing_code])
     return "\n".join(parts)
 
 
@@ -220,7 +220,7 @@ def plan_fixes_impl(  # pragma: no cover  # integration-only: LLM-driven re-plan
         f"- [{i.severity}] {i.description} (file: {i.file_path or 'N/A'}) → {i.recommendation}"
         for i in unresolved_issues
     )
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:15])[:8000]
+    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:15])
     prompt = planning_fixes_prompt.format(
         issues_text=issues_text,
         existing_code=code_text or "(no code)",

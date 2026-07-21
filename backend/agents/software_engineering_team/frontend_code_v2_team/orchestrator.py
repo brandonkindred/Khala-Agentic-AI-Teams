@@ -317,41 +317,7 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
             status_text="Starting code implementation...",
         )
 
-        def _progress_cb(
-            current_index: int,
-            done: int,
-            total: int,
-            title: str,
-            microtask_phase: str = "coding",
-            phase_detail: str = "",
-        ) -> None:
-            phase_labels = {
-                "coding": "Writing code",
-                "code_review": "Code review",
-                "qa_testing": "QA testing",
-                "security_testing": "Security testing",
-                "documentation": "Documentation",
-                "review": "Reviewing",
-                "problem_solving": "Fixing issues",
-                "completed": "Completed",
-            }
-            phase_label = phase_labels.get(
-                microtask_phase, microtask_phase.replace("_", " ").title()
-            )
-            status = f"{phase_label}: {title} ({current_index}/{total})"
-            if phase_detail:
-                status = f"{status} — {phase_detail}"
-            _update_job(
-                current_phase="execution",
-                current_microtask=title,
-                current_microtask_phase=microtask_phase,
-                phase_detail=phase_detail,
-                current_microtask_index=current_index,
-                microtasks_completed=done,
-                microtasks_total=total,
-                progress=min(15 + int(done / max(total, 1) * 60), 75),
-                status_text=status,
-            )
+        progress_callback = self._build_progress_callback(_update_job, review_label="Reviewing")
 
         review_deps = ReviewDependencies(
             build_verifier=build_verifier,
@@ -374,7 +340,7 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
                 spec_content=spec_content,
                 existing_code=existing_code,
                 tool_runners=tool_runners,
-                progress_callback=_progress_cb,
+                progress_callback=progress_callback,
                 review_config=config,
                 review_deps=review_deps,
             )

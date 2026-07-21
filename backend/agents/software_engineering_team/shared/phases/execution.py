@@ -25,12 +25,6 @@ from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 
-# Hard char caps on the existing-code excerpt inlined into the general coder's
-# prompt (no LLM-aware compaction here, unlike the code-review coordinator's
-# excerpts -- this is a plain truncation to bound prompt size cheaply).
-_GENERAL_MICROTASK_EXISTING_CODE_CHARS = 8_000
-_TOOL_AGENT_EXISTING_CODE_CHARS = 6_000
-
 # Iteration budget for the gated loop's own final documentation self-review pass.
 # Deliberately its own (lower) constants rather than reusing
 # review_utils.MIN/MAX_DOC_SELF_REVIEW_ITERATIONS (3/3): this pass runs once per
@@ -375,9 +369,7 @@ def _run_general_microtask_impl(
     fmt: Dict[str, Any] = dict(
         microtask_description=microtask.description or microtask.title,
         requirements=task.requirements or task.description,
-        existing_code=existing_code[:_GENERAL_MICROTASK_EXISTING_CODE_CHARS]
-        if existing_code
-        else "(none)",
+        existing_code=existing_code or "(none)",
         architecture_context=arch_ctx or "(none)",
     )
     if profile.has_language_conventions:
@@ -431,7 +423,7 @@ def generate_microtask_files(
         inp = models.ToolAgentInput(
             microtask=mt,
             repo_path=str(repo_path),
-            existing_code=existing_code[:_TOOL_AGENT_EXISTING_CODE_CHARS] if existing_code else "",
+            existing_code=existing_code or "",
             language=planning_result.language,
         )
         out = runner(inp)

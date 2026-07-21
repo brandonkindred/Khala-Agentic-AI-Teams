@@ -153,7 +153,7 @@ class TrendDiscoveryAgent:
             )
 
         snippets_text = _format_snippets(all_results)
-        prompt = _SYNTHESIS_PROMPT.format(snippets=snippets_text[:60_000])  # stay within context
+        prompt = _SYNTHESIS_PROMPT.format(snippets=snippets_text)  # stay within context
 
         topics: List[TrendingTopic] = []
         try:

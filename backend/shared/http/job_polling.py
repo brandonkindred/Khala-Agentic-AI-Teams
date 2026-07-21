@@ -8,9 +8,12 @@ process-wide pooled client already used by ``job_service_client.py``. This
 module is the single home for those primitives.
 
 Invariants:
-    - post_json/get_json never raise on transport/HTTP/parse failure; they log
-      a WARNING tagged with ``log_context`` and return None. Callers decide
-      what "could not complete request" means for their operation.
+    - post_json/get_json enforce their preconditions via ``assert`` (raising
+      AssertionError on violation — a caller bug, per this repo's
+      Design-by-Contract convention). Once preconditions hold, they never
+      raise on transport/HTTP/parse failure; they log a WARNING tagged with
+      ``log_context`` and return None instead. Callers decide what "could not
+      complete request" means for their operation.
     - poll_until_terminal never busy-waits past ``total_timeout`` and never
       raises; a ``status_fn()`` failure (returns None or raises) or a timeout
       both yield a dict shaped like a terminal-failure status (``{status_key:
@@ -58,7 +61,9 @@ def post_json(
         - On a 2xx response with a JSON body, returns the parsed value.
         - On any httpx transport error, non-2xx status, or JSON parse
           failure, logs a WARNING prefixed with ``log_context`` and returns
-          None. Never raises.
+          None. Never raises for these failure modes (a precondition
+          violation, per the ``Preconditions`` above, still raises
+          AssertionError).
         - Reuses the process-wide pooled client; never opens/closes a client.
     """
     assert url, "url must be non-empty"

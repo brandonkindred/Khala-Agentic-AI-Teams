@@ -74,7 +74,7 @@ class JsonGeneratorToolAgent:
         agent = self._agent_factory()(model=self._model)
         prompt = self.PROMPT.format(
             microtask=inp.microtask.description or inp.microtask.title,
-            spec=inp.spec_context[:MAX_SPEC_CHARS],
+            spec=inp.spec_context,
         )
         raw = str(agent(prompt)).strip()
         data = extract_json_object(raw)

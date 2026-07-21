@@ -251,6 +251,46 @@ def test_wrapper_temporal_block_registers_every_schema_and_continues_past_failur
     assert worker_started == [True]  # worker still starts despite the mid-list failure
 
 
+def test_wrapper_temporal_block_skips_schema_registration_when_temporal_address_unset(
+    monkeypatch,
+) -> None:
+    """Executes the generated Temporal-block source with TEMPORAL_ADDRESS unset,
+    proving the multi-schema change made no behavior change to the existing
+    no-op path: neither register_team_schemas nor the worker start function is
+    ever called, for a team with multiple postgres_schemas configured."""
+    import logging
+    import sys
+    import types
+
+    import shared.postgres
+
+    body = entrypoint.build_wrapper_body(
+        "planning_team",
+        "planning_team.api.main",
+        "app",
+        "planning_team.temporal.worker",
+        "start_planning_temporal_worker_thread",
+    )
+    temporal_block = body[body.index("try:\n    import os as _os") :]
+
+    def _fail_if_called(schema):
+        raise AssertionError("register_team_schemas must not be called when TEMPORAL_ADDRESS is unset")
+
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", _fail_if_called)
+
+    worker_started: list[bool] = []
+    fake_worker_mod = types.ModuleType("planning_team.temporal.worker")
+    fake_worker_mod.start_planning_temporal_worker_thread = lambda: worker_started.append(True) or True
+    monkeypatch.setitem(sys.modules, "planning_team.temporal.worker", fake_worker_mod)
+    monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
+
+    fake_app = types.SimpleNamespace(state=types.SimpleNamespace(postgres_schemas=(object(), object())))
+    namespace = {"app": fake_app, "_log": logging.getLogger("test_wrapper_temporal_block_noop")}
+    exec(compile(temporal_block, "<temporal-block>", "exec"), namespace)  # noqa: S102
+
+    assert worker_started == []  # worker never started
+
+
 def test_temporal_names_embedded_safely() -> None:
     """Worker module/func names are embedded via repr(), so a hostile value
     cannot inject code — the wrapper still compiles and the payload survives

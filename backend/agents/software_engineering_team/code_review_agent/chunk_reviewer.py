@@ -29,6 +29,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import os
 from typing import List, Optional, Union
 
 from llm_service import LLMClient, LLMJsonParseError
@@ -46,6 +47,10 @@ from .models import ChunkReviewInput, ChunkReviewOutput
 from .profiles import build_review_system_prompt
 
 logger = logging.getLogger(__name__)
+
+# Extensions recognized as Python when a chunk's language isn't declared and
+# must be guessed from its file path. Mirrors code_boundaries._PYTHON_EXTS.
+_PYTHON_FILE_EXTS = (".py", ".pyi")
 
 CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review only the code below. Report issues with file_path set to the path provided for this chunk.\n"
 
@@ -84,6 +89,23 @@ FINAL_OUTPUT_CONTRACT_NOTE = (
     "(approved, issues, summary, spec_compliance_notes). "
     "Do not emit reasoning, analysis, or any prose outside that JSON object."
 )
+
+
+def _guess_language_from_label(file_path_or_label: str) -> Optional[str]:
+    """Guess a chunk's language from the extension of its first file path.
+
+    ``file_path_or_label`` may join several paths with ", " and mark partial
+    segments with a trailing " (lines A-B of N)" — this looks only at the
+    first path's extension.
+
+    Postconditions:
+        - Returns ``"python"`` for a ``.py``/``.pyi`` path; ``None`` otherwise
+          (including an empty or path-less label), so callers can apply their
+          own default.
+    """
+    first = file_path_or_label.split(",", 1)[0].split(" (", 1)[0].strip()
+    ext = os.path.splitext(first)[1].lower()
+    return "python" if ext in _PYTHON_FILE_EXTS else None
 
 
 class ChunkReviewAgent:
@@ -206,8 +228,9 @@ def _run_chunk_review(
 
     language = input_data.language.strip().lower() if input_data.language else ""
     if not language:
-        # Fallback guess for legacy callers that did not declare a language.
-        language = "python" if "def " in code_chunk else "typescript"
+        # Fallback for legacy callers that did not declare a language: derive
+        # it from the chunk's file extension rather than guessing from content.
+        language = _guess_language_from_label(input_data.file_path_or_label) or "typescript"
 
     context_parts = [CHUNK_REVIEW_NOTE, REVIEW_GUARDRAILS_NOTE]
     if input_data.segment_note:

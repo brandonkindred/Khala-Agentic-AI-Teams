@@ -499,7 +499,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
                 failure_class=FailureClass.YAML_PARSE_ERROR,
                 file_path=file_path,
                 message=msg,
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix YAML syntax: indentation, colons, and quoting.",
                 playbook_hint=PLAYBOOK_YAML_SYNTAX,
             )
@@ -518,7 +518,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"COPY failed: {src} - {err}",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion=f"Ensure '{src}' exists in the build context. Check path and .dockerignore.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -537,7 +537,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"Docker build failed: {msg}",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix the Dockerfile: valid base image, correct paths, working RUN commands.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -556,7 +556,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"RUN command failed: {detail}",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix the failing RUN step: check package names, install commands, and paths.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -569,7 +569,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message="Docker build failed",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix the Dockerfile and build context. Check COPY paths and RUN commands.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -581,7 +581,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.UNKNOWN,
                 message="Unrecognized DevOps failure",
-                raw_excerpt=text[:2000] if text else "",
+                raw_excerpt=text if text else "",
             )
         )
     return failures

@@ -338,17 +338,29 @@ def test_chunk_review_agent_passes_blank_file_path_through_unchanged() -> None:
 
 
 def test_declared_language_reaches_prompt_without_heuristic() -> None:
-    """The caller's language is used verbatim; the def-sniffing heuristic only
+    """The caller's language is used verbatim; the extension-based fallback only
     applies when no language was declared."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
-    # No "def " in the chunk: the heuristic alone would say typescript.
     agent.run(_chunk_input(code_chunk="TIMEOUT = 30", language="python"))
     assert "**Language:** python" in client.prompts[0]
 
+    # No language declared: falls back to the ".py" extension of the default
+    # file_path_or_label ("app/main.py"), not a "typescript" guess.
     fallback_client = _RecorderClient()
     ChunkReviewAgent(llm=fallback_client).run(_chunk_input(code_chunk="TIMEOUT = 30"))
-    assert "**Language:** typescript" in fallback_client.prompts[0]
+    assert "**Language:** python" in fallback_client.prompts[0]
+
+
+def test_undeclared_language_falls_back_to_typescript_for_non_python_path() -> None:
+    """A chunk with no declared language and a non-Python file extension still
+    falls back to "typescript" — the extension-based guess only recognizes
+    .py/.pyi as Python."""
+    client = _RecorderClient()
+    ChunkReviewAgent(llm=client).run(
+        _chunk_input(file_path_or_label="app/app.component.ts", language="")
+    )
+    assert "**Language:** typescript" in client.prompts[0]
 
 
 def test_final_output_contract_note_follows_the_code_block() -> None:

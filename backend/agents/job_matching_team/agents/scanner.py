@@ -126,7 +126,7 @@ class JobScannerAgent:
             return None
 
         prompt = (
-            f"Source URL: {hit.url}\nSearch title: {hit.title}\n\nPage text:\n{page_text[:8000]}"
+            f"Source URL: {hit.url}\nSearch title: {hit.title}\n\nPage text:\n{page_text}"
         )
         try:
             data = self._client().complete_json(

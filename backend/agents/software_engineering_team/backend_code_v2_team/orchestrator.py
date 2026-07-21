@@ -99,62 +99,6 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     """
 
     @staticmethod
-    def _build_progress_callback(update_job: Callable[..., None]) -> Callable[..., None]:
-        """Build the per-microtask progress callback handed to the execution loop.
-
-        Extracted from ``run_workflow`` so the phase-label mapping + progress
-        math are unit-isolated from the workflow body and the closure no longer
-        buries ~30 lines inside ``run_workflow``.
-
-        Preconditions: ``update_job`` is the run_workflow job-update callable
-          (forwards kwargs to the job updater; the run_workflow closure swallows
-          its failures).
-        Postconditions: returns a callback
-          ``(current_index, done, total, title, microtask_phase, phase_detail)
-          -> None`` that maps the microtask phase to a human label and reports
-          progress (15..75%% of the job) via ``update_job``; never raises into
-          the execution loop.
-        """
-        phase_labels = {
-            "coding": "Writing code",
-            "code_review": "Code review",
-            "qa_testing": "QA testing",
-            "security_testing": "Security testing",
-            "documentation": "Documentation",
-            "review": "Reviewing code",
-            "problem_solving": "Fixing issues",
-            "completed": "Completed",
-        }
-
-        def _progress_cb(
-            current_index: int,
-            done: int,
-            total: int,
-            title: str,
-            microtask_phase: str = "coding",
-            phase_detail: str = "",
-        ) -> None:
-            phase_label = phase_labels.get(
-                microtask_phase, microtask_phase.replace("_", " ").title()
-            )
-            status = f"{phase_label}: {title} ({current_index}/{total})"
-            if phase_detail:
-                status = f"{status} — {phase_detail}"
-            update_job(
-                current_phase="execution",
-                current_microtask=title,
-                current_microtask_phase=microtask_phase,
-                phase_detail=phase_detail,
-                current_microtask_index=current_index,
-                microtasks_completed=done,
-                microtasks_total=total,
-                progress=min(15 + int(done / max(total, 1) * 60), 75),
-                status_text=status,
-            )
-
-        return _progress_cb
-
-    @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = _BACKEND_REPO_BRIEFING_MAX_CHARS) -> str:
         """Read Python/Java source files from repo into a single string.
 

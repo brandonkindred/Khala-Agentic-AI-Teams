@@ -312,7 +312,7 @@ def _get_spec_content_for_job(data: Dict[str, Any]) -> str:
         from software_engineering_team.spec_parser import get_latest_spec_content
 
         content = get_latest_spec_content(repo)
-        return content[:12000]
+        return content
     except FileNotFoundError:
         return ""
 

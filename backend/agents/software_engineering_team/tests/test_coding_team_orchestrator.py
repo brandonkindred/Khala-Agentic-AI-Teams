@@ -2495,6 +2495,74 @@ def test_task_creation_grooming_failure_falls_back_for_that_task_only(tmp_path, 
     assert graph.get_task("t2").description == "d2"  # ungroomed description preserved
 
 
+def test_groom_fanout_runs_concurrently(tmp_path, monkeypatch):
+    """Per-task grooming is dispatched via shared_concurrency.parallel_map, not a sequential loop:
+    a barrier that only releases when both groom calls are in flight at once must be crossed. A
+    serial loop would never release the barrier and would time out instead of grooming both tasks."""
+    import threading
+
+    barrier = threading.Barrier(2, timeout=10)
+
+    class BarrierGroomingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [
+                    {"id": "t1", "title": "T1", "description": "d1", "dependencies": []},
+                    {"id": "t2", "title": "T2", "description": "d2", "dependencies": []},
+                ],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+        def run_groom_task(
+            self, task_id, task_title, task_description, task_dependencies, plan_context
+        ):
+            # Blocks until both groom calls reach here; serial execution never releases it.
+            barrier.wait()
+            return {
+                "acceptance_criteria": [f"AC for {task_id}"],
+                "out_of_scope": "",
+                "description_enriched": task_description,
+                "priority": "medium",
+                "subtasks": [],
+                "task_dependencies": task_dependencies,
+            }
+
+    captured: Dict[str, Any] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            captured["graph"] = k["graph"]
+
+        def run(self, **kw):
+            pass
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", BarrierGroomingTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    # Both grooms completed ⇒ the barrier was crossed ⇒ they genuinely ran concurrently.
+    graph = captured["graph"]
+    assert graph.get_task("t1").acceptance_criteria == ["AC for t1"]
+    assert graph.get_task("t2").acceptance_criteria == ["AC for t2"]
+
+
 def test_groomed_acceptance_criteria_reaches_code_review(tmp_path, monkeypatch):
     """A task's grooming output (acceptance_criteria), once populated on the graph by the
     orchestrator's task-creation wiring, flows through to the Tech Lead's code review call --

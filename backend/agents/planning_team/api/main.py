@@ -17,7 +17,13 @@ from typing import Any, Dict
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-# Ensure backend/agents is on path for job_service_client and software_engineering_team.shared.llm
+# Defensive fallback only: in real invocations `backend/agents` is already importable —
+# team_service/Dockerfile sets PYTHONPATH=/app:/app/agents:... for the planning-service
+# container, and backend/pytest.ini sets `pythonpath = agents .` for the test suite. This
+# guard exists for any invocation mode outside those two (e.g. running this file directly
+# without PYTHONPATH set) so that `llm_service`, `planning_team.models`,
+# `planning_team.orchestrator`, `planning_team.postgres`, and `planning_team.shared.job_store`
+# below can still resolve. It is a no-op when the path is already present.
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))

@@ -24,6 +24,7 @@ from software_engineering_team.shared.agent_review import (
 )
 from software_engineering_team.shared.llm_review import LlmReviewOutput, run_team_llm_review
 from software_engineering_team.shared.models import ReviewContext, Task
+from software_engineering_team.shared.phases.review import run_code_review_phase_impl
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -37,8 +38,6 @@ from software_engineering_team.shared.review_utils import (
 from software_engineering_team.shared.security_service import is_blocking
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 from software_engineering_team.shared.v2_review import (
-    _code_review_step,
-    _lint_passed,
     _review_steps_run_sequentially,  # noqa: F401  (re-exported for tests)
 )
 from software_engineering_team.shared.v2_review import (
@@ -311,103 +310,33 @@ def run_code_review_phase(
 
     This is the first phase after coding, focusing on code quality, syntax,
     and adherence to coding standards.
+
+    Thin wrapper over the shared parametrised implementation
+    (:func:`software_engineering_team.shared.phases.review.run_code_review_phase_impl`)
+    driven by this team's :data:`REVIEW_CONFIG`. ``_run_build_verification`` and
+    ``_run_llm_review`` are referenced here by bare module-global name (resolved
+    at call time, not captured at import time), so this module stays the test
+    patch surface for ``Agent`` / ``resolve_text_mode_strands_model`` /
+    ``_run_build_verification`` -- exactly the technique ``run_review`` /
+    ``run_microtask_review`` already use for the same reason.
     """
-    task_id = task.id
-    microtask_id = microtask.id
-    issues: List[ReviewIssue] = []
-
-    logger.info(
-        "[%s] Code review phase for %s (%d files). Next step -> Build verification, lint, code review",
-        task_id,
-        microtask_id,
-        len(files),
-    )
-
-    if detail_callback:
-        detail_callback("Running build verification...")
-    build_ok, build_msg = _run_build_verification(repo_path, build_verifier, task_id)
-    if not build_ok:
-        issues.append(
-            ReviewIssue(
-                source="build",
-                severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg}",
-                recommendation="Fix build errors before proceeding.",
-            )
-        )
-
-    lint_ok = True
-    if linting_tool_agent is not None:
-        if detail_callback:
-            detail_callback("Running linter...")
-        try:
-            from software_engineering_team.linting_tool_agent.models import (
-                LintToolInput as _LintInput,
-            )
-
-            lint_result = linting_tool_agent.run(
-                _LintInput(
-                    repo_path=str(repo_path),
-                    agent_type="backend",
-                    task_id=task_id,
-                    task_description=f"Microtask: {microtask.title or microtask_id}",
-                )
-            )
-            if lint_result and not _lint_passed(lint_result):
-                lint_ok = False
-                _lint_severity_map = {"error": "high", "warning": "medium", "info": "low"}
-                for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
-                    file_path = getattr(li, "file_path", "")
-                    if files and file_path and file_path not in files:
-                        continue
-                    sev = getattr(li, "severity", "medium")
-                    issues.append(
-                        ReviewIssue(
-                            source="lint",
-                            severity=_lint_severity_map.get(sev, "medium"),
-                            description=getattr(li, "message", str(li)),
-                            file_path=file_path,
-                            recommendation="",
-                        )
-                    )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Linting tool agent failed for microtask %s: %s", task_id, microtask_id, exc
-            )
-
-    if detail_callback:
-        detail_callback("Running code review...")
-    # Delegates to the shared code-review step (agent call + LLM fallback + outright-failure
-    # containment) instead of reimplementing it, so this phase never diverges from run_review's/
-    # run_microtask_review's behavior.
-    cr_out = _code_review_step(
+    return run_code_review_phase_impl(
         llm=llm,
         task=task,
-        files=files,
+        microtask=microtask,
         repo_path=repo_path,
+        files=files,
+        build_verifier=build_verifier,
         code_review_agent=code_review_agent,
-        language=language,
-        task_id=task_id,
-        task_description=f"Microtask: {microtask.description or microtask.title}",
-        llm_review_fn=_run_llm_review,
-        review_context=review_context,
+        linting_tool_agent=linting_tool_agent,
         detail_callback=detail_callback,
+        language=language,
+        review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
-    )
-    issues.extend(cr_out.issues)
-
-    critical_or_high = [i for i in issues if is_blocking(i.severity)]
-    passed = build_ok and lint_ok and len(critical_or_high) == 0
-
-    summary = f"Code review phase for {microtask_id}: build={'OK' if build_ok else 'FAIL'}, lint={'OK' if lint_ok else 'FAIL'}, {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
-    logger.info("[%s] %s", task_id, summary)
-
-    return PhaseReviewResult(
-        passed=passed,
-        issues=issues,
-        summary=summary,
-        phase_name="code_review",
-        raw_issue_count=cr_out.raw_issue_count,
+        config=REVIEW_CONFIG,
+        llm_review_fn=_run_llm_review,
+        build_verify_fn=_run_build_verification,
+        phase_review_result_cls=PhaseReviewResult,
     )
 
 

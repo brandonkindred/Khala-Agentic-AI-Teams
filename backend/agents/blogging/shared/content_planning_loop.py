@@ -265,7 +265,7 @@ def run_content_planning_loop(
                 update={
                     "title_candidates": [
                         TitleCandidate(
-                            title=plan.overarching_topic[:120],
+                            title=plan.overarching_topic,
                             probability_of_success=0.5,
                         )
                     ]

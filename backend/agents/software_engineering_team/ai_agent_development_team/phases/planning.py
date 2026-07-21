@@ -35,7 +35,7 @@ def run_planning(
         f"Constraints: {intake_result.constraints}\n"
         f"Metrics: {intake_result.success_metrics}\n"
         f"Task: {task.description}\n"
-        f"Spec:\n{(spec_content or '')[:7000]}"
+        f"Spec:\n{(spec_content or '')}"
     )
     raw = complete_json_with_continuation(llm, prompt, system_prompt=PLANNING_PROMPT)
     if not isinstance(raw, dict):

@@ -87,8 +87,8 @@ class BlogFactCheckAgent:
         )
 
         prompt = FACT_CHECK_PROMPT.format(
-            draft=draft[:12000],
-            allowed_claims_text=allowed_text[:4000],
+            draft=draft,
+            allowed_claims_text=allowed_text,
             require_disclaimer_for=", ".join(require_disclaimer_for),
         )
 

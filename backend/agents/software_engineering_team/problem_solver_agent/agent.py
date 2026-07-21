@@ -72,7 +72,7 @@ class ProblemSolverAgent:
                     "",
                     "**Current code snapshot (truncated):**",
                     "```",
-                    input_data.current_code_snapshot[:6000],
+                    input_data.current_code_snapshot,
                     "```",
                 ]
             )

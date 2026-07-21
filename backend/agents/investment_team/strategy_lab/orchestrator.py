@@ -1107,7 +1107,7 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin):
                     {
                         "rule_type": i.rule_type,
                         "severity": i.severity,
-                        "description": i.description[:160],
+                        "description": i.description,
                     }
                     for i in report.issues[:5]
                 ],
@@ -1122,9 +1122,9 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin):
                         "rule_id": f.rule_id,
                         "severity": f.severity,
                         "passed": f.passed,
-                        "details": f.details[:160],
+                        "details": f.details,
                     }
-                    for f in report.alignment_findings[:10]
+                    for f in report.alignment_findings
                 ],
                 "findings_count": len(report.alignment_findings),
             },

@@ -79,7 +79,7 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
             for tc in plan.title_candidates
         ],
         outline=outline,
-        draft_preview=draft_result.draft[:2000],
+        draft_preview=draft_result.draft,
         content_plan_summary=content_plan_summary_text(plan),
     )
 

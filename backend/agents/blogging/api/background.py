@@ -172,7 +172,7 @@ def _run_pipeline_with_tracking(
                 {"title": tc.title, "probability_of_success": tc.probability_of_success}
                 for tc in plan.title_candidates
             ]
-            draft_preview = draft_result.draft[:2000]
+            draft_preview = draft_result.draft
 
             final_status = (
                 _main.JOB_STATUS_COMPLETED if status == "PASS" else _main.JOB_STATUS_NEEDS_REVIEW

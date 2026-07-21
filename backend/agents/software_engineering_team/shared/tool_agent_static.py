@@ -156,7 +156,7 @@ class FileGeneratorToolAgent(StaticPhaseToolAgent):
         ``summary`` come from parsing the model output (empty ``files`` when the
         model returns none).
         """
-        existing = inp.existing_code[:MAX_EXISTING_CODE_CHARS] if inp.existing_code else "(none)"
+        existing = inp.existing_code or "(none)"
         prompt = self.generation_prompt.format(
             description=inp.microtask.description or inp.microtask.title,
             language=inp.language,

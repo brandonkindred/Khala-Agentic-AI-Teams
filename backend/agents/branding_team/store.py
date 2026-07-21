@@ -24,13 +24,12 @@ from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from psycopg import Cursor
-from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared.postgres import get_conn
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe
 
+from ._db import PostgresHelperMixin
 from .models import (
     Brand,
     BrandingMission,
@@ -82,7 +81,7 @@ def _apply_brand_patch(cur: Cursor, brand_id: str, client_id: str, patch: dict) 
     return Brand.model_validate(row["data"]) if row is not None else None
 
 
-class BrandingStore:
+class BrandingStore(PostgresHelperMixin):
     """Postgres-backed store for clients and brands.
 
     The constructor takes no arguments — the Postgres DSN is read from
@@ -100,9 +99,7 @@ class BrandingStore:
 
     @timed_query(store=_STORE, op="get_client")
     def get_client(self, client_id: str) -> Optional[Client]:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT data FROM branding_clients WHERE id = %s", (client_id,))
-            row = cur.fetchone()
+        row = self._fetch_one("SELECT data FROM branding_clients WHERE id = %s", (client_id,))
         if row is None:
             return None
         return Client.model_validate(row["data"])
@@ -120,15 +117,13 @@ class BrandingStore:
             ``limit`` rows starting at ``offset``.
         """
         _validate_pagination(limit, offset)
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            if limit is None:
-                cur.execute("SELECT data FROM branding_clients ORDER BY created_at, id")
-            else:
-                cur.execute(
-                    "SELECT data FROM branding_clients ORDER BY created_at, id LIMIT %s OFFSET %s",
-                    (limit, offset),
-                )
-            rows = cur.fetchall()
+        if limit is None:
+            rows = self._fetch_all("SELECT data FROM branding_clients ORDER BY created_at, id")
+        else:
+            rows = self._fetch_all(
+                "SELECT data FROM branding_clients ORDER BY created_at, id LIMIT %s OFFSET %s",
+                (limit, offset),
+            )
         return [Client.model_validate(r["data"]) for r in rows]
 
     @timed_query(store=_STORE, op="create_client")
@@ -148,11 +143,10 @@ class BrandingStore:
             contact_info=contact_info,
             notes=notes,
         )
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO branding_clients (id, data) VALUES (%s, %s)",
-                (client_id, Json(client.model_dump(mode="json"))),
-            )
+        self._execute(
+            "INSERT INTO branding_clients (id, data) VALUES (%s, %s)",
+            (client_id, Json(client.model_dump(mode="json"))),
+        )
         return client
 
     # ------------------------------------------------------------------
@@ -161,12 +155,10 @@ class BrandingStore:
 
     @timed_query(store=_STORE, op="get_brand")
     def get_brand(self, client_id: str, brand_id: str) -> Optional[Brand]:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
-                (brand_id, client_id),
-            )
-            row = cur.fetchone()
+        row = self._fetch_one(
+            "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
+            (brand_id, client_id),
+        )
         if row is None:
             return None
         return Brand.model_validate(row["data"])
@@ -180,9 +172,8 @@ class BrandingStore:
         Postconditions:
             Returns a bool; performs exactly one query and loads no JSONB.
         """
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM branding_brands WHERE id = %s LIMIT 1", (brand_id,))
-            return cur.fetchone() is not None
+        row = self._fetch_one("SELECT 1 FROM branding_brands WHERE id = %s LIMIT 1", (brand_id,))
+        return row is not None
 
     @timed_query(store=_STORE, op="get_brand_by_id")
     def get_brand_by_id(self, brand_id: str) -> Optional[Tuple[str, Brand]]:
@@ -199,12 +190,10 @@ class BrandingStore:
             Returns None when no such brand exists, else the owning client id
             paired with the validated Brand.
         """
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT client_id, data FROM branding_brands WHERE id = %s",
-                (brand_id,),
-            )
-            row = cur.fetchone()
+        row = self._fetch_one(
+            "SELECT client_id, data FROM branding_brands WHERE id = %s",
+            (brand_id,),
+        )
         if row is None:
             return None
         return row["client_id"], Brand.model_validate(row["data"])
@@ -224,12 +213,10 @@ class BrandingStore:
         unique_ids = list({bid for bid in brand_ids if bid})
         if not unique_ids:
             return {}
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT id, data FROM branding_brands WHERE id = ANY(%s)",
-                (unique_ids,),
-            )
-            rows = cur.fetchall()
+        rows = self._fetch_all(
+            "SELECT id, data FROM branding_brands WHERE id = ANY(%s)",
+            (unique_ids,),
+        )
         # Read the name straight out of the JSONB document — no need to build
         # and validate a full Brand model just to pull one field.
         return {r["id"]: r["data"].get("name") for r in rows}
@@ -249,19 +236,17 @@ class BrandingStore:
             otherwise at most ``limit`` rows starting at ``offset``.
         """
         _validate_pagination(limit, offset)
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            if limit is None:
-                cur.execute(
-                    "SELECT data FROM branding_brands WHERE client_id = %s ORDER BY created_at, id",
-                    (client_id,),
-                )
-            else:
-                cur.execute(
-                    "SELECT data FROM branding_brands WHERE client_id = %s "
-                    "ORDER BY created_at, id LIMIT %s OFFSET %s",
-                    (client_id, limit, offset),
-                )
-            rows = cur.fetchall()
+        if limit is None:
+            rows = self._fetch_all(
+                "SELECT data FROM branding_brands WHERE client_id = %s ORDER BY created_at, id",
+                (client_id,),
+            )
+        else:
+            rows = self._fetch_all(
+                "SELECT data FROM branding_brands WHERE client_id = %s "
+                "ORDER BY created_at, id LIMIT %s OFFSET %s",
+                (client_id, limit, offset),
+            )
         return [Brand.model_validate(r["data"]) for r in rows]
 
     @timed_query(store=_STORE, op="create_brand")
@@ -271,7 +256,7 @@ class BrandingStore:
         mission: BrandingMission,
         name: Optional[str] = None,
     ) -> Optional[Brand]:
-        with get_conn() as conn, conn.cursor() as cur:
+        with self._transaction() as cur:
             cur.execute("SELECT 1 FROM branding_clients WHERE id = %s", (client_id,))
             if cur.fetchone() is None:
                 return None
@@ -336,7 +321,7 @@ class BrandingStore:
             patch["name"] = name
         if conversation_id is not None:
             patch["conversation_id"] = conversation_id
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        with self._transaction() as cur:
             return _apply_brand_patch(cur, brand_id, client_id, patch)
 
     @timed_query(store=_STORE, op="append_brand_version")
@@ -358,7 +343,7 @@ class BrandingStore:
             Returns None if the brand no longer exists at write time (e.g. a
             concurrent delete between the read and the write).
         """
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        with self._transaction() as cur:
             # Read only the two fields we need to compute the next version,
             # not the whole brand document (which embeds the previous
             # latest_output — every phase's output). FOR UPDATE locks the row

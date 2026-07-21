@@ -461,11 +461,17 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
     def _fake_get_conn(database=None):
         yield _FakeConn(db, ids)
 
+    import branding_team._db as db_mod
     import branding_team.assistant.store as assistant_store_mod
     import branding_team.store as store_mod
 
-    monkeypatch.setattr(store_mod, "get_conn", _fake_get_conn)
+    # ``branding_team.store`` now routes all Postgres access through
+    # ``branding_team._db`` (see ``PostgresHelperMixin``) rather than importing
+    # ``get_conn`` itself, so only patch it there when still present.
+    if hasattr(store_mod, "get_conn"):
+        monkeypatch.setattr(store_mod, "get_conn", _fake_get_conn)
     monkeypatch.setattr(assistant_store_mod, "get_conn", _fake_get_conn)
+    monkeypatch.setattr(db_mod, "get_conn", _fake_get_conn)
 
     # ``branding_team.api.state`` imports ``get_conn`` at module scope for the
     # BrandingSessionStore. Patch there too when already imported.

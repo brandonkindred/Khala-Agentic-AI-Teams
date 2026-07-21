@@ -119,7 +119,7 @@ class IntegrationAgent:
                     "",
                     "**Project specification:**",
                     "---",
-                    input_data.spec_content[:8000],
+                    input_data.spec_content,
                     "---",
                 ]
             )

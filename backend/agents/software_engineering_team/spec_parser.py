@@ -525,11 +525,7 @@ def format_context_for_prompt(context_files: Dict[str, str]) -> str:
 
     sections = []
     for file_path, content in sorted(context_files.items()):
-        # Truncate very long files for the prompt
-        truncated = content[:8000] if len(content) > 8000 else content
-        suffix = f"\n... (truncated, {len(content)} total chars)" if len(content) > 8000 else ""
-
-        sections.append(f"### File: {file_path}\n```\n{truncated}{suffix}\n```")
+        sections.append(f"### File: {file_path}\n```\n{content}\n```")
 
     return "\n\n".join(sections)
 
