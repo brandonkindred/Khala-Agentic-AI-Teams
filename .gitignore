@@ -58,6 +58,8 @@ typings/
 !.vscode/launch.json
 !.vscode/extensions.json
 .history/
+# Kiro IDE — local per-developer workflow/spec metadata; never commit.
+.kiro/
 
 # OS
 .DS_Store
