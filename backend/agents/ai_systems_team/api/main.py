@@ -104,6 +104,31 @@ def _run_build_background(
         mark_job_failed(job_id, error=str(e))
 
 
+def _launch_background_build(
+    job_id: str,
+    project_name: str,
+    spec_path: str,
+    constraints: Dict[str, Any],
+    output_dir: Optional[str],
+    resume_blueprint: Optional[Any] = None,
+) -> None:
+    """Spawn the thread-mode background build for a job.
+
+    Preconditions:
+        A job record for job_id already exists in the job store.
+    Postconditions:
+        A daemon thread running _run_build_background has been started
+        for this job; returns immediately without waiting for it.
+    """
+    thread = threading.Thread(
+        target=_run_build_background,
+        args=(job_id, project_name, spec_path, constraints, output_dir),
+        kwargs={"resume_blueprint": resume_blueprint},
+        daemon=True,
+    )
+    thread.start()
+
+
 def _maybe_dispatch_temporal(
     job_id: str,
     project_name: str,
@@ -168,18 +193,13 @@ def start_build(request: AISystemRequest) -> AISystemJobResponse:
             message="Build started (Temporal). Poll GET /build/status/{job_id} for progress.",
         )
 
-    thread = threading.Thread(
-        target=_run_build_background,
-        args=(
-            job_id,
-            request.project_name,
-            request.spec_path,
-            request.constraints,
-            request.output_dir,
-        ),
-        daemon=True,
+    _launch_background_build(
+        job_id,
+        request.project_name,
+        request.spec_path,
+        request.constraints,
+        request.output_dir,
     )
-    thread.start()
 
     return AISystemJobResponse(
         job_id=job_id,
@@ -340,13 +360,14 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
             job_id=job_id, status=JOB_STATUS_RUNNING, message="Job resumed (Temporal)."
         )
 
-    thread = threading.Thread(
-        target=_run_build_background,
-        args=(job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")),
-        kwargs={"resume_blueprint": resume_bp},
-        daemon=True,
+    _launch_background_build(
+        job_id,
+        project_name,
+        spec_path,
+        data.get("constraints", {}),
+        data.get("output_dir"),
+        resume_blueprint=resume_bp,
     )
-    thread.start()
 
     return AISystemJobResponse(
         job_id=job_id, status=JOB_STATUS_RUNNING, message="Job resumed. Skipping completed phases."
@@ -381,12 +402,13 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
             job_id=job_id, status=JOB_STATUS_RUNNING, message="Job restarted (Temporal)."
         )
 
-    thread = threading.Thread(
-        target=_run_build_background,
-        args=(job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")),
-        daemon=True,
+    _launch_background_build(
+        job_id,
+        project_name,
+        spec_path,
+        data.get("constraints", {}),
+        data.get("output_dir"),
     )
-    thread.start()
 
     return AISystemJobResponse(
         job_id=job_id, status=JOB_STATUS_RUNNING, message="Job restarted from scratch."
