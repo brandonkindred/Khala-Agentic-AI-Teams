@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from _content_plan_test_utils import make_content_plan
 from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_writer_agent import BlogWriterAgent, ReviseWriterInput
 from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
 
 from llm_service import DummyLLMClient
+
+from ._content_plan_test_utils import make_content_plan
 
 
 def _minimal_plan() -> ContentPlan:

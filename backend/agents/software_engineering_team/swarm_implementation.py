@@ -193,9 +193,14 @@ class _ImplementationMixin:
             - ``task`` is a non-terminal task tracked by this swarm's graph that has hit the
               no-change cap (``_note_revision_progress`` returned True for it).
         Postconditions:
-            - "done": task is MERGED with ``resolved_without_changes=True`` (terminal, agent freed,
-              dependents unblocked) and the reasoning recorded.
-            - "fail": task is FAILED and its dependents cascade-failed.
+            - "done": task is MERGED (terminal, agent freed, dependents unblocked) and the
+              reasoning recorded. ``resolved_without_changes=True`` when the branch is empty (the
+              no-change cap proved only that the branch stopped changing, not that it's empty — an
+              empty branch means the work already landed elsewhere); ``resolved_without_changes=
+              False`` when the branch has real changes and they merge successfully. If a non-empty
+              branch fails to merge, the task is FAILED instead (not merged) — see below.
+            - "fail" (or any unexpected verdict — ``run_revision_adjudication`` fails closed to
+              "fail"): task is FAILED and its dependents cascade-failed.
             - "continue": ``no_change_revisits`` is reset to 0 (a fresh window) and the task returns
               to its engineer IN_PROGRESS; the 20-revision cap still ultimately bounds it.
         """
@@ -348,8 +353,6 @@ class _ImplementationMixin:
         round until the round cap. Count each occurrence against the shared revision cap and, on
         exhaustion, fail the task (and its dependents) terminally with the reason recorded.
         """
-        from software_engineering_team import coding_team_orchestrator as _orch
-
         if result.get("status") == "in_progress":
             reason = "Engineer did not mark the work ready for review"
         else:
@@ -363,8 +366,10 @@ class _ImplementationMixin:
         # feedback is now persisted, so the status writes below need not re-pass it).
         if self._escalate_if_no_change(task, [entry]):
             return
-        revision_count = task.revision_count + 1
-        if revision_count >= _orch.MAX_TASK_REVISIONS:
+
+        def _fail(revision_count: int) -> None:
+            from software_engineering_team import coding_team_orchestrator as _orch
+
             logger.warning(
                 "Task %s did not reach review and exhausted revisions (%d); marking FAILED",
                 task.id,
@@ -376,23 +381,28 @@ class _ImplementationMixin:
                 revision_count=revision_count,
             )
             self._cascade_fail_dependents(task.id)
-            return
-        # Keep it with the same engineer for another bounded attempt; record the reason.
-        self.graph.update_task(
-            task.id,
-            status=TaskStatus.IN_PROGRESS,
-            revision_count=revision_count,
-        )
+
+        def _continue(revision_count: int) -> None:
+            # Keep it with the same engineer for another bounded attempt; record the reason.
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.IN_PROGRESS,
+                revision_count=revision_count,
+            )
+
+        self._bump_and_check_revision_cap(task, on_exhausted=_fail, on_continue=_continue)
 
     def _escalate_decision(self, task: Task, result: Dict[str, Any], update_fn: Any) -> None:
         """Pause the job for a user decision a worker raised, then thread the answer back to the task.
 
         The engineer never decides the question itself. The task stays with the same engineer
         (IN_PROGRESS) so it re-implements next round with the user's decision in its feedback. An
-        escalation is NOT counted against the revision cap — a late-stage question (a task already
-        near the cap) must still get its answer implemented, not discarded. Pathological re-asking
-        is bounded by the human (each escalation needs a user answer) and the swarm's round cap. A
-        pause that ends without answers (terminal/timeout) aborts the swarm.
+        escalation does NOT bump ``revision_count`` (so it doesn't spend the revision budget), but
+        escalations are counted independently: a task that escalates ``MAX_TASK_REVISIONS`` times
+        is failed (see the ``prior_escalations`` check below) rather than paused indefinitely. A
+        well-scoped task escalating a genuinely new decision each time will not hit this in
+        practice (the default cap of 20 needs 19 prior escalations first). A pause that ends
+        without answers (terminal/timeout) aborts the swarm.
 
         Postconditions:
             - On a successful pause the task is IN_PROGRESS with a ``user_decision`` feedback entry

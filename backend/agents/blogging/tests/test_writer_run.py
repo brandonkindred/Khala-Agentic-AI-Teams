@@ -4,15 +4,16 @@ from __future__ import annotations
 
 
 def _agent():
-    from conftest import make_writer_agent
+    from .conftest import make_writer_agent
 
     return make_writer_agent()
 
 
 def _writer_input(**overrides):
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import WriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     plan = make_content_plan(
         overarching_topic="Topic",
@@ -56,9 +57,10 @@ def test_writer_run_happy_with_all_options(monkeypatch, tmp_path) -> None:
 
 
 def test_writer_run_empty_outline_returns_placeholder(monkeypatch) -> None:
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_writer_agent.models import WriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _agent()
     plan = make_content_plan(
@@ -145,11 +147,12 @@ def test_writer_run_default_length_guidance(monkeypatch) -> None:
 
 
 def test_writer_revise_single_item_happy(monkeypatch) -> None:
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _agent()
     monkeypatch.setattr(
@@ -180,11 +183,12 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
 
 def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     """All 2 attempts at _call_agent fail; _call_agent_json succeeds."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _agent()
     import agents.blogging.blog_writer_agent.agent as wa_mod
@@ -223,11 +227,12 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
 
 def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -> None:
     """All retries + fallback fail → original draft returned."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _agent()
     import agents.blogging.blog_writer_agent.agent as wa_mod
@@ -266,10 +271,11 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
 
 def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
     """Smoke test the prompt building helper with title + stories + length_guidance."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _agent()
     item = FeedbackItem(category="x", severity="minor", issue="i")
@@ -303,10 +309,11 @@ def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
 
 
 def test_writer_build_revise_single_item_prompt_default_length() -> None:
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     a = _agent()
     item = FeedbackItem(category="x", severity="minor", issue="i")
