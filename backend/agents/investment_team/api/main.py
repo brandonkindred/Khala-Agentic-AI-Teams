@@ -3144,7 +3144,9 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
 
     Raises:
         - ``HTTPException`` 404: no state found in either ``_active_runs`` or
-          the job-service fallback.
+          the job-service fallback. Job-service reconciliation failures are
+          caught and logged (``logger.debug``), falling back to the
+          in-memory state rather than propagating.
     """
     _TERMINAL = STRATEGY_LAB_TERMINAL_STATUSES
 
@@ -3167,7 +3169,7 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
                             ).get("error")
                             state = _active_runs[run_id]
         except Exception:
-            pass
+            logger.debug("Job service reconciliation failed for run %s", run_id, exc_info=True)
 
     if not state:
         state = _load_run_from_job_service(run_id)
