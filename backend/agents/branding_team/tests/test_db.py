@@ -58,6 +58,20 @@ def test_fetch_all_returns_all_rows(fake_pg: dict) -> None:
     assert sorted(r["data"]["id"] for r in rows) == ["client_1", "client_2"]
 
 
+def test_transaction_shares_one_cursor_across_statements(fake_pg: dict) -> None:
+    probe = _Probe()
+
+    with probe._transaction() as cur:
+        cur.execute(
+            "INSERT INTO branding_clients (id, data) VALUES (%s, %s)",
+            ("client_1", Json({"id": "client_1", "name": "Acme"})),
+        )
+        cur.execute("SELECT data FROM branding_clients WHERE id = %s", ("client_1",))
+        row = cur.fetchone()
+
+    assert row == {"data": {"id": "client_1", "name": "Acme"}}
+
+
 def test_execute_rowcount_reflects_matched_rows(fake_pg: dict) -> None:
     probe = _Probe()
     now = datetime.now(tz=timezone.utc)
