@@ -20,6 +20,9 @@ import {
   gateSeverityClass as pureGateSeverityClass,
   type GateViewModel,
   flattenObjectRows,
+  entryRuleRows,
+  exitRuleRows,
+  sizingRows,
 } from '../strategy-lab.formatters';
 import type {
   PaperTradingSession,
@@ -35,9 +38,9 @@ import type {
  * tracking, delete-in-flight, pagination, paper-trading-in-flight all live on
  * the host, which passes the derived value for *this* record down as
  * `@Input()`s) and performs no externally-observable side effects beyond a
- * clipboard write (`copyStrategyCode()`) and internal memoization caches
- * (`gateViewModels()`) — every user action that matters to the host is
- * reported up via the `@Output()`s below.
+ * clipboard write and confirmation flash (`copyStrategyCode()`) and an
+ * internal memoization cache (`gateViewModels()`) — every user action that
+ * matters to the host is reported up via the `@Output()`s below.
  *
  * Preconditions: `record` is set before the first render (required input).
  * Postconditions: renders identically for the same `record`/inputs regardless
@@ -99,6 +102,9 @@ export class StrategyCardComponent implements OnDestroy {
   readonly returnColorLabel = returnColorLabel;
   readonly verdictColor = verdictColor;
   readonly flattenObjectRows = flattenObjectRows;
+  readonly entryRuleRows = entryRuleRows;
+  readonly exitRuleRows = exitRuleRows;
+  readonly sizingRows = sizingRows;
 
   /** True for ~1.5s after `copyStrategyCode()` runs, flashing a confirmation icon on the copy button. */
   strategyCodeCopied = false;
@@ -115,14 +121,18 @@ export class StrategyCardComponent implements OnDestroy {
    * Copy the generated strategy code to the clipboard, flashing a confirmation icon.
    * Mirrors `CodingTeamPageComponent.copyJobId()`'s pattern.
    *
-   * Preconditions: `code` is the non-empty string currently rendered in the panel.
-   * Postconditions: `strategyCodeCopied` is true for ~1.5s regardless of clipboard
-   *   availability (the reset timer is tracked so it is cancelled on destroy and
-   *   never fires twice); `code` is written to the clipboard only when the
-   *   Clipboard API is available, and a rejected clipboard write is swallowed so
-   *   it cannot surface as an unhandled rejection.
+   * Preconditions: none — a falsy `code` (e.g. if ever invoked outside the
+   *   template's `@if (strategyCode(); as code)` guard) is a safe no-op rather
+   *   than a caller contract violation.
+   * Postconditions: a falsy `code` leaves all state unchanged. Otherwise, `code`
+   *   is written to the clipboard when the Clipboard API is available (a no-op
+   *   when it isn't) with any write rejection swallowed so it cannot surface as
+   *   an unhandled rejection; `strategyCodeCopied` is set true for ~1.5s
+   *   regardless of clipboard availability or write outcome (the reset timer is
+   *   tracked so it is cancelled on destroy and never fires twice).
    */
   copyStrategyCode(code: string): void {
+    if (!code) return;
     navigator.clipboard?.writeText(code).catch(() => {
       // Clipboard write can reject (permission denied, insecure context); ignore — the user can
       // still read/select the code manually.
