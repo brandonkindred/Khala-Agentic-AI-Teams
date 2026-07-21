@@ -27,6 +27,26 @@ from shared.command_runner.runner import (
 logger = logging.getLogger(__name__)
 
 
+def _build_nvm_command(final_cmd: str, fallback_cmd: list[str]) -> list[str]:
+    """
+    Build a ``bash -c`` command that activates FRONTEND_NODE_VERSION via NVM
+    (falling back to NVM_NODE_FALLBACK_VERSION if that install fails) before
+    running ``final_cmd``.
+
+    Returns ``fallback_cmd`` unchanged when NVM isn't available on this system.
+    """
+    nvm_prefix = _get_nvm_script_prefix()
+    if nvm_prefix is None:
+        return fallback_cmd
+    script = (
+        f"{nvm_prefix} && "
+        f"{{ nvm install {FRONTEND_NODE_VERSION} --no-progress && nvm use {FRONTEND_NODE_VERSION}; }} || "
+        f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
+        f"{final_cmd}"
+    )
+    return ["bash", "-c", script]
+
+
 def run_frontend_serve_smoke_test(  # pragma: no cover  # integration-only: starts a real dev server subprocess
     project_path: str | Path, port: int = 4299, framework: str = ""
 ) -> CommandResult:
@@ -70,18 +90,9 @@ def run_npm_start_smoke_test(
     except Exception:
         pass
 
-    nvm_prefix = _get_nvm_script_prefix()
-    if nvm_prefix is not None:
-        script = (
-            f"{nvm_prefix} && "
-            f"{{ nvm install {FRONTEND_NODE_VERSION} --no-progress && nvm use {FRONTEND_NODE_VERSION}; }} || "
-            f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
-            f"npm run {start_cmd}"
-        )
-        run_cmd: list[str] = ["bash", "-c", script]
+    run_cmd = _build_nvm_command(f"npm run {start_cmd}", ["npm", "run", start_cmd])
+    if run_cmd[0] == "bash":
         logger.info("Using NVM (node %s) for npm %s smoke test", FRONTEND_NODE_VERSION, start_cmd)
-    else:
-        run_cmd = ["npm", "run", start_cmd]
 
     try:
         proc = subprocess.Popen(
@@ -148,22 +159,16 @@ def run_ng_serve_smoke_test(
     cwd = Path(project_path).resolve()
     logger.info("Starting ng serve smoke test on port %s in %s", port, cwd)
 
-    nvm_prefix = _get_nvm_script_prefix()
-    if nvm_prefix is not None:
-        script = (
-            f"{nvm_prefix} && "
-            f"{{ nvm install {FRONTEND_NODE_VERSION} --no-progress && nvm use {FRONTEND_NODE_VERSION}; }} || "
-            f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
-            f"npx ng serve --port {port} --no-open"
-        )
-        run_cmd: list[str] = ["bash", "-c", script]
+    run_cmd = _build_nvm_command(
+        f"npx ng serve --port {port} --no-open",
+        ["npx", "ng", "serve", "--port", str(port), "--no-open"],
+    )
+    if run_cmd[0] == "bash":
         logger.info(
             "Using NVM (node %s, fallback %s) for ng serve smoke test",
             FRONTEND_NODE_VERSION,
             NVM_NODE_FALLBACK_VERSION,
         )
-    else:
-        run_cmd = ["npx", "ng", "serve", "--port", str(port), "--no-open"]
 
     try:
         proc = subprocess.Popen(

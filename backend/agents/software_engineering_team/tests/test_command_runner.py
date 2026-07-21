@@ -17,6 +17,7 @@ from shared.command_runner.angular_repair import (
 from shared.command_runner.nvm import _get_nvm_script_prefix
 from shared.command_runner.runner import (
     CommandResult,
+    detect_frontend_framework,
     is_ng_build_environment_failure,
     patch_json_file,
     patch_text_file,
@@ -148,6 +149,50 @@ def test_is_ng_build_environment_failure_code_error_returns_false() -> None:
         success=False, exit_code=1, stdout="", stderr="TS2304: Cannot find name 'foo'"
     )
     assert is_ng_build_environment_failure(r) is False
+
+
+def test_detect_frontend_framework_angular_json(tmp_path: Path) -> None:
+    """An angular.json file alone is sufficient to detect Angular."""
+    (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "angular"
+
+
+def test_detect_frontend_framework_angular_via_package_json(tmp_path: Path) -> None:
+    """@angular/core in dependencies detects Angular even without angular.json."""
+    pkg = {"dependencies": {"@angular/core": "^19.0.0"}}
+    (tmp_path / "package.json").write_text(_json.dumps(pkg), encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "angular"
+
+
+def test_detect_frontend_framework_react_via_package_json(tmp_path: Path) -> None:
+    """react in devDependencies detects React."""
+    pkg = {"devDependencies": {"react": "^18.0.0"}}
+    (tmp_path / "package.json").write_text(_json.dumps(pkg), encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "react"
+
+
+def test_detect_frontend_framework_vue_via_package_json(tmp_path: Path) -> None:
+    """vue in dependencies detects Vue."""
+    pkg = {"dependencies": {"vue": "^3.0.0"}}
+    (tmp_path / "package.json").write_text(_json.dumps(pkg), encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "vue"
+
+
+def test_detect_frontend_framework_vue_config_file(tmp_path: Path) -> None:
+    """A vue.config.js file detects Vue when package.json is absent."""
+    (tmp_path / "vue.config.js").write_text("", encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "vue"
+
+
+def test_detect_frontend_framework_malformed_package_json_ignored(tmp_path: Path) -> None:
+    """Unparseable package.json is swallowed, falling through to unknown."""
+    (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "unknown"
+
+
+def test_detect_frontend_framework_unknown(tmp_path: Path) -> None:
+    """An empty project directory detects as unknown."""
+    assert detect_frontend_framework(tmp_path) == "unknown"
 
 
 @patch("shared.command_runner.runner.subprocess.run")

@@ -15,13 +15,13 @@ from shared.command_runner.runner import run_command
 
 from .models import LintExecutionResult, LintIssue, LintPlan
 
+logger = logging.getLogger(__name__)
+
 
 def _is_command_available(cmd: str) -> bool:
     """Check if a command is available on the system PATH."""
     return shutil.which(cmd) is not None
 
-
-logger = logging.getLogger(__name__)
 
 # Regex for ruff / flake8 output: ``file.py:10:1: E501 Line too long``
 _RUFF_FLAKE8_RE = re.compile(
@@ -171,7 +171,8 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
         - ``plan`` is a valid ``LintPlan`` produced by ``detect_linter``.
         - ``repo_path`` exists and is a directory.
     Postconditions:
-        - Returns ``LintExecutionResult`` with ``success=True`` when no violations.
+        - Returns ``LintExecutionResult`` with ``success=True`` when no violations,
+          or when ``plan.linter_name == "none"`` (no linter available to run).
     """
     # Handle skip case when no linter is available
     if plan.linter_name == "none" or not plan.linter_command:

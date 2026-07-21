@@ -97,9 +97,6 @@ FRONTEND_NODE_VERSION = "22"
 # Fallback Node version if FRONTEND_NODE_VERSION install fails (e.g. lts/* = current LTS).
 NVM_NODE_FALLBACK_VERSION = "lts/*"
 
-# Legacy alias for backwards compatibility
-ANGULAR_NODE_VERSION = FRONTEND_NODE_VERSION
-
 # Angular npm package version pin, shared by angular_repair (dependency repairs)
 # and scaffolding (new-project dependency install).
 ANGULAR_VERSION = "^19.0.0"
@@ -140,7 +137,8 @@ class CommandResult:
         """
         For pytest runs: extract the failure/error section so agents see the real
         error (e.g. ImportError, assertion) not the session header (rootdir: ...).
-        Falls back to error_summary if no ERRORS/FAILURES section found.
+        Falls back to the full combined stdout+stderr (truncated to max_chars) if
+        no ERRORS/FAILURES/collection-error marker is found.
         """
         if self.success:
             return ""
@@ -460,7 +458,10 @@ def run_python_syntax_check(project_path: str | Path) -> CommandResult:  # pragm
 def run_linter(project_path: str | Path, agent_type: str) -> CommandResult:  # pragma: no cover
     """Run the project linter and return the result.
 
-    For backend (Python): runs ``ruff check .`` (fast, zero-config default).
+    For backend (Python): runs ``ruff check .`` by default, falling back to
+    ``flake8 .`` when the project's config (``.flake8``, ``setup.cfg``'s
+    ``[flake8]`` section, or ``pyproject.toml`` lacking a ``[tool.ruff]``
+    section) points at flake8 instead.
     For frontend: runs ``npx ng lint`` (Angular) or ``npx eslint .``.
     Returns a ``CommandResult`` whose ``success`` is True when there are zero violations.
     """

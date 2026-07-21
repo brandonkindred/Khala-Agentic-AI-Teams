@@ -135,11 +135,12 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
 
 
 def _ensure_package_script(path: Path, script_name: str, script_cmd: str) -> bool:
-    """Add a script to package.json if it doesn't already exist.
+    """Add a script to package.json if it doesn't already exist, or overwrite it
+    if the existing script is a placeholder that just fails (contains "exit 1").
 
     Returns:
         True when package.json was modified, False otherwise (missing file,
-        script already present, or a read/parse error).
+        a real script already present, or a read/parse error).
     """
     pkg_json = path / "package.json"
     if not pkg_json.exists():

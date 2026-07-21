@@ -4,8 +4,9 @@ Frontend (Angular/React) and backend (FastAPI) project scaffolding.
 Writes a minimal, working project skeleton — config files, entrypoints,
 lint/test setup — so a freshly created project directory builds, lints, and
 tests cleanly before any agent-generated code is added.
-``ensure_backend_project_initialized`` additionally attempts a non-blocking
-``pip install -r requirements.txt`` after scaffolding the files.
+``ensure_backend_project_initialized`` additionally initializes a git repo
+(or commits any missing repo files onto an existing one) and attempts a
+non-blocking ``pip install -r requirements.txt`` after scaffolding the files.
 """
 
 from __future__ import annotations
