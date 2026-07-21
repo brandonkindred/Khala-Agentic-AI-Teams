@@ -42,6 +42,29 @@ def _spec() -> StrategySpec:
     )
 
 
+def _patch_refinement(monkeypatch: pytest.MonkeyPatch, agent: object, model=None) -> None:
+    """Replace the ``Agent``/``get_strands_model`` names the retry loop reads.
+
+    ``RefinementAgent._invoke_and_parse``'s unconstrained retry loop now
+    delegates to ``_agent_runner.run_json_with_parse_retry``, which builds its
+    ``Agent`` using ``_agent_runner``'s own ``Agent``/``get_strands_model``
+    names — ``refinement.py`` no longer imports ``strands.Agent`` at all, so
+    there is nothing to patch there for this path. Mirrors the pattern
+    ``test_strategy_lab_design_agent.py``'s ``_patch_design`` helper uses for
+    design's already-migrated call site. ``mod.get_strands_model`` is still
+    patched too since ``_invoke_structured``'s untouched structured-output
+    path reads it directly.
+    """
+    model_factory = model if model is not None else (lambda *_a, **_k: object())
+    monkeypatch.setattr(mod, "get_strands_model", model_factory)
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model", model_factory
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.Agent", lambda **_k: agent
+    )
+
+
 class _ScriptedAgent:
     """Strands ``Agent`` replacement returning a scripted payload per call.
 
@@ -82,10 +105,9 @@ def test_agent_key_is_strategy_refinement_not_ideation(monkeypatch: pytest.Monke
     not mis-attributed."""
     agent = _ScriptedAgent([_GOOD])
     model_keys: List[str] = []
-    monkeypatch.setattr(
-        mod, "get_strands_model", lambda key, *_a, **_k: model_keys.append(key) or object()
+    _patch_refinement(
+        monkeypatch, agent, model=lambda key, *_a, **_k: model_keys.append(key) or object()
     )
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
 
     RefinementAgent().run(
         spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
@@ -97,8 +119,7 @@ def test_agent_key_is_strategy_refinement_not_ideation(monkeypatch: pytest.Monke
 def test_retries_unparseable_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """A first no-JSON response is re-prompted; the second (valid) one is used."""
     agent = _ScriptedAgent(["I could not find a fix.", _GOOD])
-    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    _patch_refinement(monkeypatch, agent)
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
 
     updates, new_code = RefinementAgent().run(
@@ -116,8 +137,7 @@ def test_retries_malformed_braced_json_then_succeeds(monkeypatch: pytest.MonkeyP
     # Has a '{' so it passes the brace-scan, but is not valid JSON — exercises
     # the json.JSONDecodeError -> ValueError wrapping path.
     agent = _ScriptedAgent(['{"strategy_code": "# half', _GOOD])
-    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    _patch_refinement(monkeypatch, agent)
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
 
     updates, new_code = RefinementAgent().run(
@@ -145,8 +165,7 @@ def test_correction_prompt_is_fed_back(monkeypatch: pytest.MonkeyPatch) -> None:
             return "no json at all" if self.calls == 1 else _GOOD
 
     recording = _RecordingAgent()
-    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: recording)
+    _patch_refinement(monkeypatch, recording)
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
 
     RefinementAgent().run(
@@ -172,8 +191,7 @@ def test_initial_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) 
             seen.append(prompt)
             return _GOOD
 
-    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: _CapturingAgent())
+    _patch_refinement(monkeypatch, _CapturingAgent())
 
     RefinementAgent().run(
         spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
@@ -204,8 +222,7 @@ def test_embedded_schema_matches_format_constraint() -> None:
 def test_raises_after_budget_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
     """With retries disabled, the no-JSON ValueError surfaces on attempt one."""
     agent = _ScriptedAgent(["never json"])
-    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    _patch_refinement(monkeypatch, agent)
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "0")
 
     with pytest.raises(ValueError, match="No JSON object found"):
@@ -218,8 +235,7 @@ def test_raises_after_budget_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_exhausts_full_budget_before_raising(monkeypatch: pytest.MonkeyPatch) -> None:
     """An always-unparseable model is retried exactly ``retries + 1`` times."""
     agent = _ScriptedAgent(["nope"])
-    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    _patch_refinement(monkeypatch, agent)
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
 
     with pytest.raises(ValueError):
@@ -243,7 +259,10 @@ def test_happy_path_builds_agent_once(monkeypatch: pytest.MonkeyPatch) -> None:
         return _ScriptedAgent([_GOOD])
 
     monkeypatch.setattr(mod, "get_strands_model", _model)
-    monkeypatch.setattr(mod, "Agent", _agent)
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model", _model
+    )
+    monkeypatch.setattr("investment_team.strategy_lab.agents._agent_runner.Agent", _agent)
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
 
     RefinementAgent().run(
@@ -257,8 +276,7 @@ def test_logs_warning_on_each_unparseable_attempt(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     agent = _ScriptedAgent(["bad", _GOOD])
-    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    _patch_refinement(monkeypatch, agent)
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
 
     logger_name = "investment_team.strategy_lab.agents.refinement"
@@ -267,7 +285,15 @@ def test_logs_warning_on_each_unparseable_attempt(
             spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
         )
 
-    warnings = [r for r in caplog.records if "unparseable JSON" in r.message]
+    # The shared ``run_json_with_parse_retry`` driver logs its own generic
+    # warning on every failed attempt (no ``failure_phase`` field); refinement's
+    # ``_on_parse_error`` hook additionally logs the original, more detailed
+    # line so that field survives the migration. Select that one specifically.
+    warnings = [
+        r
+        for r in caplog.records
+        if "unparseable JSON" in r.message and "failure_phase=" in r.message
+    ]
     assert len(warnings) == 1
     assert "attempt 1/3" in warnings[0].message
     assert "failure_phase=execution" in warnings[0].message

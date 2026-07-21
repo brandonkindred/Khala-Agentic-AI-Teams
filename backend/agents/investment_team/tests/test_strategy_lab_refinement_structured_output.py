@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 import pytest
 
 from investment_team.models import RiskLimits, StrategySpec
+from investment_team.strategy_lab.agents import _agent_runner
 from investment_team.strategy_lab.agents import refinement as mod
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
 from llm_service.interface import LLMPermanentError, LLMSemanticExhaustionError
@@ -107,7 +108,7 @@ def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.Monk
     stub_client = _StubClient({"strategy_code": "# fixed", "changes_made": "tightened guard"})
     monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
-    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
     monkeypatch.setattr(mod, "build_json_correction_prompt", _raise_if_correction_prompt_built)
 
     updates, new_code = RefinementAgent().run(
@@ -123,7 +124,7 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     stub_client = _StubClient({"strategy_code": "# fixed", "changes_made": "x"})
     monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
-    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
 
     RefinementAgent().run(
         spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
@@ -186,7 +187,7 @@ def test_real_bedrock_provider_degrades_to_legacy_loop(monkeypatch: pytest.Monke
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
     agent = _ScriptedAgent([_GOOD])
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    monkeypatch.setattr(_agent_runner, "Agent", lambda **_k: agent)
 
     updates, new_code = RefinementAgent().run(
         spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
@@ -210,8 +211,11 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
     )
     monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client))
+    monkeypatch.setattr(
+        _agent_runner, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
+    )
     agent = _ScriptedAgent([_GOOD])
-    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    monkeypatch.setattr(_agent_runner, "Agent", lambda **_k: agent)
 
     logger_name = "investment_team.strategy_lab.agents.refinement"
     with caplog.at_level(logging.WARNING, logger=logger_name):
@@ -238,7 +242,7 @@ def test_non_schema_forced_permanent_error_propagates_without_degrading(
     fatal_client = _FailingClient(LLMPermanentError("nope, fatal"))
     monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
-    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
 
     with pytest.raises(mod.StrategyLabLLMError):
         RefinementAgent().run(
@@ -259,7 +263,7 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
     )
     monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client))
-    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
 
     with pytest.raises(mod.StrategyLabLLMError):
         RefinementAgent().run(
@@ -306,7 +310,7 @@ def test_structured_success_logs_outcome_succeeded(
     stub_client = _StubClient({"strategy_code": "# fixed", "changes_made": "x"})
     monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
-    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
 
     logger_name = "investment_team.strategy_lab.agents.refinement"
     with caplog.at_level(logging.INFO, logger=logger_name):
@@ -349,7 +353,7 @@ def test_structured_path_issues_fewer_calls_than_fallback(
     structured_client = _StubClient({"strategy_code": "# fixed", "changes_made": "ok"})
     monkeypatch.setattr(mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: _FakeModel(structured_client))
-    monkeypatch.setattr(mod, "Agent", _raise_if_agent_built)
+    monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
     monkeypatch.setattr(mod, "build_json_correction_prompt", _count_structured_correction)
 
     RefinementAgent().run(
@@ -372,7 +376,8 @@ def test_structured_path_issues_fewer_calls_than_fallback(
     scripted = _ScriptedAgent(["not json at all", _GOOD])
     monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
     monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "Agent", lambda **_k: scripted)
+    monkeypatch.setattr(_agent_runner, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(_agent_runner, "Agent", lambda **_k: scripted)
     monkeypatch.setattr(mod, "build_json_correction_prompt", _count_fallback_correction)
 
     RefinementAgent().run(

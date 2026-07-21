@@ -7,12 +7,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from strands import Agent
-
 from llm_service.interface import LLMSemanticExhaustionError
 
 from ...models import BacktestResult, StrategySpec
 from ..exceptions import StrategyLabLLMError
+from ._agent_runner import run_json_with_parse_retry
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import (
     build_json_correction_prompt,
@@ -310,39 +309,27 @@ class RefinementAgent:
                 return result
 
         retries = parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES")
-        prompt = user_prompt
-        for attempt in range(retries + 1):
-            agent = Agent(
-                model=get_strands_model("strategy_refinement"),
-                system_prompt=system_prompt,
-                tools=[],
-            )
-            try:
-                return run_structured_agent(
-                    agent,
-                    prompt,
-                    agent_key="strategy_refinement",
-                    phase="refinement",
-                    parse=extract_json_object,
-                    charge=True,
-                    logger=logger,
-                )
-            except ValueError as exc:
-                logger.warning(
-                    "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
-                    "for failure_phase=%s (structured_attempted=%s): %s",
-                    attempt + 1,
-                    retries + 1,
-                    failure_phase,
-                    structured_attempted,
-                    exc,
-                )
-                if attempt >= retries:
-                    raise
-                prompt = build_json_correction_prompt(
-                    user_prompt, exc, keys_hint=_CORRECTION_KEYS_HINT
-                )
+        attempt_box = {"n": 0}
 
-        # Unreachable: the loop returns on success or re-raises on the final
-        # attempt. Kept so type-checkers see a definite return.
-        raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
+        def _on_parse_error(_base_prompt: str, exc: ValueError) -> str:
+            attempt_box["n"] += 1
+            logger.warning(
+                "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
+                "for failure_phase=%s (structured_attempted=%s): %s",
+                attempt_box["n"],
+                retries + 1,
+                failure_phase,
+                structured_attempted,
+                exc,
+            )
+            return build_json_correction_prompt(user_prompt, exc, keys_hint=_CORRECTION_KEYS_HINT)
+
+        return run_json_with_parse_retry(
+            agent_key="strategy_refinement",
+            phase="refinement",
+            system_prompt=system_prompt,
+            base_user_prompt=user_prompt,
+            retry_budget=retries,
+            logger=logger,
+            on_parse_error=_on_parse_error,
+        )
