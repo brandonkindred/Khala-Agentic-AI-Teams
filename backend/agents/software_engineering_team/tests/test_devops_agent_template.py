@@ -47,7 +47,7 @@ def test_boilerplate_calls_helper_with_prompt_context_and_defaults(monkeypatch) 
 
     assert out == _FakeOut(summary="ok")
     assert captured["model"] is agent._model
-    assert captured["prompt"] == "SYSTEM PROMPT\n\n---\n\nctx=task-1"
+    assert captured["prompt"] == "SYSTEM PROMPT" + Agent.PROMPT_SEPARATOR + "ctx=task-1"
     assert captured["kwargs"] == {"temperature": 0.1, "think": True}
 
 
@@ -147,3 +147,34 @@ def test_none_llm_client_raises() -> None:
 
     with pytest.raises(AssertionError, match="llm_client is required"):
         Agent(None)  # type: ignore[arg-type]
+
+
+def test_unimplemented_template_methods_raise() -> None:
+    from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+
+    agent = DevOpsSingleShotAgent(_strands_model_double())
+    with pytest.raises(NotImplementedError, match="build_context"):
+        agent.build_context("x")
+    with pytest.raises(NotImplementedError, match="build_output"):
+        agent.build_output("x", {})
+
+
+def test_empty_prompt_raises(monkeypatch) -> None:
+    from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+
+    monkeypatch.setattr(
+        "software_engineering_team.devops_team._agent_template.complete_json_with_continuation",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not call")),
+    )
+
+    class Agent(DevOpsSingleShotAgent):
+        PROMPT = ""
+
+        def build_context(self, input_data: str) -> str:
+            return input_data
+
+        def build_output(self, input_data: str, data: dict) -> _FakeOut:
+            return _FakeOut(summary="")
+
+    with pytest.raises(AssertionError, match="PROMPT must be a non-empty string"):
+        Agent(_strands_model_double()).run("x")

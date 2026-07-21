@@ -54,6 +54,7 @@ class DevOpsSingleShotAgent:
     """
 
     PROMPT: str = ""
+    PROMPT_SEPARATOR: str = "\n\n---\n\n"
     temperature: Optional[float] = 0.1
     think: Optional[bool] = True
 
@@ -111,7 +112,7 @@ class DevOpsSingleShotAgent:
             the LLM is not called. Otherwise returns
             ``build_output(input_data, data)`` where ``data`` comes from
             ``complete_json_with_continuation`` with prompt
-            ``PROMPT + "\\n\\n---\\n\\n" + context``. ``temperature`` /
+            ``PROMPT + PROMPT_SEPARATOR + context``. ``temperature`` /
             ``think`` class attrs are passed as kwargs only when not ``None``.
             LLM/parse errors propagate unchanged.
         """
@@ -122,7 +123,7 @@ class DevOpsSingleShotAgent:
         assert self.PROMPT, f"{type(self).__name__}.PROMPT must be a non-empty string"
 
         context = self.build_context(input_data)
-        prompt = self.PROMPT + "\n\n---\n\n" + context
+        prompt = self.PROMPT + self.PROMPT_SEPARATOR + context
 
         kwargs: Dict[str, Any] = {}
         if self.temperature is not None:
