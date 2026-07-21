@@ -918,6 +918,568 @@ def _fetch_pr_metadata(
     return pr, files, reviewer_login
 
 
+class ReviewModeDecision(NamedTuple):
+    """Whole-file vs. hunk review-mode decision, plus every input ``_run_reviewer`` needs."""
+
+    valid_by_path: Dict[str, List[int]]
+    changed_by_path: Dict[str, List[int]]
+    head_files: Dict[str, str]
+    code: str
+    files_reviewed: int
+    repo_reader: Any
+
+
+def _decide_review_mode(
+    client: Any,
+    job_id: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr: Any,
+    files: List[Any],
+) -> Optional[ReviewModeDecision]:
+    """Decide, PER FILE, whether each reviewable file is reviewed whole or via diff hunks.
+
+    Whole-file vs. hunk review is decided PER FILE, not per PR: every
+    reviewable file whose head content fetches successfully is reviewed
+    whole; only the files whose fetch fails fall back to hunk rendering (see
+    :func:`_run_reviewer`), so one file's failed fetch never discards another
+    file's successfully-fetched whole-file body. The hunk ``code`` blob is
+    built only for the files that actually need it, never unconditionally, so
+    a PR whose whole-file fetch fully succeeds pays nothing for hunk
+    rendering.
+
+    Also runs the review's two "nothing to review" gates itself and completes
+    the job as a no-op (via :func:`_complete_review_noop`) when they fire, so
+    the caller only has to check for ``None``.
+
+    Preconditions:
+        - ``client`` is an open ``GitHubClient``; ``pr`` carries ``head_sha``/
+          ``html_url``; ``files`` is the PR's changed-file list from
+          :func:`_fetch_pr_metadata` (may be empty).
+    Postconditions:
+        - Returns ``None`` when ``files`` is empty, when no file passes
+          :func:`_is_whole_file_reviewable`, or when the total-hunk-fallback
+          branch renders empty ``code`` — in every case
+          :func:`_complete_review_noop` has already posted the courtesy
+          comment and finalized the job ``COMPLETED``; the caller must return
+          immediately without further GitHub calls.
+        - Otherwise returns a :class:`ReviewModeDecision` where: ``head_files``
+          is fetched via :func:`_fetch_head_files` for the reviewable files;
+          when every reviewable file fetched whole, ``code == ""`` and
+          ``files_reviewed == len(head_files)``; when only some fetched,
+          ``code`` is built (via :func:`_build_review_code`) ONLY from the
+          files that failed to fetch, and ``files_reviewed`` sums both; when
+          none fetched, ``code`` is built from all ``files`` and
+          ``files_reviewed`` is the hunk count. ``repo_reader`` is always
+          constructed for ``pr.head_sha``, whole-file success or not.
+        - Never raises for GitHub-fetch failures (:func:`_fetch_head_files`
+          degrades internally); any other exception propagates to the
+          caller's outer handler.
+    """
+    if not files:
+        _complete_review_noop(
+            client,
+            job_id,
+            owner,
+            repo,
+            pr_number,
+            pr,
+            comment="Code review: no changed files to review.",
+            status_text="No changed files to review",
+        )
+        return None
+
+    valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
+    # Lines the PR actually ADDED — narrower than valid_by_path, which also
+    # includes unchanged context lines (so a finding cited on one can still
+    # be anchored inline per map_issues_to_comments). Only an added line can
+    # override a reviewer's pre_existing tag below: a genuine pre-existing
+    # bug on an unchanged context line inside a modified hunk must still
+    # route to a proposal, not a PR comment.
+    changed_by_path = {f.filename: parse_valid_lines(f.patch, added_only=True) for f in files}
+
+    # "Nothing reviewable" gate, BEFORE any hunk rendering or whole-file
+    # fetch: `reviewable` applies the same non-removed+has-patch
+    # predicate _build_review_code applies internally, so an empty set
+    # here means _build_review_code(files) would also render "" — skip
+    # straight to the noop rather than paying for a hunk render or a
+    # head-content fetch that could only ever come back empty.
+    reviewable = {f.filename for f in files if _is_whole_file_reviewable(f)}
+    if not reviewable:
+        _complete_review_noop(
+            client,
+            job_id,
+            owner,
+            repo,
+            pr_number,
+            pr,
+            comment="Code review: no reviewable file content.",
+            status_text="No reviewable file content",
+        )
+        return None
+
+    # Prefer whole-file review over diff hunks: complete files remove
+    # the hunk-boundary "truncation" false positive, and the repo
+    # reader lets the false-positive filter confirm existing
+    # (unchanged) repo files a finding claims are missing. A file
+    # whose whole-file fetch fails falls back to ITS OWN hunk
+    # rendering rather than reverting the whole PR to hunk mode — a
+    # partial fetch failure must not discard the whole-file bodies
+    # that DID come back.
+    head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
+    missing = reviewable - set(head_files)
+    code = ""
+    if head_files and not missing:
+        # Every reviewable file fetched whole: the hunk blob would be
+        # thrown away unread, so skip rendering it entirely.
+        files_reviewed = len(head_files)
+    elif head_files:
+        # Partial fetch: hunk-render ONLY the files that failed to
+        # fetch whole; files that DID fetch stay in whole-file mode.
+        fallback_files = [f for f in files if f.filename in missing]
+        code, hunk_reviewed = _build_review_code(fallback_files)
+        files_reviewed = len(head_files) + hunk_reviewed
+        logger.info(
+            "PR review #%s: fetched %d/%d whole files; the remaining "
+            "%d file(s) fall back to hunk review",
+            pr_number,
+            len(head_files),
+            len(reviewable),
+            len(missing),
+        )
+    else:
+        # Total fetch failure: unchanged from before this change —
+        # render every changed file's hunks (not just `reviewable`,
+        # since _build_review_code applies its own equivalent filter
+        # internally).
+        code, files_reviewed = _build_review_code(files)
+        if not code:
+            # Belt-and-suspenders: `reviewable` is non-empty (the gate
+            # above passed) but every reviewable file's diff hunk
+            # happened to render blank (e.g. a hunk that only removes
+            # lines, adding no +/context line for
+            # render_annotated_hunks to emit). _build_review_code
+            # filters on the same non-removed+has-patch predicate as
+            # _is_whole_file_reviewable, so this is the only place
+            # `code` can still end up empty once `reviewable` passed.
+            _complete_review_noop(
+                client,
+                job_id,
+                owner,
+                repo,
+                pr_number,
+                pr,
+                comment="Code review: no reviewable file content.",
+                status_text="No reviewable file content",
+            )
+            return None
+        logger.info(
+            "PR review #%s: whole-file fetch failed for all %d "
+            "reviewable file(s); falling back to hunk review",
+            pr_number,
+            len(reviewable),
+        )
+    repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
+    return ReviewModeDecision(
+        valid_by_path=valid_by_path,
+        changed_by_path=changed_by_path,
+        head_files=head_files,
+        code=code,
+        files_reviewed=files_reviewed,
+        repo_reader=repo_reader,
+    )
+
+
+class ReviewIssuePartition(NamedTuple):
+    """PR-scoped findings, ready-to-post comments, and pre-existing-bug proposals."""
+
+    pr_issues: List[Any]
+    preexisting_issues: List[Any]
+    proposals: List[Dict[str, Any]]
+    addressed_issues: List[Any]
+    line_comments: List[Any]
+    file_comments: List[Any]
+
+
+def _partition_review_issues(
+    output: Any,
+    client: Any,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    valid_by_path: Dict[str, List[int]],
+    changed_by_path: Dict[str, List[int]],
+) -> ReviewIssuePartition:
+    """Split the reviewer's raw findings into PR-scoped issues and pre-existing-bug proposals.
+
+    Dedupes the PR-scoped findings against the PR's existing comments, then
+    maps/anchors/splits the survivors into postable line- and file-level
+    comments.
+
+    Preconditions:
+        - ``output.issues`` is from a successful (non-``None``) call to
+          :func:`_run_reviewer`.
+        - ``valid_by_path``/``changed_by_path`` are the maps
+          :func:`_decide_review_mode` built for the same file set.
+        - ``client`` is an open ``GitHubClient``.
+    Postconditions:
+        - An issue tagged ``pre_existing=True`` is kept in
+          ``preexisting_issues`` unless :func:`is_within_diff` against
+          ``changed_by_path`` proves it lies on a line this PR actually
+          ADDED, in which case it is overridden into ``pr_issues`` (hunk-mode
+          reviews, which never tag, are unaffected).
+        - ``proposals`` is :func:`_detect_duplicate_proposals` applied to
+          ``proposal_from_findings`` over each :func:`group_similar_findings`
+          group of ``preexisting_issues``.
+        - When ``pr_issues`` is non-empty, it is first partitioned against
+          :func:`_fetch_existing_comments` via
+          :func:`partition_issues_by_existing_comments`, producing the
+          returned ``addressed_issues`` (findings that matched an
+          already-RESOLVED existing comment and were dropped). When
+          ``pr_issues`` is empty, ``addressed_issues == []`` and no
+          existing-comments fetch happens (nothing to de-duplicate).
+        - ``line_comments``/``file_comments`` is
+          :func:`split_review_comments` over :func:`map_issues_to_comments`
+          applied to ``pr_issues``, plus every non-``None``
+          :func:`anchor_to_first_file` result for the leftovers
+          ``map_issues_to_comments`` could not place.
+        - The existing-comments fetch and duplicate-detection are both
+          best-effort and degrade internally (never raise). Any other
+          exception (e.g. from ``map_issues_to_comments``) propagates to the
+          caller's outer handler.
+    """
+    # Split the reviewer's findings by whether they belong to this PR.
+    # Defects in the code the PR added or modified drive the review
+    # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
+    # in unchanged code are NOT posted on this PR — they become GitHub-issue
+    # proposals a human approves later on the Code Review page. A finding
+    # without the tag defaults to a PR finding (hunk-mode reviews never
+    # tag, so they behave exactly as before). The LLM's self-reported tag
+    # is not trusted unconditionally: a finding whose file/line is verified
+    # to be a line this PR actually ADDED (per is_within_diff against
+    # changed_by_path — deliberately narrower than valid_by_path, which
+    # would also match unchanged context lines) cannot legitimately be
+    # "pre-existing, unchanged code", so a mistagged pre_existing=true is
+    # overridden back to a PR finding rather than silently skipping review.
+    pr_issues: List[Any] = []
+    preexisting_issues: List[Any] = []
+    for i in output.issues:
+        if getattr(i, "pre_existing", False) and not is_within_diff(i, changed_by_path):
+            preexisting_issues.append(i)
+        else:
+            pr_issues.append(i)
+    # Similar findings (same category, near-identical description — e.g. the
+    # same "bare import" pattern flagged across several files) are combined
+    # into one proposal so a human is offered one issue per kind of problem,
+    # not one per occurrence.
+    finding_groups = group_similar_findings(preexisting_issues)
+    proposals = [proposal_from_findings(g, idx) for idx, g in enumerate(finding_groups)]
+    proposals = _detect_duplicate_proposals(proposals, client, owner, repo, pr_number)
+
+    # Recognize findings that duplicate a comment already on the PR (from a
+    # prior review run, or a human), so an evolving PR does not accumulate
+    # repeat comments every time it is re-reviewed. A match against an
+    # already-RESOLVED comment is dropped (requirement: already addressed);
+    # a match against a still-open comment is kept but cross-referenced (see
+    # map_issues_to_comments/anchor_to_first_file below) instead of posted as
+    # an unexplained duplicate. The fetch is best-effort: any failure yields
+    # [], so this never turns a working review into a failed one. Skipped
+    # entirely on a clean review (no findings): there is nothing to
+    # de-duplicate, so the up-to-three API calls the fetch makes would be
+    # pure waste.
+    if pr_issues:
+        existing_comments = _fetch_existing_comments(client, owner, repo, pr_number)
+        pr_issues, addressed_issues, existing_by_issue = partition_issues_by_existing_comments(
+            pr_issues, existing_comments
+        )
+    else:
+        addressed_issues, existing_by_issue = [], {}
+
+    comments, leftovers = map_issues_to_comments(pr_issues, valid_by_path, existing_by_issue)
+
+    # Re-anchor leftover findings (file not in diff) as file-level
+    # comments on the first changed file in the diff, so they travel as
+    # review comments rather than standalone top-level PR conversation
+    # comments.  anchor_to_first_file returns None only when valid_by_path
+    # is empty — but we already exit early in that case, so the filter is
+    # just a safety net.
+    anchored_leftovers = [
+        anchor_to_first_file(issue, valid_by_path, existing_by_issue.get(id(issue)))
+        for issue in leftovers
+    ]
+    comments = comments + [c for c in anchored_leftovers if c is not None]
+
+    # Two GitHub endpoints, two shapes. Line-anchored comments ride the
+    # single review; file-level comments (subject_type="file") go on the
+    # dedicated review-comments endpoint, which the reviews array rejects
+    # (it does not accept subject_type). Splitting them keeps one bad
+    # file-level entry from collapsing the whole review to the fallback.
+    line_comments, file_comments = split_review_comments(comments)
+
+    return ReviewIssuePartition(
+        pr_issues=pr_issues,
+        preexisting_issues=preexisting_issues,
+        proposals=proposals,
+        addressed_issues=addressed_issues,
+        line_comments=line_comments,
+        file_comments=file_comments,
+    )
+
+
+class CommentPostingResult(NamedTuple):
+    """Outcome of submitting one PR review's comments to GitHub."""
+
+    event: str
+    inline_count: int
+    file_comment_count: int
+    comment_findings: int
+    comments_failed: int
+
+
+def _post_review_comments(
+    client: Any,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr: Any,
+    reviewer_login: str,
+    output: Any,
+    partition: ReviewIssuePartition,
+) -> CommentPostingResult:
+    """Build and submit the review body/event, then post every finding as its own comment.
+
+    Preconditions:
+        - ``partition`` was produced by :func:`_partition_review_issues` for
+          this same ``output``/PR.
+        - ``client`` is an open ``GitHubClient``; ``pr`` carries ``head_sha``,
+          ``author``, ``html_url``.
+    Postconditions:
+        - The review body is built via ``build_review_body`` from
+          ``output.summary``/``output.spec_compliance_notes``, forced to
+          ``""`` when ``partition.preexisting_issues`` is non-empty (the
+          reviewer's narrative can otherwise leak a pre-existing finding's
+          theme/location even though its own comment is suppressed). The
+          returned ``event`` is ``choose_event(partition.pr_issues,
+          author=pr.author, reviewer=reviewer_login)``.
+        - ``partition.line_comments`` are submitted via :func:`_submit_review`,
+          bisecting out any off-diff line so the rest stay anchored. A
+          ``GitHubAPIError`` from that submission is swallowed ONLY when there
+          are no line comments AND there are file-level comments still to
+          post (the summary submission failed but file-level findings still
+          carry the review); in every other case it is re-raised UNCHANGED to
+          the caller's outer handler.
+        - File-level comments (mapped + re-anchored leftovers) plus any
+          bisected-out line comments are posted via :func:`_post_file_comments`;
+          whatever that still cannot post falls through to standalone
+          conversation comments via ``_main._safe_comment`` (module-qualified
+          so ``monkeypatch.setattr(main, ...)`` keeps taking effect).
+        - Returns a :class:`CommentPostingResult` with ``inline_count =
+          len(line_comments) - len(dropped_lines)``, ``file_comment_count``/
+          the standalone count from :func:`_post_file_comments`, and
+          ``comments_failed`` counting the standalone posts that returned
+          falsy.
+        - Never raises except the untolerated ``GitHubAPIError`` re-raise
+          above; ``_post_file_comments``/``_main._safe_comment`` are
+          best-effort by their own contract already.
+    """
+    # output.summary/spec_compliance_notes are synthesized by the reviewer
+    # engine from its FULL issue list (software_engineering_team's
+    # synthesize_review_findings runs before this split), so the narrative
+    # can describe a pre-existing finding's theme/location even though its
+    # own per-issue comment is suppressed. When any finding was
+    # pre-existing, fall back to build_review_body's deterministic "N
+    # findings reported" text instead of risking that leak.
+    body = build_review_body(
+        output.summary if not partition.preexisting_issues else "",
+        output.spec_compliance_notes if not partition.preexisting_issues else "",
+        issue_count=len(partition.pr_issues),
+    )
+    event = choose_event(partition.pr_issues, author=pr.author, reviewer=reviewer_login)
+
+    line_comments = partition.line_comments
+    file_comments = partition.file_comments
+
+    # Submit line-anchored comments in the review, bisecting out any
+    # off-diff line so the rest stay anchored. Whatever GitHub still
+    # rejects is demoted to a file-level comment below.
+    try:
+        dropped_lines = _submit_review(
+            client, owner, repo, pr_number, pr.head_sha, body, event, line_comments
+        )
+    except GitHubAPIError:
+        # _submit_review raises only when the whole submission failed
+        # (a non-422 on line comments, or every summary-only attempt for
+        # a no-line-comment review). Tolerate it ONLY when there are
+        # file-level findings still to post — the summary is then a
+        # best-effort courtesy and those findings carry the review (and
+        # surface any real error themselves). Otherwise nothing reached
+        # GitHub, so let the failure mark the job failed rather than
+        # report a hollow success.
+        if line_comments or not file_comments:
+            raise
+        logger.warning("Summary-only review failed; posting file-level findings only")
+        dropped_lines = []
+    inline_count = len(line_comments) - len(dropped_lines)
+
+    # File-level comments (mapped + re-anchored leftovers) and any
+    # bisected-out line comments (demoted, keeping the file anchor) each
+    # go on the dedicated endpoint. A rejected line comment falls through
+    # as its original entry, so the standalone fallback still names
+    # ``path:line``.
+    file_comment_count, standalone = _post_file_comments(
+        client, owner, repo, pr_number, pr.head_sha, file_comments + dropped_lines
+    )
+
+    # Only truly-unpostable findings fall through to standalone comments.
+    standalone_bodies = [inline_comment_to_timeline_body(c) for c in standalone]
+    comments_failed = sum(
+        0 if _main._safe_comment(client, owner, repo, pr_number, body) else 1
+        for body in standalone_bodies
+    )
+
+    return CommentPostingResult(
+        event=event,
+        inline_count=inline_count,
+        file_comment_count=file_comment_count,
+        comment_findings=len(standalone),
+        comments_failed=comments_failed,
+    )
+
+
+def _finalize_review_outcome(
+    client: Any,
+    job_id: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr: Any,
+    files_reviewed: int,
+    partition: ReviewIssuePartition,
+    posting: CommentPostingResult,
+) -> None:
+    """Compute severity metrics, assemble ``review_summary``, and write the terminal outcome.
+
+    Preconditions:
+        - ``partition``/``posting`` come from the same review run, produced in
+          ``_partition_review_issues`` → ``_post_review_comments`` order.
+        - ``client`` is an open ``GitHubClient``; ``pr`` carries ``html_url``.
+    Postconditions:
+        - ``severity_counts`` buckets ``partition.pr_issues`` over the five
+          recognized levels (critical/high/medium/low/info); an issue with an
+          unrecognized or blank severity counts toward ``total_issues`` but
+          not into ``severity_counts``.
+        - ``review_summary`` is built with the same keys/semantics as before
+          the split: ``total_issues``, ``inline_comments``, ``file_comments``,
+          ``comment_findings``, ``comments_failed``, ``event``,
+          ``files_reviewed``, ``severity_counts``, ``addressed_issues_dropped``,
+          ``pending_issue_proposals``.
+        - When ``posting.comments_failed`` is truthy: posts an "incomplete"
+          notice via ``_main._safe_comment``, calls :func:`_finalize_review`
+          with ``JobStatus.FAILED``, and returns — no further writes happen.
+        - Otherwise: builds ``status_text`` (finding counts plus optional
+          "pre-existing bugs"/"already-addressed findings" clauses), reacts
+          ``+1`` via :func:`_react_to_pr` only when ``partition.pr_issues`` is
+          empty, and calls :func:`_finalize_review` with
+          ``JobStatus.COMPLETED``.
+        - Exactly one terminal :func:`_finalize_review` call happens per
+          invocation. Does not itself catch exceptions from
+          ``_finalize_review``/``_main._safe_comment``/``_react_to_pr`` — a
+          failure there propagates to the caller's outer handler exactly as
+          before the split.
+    """
+    pr_issues = partition.pr_issues
+    # Break the posted PR findings down by severity so the Code Review page can
+    # show per-review severity metrics. Aggregated over ``pr_issues`` (the
+    # findings actually posted on this PR); pre-existing-bug proposals are
+    # excluded. Only the five documented levels are counted and only non-zero
+    # levels are emitted, so the map stays compact. Its values sum to
+    # ``total_issues`` for findings whose severity is recognized; a finding
+    # with an unknown or blank severity is counted in ``total_issues`` but not
+    # bucketed here.
+    recognized_severities = ("critical", "high", "medium", "low", "info")
+    severity_counts: dict[str, int] = {}
+    for issue in pr_issues:
+        lvl = str(getattr(issue, "severity", "")).lower()
+        if lvl in recognized_severities:
+            severity_counts[lvl] = severity_counts.get(lvl, 0) + 1
+    review_summary = {
+        "total_issues": len(pr_issues),
+        "inline_comments": posting.inline_count,
+        "file_comments": posting.file_comment_count,
+        "comment_findings": posting.comment_findings,
+        "comments_failed": posting.comments_failed,
+        "event": posting.event,
+        "files_reviewed": files_reviewed,
+        "severity_counts": severity_counts,
+        # Findings that matched an already-RESOLVED existing PR comment and
+        # so were dropped rather than re-posted (see
+        # partition_issues_by_existing_comments above).
+        "addressed_issues_dropped": len(partition.addressed_issues),
+        # Pre-existing bugs the reviewer flagged in unchanged code, offered
+        # to a human on the Code Review page as GitHub-issue candidates.
+        # Not posted on this PR. Each carries a stable ``id``. ``issue_url``/
+        # ``issue_number`` start unset, UNLESS annotate_duplicate_proposals
+        # already matched the finding to an existing open issue -- in which
+        # case they're pre-filled with that issue's identity and
+        # ``matched_existing`` is True, so the proposal is never offered as
+        # a fresh "create issue" candidate.
+        "pending_issue_proposals": partition.proposals,
+    }
+    if posting.comments_failed:
+        # Some findings could not be posted as their own comment; the
+        # review (inline comments + body) is already submitted, but the
+        # contract "one comment per finding" is broken — surface it as a
+        # failure rather than reporting completion.
+        err = (
+            f"{posting.comments_failed} of {posting.comment_findings} finding comment(s) "
+            "could not be posted"
+        )
+        # Notify on the PR itself: the dropped findings no longer live in
+        # the review body, so without this the author has no signal on
+        # GitHub that part of the review is missing.
+        _main._safe_comment(
+            client,
+            owner,
+            repo,
+            pr_number,
+            f"Code review incomplete: {err}. See the coding team job for details.",
+        )
+        _finalize_review(
+            job_id,
+            JobStatus.FAILED,
+            err,
+            github_pr_url=pr.html_url,
+            review_summary=review_summary,
+            error=err,
+        )
+        return
+    status_text = (
+        f"Review posted: {len(pr_issues)} finding(s), "
+        f"{posting.inline_count} inline, {posting.file_comment_count} file-level, "
+        f"{posting.comment_findings} comment(s), event={posting.event}"
+    )
+    if partition.proposals:
+        noun = "bug" if len(partition.proposals) == 1 else "bugs"
+        status_text += f"; {len(partition.proposals)} pre-existing {noun} to review"
+    if partition.addressed_issues:
+        noun = "finding" if len(partition.addressed_issues) == 1 else "findings"
+        status_text += f"; {len(partition.addressed_issues)} already-addressed {noun} skipped"
+    # React only when the PR's OWN change is clean. Pre-existing findings
+    # are about unchanged code, so they do not withhold the "looks good"
+    # signal for the change under review.
+    if not pr_issues:
+        _react_to_pr(client, owner, repo, pr_number)
+    _finalize_review(
+        job_id,
+        JobStatus.COMPLETED,
+        status_text,
+        phase="completed",
+        github_pr_url=pr.html_url,
+        review_summary=review_summary,
+    )
+
+
 def _run_pr_review_body(
     job_id: str,
     request: ReviewPrRequest,
@@ -936,124 +1498,24 @@ def _run_pr_review_body(
     Postconditions: identical to :func:`_run_pr_review` (this IS that contract's
         implementation; see its docstring). Never raises.
 
-        Whole-file vs. hunk review is decided PER FILE, not per PR: every
-        reviewable file whose head content fetches successfully is reviewed
-        whole; only the files whose fetch fails fall back to hunk rendering
-        (see :func:`_run_reviewer`), so one file's failed fetch never discards
-        another file's successfully-fetched whole-file body. The hunk ``code``
-        blob is built only for the files that actually need it, never
-        unconditionally, so a PR whose whole-file fetch fully succeeds pays
-        nothing for hunk rendering.
+        Orchestrates the review as a straight-line pipeline of named helpers,
+        each owning one concern: :func:`_fetch_pr_metadata` (metadata),
+        :func:`_decide_review_mode` (whole-file vs. hunk decision, including
+        the "nothing to review" no-op exits), :func:`_run_reviewer` (engine
+        invocation), :func:`_partition_review_issues` (issue partitioning),
+        :func:`_post_review_comments` (comment posting), and
+        :func:`_finalize_review_outcome` (finalization). All of it runs inside
+        the same GitHub client and the same outer ``try/except`` below, so a
+        failure at any step still reaches the one exception handler that
+        marks the job failed.
     """
     try:
         with _main.GitHubClient(token=token) as client:
             pr, files, reviewer_login = _fetch_pr_metadata(client, owner, repo, pr_number)
-            if not files:
-                _complete_review_noop(
-                    client,
-                    job_id,
-                    owner,
-                    repo,
-                    pr_number,
-                    pr,
-                    comment="Code review: no changed files to review.",
-                    status_text="No changed files to review",
-                )
+
+            mode = _decide_review_mode(client, job_id, owner, repo, pr_number, pr, files)
+            if mode is None:
                 return
-
-            valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
-            # Lines the PR actually ADDED — narrower than valid_by_path, which also
-            # includes unchanged context lines (so a finding cited on one can still
-            # be anchored inline per map_issues_to_comments). Only an added line can
-            # override a reviewer's pre_existing tag below: a genuine pre-existing
-            # bug on an unchanged context line inside a modified hunk must still
-            # route to a proposal, not a PR comment.
-            changed_by_path = {
-                f.filename: parse_valid_lines(f.patch, added_only=True) for f in files
-            }
-
-            # "Nothing reviewable" gate, BEFORE any hunk rendering or whole-file
-            # fetch: `reviewable` applies the same non-removed+has-patch
-            # predicate _build_review_code applies internally, so an empty set
-            # here means _build_review_code(files) would also render "" — skip
-            # straight to the noop rather than paying for a hunk render or a
-            # head-content fetch that could only ever come back empty.
-            reviewable = {f.filename for f in files if _is_whole_file_reviewable(f)}
-            if not reviewable:
-                _complete_review_noop(
-                    client,
-                    job_id,
-                    owner,
-                    repo,
-                    pr_number,
-                    pr,
-                    comment="Code review: no reviewable file content.",
-                    status_text="No reviewable file content",
-                )
-                return
-
-            # Prefer whole-file review over diff hunks: complete files remove
-            # the hunk-boundary "truncation" false positive, and the repo
-            # reader lets the false-positive filter confirm existing
-            # (unchanged) repo files a finding claims are missing. A file
-            # whose whole-file fetch fails falls back to ITS OWN hunk
-            # rendering rather than reverting the whole PR to hunk mode — a
-            # partial fetch failure must not discard the whole-file bodies
-            # that DID come back.
-            head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
-            missing = reviewable - set(head_files)
-            code = ""
-            if head_files and not missing:
-                # Every reviewable file fetched whole: the hunk blob would be
-                # thrown away unread, so skip rendering it entirely.
-                files_reviewed = len(head_files)
-            elif head_files:
-                # Partial fetch: hunk-render ONLY the files that failed to
-                # fetch whole; files that DID fetch stay in whole-file mode.
-                fallback_files = [f for f in files if f.filename in missing]
-                code, hunk_reviewed = _build_review_code(fallback_files)
-                files_reviewed = len(head_files) + hunk_reviewed
-                logger.info(
-                    "PR review #%s: fetched %d/%d whole files; the remaining "
-                    "%d file(s) fall back to hunk review",
-                    pr_number,
-                    len(head_files),
-                    len(reviewable),
-                    len(missing),
-                )
-            else:
-                # Total fetch failure: unchanged from before this change —
-                # render every changed file's hunks (not just `reviewable`,
-                # since _build_review_code applies its own equivalent filter
-                # internally).
-                code, files_reviewed = _build_review_code(files)
-                if not code:
-                    # Belt-and-suspenders: `reviewable` is non-empty (the gate
-                    # above passed) but every reviewable file's diff hunk
-                    # happened to render blank (e.g. a hunk that only removes
-                    # lines, adding no +/context line for
-                    # render_annotated_hunks to emit). _build_review_code
-                    # filters on the same non-removed+has-patch predicate as
-                    # _is_whole_file_reviewable, so this is the only place
-                    # `code` can still end up empty once `reviewable` passed.
-                    _complete_review_noop(
-                        client,
-                        job_id,
-                        owner,
-                        repo,
-                        pr_number,
-                        pr,
-                        comment="Code review: no reviewable file content.",
-                        status_text="No reviewable file content",
-                    )
-                    return
-                logger.info(
-                    "PR review #%s: whole-file fetch failed for all %d "
-                    "reviewable file(s); falling back to hunk review",
-                    pr_number,
-                    len(reviewable),
-                )
-            repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
 
             output = _run_reviewer(
                 provider,
@@ -1064,224 +1526,27 @@ def _run_pr_review_body(
                 job_id,
                 pr,
                 files,
-                code,
-                head_files=head_files or None,
-                repo_reader=repo_reader,
+                mode.code,
+                head_files=mode.head_files or None,
+                repo_reader=mode.repo_reader,
             )
             if output is None:
                 return
 
-            # Split the reviewer's findings by whether they belong to this PR.
-            # Defects in the code the PR added or modified drive the review
-            # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
-            # in unchanged code are NOT posted on this PR — they become GitHub-issue
-            # proposals a human approves later on the Code Review page. A finding
-            # without the tag defaults to a PR finding (hunk-mode reviews never
-            # tag, so they behave exactly as before). The LLM's self-reported tag
-            # is not trusted unconditionally: a finding whose file/line is verified
-            # to be a line this PR actually ADDED (per is_within_diff against
-            # changed_by_path — deliberately narrower than valid_by_path, which
-            # would also match unchanged context lines) cannot legitimately be
-            # "pre-existing, unchanged code", so a mistagged pre_existing=true is
-            # overridden back to a PR finding rather than silently skipping review.
-            pr_issues: List[Any] = []
-            preexisting_issues: List[Any] = []
-            for i in output.issues:
-                if getattr(i, "pre_existing", False) and not is_within_diff(i, changed_by_path):
-                    preexisting_issues.append(i)
-                else:
-                    pr_issues.append(i)
-            # Similar findings (same category, near-identical description — e.g. the
-            # same "bare import" pattern flagged across several files) are combined
-            # into one proposal so a human is offered one issue per kind of problem,
-            # not one per occurrence.
-            finding_groups = group_similar_findings(preexisting_issues)
-            proposals = [proposal_from_findings(g, idx) for idx, g in enumerate(finding_groups)]
-            proposals = _detect_duplicate_proposals(proposals, client, owner, repo, pr_number)
-
-            # Recognize findings that duplicate a comment already on the PR (from a
-            # prior review run, or a human), so an evolving PR does not accumulate
-            # repeat comments every time it is re-reviewed. A match against an
-            # already-RESOLVED comment is dropped (requirement: already addressed);
-            # a match against a still-open comment is kept but cross-referenced (see
-            # map_issues_to_comments/anchor_to_first_file below) instead of posted as
-            # an unexplained duplicate. The fetch is best-effort: any failure yields
-            # [], so this never turns a working review into a failed one. Skipped
-            # entirely on a clean review (no findings): there is nothing to
-            # de-duplicate, so the up-to-three API calls the fetch makes would be
-            # pure waste.
-            if pr_issues:
-                existing_comments = _fetch_existing_comments(client, owner, repo, pr_number)
-                pr_issues, addressed_issues, existing_by_issue = (
-                    partition_issues_by_existing_comments(pr_issues, existing_comments)
-                )
-            else:
-                addressed_issues, existing_by_issue = [], {}
-
-            comments, leftovers = map_issues_to_comments(
-                pr_issues, valid_by_path, existing_by_issue
+            partition = _partition_review_issues(
+                output,
+                client,
+                owner,
+                repo,
+                pr_number,
+                mode.valid_by_path,
+                mode.changed_by_path,
             )
-
-            # Re-anchor leftover findings (file not in diff) as file-level
-            # comments on the first changed file in the diff, so they travel as
-            # review comments rather than standalone top-level PR conversation
-            # comments.  anchor_to_first_file returns None only when valid_by_path
-            # is empty — but we already exit early in that case, so the filter is
-            # just a safety net.
-            anchored_leftovers = [
-                anchor_to_first_file(issue, valid_by_path, existing_by_issue.get(id(issue)))
-                for issue in leftovers
-            ]
-            comments = comments + [c for c in anchored_leftovers if c is not None]
-
-            # Two GitHub endpoints, two shapes. Line-anchored comments ride the
-            # single review; file-level comments (subject_type="file") go on the
-            # dedicated review-comments endpoint, which the reviews array rejects
-            # (it does not accept subject_type). Splitting them keeps one bad
-            # file-level entry from collapsing the whole review to the fallback.
-            line_comments, file_comments = split_review_comments(comments)
-
-            # output.summary/spec_compliance_notes are synthesized by the reviewer
-            # engine from its FULL issue list (software_engineering_team's
-            # synthesize_review_findings runs before this split), so the narrative
-            # can describe a pre-existing finding's theme/location even though its
-            # own per-issue comment is suppressed. When any finding was
-            # pre-existing, fall back to build_review_body's deterministic "N
-            # findings reported" text instead of risking that leak.
-            body = build_review_body(
-                output.summary if not preexisting_issues else "",
-                output.spec_compliance_notes if not preexisting_issues else "",
-                issue_count=len(pr_issues),
+            posting = _post_review_comments(
+                client, owner, repo, pr_number, pr, reviewer_login, output, partition
             )
-            event = choose_event(pr_issues, author=pr.author, reviewer=reviewer_login)
-
-            # Submit line-anchored comments in the review, bisecting out any
-            # off-diff line so the rest stay anchored. Whatever GitHub still
-            # rejects is demoted to a file-level comment below.
-            try:
-                dropped_lines = _submit_review(
-                    client, owner, repo, pr_number, pr.head_sha, body, event, line_comments
-                )
-            except GitHubAPIError:
-                # _submit_review raises only when the whole submission failed
-                # (a non-422 on line comments, or every summary-only attempt for
-                # a no-line-comment review). Tolerate it ONLY when there are
-                # file-level findings still to post — the summary is then a
-                # best-effort courtesy and those findings carry the review (and
-                # surface any real error themselves). Otherwise nothing reached
-                # GitHub, so let the failure mark the job failed rather than
-                # report a hollow success.
-                if line_comments or not file_comments:
-                    raise
-                logger.warning("Summary-only review failed; posting file-level findings only")
-                dropped_lines = []
-            inline_count = len(line_comments) - len(dropped_lines)
-
-            # File-level comments (mapped + re-anchored leftovers) and any
-            # bisected-out line comments (demoted, keeping the file anchor) each
-            # go on the dedicated endpoint. A rejected line comment falls through
-            # as its original entry, so the standalone fallback still names
-            # ``path:line``.
-            file_comment_count, standalone = _post_file_comments(
-                client, owner, repo, pr_number, pr.head_sha, file_comments + dropped_lines
-            )
-
-            # Only truly-unpostable findings fall through to standalone comments.
-            standalone_bodies = [inline_comment_to_timeline_body(c) for c in standalone]
-            comments_failed = sum(
-                0 if _main._safe_comment(client, owner, repo, pr_number, body) else 1
-                for body in standalone_bodies
-            )
-
-            comment_findings = len(standalone)
-            # Break the posted PR findings down by severity so the Code Review page can
-            # show per-review severity metrics. Aggregated over ``pr_issues`` (the
-            # findings actually posted on this PR); pre-existing-bug proposals are
-            # excluded. Only the five documented levels are counted and only non-zero
-            # levels are emitted, so the map stays compact. Its values sum to
-            # ``total_issues`` for findings whose severity is recognized; a finding
-            # with an unknown or blank severity is counted in ``total_issues`` but not
-            # bucketed here.
-            recognized_severities = ("critical", "high", "medium", "low", "info")
-            severity_counts: dict[str, int] = {}
-            for issue in pr_issues:
-                lvl = str(getattr(issue, "severity", "")).lower()
-                if lvl in recognized_severities:
-                    severity_counts[lvl] = severity_counts.get(lvl, 0) + 1
-            review_summary = {
-                "total_issues": len(pr_issues),
-                "inline_comments": inline_count,
-                "file_comments": file_comment_count,
-                "comment_findings": comment_findings,
-                "comments_failed": comments_failed,
-                "event": event,
-                "files_reviewed": files_reviewed,
-                "severity_counts": severity_counts,
-                # Findings that matched an already-RESOLVED existing PR comment and
-                # so were dropped rather than re-posted (see
-                # partition_issues_by_existing_comments above).
-                "addressed_issues_dropped": len(addressed_issues),
-                # Pre-existing bugs the reviewer flagged in unchanged code, offered
-                # to a human on the Code Review page as GitHub-issue candidates.
-                # Not posted on this PR. Each carries a stable ``id``. ``issue_url``/
-                # ``issue_number`` start unset, UNLESS annotate_duplicate_proposals
-                # already matched the finding to an existing open issue -- in which
-                # case they're pre-filled with that issue's identity and
-                # ``matched_existing`` is True, so the proposal is never offered as
-                # a fresh "create issue" candidate.
-                "pending_issue_proposals": proposals,
-            }
-            if comments_failed:
-                # Some findings could not be posted as their own comment; the
-                # review (inline comments + body) is already submitted, but the
-                # contract "one comment per finding" is broken — surface it as a
-                # failure rather than reporting completion.
-                err = (
-                    f"{comments_failed} of {comment_findings} finding comment(s) "
-                    "could not be posted"
-                )
-                # Notify on the PR itself: the dropped findings no longer live in
-                # the review body, so without this the author has no signal on
-                # GitHub that part of the review is missing.
-                _main._safe_comment(
-                    client,
-                    owner,
-                    repo,
-                    pr_number,
-                    f"Code review incomplete: {err}. See the coding team job for details.",
-                )
-                _finalize_review(
-                    job_id,
-                    JobStatus.FAILED,
-                    err,
-                    github_pr_url=pr.html_url,
-                    review_summary=review_summary,
-                    error=err,
-                )
-                return
-            status_text = (
-                f"Review posted: {len(pr_issues)} finding(s), "
-                f"{inline_count} inline, {file_comment_count} file-level, "
-                f"{comment_findings} comment(s), event={event}"
-            )
-            if proposals:
-                noun = "bug" if len(proposals) == 1 else "bugs"
-                status_text += f"; {len(proposals)} pre-existing {noun} to review"
-            if addressed_issues:
-                noun = "finding" if len(addressed_issues) == 1 else "findings"
-                status_text += f"; {len(addressed_issues)} already-addressed {noun} skipped"
-            # React only when the PR's OWN change is clean. Pre-existing findings
-            # are about unchanged code, so they do not withhold the "looks good"
-            # signal for the change under review.
-            if not pr_issues:
-                _react_to_pr(client, owner, repo, pr_number)
-            _finalize_review(
-                job_id,
-                JobStatus.COMPLETED,
-                status_text,
-                phase="completed",
-                github_pr_url=pr.html_url,
-                review_summary=review_summary,
+            _finalize_review_outcome(
+                client, job_id, owner, repo, pr_number, pr, mode.files_reviewed, partition, posting
             )
     except Exception as review_exc:  # noqa: BLE001 - any failure must mark the job, never wedge it
         # The hook runs in a daemon thread; if we let an exception escape, the thread
