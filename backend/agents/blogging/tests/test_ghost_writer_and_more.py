@@ -16,8 +16,9 @@ from unittest.mock import MagicMock
 
 
 def _content_plan():
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
 
     return make_content_plan(
         overarching_topic="Building scalable APIs",
@@ -353,11 +354,12 @@ def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
 
 def test_ghost_find_story_gaps_uses_plan_opportunities_when_present(monkeypatch) -> None:
     """find_story_gaps short-circuits to opportunities, avoiding LLM gap-finding."""
-    from _content_plan_test_utils import make_content_plan
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
     from llm_service import DummyLLMClient
+
+    from ._content_plan_test_utils import make_content_plan
 
     sec = ContentPlanSection(
         title="A", coverage_description="cov", order=0, story_opportunity="A bug story"

@@ -216,6 +216,36 @@ def _workflow_file_list(result: Any, deliver: Any) -> List[str]:
     return []
 
 
+def _failed_result(
+    feature_branch: str,
+    error: str,
+    *,
+    changes_summary: str = "",
+    files_to_create_or_edit: Any = (),
+    commands_run: Any = (),
+) -> Dict[str, Any]:
+    """Build a coding-team handoff result dict for a failed ``run_implement`` early return.
+
+    Preconditions:
+        - ``feature_branch`` is the branch name to report (may be a fallback name when the
+          real branch was never created); ``error`` is a non-empty failure description.
+    Postconditions:
+        - Returns a dict with ``status="failed"``, ``open_questions=[]``, and the given
+          ``feature_branch``/``error``, with ``changes_summary``/``files_to_create_or_edit``/
+          ``commands_run`` defaulted to empty/"" when not supplied and coerced to ``list``
+          for the two list-typed fields.
+    """
+    return {
+        "status": "failed",
+        "feature_branch": feature_branch,
+        "changes_summary": changes_summary,
+        "files_to_create_or_edit": list(files_to_create_or_edit),
+        "commands_run": list(commands_run),
+        "open_questions": [],
+        "error": error,
+    }
+
+
 def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
     """Create or checkout the task branch before v2 execution can write files.
 
@@ -384,16 +414,10 @@ class V2TeamWorker:
             logger.warning(
                 "%s worker received malformed task %s: %s", self._team_label, task_id, exc
             )
-            return {
-                "status": "failed",
-                "feature_branch": getattr(task, "feature_branch", None)
-                or f"feature/{_task_feature_name(task)}",
-                "changes_summary": "",
-                "files_to_create_or_edit": [],
-                "commands_run": [],
-                "open_questions": [],
-                "error": str(exc),
-            }
+            return _failed_result(
+                getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
+                str(exc),
+            )
         branch_ok, prepared_branch = _prepare_feature_branch(path, task)
         if not branch_ok:
             logger.warning(
@@ -402,16 +426,10 @@ class V2TeamWorker:
                 task_id,
                 prepared_branch,
             )
-            return {
-                "status": "failed",
-                "feature_branch": getattr(task, "feature_branch", None)
-                or f"feature/{_task_feature_name(task)}",
-                "changes_summary": "",
-                "files_to_create_or_edit": [],
-                "commands_run": [],
-                "open_questions": [],
-                "error": f"failed to prepare feature branch: {prepared_branch}",
-            }
+            return _failed_result(
+                getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
+                f"failed to prepare feature branch: {prepared_branch}",
+            )
         se_task = self._to_se_task(task, feature_branch_name=prepared_branch)
         workflow_kwargs = {"repo_path": path, "task": se_task}
         if _accepts_keyword(self.team_lead.run_workflow, "merge_to_development"):
@@ -428,15 +446,7 @@ class V2TeamWorker:
             result = self.team_lead.run_workflow(**workflow_kwargs)
         except Exception as exc:  # noqa: BLE001 - worker failure is task-local
             logger.exception("%s worker failed for task %s", self._team_label, task_id)
-            return {
-                "status": "failed",
-                "feature_branch": prepared_branch,
-                "changes_summary": "",
-                "files_to_create_or_edit": [],
-                "commands_run": [],
-                "open_questions": [],
-                "error": str(exc),
-            }
+            return _failed_result(prepared_branch, str(exc))
 
         deliver = getattr(result, "deliver_result", None)
         branch = (
@@ -452,15 +462,13 @@ class V2TeamWorker:
         success = branch_ready if result_success is missing_success else bool(result_success)
         if not success:
             reason = str(getattr(result, "failure_reason", "") or "v2 workflow did not complete")
-            return {
-                "status": "failed",
-                "feature_branch": branch,
-                "changes_summary": str(getattr(result, "summary", "") or ""),
-                "files_to_create_or_edit": files_changed,
-                "commands_run": list(getattr(deliver, "commit_messages", []) or []),
-                "open_questions": [],
-                "error": reason,
-            }
+            return _failed_result(
+                branch,
+                reason,
+                changes_summary=str(getattr(result, "summary", "") or ""),
+                files_to_create_or_edit=files_changed,
+                commands_run=list(getattr(deliver, "commit_messages", []) or []),
+            )
         return {
             "status": "in_review",
             "feature_branch": branch,
