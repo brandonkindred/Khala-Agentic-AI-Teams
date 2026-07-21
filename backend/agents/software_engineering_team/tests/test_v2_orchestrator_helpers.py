@@ -794,3 +794,130 @@ class TestRunPlanningAndBranchSetup:
         assert planning_result is fake_result
         assert feature_branch_name is None
         assert failure_reason is None
+
+
+class _FakeDocResult:
+    def __init__(self, files=None, summary="ok"):
+        self.files = files or {}
+        self.summary = summary
+
+
+class _FakeWorkflowResult:
+    def __init__(self):
+        self.current_phase = None
+        self.documentation_result = None
+        self.final_files = None
+
+
+class TestRunDocumentationPhase:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_documentation_phase`` helper.
+
+    Mirrors ``TestRunPreflight`` / ``TestRunPlanningAndBranchSetup``: fake
+    callables injected so the documentation status update + phase invocation +
+    file-merge + exception-swallow sequence is unit-isolated from either team's
+    ``run_workflow``.
+    """
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_documentation_phase")
+
+    def test_success_merges_files_and_updates_job(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_models import Phase
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        update_calls = []
+        result = _FakeWorkflowResult()
+        current_files = {"a.py": "a"}
+        doc = _FakeDocResult(files={"docs/readme.md": "# hi"}, summary="docs done")
+
+        out = BaseV2DevelopmentAgent._run_documentation_phase(
+            task_id="t1",
+            task=MagicMock(),
+            repo_path=tmp_path,
+            llm=MagicMock(),
+            exec_result=MagicMock(),
+            planning_result=MagicMock(),
+            tool_agents={},
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=lambda **kw: doc,
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+            status_text="Generating documentation and API specs",
+        )
+
+        assert result.current_phase == Phase.DOCUMENTATION
+        assert result.documentation_result is doc
+        assert out == {"a.py": "a", "docs/readme.md": "# hi"}
+        assert result.final_files == out
+        assert update_calls == [
+            {
+                "current_phase": "documentation",
+                "progress": 80,
+                "status_text": "Generating documentation and API specs",
+            }
+        ]
+
+    def test_success_without_files_leaves_current_files_unchanged(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = _FakeWorkflowResult()
+        current_files = {"a.py": "a"}
+        doc = _FakeDocResult(files={}, summary="nothing")
+
+        out = BaseV2DevelopmentAgent._run_documentation_phase(
+            task_id="t1",
+            task=MagicMock(),
+            repo_path=tmp_path,
+            llm=MagicMock(),
+            exec_result=MagicMock(),
+            planning_result=MagicMock(),
+            tool_agents={},
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=lambda **kw: doc,
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+            status_text="Generating documentation and API docs...",
+        )
+
+        assert result.documentation_result is doc
+        assert out is current_files
+        assert out == {"a.py": "a"}
+        assert result.final_files is None
+
+    def test_exception_is_swallowed_and_logged(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_models import Phase
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = _FakeWorkflowResult()
+        current_files = {"a.py": "a"}
+
+        def _raise(**kwargs):
+            raise RuntimeError("doc boom")
+
+        with caplog.at_level("WARNING", logger="test_run_documentation_phase"):
+            out = BaseV2DevelopmentAgent._run_documentation_phase(
+                task_id="t1",
+                task=MagicMock(),
+                repo_path=tmp_path,
+                llm=MagicMock(),
+                exec_result=MagicMock(),
+                planning_result=MagicMock(),
+                tool_agents={},
+                result=result,
+                current_files=current_files,
+                run_documentation_phase=_raise,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+                status_text="Generating documentation and API specs",
+            )
+
+        assert result.current_phase == Phase.DOCUMENTATION
+        assert result.documentation_result is None
+        assert out is current_files
+        assert "Documentation phase failed: doc boom" in caplog.text
+        assert "Continuing to Deliver phase" in caplog.text
