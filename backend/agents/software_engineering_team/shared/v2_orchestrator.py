@@ -184,6 +184,109 @@ class BaseV2DevelopmentAgent:
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
         return None
 
+    @staticmethod
+    def _run_planning_and_branch_setup(
+        *,
+        task_id: str,
+        task: Any,
+        repo_path: Path,
+        architecture: Any,
+        existing_code: str,
+        tool_agents: Dict[Any, Any],
+        git_agent: Any,
+        feature_branch_name: Optional[str],
+        llm: LLMClient,
+        run_planning: Callable[..., Any],
+        update_job: Callable[..., None],
+        logger: logging.Logger,
+    ) -> Tuple[Optional[Any], Optional[str], Optional[str]]:
+        """Run planning, then create a feature branch if one isn't already set.
+
+        Extracted from ``run_workflow`` so the planning-invocation +
+        job-status-update + feature-branch-creation sequence is defined once;
+        ``run_planning`` is injected (the caller's own module-level name) so
+        tests that monkeypatch a team's orchestrator module keep working
+        unchanged, matching ``_run_preflight``'s pattern. ``git_agent`` is
+        pre-resolved by the caller (``tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)``)
+        since ``ToolAgentKind`` is a distinct enum per team and the shared
+        base cannot reference it.
+
+        Preconditions: ``repo_path`` is an existing directory containing the
+          branch to plan/edit. ``run_planning`` follows the team
+          ``run_planning`` signature (``llm``, ``task``, ``repo_path``,
+          ``architecture``, ``existing_code``, ``tool_agents`` keywords) and
+          is assumed not to raise by contract, but any exception it does
+          raise is caught and reported via the returned failure reason.
+        Postconditions: returns ``(planning_result, feature_branch_name,
+          failure_reason)``. On planning failure, ``planning_result`` is
+          ``None`` and ``failure_reason`` is set (already logged via
+          ``logger.error``); the caller sets ``result.failure_reason`` and
+          returns early exactly as ``run_workflow`` does today. On success,
+          ``failure_reason`` is ``None`` and ``feature_branch_name`` is the
+          incoming name unchanged if already set, else the newly created
+          branch name if branch creation succeeded, else the incoming
+          (falsy) name. Never raises on its own; branch-creation failures are
+          swallowed and logged, never surfaced as a failure_reason, since
+          ``deliver`` can still create the branch later.
+        """
+        logger.info("[%s] Next step -> Starting Phase: Planning", task_id)
+        update_job(
+            current_phase="planning",
+            progress=5,
+            status_text="Analyzing task and creating implementation plan...",
+        )
+
+        try:
+            planning_result = run_planning(
+                llm=llm,
+                task=task,
+                repo_path=repo_path,
+                architecture=architecture,
+                existing_code=existing_code,
+                tool_agents=tool_agents,
+            )
+        except Exception as exc:
+            failure_reason = f"Planning failed: {exc}"
+            logger.error("[%s] %s", task_id, failure_reason)
+            return None, feature_branch_name, failure_reason
+
+        total_microtasks = len(planning_result.microtasks)
+        update_job(
+            current_phase="planning",
+            progress=10,
+            microtasks_total=total_microtasks,
+            microtasks_completed=0,
+            status_text=f"Plan created with {total_microtasks} microtask(s)",
+        )
+
+        # ── Create feature branch (Git agent) before first execution ───
+        create_feature_branch_fn = (
+            getattr(git_agent, "create_feature_branch", None) if git_agent is not None else None
+        )
+        if not feature_branch_name and callable(create_feature_branch_fn):
+            update_job(
+                current_phase="planning", progress=12, status_text="Creating feature branch..."
+            )
+            try:
+                ok, branch_name = create_feature_branch_fn(repo_path, task_id, task.title or "")
+                if ok and branch_name:
+                    feature_branch_name = branch_name
+                    logger.info("[%s] Created feature branch: %s", task_id, feature_branch_name)
+                    update_job(
+                        current_phase="planning",
+                        progress=14,
+                        status_text=f"Branch {feature_branch_name} ready",
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Git agent create_feature_branch failed, deliver will create branch",
+                        task_id,
+                    )
+            except Exception as exc:
+                logger.warning("[%s] Git agent create_feature_branch raised: %s", task_id, exc)
+
+        return planning_result, feature_branch_name, None
+
     def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
         """Per-team repo briefing reader.
 

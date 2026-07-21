@@ -570,3 +570,227 @@ class TestRunPreflight:
         )
         assert result is None
         assert update_calls == []
+
+
+class _FakePlanningResult:
+    def __init__(self, microtask_count: int = 2):
+        self.microtasks = list(range(microtask_count))
+
+
+class _FakeTask:
+    def __init__(self, task_id: str = "t1", title: str = "Do the thing"):
+        self.id = task_id
+        self.title = title
+
+
+class TestRunPlanningAndBranchSetup:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_planning_and_branch_setup`` helper.
+
+    Mirrors ``TestRunPreflight``'s style: fake callables/agents injected so the
+    planning-invocation + job-status-update + feature-branch-creation sequence
+    is unit-isolated from either team's ``run_workflow``.
+    """
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_planning_and_branch_setup")
+
+    def test_planning_failure_short_circuits_without_branch_creation(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+
+        def _raise_run_planning(**kwargs):
+            raise ValueError("boom")
+
+        planning_result, feature_branch_name, failure_reason = (
+            BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                task_id="t1",
+                task=_FakeTask(),
+                repo_path=tmp_path,
+                architecture=None,
+                existing_code="",
+                tool_agents={},
+                git_agent=git_agent,
+                feature_branch_name=None,
+                llm=MagicMock(),
+                run_planning=_raise_run_planning,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+            )
+        )
+        assert planning_result is None
+        assert feature_branch_name is None
+        assert failure_reason == "Planning failed: boom"
+        git_agent.create_feature_branch.assert_not_called()
+
+    def test_existing_branch_name_skips_branch_creation(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        fake_result = _FakePlanningResult()
+
+        planning_result, feature_branch_name, failure_reason = (
+            BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                task_id="t1",
+                task=_FakeTask(),
+                repo_path=tmp_path,
+                architecture=None,
+                existing_code="",
+                tool_agents={},
+                git_agent=git_agent,
+                feature_branch_name="feature/already-set",
+                llm=MagicMock(),
+                run_planning=lambda **kw: fake_result,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+            )
+        )
+        assert planning_result is fake_result
+        assert feature_branch_name == "feature/already-set"
+        assert failure_reason is None
+        git_agent.create_feature_branch.assert_not_called()
+
+    def test_successful_branch_creation_emits_progress_and_logs(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.create_feature_branch.return_value = (True, "feature/new-branch")
+        fake_result = _FakePlanningResult(microtask_count=3)
+        update_calls = []
+
+        with caplog.at_level("INFO", logger="test_run_planning_and_branch_setup"):
+            planning_result, feature_branch_name, failure_reason = (
+                BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                    task_id="t1",
+                    task=_FakeTask(),
+                    repo_path=tmp_path,
+                    architecture=None,
+                    existing_code="",
+                    tool_agents={},
+                    git_agent=git_agent,
+                    feature_branch_name=None,
+                    llm=MagicMock(),
+                    run_planning=lambda **kw: fake_result,
+                    update_job=lambda **kw: update_calls.append(kw),
+                    logger=self._logger(),
+                )
+            )
+
+        assert planning_result is fake_result
+        assert feature_branch_name == "feature/new-branch"
+        assert failure_reason is None
+        assert update_calls == [
+            {
+                "current_phase": "planning",
+                "progress": 5,
+                "status_text": "Analyzing task and creating implementation plan...",
+            },
+            {
+                "current_phase": "planning",
+                "progress": 10,
+                "microtasks_total": 3,
+                "microtasks_completed": 0,
+                "status_text": "Plan created with 3 microtask(s)",
+            },
+            {
+                "current_phase": "planning",
+                "progress": 12,
+                "status_text": "Creating feature branch...",
+            },
+            {
+                "current_phase": "planning",
+                "progress": 14,
+                "status_text": "Branch feature/new-branch ready",
+            },
+        ]
+        assert "Created feature branch: feature/new-branch" in caplog.text
+
+    def test_failed_branch_creation_logs_warning_without_failure_reason(
+        self, tmp_path: Path, caplog
+    ):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.create_feature_branch.return_value = (False, None)
+        fake_result = _FakePlanningResult()
+
+        with caplog.at_level("WARNING", logger="test_run_planning_and_branch_setup"):
+            planning_result, feature_branch_name, failure_reason = (
+                BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                    task_id="t1",
+                    task=_FakeTask(),
+                    repo_path=tmp_path,
+                    architecture=None,
+                    existing_code="",
+                    tool_agents={},
+                    git_agent=git_agent,
+                    feature_branch_name=None,
+                    llm=MagicMock(),
+                    run_planning=lambda **kw: fake_result,
+                    update_job=lambda **kw: None,
+                    logger=self._logger(),
+                )
+            )
+
+        assert planning_result is fake_result
+        assert feature_branch_name is None
+        assert failure_reason is None
+        assert "Git agent create_feature_branch failed, deliver will create branch" in caplog.text
+
+    def test_branch_creation_exception_is_swallowed_and_logged(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.create_feature_branch.side_effect = RuntimeError("git exploded")
+        fake_result = _FakePlanningResult()
+
+        with caplog.at_level("WARNING", logger="test_run_planning_and_branch_setup"):
+            planning_result, feature_branch_name, failure_reason = (
+                BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                    task_id="t1",
+                    task=_FakeTask(),
+                    repo_path=tmp_path,
+                    architecture=None,
+                    existing_code="",
+                    tool_agents={},
+                    git_agent=git_agent,
+                    feature_branch_name=None,
+                    llm=MagicMock(),
+                    run_planning=lambda **kw: fake_result,
+                    update_job=lambda **kw: None,
+                    logger=self._logger(),
+                )
+            )
+
+        assert planning_result is fake_result
+        assert feature_branch_name is None
+        assert failure_reason is None
+        assert "Git agent create_feature_branch raised: git exploded" in caplog.text
+
+    def test_no_git_agent_skips_branch_creation(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        fake_result = _FakePlanningResult()
+
+        planning_result, feature_branch_name, failure_reason = (
+            BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                task_id="t1",
+                task=_FakeTask(),
+                repo_path=tmp_path,
+                architecture=None,
+                existing_code="",
+                tool_agents={},
+                git_agent=None,
+                feature_branch_name=None,
+                llm=MagicMock(),
+                run_planning=lambda **kw: fake_result,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+            )
+        )
+        assert planning_result is fake_result
+        assert feature_branch_name is None
+        assert failure_reason is None
