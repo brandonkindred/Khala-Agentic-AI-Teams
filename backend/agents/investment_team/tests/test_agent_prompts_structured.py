@@ -141,13 +141,23 @@ def _patch_design(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
 
 
 def _patch_refinement(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
+    # RefinementAgent._invoke_and_parse's unconstrained retry loop delegates to
+    # _agent_runner.run_json_with_parse_retry, which builds its Agent using
+    # that module's own Agent/get_strands_model names, not refinement.py's —
+    # patch those. Also force the structured-output seam off (same rationale
+    # as _patch_design above) so this deterministically exercises the legacy
+    # loop regardless of ambient LLM_PROVIDER.
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.refinement.Agent",
+        "investment_team.strategy_lab.agents._agent_runner.Agent",
         lambda **kwargs: _FakeStrandsAgentReturning(payload),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.refinement.get_strands_model",
+        "investment_team.strategy_lab.agents._agent_runner.get_strands_model",
         lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.refinement._structured_output_available",
+        lambda: False,
     )
 
 
