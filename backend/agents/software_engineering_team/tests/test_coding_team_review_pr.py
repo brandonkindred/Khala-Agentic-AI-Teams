@@ -800,9 +800,7 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
                 raise out
             return out
 
-    monkeypatch.setattr(
-        "software_engineering_team.engine_provider._provider", _FakeProvider()
-    )
+    monkeypatch.setattr("software_engineering_team.engine_provider._provider", _FakeProvider())
 
     from fastapi.testclient import TestClient
 
@@ -2952,9 +2950,7 @@ class TestWholeFileReview:
                 captured.update(kw)
                 return _FakeOutput(issues=[])
 
-        monkeypatch.setattr(
-            "software_engineering_team.engine_provider._provider", _CapProvider()
-        )
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -2976,9 +2972,7 @@ class TestWholeFileReview:
                 captured.update(kw)
                 return _FakeOutput(issues=[])
 
-        monkeypatch.setattr(
-            "software_engineering_team.engine_provider._provider", _CapProvider()
-        )
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -2998,9 +2992,7 @@ class TestWholeFileReview:
                 captured.update(kw)
                 return _FakeOutput(issues=[])
 
-        monkeypatch.setattr(
-            "software_engineering_team.engine_provider._provider", _CapProvider()
-        )
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
@@ -3027,9 +3019,7 @@ class TestWholeFileReview:
                 calls.append(dict(kw))
                 return _FakeOutput(issues=[])
 
-        monkeypatch.setattr(
-            "software_engineering_team.engine_provider._provider", _CapProvider()
-        )
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # Only 1 of 2 reviewable files fetched whole -> a.py must NOT silently
@@ -3091,9 +3081,7 @@ class TestWholeFileReview:
                     spec="",
                 )
 
-        monkeypatch.setattr(
-            "software_engineering_team.engine_provider._provider", _SplitProvider()
-        )
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _SplitProvider())
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -4118,6 +4106,529 @@ class TestDetectDuplicateProposalsUnit:
         )
         assert proposal["matched_existing"] is False
         assert proposal["issue_url"] is None
+
+
+def _mode_pr(head_sha: str = "sha1") -> PullRequestDetail:
+    return PullRequestDetail(
+        number=7,
+        html_url="https://example/pull/7",
+        head="feature",
+        base="main",
+        head_sha=head_sha,
+        title="Add feature",
+        body="",
+        draft=False,
+        author="alice",
+        state="open",
+        updated_at="2026-01-01T00:00:00Z",
+        labels=(),
+    )
+
+
+class TestDecideReviewModeUnit:
+    """Direct unit tests for _decide_review_mode, extracted from
+    _run_pr_review_body for exactly this reason (its own no-op exits, and each
+    of the whole-file/partial/hunk-fallback branches, independent of the full
+    review harness)."""
+
+    def test_no_files_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from software_engineering_team.api import pr_review
+
+        noop_calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            pr_review,
+            "_complete_review_noop",
+            lambda *a, **kw: noop_calls.append(kw),
+        )
+
+        result = pr_review._decide_review_mode(object(), "job1", "o", "r", 7, _mode_pr(), [])
+        assert result is None
+        assert noop_calls == [
+            {
+                "comment": "Code review: no changed files to review.",
+                "status_text": "No changed files to review",
+            }
+        ]
+
+    def test_no_reviewable_files_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from software_engineering_team.api import pr_review
+
+        noop_calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            pr_review,
+            "_complete_review_noop",
+            lambda *a, **kw: noop_calls.append(kw),
+        )
+
+        files = [
+            PullRequestFile("gone.py", "removed", "@@ -1 +0 @@\n-x", 0, 1, None),
+            PullRequestFile("img.png", "added", "", 0, 0, None),  # binary: no patch
+        ]
+        result = pr_review._decide_review_mode(object(), "job1", "o", "r", 7, _mode_pr(), files)
+        assert result is None
+        assert noop_calls == [
+            {
+                "comment": "Code review: no reviewable file content.",
+                "status_text": "No reviewable file content",
+            }
+        ]
+
+    def test_all_files_fetch_whole_skips_hunk_rendering(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        files = [
+            PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1 +1 @@\n+y", 1, 0, None),
+        ]
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                assert ref == "sha1"
+                return f"WHOLE {path}\n"
+
+        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        assert result is not None
+        assert result.code == ""
+        assert result.files_reviewed == 2
+        assert set(result.head_files) == {"a.py", "b.py"}
+        assert set(result.valid_by_path["a.py"]) == {1}
+        assert set(result.changed_by_path["a.py"]) == {1}
+
+    def test_partial_fetch_falls_back_to_hunks_for_the_missing_subset(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1,1 +1,2 @@\n x\n+y", 1, 0, None),
+        ]
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                return "whole a\n" if path == "a.py" else None
+
+        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        assert result is not None
+        assert set(result.head_files) == {"a.py"}
+        assert "b.py" in result.code  # missing file's hunk was rendered
+        assert "a.py" not in result.code  # fetched file's hunk was NOT rendered
+        assert result.files_reviewed == 2  # 1 whole + 1 hunk
+
+    def test_total_fetch_failure_renders_every_files_hunks(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                return None
+
+        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        assert result is not None
+        assert result.head_files == {}
+        assert result.code
+        assert result.files_reviewed == 1
+
+    def test_total_fetch_failure_with_blank_hunk_render_is_a_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Belt-and-suspenders branch: reviewable is non-empty but every
+        reviewable file's diff hunk happens to render blank (e.g. a
+        deletion-only patch)."""
+        from software_engineering_team.api import pr_review
+
+        noop_calls: list[dict[str, Any]] = []
+        monkeypatch.setattr(
+            pr_review,
+            "_complete_review_noop",
+            lambda *a, **kw: noop_calls.append(kw),
+        )
+        # A patch that only removes lines: has_patch is True (reviewable) but
+        # render_annotated_hunks emits nothing for it.
+        files = [PullRequestFile("a.py", "modified", "@@ -1,2 +1,0 @@\n-x\n-y", 0, 2, None)]
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                return None
+
+        result = pr_review._decide_review_mode(_C(), "job1", "o", "r", 7, _mode_pr(), files)
+        assert result is None
+        assert noop_calls == [
+            {
+                "comment": "Code review: no reviewable file content.",
+                "status_text": "No reviewable file content",
+            }
+        ]
+
+
+class TestPartitionReviewIssuesUnit:
+    """Direct unit tests for _partition_review_issues, extracted from
+    _run_pr_review_body for exactly this reason."""
+
+    def test_pre_existing_tag_kept_when_not_within_diff(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        issue = _FakeReviewIssue("medium", line=99, file_path="a.py", pre_existing=True)
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1, 2, 99]}
+        changed_by_path = {"a.py": [1]}  # line 99 was NOT added by this PR
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                return []
+
+            def list_issue_comments(self, o, r, n):
+                return []
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                return set()
+
+            def list_open_issues(self, o, r):
+                return iter(())
+
+        result = pr_review._partition_review_issues(
+            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == []
+        assert result.preexisting_issues == [issue]
+        assert len(result.proposals) == 1
+
+    def test_pre_existing_tag_overridden_when_within_diff(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        issue = _FakeReviewIssue("medium", line=1, file_path="a.py", pre_existing=True)
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1]}
+        changed_by_path = {"a.py": [1]}  # line 1 WAS added by this PR
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                return []
+
+            def list_issue_comments(self, o, r, n):
+                return []
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                return set()
+
+        result = pr_review._partition_review_issues(
+            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == [issue]
+        assert result.preexisting_issues == []
+        assert result.proposals == []
+
+    def test_existing_comments_fetch_skipped_when_no_pr_issues(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        output = _FakeOutput(issues=[])
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                raise AssertionError("should not be called when pr_issues is empty")
+
+        result = pr_review._partition_review_issues(output, _C(), "o", "r", 7, {}, {})
+        assert result.pr_issues == []
+        assert result.addressed_issues == []
+
+    def test_finding_matching_resolved_comment_is_dropped_as_addressed(self) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.github_source import ReviewComment
+
+        issue = _FakeReviewIssue("high", line=2, file_path="a.py", description="dup finding")
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1, 2]}
+        changed_by_path = {"a.py": [1, 2]}
+        existing = ReviewComment(
+            id=1, path="a.py", line=2, body="dup finding", html_url="https://example/comment/1"
+        )
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                return [existing]
+
+            def list_issue_comments(self, o, r, n):
+                return []
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                return {1}  # resolved
+
+        result = pr_review._partition_review_issues(
+            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.pr_issues == []
+        assert result.addressed_issues == [issue]
+
+    def test_leftover_finding_is_reanchored_to_first_file(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        # file_path not present in valid_by_path -> map_issues_to_comments
+        # cannot place it directly, so it must be re-anchored.
+        issue = _FakeReviewIssue("high", line=1, file_path="missing.py")
+        output = _FakeOutput(issues=[issue])
+        valid_by_path = {"a.py": [1, 2]}
+        changed_by_path = {"a.py": [1, 2]}
+
+        class _C:
+            def list_review_comments(self, o, r, n):
+                return []
+
+            def list_issue_comments(self, o, r, n):
+                return []
+
+            def get_resolved_review_thread_comment_ids(self, o, r, n):
+                return set()
+
+        result = pr_review._partition_review_issues(
+            output, _C(), "o", "r", 7, valid_by_path, changed_by_path
+        )
+        assert result.line_comments == []
+        assert len(result.file_comments) == 1
+        assert result.file_comments[0]["path"] == "a.py"
+
+
+class TestPostReviewCommentsUnit:
+    """Direct unit tests for _post_review_comments, extracted from
+    _run_pr_review_body for exactly this reason."""
+
+    def _partition(self, **overrides: Any):
+        from software_engineering_team.api.pr_review import ReviewIssuePartition
+
+        base = dict(
+            pr_issues=[],
+            preexisting_issues=[],
+            proposals=[],
+            addressed_issues=[],
+            line_comments=[],
+            file_comments=[],
+        )
+        base.update(overrides)
+        return ReviewIssuePartition(**base)
+
+    def test_happy_path_counts(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        client = _FakeReviewClient()
+        line_comment = {"path": "a.py", "line": 2, "body": "b", "side": "RIGHT"}
+        partition = self._partition(pr_issues=[object()], line_comments=[line_comment])
+        output = _FakeOutput(issues=[])
+
+        result = pr_review._post_review_comments(
+            client, "o", "r", 7, _mode_pr(), "khala-bot", output, partition
+        )
+        assert result.inline_count == 1
+        assert result.file_comment_count == 0
+        assert result.comments_failed == 0
+        assert len(client.submitted_reviews) == 1
+
+    def test_github_api_error_tolerated_when_only_file_comments_remain(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        client = _FakeReviewClient()
+        client.review_exc = GitHubAPIError(500, "summary submit failed")
+        file_comment = {"path": "a.py", "line": 2, "body": "b", "subject_type": "file"}
+        partition = self._partition(pr_issues=[object()], file_comments=[file_comment])
+        output = _FakeOutput(issues=[])
+
+        result = pr_review._post_review_comments(
+            client, "o", "r", 7, _mode_pr(), "khala-bot", output, partition
+        )
+        assert result.file_comment_count == 1
+        assert result.inline_count == 0
+
+    def test_github_api_error_reraised_when_line_comments_present(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        client = _FakeReviewClient()
+        client.review_exc = GitHubAPIError(500, "boom")
+        line_comment = {"path": "a.py", "line": 2, "body": "b", "side": "RIGHT"}
+        partition = self._partition(pr_issues=[object()], line_comments=[line_comment])
+        output = _FakeOutput(issues=[])
+
+        with pytest.raises(GitHubAPIError):
+            pr_review._post_review_comments(
+                client, "o", "r", 7, _mode_pr(), "khala-bot", output, partition
+            )
+
+    def test_github_api_error_reraised_when_nothing_else_to_post(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        client = _FakeReviewClient()
+        client.review_exc = GitHubAPIError(500, "boom")
+        partition = self._partition()
+        output = _FakeOutput(issues=[])
+
+        with pytest.raises(GitHubAPIError):
+            pr_review._post_review_comments(
+                client, "o", "r", 7, _mode_pr(), "khala-bot", output, partition
+            )
+
+    def test_standalone_comment_failure_is_counted(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        client = _FakeReviewClient()
+        client.review_comment_fail_paths = {"a.py"}  # forces demotion to standalone
+        client.comment_fail_times = 1  # the one standalone attempt fails
+        file_comment = {"path": "a.py", "line": 2, "body": "b", "subject_type": "file"}
+        partition = self._partition(pr_issues=[object()], file_comments=[file_comment])
+        output = _FakeOutput(issues=[])
+
+        result = pr_review._post_review_comments(
+            client, "o", "r", 7, _mode_pr(), "khala-bot", output, partition
+        )
+        assert result.comment_findings == 1
+        assert result.comments_failed == 1
+
+
+class TestFinalizeReviewOutcomeUnit:
+    """Direct unit tests for _finalize_review_outcome, extracted from
+    _run_pr_review_body for exactly this reason."""
+
+    def _partition(self, **overrides: Any):
+        from software_engineering_team.api.pr_review import ReviewIssuePartition
+
+        base = dict(
+            pr_issues=[],
+            preexisting_issues=[],
+            proposals=[],
+            addressed_issues=[],
+            line_comments=[],
+            file_comments=[],
+        )
+        base.update(overrides)
+        return ReviewIssuePartition(**base)
+
+    def _posting(self, **overrides: Any):
+        from software_engineering_team.api.pr_review import CommentPostingResult
+
+        base = dict(
+            event="COMMENT",
+            inline_count=0,
+            file_comment_count=0,
+            comment_findings=0,
+            comments_failed=0,
+        )
+        base.update(overrides)
+        return CommentPostingResult(**base)
+
+    def _capture_finalize(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        from software_engineering_team.api import pr_review
+
+        calls: list[dict[str, Any]] = []
+
+        def _fake_finalize(job_id, status, status_text=None, **kw):
+            calls.append({"status": status, "status_text": status_text, **kw})
+
+        monkeypatch.setattr(pr_review, "_finalize_review", _fake_finalize)
+        return calls
+
+    def test_comments_failed_marks_job_failed_and_stops(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.models import JobStatus
+
+        calls = self._capture_finalize(monkeypatch)
+        reacted: list[Any] = []
+        monkeypatch.setattr(pr_review, "_react_to_pr", lambda *a, **kw: reacted.append(a))
+        client = _FakeReviewClient()
+
+        posting = self._posting(comments_failed=1, comment_findings=2)
+        partition = self._partition(pr_issues=[_FakeReviewIssue("high", line=1)])
+
+        pr_review._finalize_review_outcome(
+            client, "job1", "o", "r", 7, _mode_pr(), 1, partition, posting
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["status"] == JobStatus.FAILED
+        assert "1 of 2 finding comment(s)" in calls[0]["error"]
+        assert reacted == []  # no further calls after the early return
+        assert client.comments  # the "incomplete" notice was posted
+
+    def test_clean_review_reacts_and_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.models import JobStatus
+
+        calls = self._capture_finalize(monkeypatch)
+        reacted: list[Any] = []
+        monkeypatch.setattr(pr_review, "_react_to_pr", lambda *a, **kw: reacted.append(a))
+        client = _FakeReviewClient()
+
+        posting = self._posting()
+        partition = self._partition(pr_issues=[])
+
+        pr_review._finalize_review_outcome(
+            client, "job1", "o", "r", 7, _mode_pr(), 1, partition, posting
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["status"] == JobStatus.COMPLETED
+        assert len(reacted) == 1
+        assert "pre-existing" not in calls[0]["status_text"]
+        assert "already-addressed" not in calls[0]["status_text"]
+
+    def test_non_empty_pr_issues_does_not_react(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from software_engineering_team.api import pr_review
+
+        self._capture_finalize(monkeypatch)
+        reacted: list[Any] = []
+        monkeypatch.setattr(pr_review, "_react_to_pr", lambda *a, **kw: reacted.append(a))
+        client = _FakeReviewClient()
+
+        posting = self._posting()
+        partition = self._partition(pr_issues=[_FakeReviewIssue("low", line=1)])
+
+        pr_review._finalize_review_outcome(
+            client, "job1", "o", "r", 7, _mode_pr(), 1, partition, posting
+        )
+        assert reacted == []
+
+    def test_status_text_includes_proposals_and_addressed_clauses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from software_engineering_team.api import pr_review
+
+        calls = self._capture_finalize(monkeypatch)
+        monkeypatch.setattr(pr_review, "_react_to_pr", lambda *a, **kw: None)
+        client = _FakeReviewClient()
+
+        posting = self._posting()
+        partition = self._partition(
+            pr_issues=[],
+            proposals=[{"id": "p0"}],
+            addressed_issues=[_FakeReviewIssue("low", line=1)],
+        )
+
+        pr_review._finalize_review_outcome(
+            client, "job1", "o", "r", 7, _mode_pr(), 1, partition, posting
+        )
+        assert "1 pre-existing bug to review" in calls[0]["status_text"]
+        assert "1 already-addressed finding skipped" in calls[0]["status_text"]
+
+    def test_severity_bucketing_ignores_unrecognized_severity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from software_engineering_team.api import pr_review
+
+        calls = self._capture_finalize(monkeypatch)
+        monkeypatch.setattr(pr_review, "_react_to_pr", lambda *a, **kw: None)
+        client = _FakeReviewClient()
+
+        posting = self._posting()
+        partition = self._partition(
+            pr_issues=[
+                _FakeReviewIssue("high", line=1),
+                _FakeReviewIssue("weird-level", line=2),
+                _FakeReviewIssue("", line=3),
+            ]
+        )
+
+        pr_review._finalize_review_outcome(
+            client, "job1", "o", "r", 7, _mode_pr(), 1, partition, posting
+        )
+        summary = calls[0]["review_summary"]
+        assert summary["total_issues"] == 3
+        assert summary["severity_counts"] == {"high": 1}
 
 
 class TestCreateReviewIssuesUnit:
