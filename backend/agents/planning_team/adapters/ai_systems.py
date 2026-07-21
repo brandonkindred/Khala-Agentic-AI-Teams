@@ -9,9 +9,9 @@ Calls the AI Systems Team API:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, Optional
 
+from planning_team.adapters._base import BaseAdapter
 from shared.http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
@@ -22,9 +22,11 @@ MAX_POLL_WAIT = 3600.0
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed"})
 
-
-def _ai_systems_base_url() -> Optional[str]:
-    return os.environ.get("PLANNING_AI_SYSTEMS_URL") or os.environ.get("UNIFIED_API_BASE_URL")
+_adapter = BaseAdapter(
+    env_var="PLANNING_AI_SYSTEMS_URL",
+    path_prefix="/api/ai-systems",
+    unconfigured_log="AI Systems build",
+)
 
 
 def start_ai_systems_build(
@@ -38,11 +40,9 @@ def start_ai_systems_build(
     (AI Systems API expects a file path). Returns job_id or None on failure
     (including when the AI Systems service is unconfigured).
     """
-    base = _ai_systems_base_url()
-    if not base:
-        logger.debug("No base URL for AI Systems build; skipping.")
+    url = _adapter.build_url("/build")
+    if not url:
         return None
-    url = f"{base.rstrip('/')}/api/ai-systems/build"
     payload: Dict[str, Any] = {
         "project_name": project_name,
         "spec_path": spec_path,
@@ -56,11 +56,9 @@ def start_ai_systems_build(
 
 def get_ai_systems_build_status(job_id: str) -> Optional[Dict[str, Any]]:
     """Get status of an AI Systems build job. Returns None on failure."""
-    base = _ai_systems_base_url()
-    if not base:
-        logger.debug("No base URL for AI Systems build; skipping.")
+    url = _adapter.build_url(f"/build/status/{job_id}")
+    if not url:
         return None
-    url = f"{base.rstrip('/')}/api/ai-systems/build/status/{job_id}"
     return get_json(
         url, timeout=DEFAULT_TIMEOUT, log_context=f"AI Systems build status for {job_id}"
     )

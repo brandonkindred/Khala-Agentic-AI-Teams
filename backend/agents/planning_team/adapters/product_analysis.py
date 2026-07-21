@@ -10,9 +10,9 @@ Calls the Software Engineering API:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
+from planning_team.adapters._base import BaseAdapter
 from shared.http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
@@ -23,11 +23,11 @@ MAX_POLL_WAIT = 3600.0
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed"})
 
-
-def _se_base_url() -> Optional[str]:
-    return os.environ.get("PLANNING_SOFTWARE_ENGINEERING_URL") or os.environ.get(
-        "UNIFIED_API_BASE_URL"
-    )
+_adapter = BaseAdapter(
+    env_var="PLANNING_SOFTWARE_ENGINEERING_URL",
+    path_prefix="/api/software-engineering/product-analysis",
+    unconfigured_log="product analysis",
+)
 
 
 def run_product_analysis(
@@ -38,11 +38,9 @@ def run_product_analysis(
     Start Product Requirements Analysis. Returns job_id or None on failure
     (including when the Software Engineering service is unconfigured).
     """
-    base = _se_base_url()
-    if not base:
-        logger.debug("No base URL for product analysis; skipping.")
+    url = _adapter.build_url("/run")
+    if not url:
         return None
-    url = f"{base.rstrip('/')}/api/software-engineering/product-analysis/run"
     payload: Dict[str, Any] = {"repo_path": repo_path}
     if spec_content is not None:
         payload["spec_content"] = spec_content
@@ -52,11 +50,9 @@ def run_product_analysis(
 
 def get_product_analysis_status(job_id: str) -> Optional[Dict[str, Any]]:
     """Get status of a product analysis job. Returns None on failure."""
-    base = _se_base_url()
-    if not base:
-        logger.debug("No base URL for product analysis; skipping.")
+    url = _adapter.build_url(f"/status/{job_id}")
+    if not url:
         return None
-    url = f"{base.rstrip('/')}/api/software-engineering/product-analysis/status/{job_id}"
     return get_json(
         url, timeout=DEFAULT_TIMEOUT, log_context=f"Product analysis status for {job_id}"
     )
@@ -70,11 +66,9 @@ def submit_product_analysis_answers(
     Submit answers to open questions. answers: list of {question_id, selected_option_id?, other_text?}.
     Returns updated status dict or None on failure.
     """
-    base = _se_base_url()
-    if not base:
-        logger.debug("No base URL for product analysis; skipping.")
+    url = _adapter.build_url(f"/{job_id}/answers")
+    if not url:
         return None
-    url = f"{base.rstrip('/')}/api/software-engineering/product-analysis/{job_id}/answers"
     return post_json(
         url,
         {"answers": answers},
