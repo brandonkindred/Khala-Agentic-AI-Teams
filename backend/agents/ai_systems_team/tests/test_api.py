@@ -114,6 +114,133 @@ def test_start_build_returns_job_id():
     assert len(data["job_id"]) > 0
 
 
+def test_maybe_dispatch_temporal_dispatches_when_enabled(monkeypatch):
+    """Enabled + importable: the helper starts the workflow and returns True."""
+    import ai_systems_team.temporal.client as temporal_client
+    import ai_systems_team.temporal.start_workflow as start_workflow
+    from ai_systems_team.api.main import _maybe_dispatch_temporal
+
+    captured: dict = {}
+    monkeypatch.setattr(temporal_client, "is_temporal_enabled", lambda: True)
+    monkeypatch.setattr(
+        start_workflow,
+        "start_build_workflow",
+        lambda job_id, project_name, spec_path, constraints, output_dir: captured.update(
+            job_id=job_id,
+            project_name=project_name,
+            spec_path=spec_path,
+            constraints=constraints,
+            output_dir=output_dir,
+        ),
+    )
+
+    assert _maybe_dispatch_temporal("j1", "proj", "/spec.md", {"k": "v"}, "/out") is True
+    assert captured == {
+        "job_id": "j1",
+        "project_name": "proj",
+        "spec_path": "/spec.md",
+        "constraints": {"k": "v"},
+        "output_dir": "/out",
+    }
+
+
+def test_maybe_dispatch_temporal_returns_false_when_disabled(monkeypatch):
+    """Temporal disabled: no dispatch, returns False."""
+    import ai_systems_team.temporal.client as temporal_client
+    import ai_systems_team.temporal.start_workflow as start_workflow
+    from ai_systems_team.api.main import _maybe_dispatch_temporal
+
+    called = {"n": 0}
+    monkeypatch.setattr(temporal_client, "is_temporal_enabled", lambda: False)
+    monkeypatch.setattr(
+        start_workflow,
+        "start_build_workflow",
+        lambda *a, **kw: called.__setitem__("n", called["n"] + 1),
+    )
+
+    assert _maybe_dispatch_temporal("j2", "proj", "/spec.md", {}, None) is False
+    assert called["n"] == 0
+
+
+def test_maybe_dispatch_temporal_returns_false_on_import_error(monkeypatch):
+    """Temporal package not importable: swallowed, returns False (no exception)."""
+    import sys
+
+    from ai_systems_team.api.main import _maybe_dispatch_temporal
+
+    monkeypatch.setitem(sys.modules, "ai_systems_team.temporal.client", None)
+
+    assert _maybe_dispatch_temporal("j3", "proj", "/spec.md", {}, None) is False
+
+
+def test_start_build_dispatches_to_temporal():
+    """When Temporal accepts the job, start_build responds without spawning a thread."""
+    with (
+        patch("ai_systems_team.api.main.create_job"),
+        patch(
+            "ai_systems_team.api.main._maybe_dispatch_temporal", return_value=True
+        ) as mock_dispatch,
+        patch("threading.Thread") as mock_thread,
+    ):
+        resp = client.post(
+            "/build",
+            json={"project_name": "test_proj", "spec_path": "/tmp/spec.md"},
+        )
+    assert resp.status_code == 200
+    assert "Temporal" in resp.json()["message"]
+    mock_dispatch.assert_called_once()
+    mock_thread.assert_not_called()
+
+
+def test_resume_build_job_dispatches_to_temporal():
+    """When Temporal accepts the resume, resume_build_job responds without a thread."""
+    job_data = {
+        "status": "failed",
+        "project_name": "proj",
+        "spec_path": "/tmp/spec.md",
+        "constraints": {},
+        "output_dir": None,
+        "blueprint": None,
+    }
+    with (
+        patch("ai_systems_team.api.main.get_job", return_value=job_data),
+        patch("ai_systems_team.api.main.update_job"),
+        patch(
+            "ai_systems_team.api.main._maybe_dispatch_temporal", return_value=True
+        ) as mock_dispatch,
+        patch("threading.Thread") as mock_thread,
+    ):
+        resp = client.post("/build/job/j-resume/resume")
+    assert resp.status_code == 200
+    assert "Temporal" in resp.json()["message"]
+    mock_dispatch.assert_called_once()
+    mock_thread.assert_not_called()
+
+
+def test_restart_build_job_dispatches_to_temporal():
+    """When Temporal accepts the restart, restart_build_job responds without a thread."""
+    job_data = {
+        "status": "completed",
+        "project_name": "proj",
+        "spec_path": "/tmp/spec.md",
+        "constraints": {},
+        "output_dir": None,
+    }
+    with (
+        patch("ai_systems_team.api.main.get_job", return_value=job_data),
+        patch("ai_systems_team.api.main.store_reset_job"),
+        patch(
+            "ai_systems_team.api.main._maybe_dispatch_temporal", return_value=True
+        ) as mock_dispatch,
+        patch("threading.Thread") as mock_thread,
+    ):
+        resp = client.post("/build/job/j-restart/restart")
+    assert resp.status_code == 200
+    assert "Temporal" in resp.json()["message"]
+    mock_dispatch.assert_called_once()
+    mock_thread.assert_not_called()
+
+
 def test_get_blueprint_not_found():
     resp = client.get("/blueprints/nonexistent")
     assert resp.status_code == 404

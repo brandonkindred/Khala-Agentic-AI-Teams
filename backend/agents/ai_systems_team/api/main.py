@@ -104,6 +104,38 @@ def _run_build_background(
         mark_job_failed(job_id, error=str(e))
 
 
+def _maybe_dispatch_temporal(
+    job_id: str,
+    project_name: str,
+    spec_path: str,
+    constraints: Dict[str, Any],
+    output_dir: Optional[str],
+) -> bool:
+    """Start the AI Systems build workflow on Temporal, if enabled.
+
+    Preconditions:
+        job_id, project_name, spec_path are non-empty; a job record for
+        job_id already exists in the job store.
+    Postconditions:
+        Returns True and starts AISystemsBuildWorkflow via
+        start_build_workflow when the temporal package is importable and
+        is_temporal_enabled() is True. Returns False, with no side effects,
+        when the temporal package can't be imported or Temporal is
+        disabled — callers must fall back to thread-mode execution.
+    """
+    try:
+        from ai_systems_team.temporal.client import is_temporal_enabled
+        from ai_systems_team.temporal.start_workflow import start_build_workflow
+    except ImportError:
+        return False
+
+    if not is_temporal_enabled():
+        return False
+
+    start_build_workflow(job_id, project_name, spec_path, constraints, output_dir)
+    return True
+
+
 @app.post(
     "/build",
     response_model=AISystemJobResponse,
@@ -123,25 +155,18 @@ def start_build(request: AISystemRequest) -> AISystemJobResponse:
         output_dir=request.output_dir,
     )
 
-    try:
-        from ai_systems_team.temporal.client import is_temporal_enabled
-        from ai_systems_team.temporal.start_workflow import start_build_workflow
-
-        if is_temporal_enabled():
-            start_build_workflow(
-                job_id,
-                request.project_name,
-                request.spec_path,
-                request.constraints,
-                request.output_dir,
-            )
-            return AISystemJobResponse(
-                job_id=job_id,
-                status=JOB_STATUS_RUNNING,
-                message="Build started (Temporal). Poll GET /build/status/{job_id} for progress.",
-            )
-    except ImportError:
-        pass
+    if _maybe_dispatch_temporal(
+        job_id,
+        request.project_name,
+        request.spec_path,
+        request.constraints,
+        request.output_dir,
+    ):
+        return AISystemJobResponse(
+            job_id=job_id,
+            status=JOB_STATUS_RUNNING,
+            message="Build started (Temporal). Poll GET /build/status/{job_id} for progress.",
+        )
 
     thread = threading.Thread(
         target=_run_build_background,
@@ -305,22 +330,15 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
 
     update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
-    try:
-        from ai_systems_team.temporal.client import is_temporal_enabled
-        from ai_systems_team.temporal.start_workflow import start_build_workflow
-
-        if is_temporal_enabled():
-            # The workflow's ``begin`` activity reads the checkpointed blueprint
-            # (completed_phases + per-phase results) straight from the job store and
-            # skips the phases already done, so no separate resume payload is needed.
-            start_build_workflow(
-                job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
-            )
-            return AISystemJobResponse(
-                job_id=job_id, status="running", message="Job resumed (Temporal)."
-            )
-    except ImportError:
-        pass
+    # The workflow's ``begin`` activity reads the checkpointed blueprint
+    # (completed_phases + per-phase results) straight from the job store and
+    # skips the phases already done, so no separate resume payload is needed.
+    if _maybe_dispatch_temporal(
+        job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
+    ):
+        return AISystemJobResponse(
+            job_id=job_id, status="running", message="Job resumed (Temporal)."
+        )
 
     thread = threading.Thread(
         target=_run_build_background,
@@ -356,19 +374,12 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
 
     store_reset_job(job_id)
 
-    try:
-        from ai_systems_team.temporal.client import is_temporal_enabled
-        from ai_systems_team.temporal.start_workflow import start_build_workflow
-
-        if is_temporal_enabled():
-            start_build_workflow(
-                job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
-            )
-            return AISystemJobResponse(
-                job_id=job_id, status="running", message="Job restarted (Temporal)."
-            )
-    except ImportError:
-        pass
+    if _maybe_dispatch_temporal(
+        job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
+    ):
+        return AISystemJobResponse(
+            job_id=job_id, status="running", message="Job restarted (Temporal)."
+        )
 
     thread = threading.Thread(
         target=_run_build_background,
