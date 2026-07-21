@@ -2102,6 +2102,11 @@ def _backtest_job_status(job_id: str) -> Optional[str]:
     return data.get("status")
 
 
+# Bound memory for errored_details — enough for operators to diagnose
+# without letting a pathological run balloon the state dict.
+_ERRORED_DETAILS_MAX = 50
+
+
 def _strategy_lab_worker(
     run_id: str, request: RunStrategyLabRequest, *, start_cycle_offset: int = 0
 ) -> None:
@@ -2236,9 +2241,6 @@ def _strategy_lab_worker(
         # preserve it instead of assuming every external stop was a genuine
         # user cancellation. Set alongside run_cancelled; None until then.
         external_terminal_status: Optional[str] = None
-        # Bound memory for errored_details — enough for operators to diagnose
-        # without letting a pathological run balloon the state dict.
-        _ERRORED_DETAILS_MAX = 50
 
         for batch_idx in range(start_batch_idx, batch_count):
             if run_failed or run_cancelled:
