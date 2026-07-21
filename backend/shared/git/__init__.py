@@ -15,7 +15,7 @@ API is large and stable; import the specific names you need from the submodule,
 e.g. ``from shared.git.git_utils import branch_diff, checkout_branch``.
 
 Preconditions:
-    - ``backend/agents`` is on ``sys.path`` (the ``shared_*`` convention).
+    - ``backend/`` is on ``sys.path`` (the ``shared.*`` convention).
 Postconditions:
     - Importing the package has no side effects and runs no git commands.
 """

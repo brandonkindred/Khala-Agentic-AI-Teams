@@ -16,8 +16,8 @@ Both submodules are stdlib-only at import time. ``runner`` lazily imports
 in-package import and carries no team dependency.
 
 Preconditions:
-    - ``backend/agents`` is on ``sys.path`` (the repo-wide convention for
-      ``shared_*`` packages), so ``import shared.command_runner`` resolves.
+    - ``backend/`` is on ``sys.path`` (the repo-wide convention for
+      ``shared.*`` packages), so ``import shared.command_runner`` resolves.
 Postconditions:
     - Importing this package has no side effects and starts no threads.
 """

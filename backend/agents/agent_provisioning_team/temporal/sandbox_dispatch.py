@@ -57,7 +57,7 @@ def sandbox_temporal_enabled() -> bool:
     Postconditions:
         * Returns ``is_temporal_enabled()`` — never raises.
     """
-    from agent_provisioning_team.temporal.client import is_temporal_enabled
+    from shared.temporal.client import is_temporal_enabled
 
     return is_temporal_enabled()
 

@@ -35,6 +35,7 @@ from shared.temporal.client import (
 )
 from shared.temporal.failure_translation import translate_workflow_failure
 from shared.temporal.runner import (
+    await_client,
     cancel_workflow_sync,
     execute_workflow_async,
     execute_workflow_sync,
@@ -47,6 +48,7 @@ from shared.temporal.worker import start_team_worker
 
 __all__ = [
     "TEAM_TEMPORAL_MODULES",
+    "await_client",
     "cancel_workflow_sync",
     "connect_temporal_client",
     "execute_workflow_async",

@@ -186,7 +186,7 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     request = FullPipelineRequest(**payload)
 
     try:
-        from agents.blogging.temporal.client import is_temporal_enabled
+        from shared.temporal.client import is_temporal_enabled
         from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
 
         if is_temporal_enabled():
@@ -235,7 +235,7 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     request = FullPipelineRequest(**payload)
 
     try:
-        from agents.blogging.temporal.client import is_temporal_enabled
+        from shared.temporal.client import is_temporal_enabled
         from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
 
         if is_temporal_enabled():

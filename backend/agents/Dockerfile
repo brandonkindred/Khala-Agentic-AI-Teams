@@ -138,6 +138,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # This covers all 24 enabled teams in unified_api/config.py TEAM_CONFIGS
 # plus the shared infrastructure they depend on.
 COPY agents /app/
+COPY shared /app/shared
 
 # `agents /app/` flattens every team straight into /app/<team>, so no /app/agents/
 # directory exists here (unlike team_service/agent_sandbox_image, which preserve

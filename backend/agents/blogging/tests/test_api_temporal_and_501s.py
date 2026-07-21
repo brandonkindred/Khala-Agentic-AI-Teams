@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> None:
     """When is_temporal_enabled() returns True, route delegates to Temporal."""
-    from agents.blogging.temporal import client as tc_mod
+    from shared.temporal import client as tc_mod
     from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
@@ -45,7 +45,7 @@ def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> N
 
 def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
     from agents.blogging.shared import blog_job_store as bjs
-    from agents.blogging.temporal import client as tc_mod
+    from shared.temporal import client as tc_mod
     from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
@@ -66,7 +66,7 @@ def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
 
 def test_restart_with_temporal(client: TestClient, monkeypatch) -> None:
     from agents.blogging.shared import blog_job_store as bjs
-    from agents.blogging.temporal import client as tc_mod
+    from shared.temporal import client as tc_mod
     from agents.blogging.temporal import start_workflow as sw_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)

@@ -26,7 +26,7 @@ from agent_provisioning_team.temporal.activities import (
     release_agent_lock_activity,
     setup_activity,
 )
-from agent_provisioning_team.temporal.client import is_temporal_enabled
+from shared.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
 from agent_provisioning_team.temporal.sandbox_activities import (
     sandbox_acquire_activity,
@@ -83,6 +83,9 @@ SANDBOX_ACTIVITIES = [
     sandbox_reap_activity,
 ]
 
+# Deferred: ``shared.temporal.worker`` imports team WORKFLOWS/ACTIVITIES at
+# registration time; importing ``start_team_worker`` above those lists would
+# circular-import this package while it is still defining WORKFLOWS/ACTIVITIES.
 from shared.temporal import start_team_worker  # noqa: E402
 
 if is_temporal_enabled():

@@ -585,7 +585,7 @@ def test_ghost_writer_models() -> None:
 def test_temporal_client_helpers(monkeypatch) -> None:
     """address/namespace/enabled accessors read env, and the module-level client and
     loop setters/getters round-trip None."""
-    from agents.blogging.temporal import client as tc
+    from shared.temporal import client as tc
 
     # Default no-address → disabled
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
@@ -627,7 +627,7 @@ def test_connect_temporal_client_no_address(monkeypatch) -> None:
     TEMPORAL_ADDRESS is unset."""
     import asyncio
 
-    from agents.blogging.temporal import client as tc
+    from shared.temporal import client as tc
 
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     out = asyncio.run(tc.connect_temporal_client())

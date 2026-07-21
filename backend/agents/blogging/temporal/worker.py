@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from agents.blogging.temporal import ACTIVITIES, WORKFLOWS
-from agents.blogging.temporal.client import (
+from shared.temporal.client import (
     connect_temporal_client,
     is_temporal_enabled,
     set_temporal_client,

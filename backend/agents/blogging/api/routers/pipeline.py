@@ -124,7 +124,7 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
 
     # When Temporal is enabled, start workflow for resumable state; otherwise run in thread
     try:
-        from agents.blogging.temporal.client import is_temporal_enabled
+        from shared.temporal.client import is_temporal_enabled
         from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
 
         if is_temporal_enabled():

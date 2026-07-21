@@ -129,7 +129,7 @@ def test_activities_includes_every_activity_a_workflow_schedules() -> None:
 
 
 def test_client_helpers_default_env(monkeypatch) -> None:
-    from agent_provisioning_team.temporal import client
+    from shared.temporal import client
 
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     monkeypatch.delenv("TEMPORAL_NAMESPACE", raising=False)
@@ -139,7 +139,7 @@ def test_client_helpers_default_env(monkeypatch) -> None:
 
 
 def test_client_helpers_with_env(monkeypatch) -> None:
-    from agent_provisioning_team.temporal import client
+    from shared.temporal import client
 
     monkeypatch.setenv("TEMPORAL_ADDRESS", "  localhost:7233  ")
     monkeypatch.setenv("TEMPORAL_NAMESPACE", "  myns  ")
@@ -149,7 +149,7 @@ def test_client_helpers_with_env(monkeypatch) -> None:
 
 
 def test_client_get_and_set() -> None:
-    from agent_provisioning_team.temporal import client
+    from shared.temporal import client
 
     sentinel = MagicMock(name="fake-client")
     client.set_temporal_client(sentinel)
@@ -159,7 +159,7 @@ def test_client_get_and_set() -> None:
 
 
 def test_loop_get_and_set() -> None:
-    from agent_provisioning_team.temporal import client
+    from shared.temporal import client
 
     loop = asyncio.new_event_loop()
     try:
@@ -172,7 +172,7 @@ def test_loop_get_and_set() -> None:
 
 
 def test_connect_temporal_client_returns_none_when_address_blank(monkeypatch) -> None:
-    from agent_provisioning_team.temporal import client
+    from shared.temporal import client
 
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
 
@@ -184,7 +184,7 @@ def test_connect_temporal_client_returns_none_when_address_blank(monkeypatch) ->
 
 
 def test_connect_temporal_client_connects_when_address_set(monkeypatch) -> None:
-    from agent_provisioning_team.temporal import client
+    from shared.temporal import client
 
     monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
     monkeypatch.setenv("TEMPORAL_NAMESPACE", "myns")
@@ -208,7 +208,7 @@ def test_connect_temporal_client_connects_when_address_set(monkeypatch) -> None:
 
 
 def test_connect_temporal_client_raises_on_failure(monkeypatch) -> None:
-    from agent_provisioning_team.temporal import client
+    from shared.temporal import client
 
     monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
 

@@ -18,7 +18,7 @@ Public API:
     - ``extract_single_python_block``    — a lone ```` ```python ```` body
 
 Preconditions:
-    - ``backend/agents`` is on ``sys.path`` (the ``shared_*`` convention).
+    - ``backend/`` is on ``sys.path`` (the ``shared.*`` convention).
 Postconditions:
     - Stdlib-only; importing has no side effects and never raises on bad input.
 """

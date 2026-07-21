@@ -1,8 +1,8 @@
 """
 Pytest configuration and fixtures for software_engineering_team tests.
 
-Run from software_engineering_team directory:
-  cd software_engineering_team && pytest
+Run from the repo root:
+  cd backend/agents/software_engineering_team && pytest
 """
 
 import os

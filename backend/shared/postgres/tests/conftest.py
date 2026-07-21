@@ -1,6 +1,6 @@
 """Test harness for ``shared.postgres``.
 
-Adds the ``backend/agents`` directory to ``sys.path`` so tests can
+Adds ``backend/`` to ``sys.path`` (via ``parents[3]``) so tests can
 import ``shared.postgres`` without relying on a project install, and
 provides a session-scoped fixture that applies every team's schema
 exactly once against the configured Postgres (used by tests marked
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

@@ -108,6 +108,18 @@ def _await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
         time.sleep(CLIENT_READY_POLL_S)
 
 
+def await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
+    """Public entrypoint for blocking until the shared Temporal client is ready.
+
+    Preconditions:
+        - Same as :func:`_await_client`.
+
+    Postconditions:
+        - Delegates to :func:`_await_client` and returns its ``(client, loop)`` tuple.
+    """
+    return _await_client(timeout_s)
+
+
 def start_workflow_sync(
     workflow_run: Any,
     *args: Any,
