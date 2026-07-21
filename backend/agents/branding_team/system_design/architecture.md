@@ -50,10 +50,10 @@ briefed vs. exploratory vs. chat-first) can all reach a consistent
   The orchestrator never imports the other teams directly — it only calls
   the adapter functions and tolerates their absence.
 - **Persistence-agnostic API surface.** The public endpoints take and
-  return Pydantic models; the underlying storage is SQLite today
-  (`store.py:30-41`) with a Postgres schema already defined for a future
-  migration (`postgres/__init__.py`). Swapping stores does not change the
-  API contract.
+  return Pydantic models; the underlying storage is the shared Khala
+  Postgres instance, accessed via `shared.postgres.get_conn`
+  (`store.py:30,103`) with DDL declared in `postgres/__init__.py`.
+  Swapping stores does not change the API contract.
 - **Graceful LLM fallback.** The conversational assistant lazy-initializes
   the shared LLM client and, if the call fails, returns a hard-coded reply
   and suggested questions instead of surfacing an exception
@@ -113,10 +113,9 @@ flowchart TB
     end
 
     subgraph persistence [Persistence]
-        BrandingStore["BrandingStore<br/>store.py (SQLite)"]
-        SessionStore["BrandingSessionStore<br/>api/main.py (SQLite)"]
-        ConvStore["BrandingConversationStore<br/>assistant/store.py"]
-        DBPath["get_db_path()<br/>db.py"]
+        BrandingStore["BrandingStore<br/>store.py (Postgres)"]
+        SessionStore["BrandingSessionStore<br/>api/state.py (Postgres)"]
+        ConvStore["BrandingConversationStore<br/>assistant/store.py (Postgres)"]
         PG["Postgres schema<br/>postgres/__init__.py"]
     end
 
@@ -161,12 +160,9 @@ flowchart TB
     AgencyAPI --> BrandingStore
     SessionAPI --> SessionStore
     ConvAPI --> ConvStore
-    BrandingStore --> DBPath
-    SessionStore --> DBPath
-    ConvStore --> DBPath
-    BrandingStore -. future migration .-> PG
-    SessionStore -. future migration .-> PG
-    ConvStore -. future migration .-> PG
+    BrandingStore --> PG
+    SessionStore --> PG
+    ConvStore --> PG
 
     Temporal -. wraps .-> Orch
 ```
@@ -222,21 +218,21 @@ Different entry points serve different user states:
 All three produce the same `TeamOutput`, so downstream UIs and integrations
 can render the result without caring which path produced it.
 
-### 4. Why SQLite is the default with Postgres ready
+### 4. Why every store is Postgres-backed
 
-Today every store (`store.py:48-73`, `api/main.py:254-293`,
-`assistant/store.py`) uses SQLite, falling back to a per-instance
-`:memory:` database when no path is supplied (which keeps tests isolated)
-and to a WAL-mode file-backed database otherwise. Production deployments
-set `BRANDING_DB_PATH` (`db.py:11-19`) so all worker processes share one
-file.
+Every store (`store.py`, `api/state.py`, `assistant/store.py`) persists
+through `shared.postgres.get_conn`, so all worker processes share the same
+Postgres-backed state without any file-based coordination.
 
-`postgres/__init__.py` declares a full Postgres schema
+`postgres/__init__.py` declares the full schema
 (`branding_clients`, `branding_brands`, `branding_sessions`,
 `branding_conversations`, `branding_conv_messages`) registered via
-`shared.postgres.register_team_schemas` at FastAPI startup
-(`api/main.py:44-53`). This keeps the team ready for migration without
-forcing Postgres onto local dev or test environments.
+`shared.postgres.register_team_schemas` at FastAPI startup, via the
+`postgres_schema` argument to `create_team_app()` (`api/main.py:132-139`).
+Unit tests run against an in-memory fake
+(`tests/_fake_postgres.py`) that emulates this schema, and
+`real_postgres`-marked tests exercise the same SQL against a live
+Postgres in CI.
 
 ### 5. Why market research and design are adapters, not imports
 
@@ -296,10 +292,9 @@ on import (`api/main.py:37-63`). All routes are traced with the
 | Specialist agents instantiated on run | `orchestrator.py:141-145` |
 | `TeamOutput` shape incl. specialist fields | `models.py:471-498` |
 | `Client` / `Brand` models | `models.py:514-528` |
-| SQLite schema (clients, brands) | `store.py:30-41` |
-| `BRANDING_DB_PATH` resolution | `db.py:11-19` |
-| Postgres schema declaration | `postgres/__init__.py:17-71` |
-| Postgres registration at startup | `api/main.py:44-53` |
+| Postgres schema declaration (clients, brands) | `postgres/__init__.py:18-29` |
+| `shared.postgres.get_conn` usage in the store | `store.py:30,103` |
+| Postgres registration at startup | `api/main.py:132-139` |
 | Market research HTTP call | `adapters/market_research.py:17-50` |
 | Market research result mapping | `adapters/market_research.py:53-74` |
 | Design adapter stub | `adapters/design_assets.py:16-37` |
