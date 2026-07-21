@@ -355,7 +355,10 @@ def _run_general_microtask_impl(
         ``execution_prompt`` carries a ``{language_conventions}`` slot iff
         ``profile.has_language_conventions``.
     Postconditions:
-        Returns the parsed ``{path: content}`` map (possibly empty).
+        Returns the parsed ``{path: content}`` map (possibly empty). Any
+        ``.py`` file whose content fails ``ast.parse`` is dropped and logged
+        rather than returned; the caller (the build-verification retry loop)
+        is expected to detect the missing file.
     """
     arch_ctx = ""
     if architecture:

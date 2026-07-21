@@ -382,6 +382,16 @@ def _fix_issues_one_at_a_time_impl(
 
             working.update(fixed_files)
             merged.update(fixed_files)
+
+            # The LLM may claim "resolved" even though the fix for THIS issue's
+            # file was rejected above (a mixed response can have other, valid
+            # files) -- never trust "resolved" when the issue's own file didn't
+            # survive the completeness check, and don't record a fix entry for
+            # an attempt that didn't actually land the issue's file; retry
+            # instead.
+            if issue.file_path in rejected_files:
+                continue
+
             entry: Dict[str, Any] = {}
             if microtask_id:
                 entry["microtask"] = microtask_id
@@ -391,13 +401,6 @@ def _fix_issues_one_at_a_time_impl(
             entry["fix"] = parsed.get("summary", "updated file(s)")
             entry["root_cause"] = parsed.get("root_cause", "")
             fixes_applied.append(entry)
-
-            # The LLM may claim "resolved" even though the fix for THIS issue's
-            # file was rejected above (a mixed response can have other, valid
-            # files) -- never trust "resolved" when the issue's own file didn't
-            # survive the completeness check; retry instead.
-            if issue.file_path in rejected_files:
-                continue
             if parsed.get("resolved"):
                 resolved_this = True
                 break

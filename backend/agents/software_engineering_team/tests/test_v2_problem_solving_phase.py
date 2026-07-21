@@ -260,6 +260,7 @@ def test_run_batch_coding_fixes_with_callback(monkeypatch):
         language="java",
     )
     assert msgs  # callback was invoked
+    assert any("issue" in m.lower() for m in msgs)
 
 
 def test_run_problem_solving_no_actionable():
@@ -354,6 +355,8 @@ def test_run_problem_solving_rejects_unparsable_python_even_if_resolved(monkeypa
     # The issue is NOT considered resolved despite the LLM's claim.
     assert out.resolved is False
     assert len(out.unresolved_issues) == 1
+    # No fix entry recorded for an attempt that didn't land the issue's file.
+    assert out.fixes_applied == []
 
 
 def test_run_problem_solving_with_tool_agents(monkeypatch):
@@ -388,7 +391,10 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
         current_files={"a.py": "old"},
         tool_agents={ToolAgentKind.SECURITY: tool_agent},
     )
-    assert "b.py" in out.files
+    assert out.files["b.py"] == "tool_fix = True"
+    assert out.files["a.py"] == "fixed"
+    assert out.resolved is True
+    assert out.unresolved_issues == []
 
 
 def test_run_problem_solving_tool_agent_partial_rejection(monkeypatch):
