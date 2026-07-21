@@ -116,7 +116,9 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
     :class:`BaseV2DevelopmentAgent`; supplies the frontend tooling detection,
-    repo-briefing sets, and the integration-only ``run_workflow``.
+    repo-briefing sets, and the integration-only ``run_workflow``, which
+    delegates its planning + feature-branch-creation step to the base class's
+    ``_run_planning_and_branch_setup``.
     """
 
     @staticmethod
