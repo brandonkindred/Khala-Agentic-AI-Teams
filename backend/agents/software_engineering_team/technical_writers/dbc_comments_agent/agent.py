@@ -7,6 +7,7 @@ from typing import Callable, Optional
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import DbcCommentsInput, DbcCommentsOutput, DbcCommentsStatus
@@ -59,6 +60,10 @@ class DbcCommentsAgent:
               (a) files dict containing updated code and already_compliant=False, or
               (b) empty files dict and already_compliant=True
             - summary field always contains a message for the coding agent
+            - Any re-emitted ``.py`` file that fails to parse (an incomplete
+              rewrite) is rejected and excluded from the returned files dict,
+              so the caller keeps that file's pre-DbC version instead of
+              merging a broken rewrite
 
         Raises:
             Exception: If LLM call fails (caught internally, returns fail-open response)
@@ -156,6 +161,20 @@ class DbcCommentsAgent:
             for path, content in files.items()
             if isinstance(path, str) and isinstance(content, str) and content.strip()
         }
+
+        # Reject any re-emitted file that isn't syntactically complete: the DbC
+        # pass re-emits the whole file, and a model that abandons mid-rewrite
+        # can still return a "complete" (non-truncated) response, so this
+        # can't be caught by stop_reason checks alone. Keep the pre-DbC
+        # version of that file rather than merging a broken rewrite.
+        files, rejected_files = reject_invalid_python(files)
+        if rejected_files:
+            logger.warning(
+                "DbcComments: LLM returned unparsable Python for %d file(s); "
+                "discarding and keeping the pre-DbC version: %s",
+                len(rejected_files),
+                sorted(rejected_files),
+            )
 
         comments_added = int(data.get("comments_added", 0))
         comments_updated = int(data.get("comments_updated", 0))
