@@ -2,7 +2,7 @@
 
 Exports the ``WORKFLOWS``/``ACTIVITIES`` contract (the shared "Pattern A" shape
 used by the newer teams): the worker bootstrap in :mod:`.worker` registers these
-with ``shared_temporal.start_team_worker``, and the sync dispatcher in
+with ``shared.temporal.start_team_worker``, and the sync dispatcher in
 :mod:`.start_workflow` starts ``PlanningWorkflow`` via ``start_workflow_sync``.
 
 This package ``__init__`` performs no worker boot (no import-time side effects);
@@ -24,9 +24,9 @@ from planning_team.temporal.activities import (
     sub_agent_provisioning_activity,
     synthesis_activity,
 )
-from planning_team.temporal.client import is_temporal_enabled
 from planning_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 from planning_team.temporal.workflows import PlanningWorkflow
+from shared.temporal.client import is_temporal_enabled
 
 WORKFLOWS = [PlanningWorkflow]
 ACTIVITIES = [

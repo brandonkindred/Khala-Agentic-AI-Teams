@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
 from ..execution.metrics import (

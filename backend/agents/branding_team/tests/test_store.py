@@ -1,6 +1,6 @@
 """Tests for branding store (clients and brands).
 
-These tests mock ``shared_postgres.get_conn`` with a tiny dict-backed
+These tests mock ``shared.postgres.get_conn`` with a tiny dict-backed
 fake — see ``_fake_postgres.py``.
 """
 

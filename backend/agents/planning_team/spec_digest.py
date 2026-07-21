@@ -22,7 +22,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from llm_service import compact_text
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +217,7 @@ def map_reduce(
     through ``compact_text`` (so it fits one call) before ``map_fn``; ``compact_text``
     chunks internally and returns the original on failure, so oversized sections are
     compacted, never sliced. Sections are independent map steps, fanned out across a
-    bounded thread pool (``shared_concurrency.parallel_map``) when there is more than
+    bounded thread pool (``shared.concurrency.parallel_map``) when there is more than
     one; ``max_workers`` overrides the ``PLANNING_MAP_PARALLELISM`` env default (see
     ``_map_parallelism``).
 

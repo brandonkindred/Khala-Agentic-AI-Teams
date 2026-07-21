@@ -1,0 +1,196 @@
+"""Payload compression for the shared Temporal client.
+
+The map-reduce code review workflow (and any other team) can legitimately need
+to move hundreds of kilobytes of source code through a single Temporal
+activity/workflow payload — the code under review is deliberately never
+truncated (see ``code_review_agent/temporal/activities.py``), so a large
+multi-file diff can push one payload past Temporal's 512 KiB
+``PayloadSizeWarning`` threshold (``TMPRL1103``) even though the underlying
+gRPC message stays well under its own 4 MiB cap. Source/JSON text compresses
+well, so a transparent gzip codec on the shared ``DataConverter`` shrinks the
+bytes that actually cross the wire and land in workflow history — without
+touching chunk sizing, review fidelity, or the durability of any workflow.
+
+Every payload keeps the plain (uncompressed) proto encoding below
+``min_size_bytes``: gzip's own header/footer overhead makes compression a net
+loss for small payloads, and there is nothing to gain size-warning-wise from
+compressing them anyway.
+
+Rollout safety: many teams here are independently deployable services sharing
+one Temporal cluster through this same module, so a fleet-wide upgrade is not
+atomic — an older process (built before this codec existed) can never decode
+a gzip-tagged payload a newer process wrote. Decoding is therefore always
+installed and unconditional; only *encoding* (writing the new, compressed wire
+format) is gated by ``TEMPORAL_PAYLOAD_COMPRESSION``, which defaults to off.
+The safe rollout is: deploy this code everywhere first (every process can now
+decode, but nothing compresses yet, so nothing changes) — once every service
+sharing the cluster is confirmed on a build with this codec, turn encoding on.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import gzip
+import logging
+from typing import List, Sequence
+
+# This module is only ever imported lazily, from inside
+# ``shared.temporal.client``'s connection functions (never from
+# ``shared/temporal/__init__.py``), so importing ``temporalio`` at module
+# scope here does not force it onto every package import the way it would
+# from the package root.
+from temporalio.api.common.v1 import Payload
+from temporalio.converter import DataConverter, PayloadCodec
+
+from shared.env_config import env_bool, env_int
+
+logger = logging.getLogger(__name__)
+
+# Payload metadata key/value Temporal codecs conventionally use to record their
+# encoding, so a decode() can tell a codec-produced payload from a passthrough
+# one (see the temporalio-samples-python encryption/compression samples).
+_ENCODING_METADATA_KEY = b"encoding"
+_GZIP_ENCODING = b"binary/gzip"
+
+DEFAULT_MIN_COMPRESS_BYTES = 1024
+
+
+def compression_enabled() -> bool:
+    """Whether the shared Temporal client should *write* compressed payloads.
+
+    Postconditions:
+        - Returns the parsed ``TEMPORAL_PAYLOAD_COMPRESSION`` env var, default
+          False (garbage/unset falls back to disabled — encoding is opt-in so
+          a fleet can deploy decode support everywhere before any process
+          starts writing the new wire format). Decoding a payload another
+          process already compressed is never gated by this — see the module
+          docstring.
+    """
+    return env_bool("TEMPORAL_PAYLOAD_COMPRESSION", False)
+
+
+def min_compress_bytes() -> int:
+    """Smallest serialized payload size (bytes) worth gzip-compressing.
+
+    Postconditions:
+        - Returns ``TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES``, clamped to
+          ``>= 0``; unset/garbage falls back to ``DEFAULT_MIN_COMPRESS_BYTES``.
+    """
+    return env_int("TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES", DEFAULT_MIN_COMPRESS_BYTES, floor=0)
+
+
+class GzipPayloadCodec(PayloadCodec):
+    """Transparently gzip-compresses proto-serialized payloads above a size floor.
+
+    Invariants:
+        - ``decode`` is the exact inverse of ``encode`` for every payload
+          ``encode`` produced, and a pass-through (unmarked) payload decodes to
+          itself unchanged — so a payload written before compression was
+          enabled (or one below the size floor) still decodes correctly.
+        - ``decode`` behaves identically regardless of ``encode_enabled``: only
+          writing new compressed payloads is gated, never reading existing
+          ones (see the module docstring's rollout-safety rationale).
+    """
+
+    def __init__(
+        self,
+        min_size_bytes: int = DEFAULT_MIN_COMPRESS_BYTES,
+        encode_enabled: bool = True,
+    ) -> None:
+        """Configure the size floor and encode toggle this codec instance uses.
+
+        Preconditions:
+            - ``min_size_bytes >= 0``.
+        Postconditions:
+            - ``self._min_size_bytes == min_size_bytes``.
+            - ``self._encode_enabled == encode_enabled``.
+        """
+        assert min_size_bytes >= 0, "min_size_bytes must be >= 0"
+        self._min_size_bytes = min_size_bytes
+        self._encode_enabled = encode_enabled
+
+    async def encode(self, payloads: Sequence[Payload]) -> List[Payload]:
+        """Gzip-compress each payload at or above the size floor.
+
+        Preconditions:
+            - ``payloads`` is a sequence of well-formed ``Payload`` messages
+              (guaranteed by the Temporal SDK, the only caller of this method).
+        Postconditions:
+            - Returns ``payloads`` unchanged when ``encode_enabled`` is False.
+            - A payload whose serialized size is ``< min_size_bytes`` is
+              returned unchanged (no metadata added).
+            - Otherwise gzip-compresses the payload's serialized bytes; when the
+              compressed, tagged result is not actually smaller than the
+              original (already-compressed or high-entropy binary data, where
+              gzip's own header/table overhead can lose), the original payload
+              is returned unchanged instead — this codec must never make a
+              payload larger, which would defeat its purpose of staying under
+              Temporal's payload size limits.
+        """
+        if not self._encode_enabled:
+            return list(payloads)
+        result: List[Payload] = []
+        for payload in payloads:
+            serialized = payload.SerializeToString()
+            if len(serialized) < self._min_size_bytes:
+                result.append(payload)
+                continue
+            candidate = Payload(
+                metadata={_ENCODING_METADATA_KEY: _GZIP_ENCODING},
+                # mtime=0: gzip.compress() otherwise embeds the current wall-clock
+                # time in the header, so compressing identical bytes twice would
+                # produce different on-the-wire payloads and leak the worker's
+                # clock into workflow history.
+                data=gzip.compress(serialized, mtime=0),
+            )
+            if len(candidate.SerializeToString()) >= len(serialized):
+                result.append(payload)
+                continue
+            result.append(candidate)
+        return result
+
+    async def decode(self, payloads: Sequence[Payload]) -> List[Payload]:
+        """Inverse of :meth:`encode`. Always active — see the class invariant.
+
+        Preconditions:
+            - ``payloads`` is a sequence of well-formed ``Payload`` messages;
+              any payload tagged with this codec's gzip encoding metadata must
+              carry valid gzip data in ``data`` (guaranteed by ``encode`` and
+              by Temporal never altering payload bytes in transit/storage).
+        Postconditions:
+            - A payload not carrying this codec's ``encoding`` metadata is
+              returned unchanged (covers payloads below the compression floor
+              and payloads written while encoding was disabled).
+            - Otherwise returns the original ``Payload`` reconstructed from the
+              decompressed bytes.
+        """
+        result: List[Payload] = []
+        for payload in payloads:
+            if payload.metadata.get(_ENCODING_METADATA_KEY) != _GZIP_ENCODING:
+                result.append(payload)
+                continue
+            decoded = Payload()
+            decoded.ParseFromString(gzip.decompress(payload.data))
+            result.append(decoded)
+        return result
+
+
+def build_data_converter() -> DataConverter:
+    """Build the ``DataConverter`` the shared Temporal client/worker should use.
+
+    Postconditions:
+        - Always installs a ``GzipPayloadCodec`` (sized by
+          ``TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES``) so every process running
+          this module can decode a gzip-tagged payload regardless of its own
+          encode setting — the safe half of a mixed-version rollout. Only the
+          codec's *encode* behavior is gated by ``TEMPORAL_PAYLOAD_COMPRESSION``
+          (default off); client and worker both resolve it through this one
+          function, so they always agree.
+    """
+    return dataclasses.replace(
+        DataConverter.default,
+        payload_codec=GzipPayloadCodec(
+            min_size_bytes=min_compress_bytes(),
+            encode_enabled=compression_enabled(),
+        ),
+    )

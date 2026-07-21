@@ -158,13 +158,13 @@ def test_pattern_a_exports_present():
 
 def test_importing_temporal_package_does_not_start_worker():
     """The package must not self-boot a worker at import (boot is worker.py)."""
-    import shared_temporal
+    import shared.temporal
 
     for name in list(sys.modules):
         if name == "deepthought.temporal" or name.startswith("deepthought.temporal."):
             del sys.modules[name]
 
-    with patch.object(shared_temporal, "start_team_worker") as patched:
+    with patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("deepthought.temporal")
         assert patched.call_count == 0
 
@@ -231,7 +231,7 @@ def test_ask_uses_temporal_when_enabled():
     from deepthought.api import main
 
     with (
-        patch("shared_temporal.is_temporal_enabled", return_value=True),
+        patch("shared.temporal.is_temporal_enabled", return_value=True),
         patch("deepthought.temporal.start_workflow.start_deepthought_workflow") as mock_start,
         patch.object(main, "create_job") as mock_create,
         patch("threading.Thread") as mock_thread,
@@ -257,7 +257,7 @@ def test_ask_marks_failed_when_temporal_start_raises():
     from deepthought.api import main
 
     with (
-        patch("shared_temporal.is_temporal_enabled", return_value=True),
+        patch("shared.temporal.is_temporal_enabled", return_value=True),
         patch(
             "deepthought.temporal.start_workflow.start_deepthought_workflow",
             side_effect=RuntimeError("worker unreachable"),
@@ -280,7 +280,7 @@ def test_ask_falls_back_to_thread_when_temporal_disabled():
     from deepthought.api import main
 
     with (
-        patch("shared_temporal.is_temporal_enabled", return_value=False),
+        patch("shared.temporal.is_temporal_enabled", return_value=False),
         patch.object(main, "create_job"),
         patch.object(main, "_run_deepthought_background"),
         patch("threading.Thread") as mock_thread,

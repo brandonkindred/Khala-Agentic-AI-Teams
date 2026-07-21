@@ -8,8 +8,6 @@ wires these in yet) against the in-memory fake store provided by the
 from __future__ import annotations
 
 import pytest
-from _api_test_utils import api_main as _api_main
-from _api_test_utils import create_job as _create_job
 from agents.blogging.api.dependencies import (
     get_job,
     get_job_or_404,
@@ -17,6 +15,9 @@ from agents.blogging.api.dependencies import (
     require_job_waiting_for,
 )
 from fastapi import HTTPException
+
+from ._api_test_utils import api_main as _api_main
+from ._api_test_utils import create_job as _create_job
 
 # ---------------------------------------------------------------------------
 # require_job_store

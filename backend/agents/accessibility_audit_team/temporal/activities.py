@@ -262,7 +262,7 @@ async def _run_phase(
             job_id, status=JOB_STATUS_RUNNING, current_phase=phase_name, progress=progress
         )
         if heartbeat:
-            from shared_concurrency import BackgroundHeartbeat
+            from shared.concurrency import BackgroundHeartbeat
 
             with BackgroundHeartbeat(
                 lambda: _heartbeat_activity_and_job(manager, job_id),
@@ -432,7 +432,7 @@ async def finalize_activity(job_id: str, audit_id: str) -> Dict[str, Any]:
         finalize_audit_step,
         get_job_manager,
     )
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     manager = get_job_manager()
     existing = manager.get_job(job_id)
@@ -504,7 +504,7 @@ async def retest_activity(job_id: str, audit_id: str, finding_ids: List[str]) ->
         get_job_manager,
         run_retest_job,
     )
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     manager = get_job_manager()
     try:

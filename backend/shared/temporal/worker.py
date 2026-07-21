@@ -1,0 +1,174 @@
+"""Shared Temporal worker startup.
+
+Every team used to hand-roll this: create a ThreadPoolExecutor, connect the
+client, build a ``Worker``, run it in a daemon thread. ``start_team_worker``
+replaces all that boilerplate — a team just passes its workflows/activities
+list.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Iterable, Optional
+
+from shared.temporal.client import (
+    connect_temporal_client,
+    get_default_task_queue,
+    get_temporal_loop,
+    is_temporal_enabled,
+    set_temporal_client,
+    set_temporal_loop,
+)
+
+logger = logging.getLogger(__name__)
+
+_worker_threads: dict[str, threading.Thread] = {}
+_activity_executors: dict[str, ThreadPoolExecutor] = {}
+
+
+def _build_workflow_runner() -> Any:
+    """Build a SandboxedWorkflowRunner that passes through pydantic, boto3/strands, and httpx.
+
+    Without ``pydantic``/``pydantic_core`` passthrough, schema generation for
+    models that reference ``datetime.datetime`` (e.g. ``Optional[datetime]``
+    fields) fails inside the Temporal workflow sandbox: pydantic-core compares
+    types by identity and the sandboxed reimport of pydantic ends up with a
+    different ``datetime.datetime`` reference than pydantic-core's compiled
+    one, raising ``PydanticSchemaGenerationError``.
+
+    ``strands``/``boto3``/``botocore``/``urllib3``/``httpx`` need the same
+    treatment for a different reason: registering any team's workflow class
+    requires Python to first import its ancestor packages, and several teams'
+    top-level ``__init__.py`` eagerly imports agent/orchestrator code that
+    imports ``strands`` and/or ``llm_service`` at module scope (e.g.
+    ``market_research_team``, ``branding_team``, ``sales_team``). ``strands``
+    unconditionally imports its Bedrock model provider
+    (``strands.models.bedrock``), which does a top-level ``import boto3``
+    regardless of which LLM provider is actually configured; botocore does
+    thread-lock and dynamic-class-generation work at import time that is not
+    safe to replay in the sandbox's isolated module namespace, surfacing as an
+    import failure inside ``botocore.compat``/``urllib3``. Separately,
+    ``llm_service.clients.ollama`` imports ``httpx`` at module scope, and
+    ``httpx._models`` defines ``class _CookieCompatRequest(urllib.request.Request)``
+    at import time — accessing ``__mro_entries__`` on the sandbox-restricted
+    ``urllib.request.Request`` raises ``RestrictedWorkflowAccessError``. None of
+    these packages are used by workflow ``run()`` bodies in this repo (only by
+    code that executes inside activities), so passing them through sacrifices
+    no real determinism checking.
+    """
+    from temporalio.worker.workflow_sandbox import (
+        SandboxedWorkflowRunner,
+        SandboxRestrictions,
+    )
+
+    restrictions = SandboxRestrictions.default.with_passthrough_modules(
+        "pydantic",
+        "pydantic_core",
+        "strands",
+        "boto3",
+        "botocore",
+        "urllib3",
+        "httpx",
+        # numpy and pandas use C extension modules that can only be loaded once
+        # per process. If any module in the workflow's transitive import graph
+        # (e.g. market_regime.py, indicators.py) imports them at the top level,
+        # the Temporal sandbox's re-import during workflow replay triggers
+        # "cannot load module more than once per process". Passing them through
+        # makes the sandbox share the already-loaded instances rather than
+        # attempting a second load. This is safe because workflow run() bodies
+        # in this repo never call numpy/pandas directly — those calls live
+        # exclusively in activity code.
+        "numpy",
+        "pandas",
+    )
+    return SandboxedWorkflowRunner(restrictions=restrictions)
+
+
+async def _run_worker_async(
+    team: str,
+    task_queue: str,
+    workflows: Iterable[Any],
+    activities: Iterable[Any],
+    max_concurrent_activities: int,
+) -> None:
+    from temporalio.worker import Worker
+
+    client = await connect_temporal_client()
+    if client is None:
+        return
+    # First team to connect owns the shared client/loop slots.
+    set_temporal_client(client)
+    set_temporal_loop(asyncio.get_running_loop())
+
+    executor = _activity_executors.setdefault(
+        team,
+        ThreadPoolExecutor(
+            max_workers=max_concurrent_activities,
+            thread_name_prefix=f"{team}-temporal-activity",
+        ),
+    )
+    worker = Worker(
+        client,
+        task_queue=task_queue,
+        workflows=list(workflows),
+        activities=list(activities),
+        activity_executor=executor,
+        max_concurrent_activities=max_concurrent_activities,
+        workflow_runner=_build_workflow_runner(),
+    )
+    logger.info("Temporal worker starting: team=%s task_queue=%s", team, task_queue)
+    await worker.run()
+
+
+def start_team_worker(
+    team: str,
+    workflows: Iterable[Any],
+    activities: Iterable[Any],
+    task_queue: Optional[str] = None,
+    max_concurrent_activities: int = 4,
+) -> bool:
+    """Start a Temporal worker for a team in a daemon thread.
+
+    Returns True if a worker thread is running (or already running),
+    False when Temporal is disabled.
+    """
+    if not is_temporal_enabled():
+        logger.info("Temporal disabled; skipping worker for team=%s", team)
+        return False
+    existing = _worker_threads.get(team)
+    if existing is not None and existing.is_alive():
+        return True
+
+    queue = task_queue or get_default_task_queue()
+
+    def _target() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                _run_worker_async(team, queue, workflows, activities, max_concurrent_activities)
+            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception("Temporal worker failed for team=%s: %s", team, e)
+        finally:
+            # _run_worker_async populates the shared client/loop slots with THIS
+            # loop before running. Now that the loop is about to close, release
+            # those slots so a later start_workflow_sync waits for a live worker
+            # (or fails clearly) instead of submitting to a closed loop and
+            # raising "Event loop is closed". Guard on identity so we never
+            # clobber a different worker that has since taken ownership.
+            if get_temporal_loop() is loop:
+                set_temporal_loop(None)
+                set_temporal_client(None)
+            loop.close()
+
+    thread = threading.Thread(target=_target, name=f"{team}-temporal-worker", daemon=True)
+    thread.start()
+    _worker_threads[team] = thread
+    logger.info("Temporal worker thread started for team=%s queue=%s", team, queue)
+    return True

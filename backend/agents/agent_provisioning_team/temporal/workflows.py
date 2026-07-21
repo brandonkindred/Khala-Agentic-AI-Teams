@@ -145,7 +145,7 @@ _DEPROVISIONING_LOCK_PATCH = "agent-deprovisioning-lock"
 _PRE_EXISTING_ENV_CHECK_PATCH = "agent-provisioning-pre-existing-check"
 
 # Bounded so a cyclic/adversarial cause chain can never loop forever — mirrors
-# shared_temporal.failure_translation.translate_workflow_failure's own bound.
+# shared.temporal.failure_translation.translate_workflow_failure's own bound.
 _MAX_FENCING_CAUSE_DEPTH = 12
 
 
@@ -157,7 +157,7 @@ def _is_stale_fencing_token_failure(exc: BaseException) -> bool:
     ``type=<original class name>`` — not an instance of the original class —
     so a plain ``isinstance`` check cannot detect this. A local, minimal
     walk rather than reusing
-    ``shared_temporal.failure_translation.translate_workflow_failure``: that
+    ``shared.temporal.failure_translation.translate_workflow_failure``: that
     helper reconstructs and raises the *native* exception on a match (via
     ``native(message)``, a single positional arg), which is incompatible
     with ``StaleFencingTokenError``'s richer ``(agent_id, resource,

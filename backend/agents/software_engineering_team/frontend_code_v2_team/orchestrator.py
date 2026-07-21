@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
-from shared_repo_context import read_repo_code_budgeted
+from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache

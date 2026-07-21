@@ -201,7 +201,7 @@ Separate file `nutrition_meal_planning_team/clinical_taxonomy.py`:
 
 ### 4.3 Postgres schema
 
-Register via `shared_postgres.register_team_schemas` in the team's
+Register via `shared.postgres.register_team_schemas` in the team's
 lifespan (`api/main.py`):
 
 ```sql
@@ -241,7 +241,7 @@ CREATE TABLE nutrition_clinical_overrides_log (
 ```
 
 Follow the Pattern B schema registry from
-[shared_postgres/README.md](backend/agents/shared_postgres/README.md).
+[shared.postgres/README.md](backend/shared/postgres/README.md).
 A migration script (idempotent `CREATE ... IF NOT EXISTS` and
 `ADD COLUMN IF NOT EXISTS`) lives at
 `nutrition_meal_planning_team/postgres/migrations/002_biometrics.sql`
@@ -332,7 +332,7 @@ Existing profiles lack the new fields. Strategy:
   existing `nutrition_profiles` retention policy; deletion cascades
   remove `nutrition_biometric_log` and `nutrition_clinical_overrides_log`.
 - Logs above DEBUG level must not include biometric values. A
-  `shared_observability` filter rule is added and tested in §6.
+  `shared.observability` filter rule is added and tested in §6.
 - Existing PII considerations from the platform privacy policy apply;
   no new policy work is required for this spec, but a one-line
   CHANGELOG entry under "Privacy" is mandatory on deploy.

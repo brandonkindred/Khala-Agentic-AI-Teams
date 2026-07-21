@@ -1,7 +1,7 @@
 """Concurrent near-miss adjudication equivalence.
 
 Near-miss LLM adjudications are now collected during the trade loop and
-dispatched through ``shared_concurrency.parallel_map`` instead of blocking the
+dispatched through ``shared.concurrency.parallel_map`` instead of blocking the
 loop one trade at a time. These tests assert the concurrent path is
 observationally identical to the serial path: every candidate adjudicated
 exactly once, verdicts mapped to the correct trade, and the findings list in

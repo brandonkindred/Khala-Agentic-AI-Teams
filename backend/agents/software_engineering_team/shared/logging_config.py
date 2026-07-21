@@ -40,11 +40,11 @@ AGENT_LOGGERS = [
     # child of this one entry and inherits its level through the logging
     # hierarchy (child loggers default to NOTSET).
     "software_engineering_team",
-    # git ops moved to the neutral shared_git package; its modules log as
-    # shared_git.git_utils / shared_git.branch_utils under EVERY import path
+    # git ops moved to the neutral shared.git package; its modules log as
+    # shared.git.git_utils / shared.git.branch_utils under EVERY import path
     # (the compatibility shims alias to the same module objects).
-    "shared_git",
-    "shared_command_runner",
+    "shared.git",
+    "shared.command_runner",
     # Bare aliases for the identities tests still import via the pytest
     # ``pythonpath`` entries, where module __name__ has no package prefix.
     # Only names that actually match a bare import somewhere belong here.

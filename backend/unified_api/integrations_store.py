@@ -54,7 +54,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from shared_env_config import env_float
+from shared.env_config import env_float
 from unified_api.integration_credentials import (
     delete_credential,
     get_credential,

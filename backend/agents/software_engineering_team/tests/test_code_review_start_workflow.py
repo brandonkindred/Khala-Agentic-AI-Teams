@@ -2,10 +2,10 @@
 bridge ``CodeReviewAgent._run_via_temporal`` uses to run ``CodeReviewWorkflow``.
 
 Unlike the rest of this team's Temporal dispatch (which delegates to
-``shared_temporal.runner.start_workflow_sync``), the code review agent hand-rolls
+``shared.temporal.runner.start_workflow_sync``), the code review agent hand-rolls
 its own execute-and-wait bridge (``_await_client`` + ``run_coroutine_threadsafe``)
 because ``CodeReviewAgent.run`` must return synchronously. These tests are modeled
-on ``shared_temporal/tests/test_workflow_bridges.py``'s ``running_loop`` fixture: a
+on ``shared/temporal/tests/test_workflow_bridges.py``'s ``running_loop`` fixture: a
 real event loop runs in a background thread (mimicking the worker) with a fake
 client, so no live Temporal server is needed.
 """
@@ -20,7 +20,7 @@ import pytest
 from code_review_agent.temporal import config as cfg
 from code_review_agent.temporal.start_workflow import execute_code_review_workflow_sync
 
-import shared_temporal.client as client_mod
+import shared.temporal.client as client_mod
 
 
 class _FakeExecClient:

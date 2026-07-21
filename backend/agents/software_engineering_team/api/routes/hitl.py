@@ -5,9 +5,9 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from shared_hitl.progress import coerce_progress
-from shared_hitl.status import pending_questions_from_raw
-from shared_hitl.validation import validate_answers
+from shared.hitl.progress import coerce_progress
+from shared.hitl.status import pending_questions_from_raw
+from shared.hitl.validation import validate_answers
 from software_engineering_team.api.models import (
     AutoAnswerRequest,
     AutoAnswerResponse,
@@ -45,7 +45,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    # Reconciled validation lives in shared_hitl (the strict union of both teams' rules):
+    # Reconciled validation lives in shared.hitl (the strict union of both teams' rules):
     # it adds the corrupted-record (500) and duplicate-answer (400) rejections SE's old
     # inline check lacked, and returns answer dicts carrying each question's text.
     answers_dicts = validate_answers(data, request)

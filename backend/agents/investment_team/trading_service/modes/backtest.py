@@ -23,7 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 from ...execution.cost_stress import CostStressReport, CostStressRow
 from ...execution.data_quality import validate_market_data

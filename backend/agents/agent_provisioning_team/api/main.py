@@ -23,7 +23,7 @@ from job_service_client import (
     RESTARTABLE_STATUSES,
     validate_job_for_action,
 )
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from shared.observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 from ..models import (
     DeprovisionResponse,
@@ -370,7 +370,7 @@ def _ensure_temporal_enabled() -> None:
           raises.
     """
     try:
-        from agent_provisioning_team.temporal.client import is_temporal_enabled
+        from shared.temporal.client import is_temporal_enabled
     except ImportError as exc:
         raise HTTPException(status_code=503, detail=_TEMPORAL_REQUIRED_MESSAGE) from exc
     try:

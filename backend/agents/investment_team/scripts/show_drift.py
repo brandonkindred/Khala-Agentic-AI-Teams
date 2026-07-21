@@ -7,7 +7,7 @@ coverage map.
 
 Run from ``backend/`` (same directory as ``Makefile``)::
 
-    PYTHONPATH=agents python3 -m investment_team.scripts.show_drift <lab_record_id>
+    PYTHONPATH=.:agents python3 -m investment_team.scripts.show_drift <lab_record_id>
 
 Requires ``JOB_SERVICE_URL`` to be set (same env var as the running API).
 """
@@ -86,7 +86,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     try:
         from job_service_client import JobServiceClient
     except ImportError:
-        print("ERROR: run from backend/ with PYTHONPATH=agents", file=sys.stderr)
+        print("ERROR: run from backend/ with PYTHONPATH=.:agents", file=sys.stderr)
         sys.exit(1)
 
     lab_client = JobServiceClient(team="investment_strategy_lab_records")

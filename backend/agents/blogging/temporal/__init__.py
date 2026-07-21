@@ -15,9 +15,10 @@ from agents.blogging.temporal.activities import (
     plan_stage_activity,
     run_full_pipeline_activity,
 )
-from agents.blogging.temporal.client import is_temporal_enabled
 from agents.blogging.temporal.constants import TASK_QUEUE
 from agents.blogging.temporal.workflows import BlogFullPipelineWorkflow
+
+from shared.temporal.client import is_temporal_enabled
 
 WORKFLOWS = [BlogFullPipelineWorkflow]
 ACTIVITIES = [

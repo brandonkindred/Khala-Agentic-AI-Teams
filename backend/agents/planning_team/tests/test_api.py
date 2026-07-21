@@ -212,7 +212,7 @@ def test_run_temporal_dispatch_failure_returns_500_marks_job_failed_and_removes_
     workspace_dir = tmp_path / "workspace-temporal-fail"
     workspace_dir.mkdir()
     monkeypatch.setattr(main_module, "resolve_workspace", lambda *a, **k: str(workspace_dir))
-    monkeypatch.setattr("planning_team.temporal.client.is_temporal_enabled", lambda: True)
+    monkeypatch.setattr("shared.temporal.client.is_temporal_enabled", lambda: True)
 
     def _raise_start_workflow(*args, **kwargs):
         raise RuntimeError("Temporal unreachable")

@@ -341,7 +341,7 @@ classDiagram
 
 ## Persistence strategy (recap)
 
-Instead of owning a `shared_postgres` schema, the team pushes every artifact
+Instead of owning a `shared.postgres` schema, the team pushes every artifact
 through the `_PersistentDict` wrapper ([`api/main.py`](../api/main.py):85-132).
 Reads and writes look like a normal Python dict but the backing store is the
 Khala job service (`JobServiceClient`), which persists to the `khala_jobs`

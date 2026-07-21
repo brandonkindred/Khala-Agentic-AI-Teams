@@ -33,8 +33,8 @@ from agent_cognition.graph import watermark_store
 from agent_cognition.memory import store as memory_store
 from agent_cognition.memory.store import AgentCognitionStorageUnavailable
 from agent_cognition.runtime_config import read_int_with_floor
-from shared_neo4j import get_graphiti, is_neo4j_enabled, register_graph_indices
-from shared_postgres import is_postgres_enabled
+from shared.neo4j import get_graphiti, is_neo4j_enabled, register_graph_indices
+from shared.postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 

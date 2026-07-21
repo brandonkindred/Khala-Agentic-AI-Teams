@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from agent_cognition.postgres import SCHEMA
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 EXPECTED_TABLES = [
     "agent_cognition_events",
@@ -185,12 +185,12 @@ def test_evidence_columns_present_on_rules_and_proposals() -> None:
 # Idempotency tests (live Postgres only).
 # ---------------------------------------------------------------------------
 def test_schema_applies_idempotently() -> None:
-    from shared_postgres import is_postgres_enabled, register_team_schemas
+    from shared.postgres import is_postgres_enabled, register_team_schemas
 
     if not is_postgres_enabled():
         pytest.skip("POSTGRES_HOST not set; skipping live-Postgres schema test")
 
-    from shared_postgres.testing import truncate_team_tables
+    from shared.postgres.testing import truncate_team_tables
 
     # Apply twice — the second call must be a no-op (idempotent DDL).
     assert register_team_schemas(SCHEMA) is True

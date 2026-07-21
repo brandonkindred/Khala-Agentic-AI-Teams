@@ -62,10 +62,10 @@ def _isolate_temporal_modules():
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package (and its workflow/dispatch modules) must NOT spin up a
     worker thread — that would race the first request."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("planning_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("planning_team.temporal")
         importlib.import_module("planning_team.temporal.workflows")
         importlib.import_module("planning_team.temporal.start_workflow")

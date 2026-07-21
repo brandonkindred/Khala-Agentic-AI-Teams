@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from shared_git.git_utils import (
+from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     git_identity_env,
 )

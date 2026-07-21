@@ -33,7 +33,7 @@ from product_delivery.product_owner_agent.prompts import (
 )
 from product_delivery.scoring import RICEInputs, WSJFInputs, rice_score, wsjf_score
 from product_delivery.store import ProductDeliveryStore
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 logger = logging.getLogger(__name__)
 

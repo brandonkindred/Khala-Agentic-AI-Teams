@@ -5,7 +5,7 @@ this file runs in the default test suite: it drives ``app.router.lifespan_contex
 directly and monkeypatches branding's own module globals, so it needs neither a real
 Postgres instance nor a real job service. Generic ``create_team_app`` behavior
 (schema-registration/close-pool error swallowing) is covered centrally by
-``shared_app/tests/test_factory.py``; these tests only assert branding's own
+``shared/app/tests/test_factory.py``; these tests only assert branding's own
 ``on_shutdown`` wiring.
 """
 

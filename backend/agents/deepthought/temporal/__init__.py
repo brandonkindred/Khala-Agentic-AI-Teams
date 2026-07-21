@@ -1,4 +1,4 @@
-"""Temporal workflow + activities for the deepthought team (shared_temporal Pattern A).
+"""Temporal workflow + activities for the deepthought team (shared.temporal Pattern A).
 
 The reasoning pipeline is decomposed into one ``@activity.defn`` per LLM boundary
 (classify strategy, analyse, force-direct-answer, deliberate, synthesise) plus the

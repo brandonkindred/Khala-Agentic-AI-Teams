@@ -1336,10 +1336,10 @@ class TestReviewEndpoint:
         def _fake_conn():
             yield conn
 
-        import shared_postgres
+        import shared.postgres
 
-        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
-        monkeypatch.setattr(shared_postgres, "get_conn", _fake_conn)
+        monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(shared.postgres, "get_conn", _fake_conn)
         with api._pr_review_admission("Org", "Repo", 7):
             pass
         conn.execute.assert_called_once_with(
@@ -1352,12 +1352,12 @@ class TestReviewEndpoint:
     ) -> None:
         """A failing advisory-lock acquisition degrades to the process-local lock alone
         (logged) — admission must never raise or block reviews on a Postgres outage."""
-        import shared_postgres
+        import shared.postgres
 
         api = review_app["api"]
-        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
         monkeypatch.setattr(
-            shared_postgres, "get_conn", MagicMock(side_effect=RuntimeError("pg down"))
+            shared.postgres, "get_conn", MagicMock(side_effect=RuntimeError("pg down"))
         )
         with api._pr_review_admission("o", "r", 7):
             pass  # must not raise
@@ -1366,7 +1366,7 @@ class TestReviewEndpoint:
         """_run_pr_review must hold a continuous heartbeat for the job while the review
         runs (a single review LLM call can outlast the staleness cutoff), stopping it on
         exit — asserted via the context-manager protocol on a recording stand-in."""
-        import shared_concurrency
+        import shared.concurrency
 
         api = review_app["api"]
         seen: dict[str, Any] = {}
@@ -1385,7 +1385,7 @@ class TestReviewEndpoint:
                 seen["exited"] = True
                 return False
 
-        monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _RecordingHB)
+        monkeypatch.setattr(shared.concurrency, "BackgroundHeartbeat", _RecordingHB)
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         assert seen["entered"] and seen["exited"]
@@ -4493,7 +4493,7 @@ class TestCreateReviewIssuesUnit:
         exclusion, mirroring _pr_review_admission.
 
         Preconditions:
-            - shared_postgres reports Postgres enabled and yields a recording
+            - shared.postgres reports Postgres enabled and yields a recording
               connection (monkeypatched; no real database).
         Postconditions:
             - Entering the lock issues exactly one pg_advisory_xact_lock call
@@ -4501,7 +4501,7 @@ class TestCreateReviewIssuesUnit:
         """
         import contextlib as _contextlib
 
-        import shared_postgres
+        import shared.postgres
         from software_engineering_team.api import pr_review_issues
 
         conn = MagicMock()
@@ -4510,8 +4510,8 @@ class TestCreateReviewIssuesUnit:
         def _fake_conn():
             yield conn
 
-        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
-        monkeypatch.setattr(shared_postgres, "get_conn", _fake_conn)
+        monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(shared.postgres, "get_conn", _fake_conn)
         with pr_review_issues._issue_creation_lock("job-lock"):
             pass
         conn.execute.assert_called_once_with(
@@ -4526,17 +4526,17 @@ class TestCreateReviewIssuesUnit:
         (logged) — issue filing must never raise or block on a Postgres outage.
 
         Preconditions:
-            - shared_postgres reports Postgres enabled but get_conn raises
+            - shared.postgres reports Postgres enabled but get_conn raises
               (monkeypatched outage).
         Postconditions:
             - The context manager enters and exits without raising.
         """
-        import shared_postgres
+        import shared.postgres
         from software_engineering_team.api import pr_review_issues
 
-        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
         monkeypatch.setattr(
-            shared_postgres, "get_conn", MagicMock(side_effect=RuntimeError("pg down"))
+            shared.postgres, "get_conn", MagicMock(side_effect=RuntimeError("pg down"))
         )
         with pr_review_issues._issue_creation_lock("job-degrade"):
             pass  # must not raise
@@ -4623,6 +4623,7 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
         - A fresh interpreter that imports pr_review_issues before any other
           coding-team api module exits 0.
     """
+    import os
     import subprocess
     import sys
     from pathlib import Path
@@ -4630,6 +4631,13 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
     import software_engineering_team
 
     agents_root = Path(software_engineering_team.__file__).resolve().parent.parent
+    backend_root = agents_root.parent
+    # `shared.env` (imported transitively by pr_review_issues) now lives under
+    # backend/shared/, one level above agents_root — mirrors the production
+    # container's `ENV PYTHONPATH=/app:/app/agents` (backend/Dockerfile) rather
+    # than relying on cwd=agents_root alone, which only ever reached shared_*
+    # packages back when they lived directly under agents/.
+    env = dict(os.environ, PYTHONPATH=str(backend_root))
     proc = subprocess.run(
         [
             sys.executable,
@@ -4640,5 +4648,6 @@ def test_pr_review_issues_imports_cleanly_in_a_fresh_process() -> None:
         capture_output=True,
         text=True,
         timeout=120,
+        env=env,
     )
     assert proc.returncode == 0, proc.stderr

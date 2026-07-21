@@ -21,7 +21,7 @@ import os
 import threading
 from typing import Awaitable, Optional, TypeVar
 
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 __all__ = ["run_coroutine"]
 

@@ -34,7 +34,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from shared_postgres import bounded_probe
+from shared.postgres import bounded_probe
 from software_engineering_team.clone_workspace import (
     PER_ISSUE_DIR_TEMPLATE,
     agent_cache_dir,
@@ -1602,7 +1602,7 @@ async def _github_config_response() -> GitHubConfigResponse:
         derived from the SAME single credential read that backs ``token_configured``
         (``get_github_config`` -> ``get_credential_status``), so the panel and the
         run/review routes can never disagree about reachability — no separate probe.
-        The read runs via the shared :func:`shared_postgres.bounded_probe`, whose budget
+        The read runs via the shared :func:`shared.postgres.bounded_probe`, whose budget
         (``connect_timeout + statement_timeout + 1s``) is large enough that the
         statement_timeout-bounded worker finishes — releasing the credential-store
         ``_LOCK`` — before the outer guard fires, and that a within-bounds slow read isn't

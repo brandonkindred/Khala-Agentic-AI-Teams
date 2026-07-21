@@ -22,8 +22,8 @@ from __future__ import annotations
 import logging
 import os
 
-from shared_env_config import env_int
-from shared_temporal import start_team_worker
+from shared.env_config import env_int
+from shared.temporal import start_team_worker
 
 from . import ACTIVITIES, WORKFLOWS
 from .config import (

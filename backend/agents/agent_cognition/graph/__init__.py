@@ -1,7 +1,7 @@
 """Knowledge-graph layer for the Agent Cognition Core.
 
 This subpackage drains an agent's episodic memory and rollup summaries into the
-Graphiti/Neo4j knowledge graph (see :mod:`shared_neo4j`) and reads recency-ranked
+Graphiti/Neo4j knowledge graph (see :mod:`shared.neo4j`) and reads recency-ranked
 related knowledge back out. It is the *meaning* layer above the rote day/week/
 month/year rollups: Graphiti extracts entities/relationships with bi-temporal
 edges, partitioned per agent by ``group_id = agent_id``.

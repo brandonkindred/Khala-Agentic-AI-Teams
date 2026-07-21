@@ -6,9 +6,9 @@ SQLite version so callers in ``startup_advisor/api/main.py`` and the
 assistant agent need no changes.
 
 All DDL lives in ``startup_advisor.postgres`` and is registered from
-the team's FastAPI lifespan via ``shared_postgres.register_team_schemas``.
+the team's FastAPI lifespan via ``shared.postgres.register_team_schemas``.
 This module is pure data access: it opens short-lived connections
-through ``shared_postgres.get_conn`` (which is pool-backed since PR 0).
+through ``shared.postgres.get_conn`` (which is pool-backed since PR 0).
 
 Every public method is wrapped in ``@timed_query`` so slow reads and
 writes surface as structured log lines without requiring a Prometheus
@@ -26,8 +26,8 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
@@ -79,14 +79,14 @@ class StartupAdvisorConversationStore:
     """Postgres-backed store for startup advisor chat conversations.
 
     The constructor takes no arguments — the Postgres DSN is read from
-    the ``POSTGRES_*`` env vars by ``shared_postgres.get_conn``. The
+    the ``POSTGRES_*`` env vars by ``shared.postgres.get_conn``. The
     lazy ``get_conversation_store()`` module-level accessor defers
     instantiation so ``import startup_advisor.store`` stays cheap and
     never touches Postgres on import.
     """
 
     def __init__(self) -> None:
-        # Stateless; the connection pool lives inside shared_postgres.
+        # Stateless; the connection pool lives inside shared.postgres.
         pass
 
     @timed_query(store=_STORE, op="create")

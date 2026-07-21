@@ -11,7 +11,7 @@ accepting requests. Same contract as
 from __future__ import annotations
 
 from accessibility_audit_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
-from shared_temporal import is_temporal_enabled, start_team_worker
+from shared.temporal import is_temporal_enabled, start_team_worker
 
 
 def start_accessibility_audit_temporal_worker_thread() -> bool:

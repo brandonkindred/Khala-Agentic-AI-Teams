@@ -19,7 +19,7 @@ from planning_team.phases._util import (
     assemble_material,
 )
 from planning_team.spec_digest import map_reduce
-from shared_llm_recovery import extract_json_object
+from shared.llm_recovery import extract_json_object
 
 logger = logging.getLogger(__name__)
 

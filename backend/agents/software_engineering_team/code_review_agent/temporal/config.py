@@ -11,14 +11,14 @@ running under ``pytest`` falls the agent back to the in-process thread-mode
 coordinator.
 
 There is deliberately **no** code-review-specific address override: the code
-review worker connects through the process-wide ``shared_temporal`` client, which
-reads only ``TEMPORAL_ADDRESS`` (``shared_temporal.client.get_temporal_address``),
+review worker connects through the process-wide ``shared.temporal`` client, which
+reads only ``TEMPORAL_ADDRESS`` (``shared.temporal.client.get_temporal_address``),
 so a distinct per-agent address could not actually route to a different cluster —
 it would be silently ignored. Code review therefore shares the process Temporal
 address; ``TEMPORAL_ADDRESS`` is the single override.
 
 The "Temporal by default" flip is scoped to the code review agent: this resolver
-is separate from ``shared_temporal.is_temporal_enabled`` (which stays
+is separate from ``shared.temporal.is_temporal_enabled`` (which stays
 ``None``-default), so the *other* teams' thread-default dispatch decision is
 unchanged even though they read the same ``TEMPORAL_ADDRESS``.
 
@@ -35,7 +35,7 @@ import os
 import sys
 from typing import Optional
 
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 # The app's own Temporal container, as wired by ``docker/docker-compose.yml`` and
 # ``docker/.env.example`` (``TEMPORAL_ADDRESS: temporal:7233``). Used when no

@@ -339,7 +339,7 @@ def test_run_deprovision_workflow_uses_client_timeout_exceeding_phase_timeout() 
 def test_require_deprovision_runner_raises_503_when_temporal_disabled() -> None:
     from agent_provisioning_team.api import main
 
-    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False):
+    with patch("shared.temporal.client.is_temporal_enabled", return_value=False):
         with pytest.raises(HTTPException) as exc_info:
             main._require_deprovision_runner()
     assert exc_info.value.status_code == 503
@@ -349,7 +349,7 @@ def test_require_deprovision_runner_raises_503_when_temporal_disabled() -> None:
 def test_require_deprovision_runner_returns_callable_when_enabled() -> None:
     from agent_provisioning_team.api import main
 
-    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True):
+    with patch("shared.temporal.client.is_temporal_enabled", return_value=True):
         runner = main._require_deprovision_runner()
     assert callable(runner)
 
@@ -420,7 +420,7 @@ def test_deprovision_agent_endpoint_returns_503_when_temporal_disabled() -> None
     from agent_provisioning_team.api.main import app
 
     client = TestClient(app)
-    with patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False):
+    with patch("shared.temporal.client.is_temporal_enabled", return_value=False):
         resp = client.delete("/environments/agent-1")
 
     assert resp.status_code == 503

@@ -7,14 +7,14 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from shared_repo_context.repo_utils import REPO_INSPECT_EXCLUDE_DIRS
+from shared.repo_context.repo_utils import REPO_INSPECT_EXCLUDE_DIRS
 
 from .context import RepoToolContext
 from .definitions import REPO_INSPECT_TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
-# Directories never surfaced by inspection. Sourced directly from shared_repo_context so every
+# Directories never surfaced by inspection. Sourced directly from shared.repo_context so every
 # repo-inspection scanner in the codebase agrees on what's excluded.
 _INSPECT_EXCLUDE_DIRS: frozenset[str] = REPO_INSPECT_EXCLUDE_DIRS
 

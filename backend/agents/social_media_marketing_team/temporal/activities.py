@@ -30,8 +30,8 @@ from typing import Any, Callable, Dict, Optional
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from shared_temporal import is_last_attempt as _is_last_attempt
-from shared_temporal import raise_if_cancelled
+from shared.temporal import is_last_attempt as _is_last_attempt
+from shared.temporal import raise_if_cancelled
 
 logger = logging.getLogger(__name__)
 

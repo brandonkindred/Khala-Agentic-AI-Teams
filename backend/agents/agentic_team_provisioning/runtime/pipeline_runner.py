@@ -38,9 +38,9 @@ from agentic_team_provisioning.runtime.agent_builder import build_agent, call_ag
 from agentic_team_provisioning.step_ordering import order_step_ids
 from agentic_team_provisioning.testing.store import AgenticTestStore
 from agentic_team_provisioning.wait_timeout import resolve_wait_timeout_s
-from shared_concurrency import BackgroundHeartbeat
-from shared_env import parse_int
-from shared_postgres import is_postgres_enabled
+from shared.concurrency import BackgroundHeartbeat
+from shared.env import parse_int
+from shared.postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 

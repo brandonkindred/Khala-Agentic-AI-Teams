@@ -12,8 +12,8 @@ from typing import Any, Callable, Collection, Dict, List, Optional
 from strands import Agent
 
 from llm_service import call_llm_with_retries
-from shared_env import parse_int
-from shared_llm_recovery import agent_call_json
+from shared.env import parse_int
+from shared.llm_recovery import agent_call_json
 from software_engineering_team.hitl import (
     normalize_open_questions as _normalize_open_questions,
 )

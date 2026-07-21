@@ -17,10 +17,10 @@ def test_get_studio_service_returns_stable_singleton() -> None:
 
 
 def test_build_service_in_memory_when_postgres_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    import shared_postgres
+    import shared.postgres
     from agent_studio import runtime
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: False)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: False)
     svc = runtime._build_service()
     assert isinstance(svc, AgentStudioService)
     assert isinstance(svc._store, AgentStudioConversationStore)
@@ -28,13 +28,13 @@ def test_build_service_in_memory_when_postgres_disabled(monkeypatch: pytest.Monk
 
 def test_build_service_uses_postgres_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     import agent_studio.pg_store as pg
-    import shared_postgres
+    import shared.postgres
     from agent_studio import runtime
 
     class _StubStore:
         """Stand-in so the selection does not construct a real Postgres store."""
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(pg, "PostgresAgentStudioConversationStore", _StubStore)
 
     svc = runtime._build_service()

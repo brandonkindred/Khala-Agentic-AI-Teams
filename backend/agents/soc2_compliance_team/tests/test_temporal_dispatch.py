@@ -20,10 +20,10 @@ client = TestClient(app)
 
 
 def test_is_temporal_enabled_false_on_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If ``shared_temporal`` can't provide ``is_temporal_enabled``, default to
+    """If ``shared.temporal`` can't provide ``is_temporal_enabled``, default to
     thread mode rather than raising."""
-    fake = types.ModuleType("shared_temporal")  # lacks is_temporal_enabled
-    monkeypatch.setitem(sys.modules, "shared_temporal", fake)
+    fake = types.ModuleType("shared.temporal")  # lacks is_temporal_enabled
+    monkeypatch.setitem(sys.modules, "shared.temporal", fake)
     assert api_main._is_temporal_enabled() is False
 
 

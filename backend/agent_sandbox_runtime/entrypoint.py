@@ -46,7 +46,7 @@ def _load_sandbox_secrets() -> None:
 
     The provisioner bind-mounts a 0400 file at ``/run/secrets/sandbox-env``
     and sets ``SANDBOX_SECRETS_FILE`` pointing at it — so agent-consumed libs
-    (``ollama``, ``shared_postgres``, etc.) keep reading creds from the env
+    (``ollama``, ``shared.postgres``, etc.) keep reading creds from the env
     while the container's startup env (as seen by ``docker inspect`` /
     ``docker exec env``) stays free of them.
 
@@ -183,7 +183,7 @@ def _build_app() -> FastAPI:
 
     # Mount the shared invoke shim; the middleware above restricts dispatch
     # to the single bound agent.
-    from shared_agent_invoke import mount_invoke_shim
+    from shared.agent_invoke import mount_invoke_shim
 
     mount_invoke_shim(app)
 

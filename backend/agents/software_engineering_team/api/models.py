@@ -10,12 +10,12 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-# The HITL "pending question / answer" schemas live in the shared_hitl package so every
+# The HITL "pending question / answer" schemas live in the shared.hitl package so every
 # team shares one reconciled definition; re-exported here so existing importers keep using
 # `software_engineering_team.api.models`. SE's superset fields (recommendation/allow_multiple
 # on PendingQuestion, rationale/confidence on QuestionOption) are the ones the shared models
 # adopt, so these are field-identical to the previous local definitions.
-from shared_hitl.models import (  # noqa: F401
+from shared.hitl.models import (  # noqa: F401
     AnswerSubmission,
     PendingQuestion,
     QuestionOption,

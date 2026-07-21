@@ -74,8 +74,8 @@ from models import (
 )
 from postgres import SCHEMA as JOB_SERVICE_SCHEMA
 
-from shared_postgres import close_pool as shared_close_pool
-from shared_postgres import register_team_schemas
+from shared.postgres import close_pool as shared_close_pool
+from shared.postgres import register_team_schemas
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("job_service")

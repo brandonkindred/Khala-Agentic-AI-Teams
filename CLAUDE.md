@@ -8,10 +8,13 @@ Guidance for Claude Code (claude.ai/code) working in this repository. **This fil
 
 ## Repository Structure
 
-One directory per agent team under `backend/agents/`. Load-bearing entries:
+One directory per agent team under `backend/agents/`, with platform infra as a
+sibling package under `backend/shared/`. Load-bearing entries:
 
 ```
 backend/
+  shared/                   # Platform infra (postgres, temporal, agent_invoke, …) →
+                             # import shared.<name> (see Architecture below)
   agents/
     software_engineering_team/  # Primary team — full dev pipeline; contains the backend/frontend
                                 # code-v2, devops, coding-team execution engine (Tech Lead +
@@ -22,9 +25,6 @@ backend/
     llm_service/             # Centralized LLM client (Ollama, Claude)
     agent_registry/          # Agent Console catalog: per-agent YAML manifests → /api/agents
     agent_console/           # Agent Console data layer: runs, saved inputs, diff
-    shared_postgres/         # \
-    shared_temporal/         #  > Shared infra (see Architecture below)
-    shared_agent_invoke/     # /
     integrations/            # Shared integration contracts (Google login, Medium, etc.)
     artifact_registry/       # Shared artifact persistence
     event_bus/               # Cross-team event publishing
@@ -42,7 +42,7 @@ user-interface/              # Angular 19 frontend (src/app: components/, models
 Concise summary below; full detail with Mermaid diagrams (12 sections) lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 - **Execution model** — each team has a team-lead orchestrator coordinating role-separated specialist agents via Pydantic request/response models. Two runtime modes: **thread mode** (default, local dev; agents run as Python threads) and **Temporal mode** (durable workflows when `TEMPORAL_ADDRESS` is set — state survives server restarts).
-- **Shared infra patterns** — Temporal client + per-team worker registry (`shared_temporal/`, **Pattern A**: teams export `WORKFLOWS`/`ACTIVITIES` from `<team>/temporal/__init__.py`, workers start on import) and a Postgres schema registry ([`shared_postgres/README.md`](backend/agents/shared_postgres/README.md), **Pattern B**: teams export a `SCHEMA` constant, the FastAPI lifespan calls `register_team_schemas`; no-op when `POSTGRES_HOST` is unset).
+- **Shared infra patterns** — Temporal client + per-team worker registry (`backend/shared/temporal/`, **Pattern A**: teams export `WORKFLOWS`/`ACTIVITIES` from `<team>/temporal/__init__.py`, workers start on import) and a Postgres schema registry ([`shared.postgres/README.md`](backend/shared/postgres/README.md), **Pattern B**: teams export a `SCHEMA` constant, the FastAPI lifespan calls `register_team_schemas`; no-op when `POSTGRES_HOST` is unset).
 - **Software Engineering team** — 4-phase pipeline (Discovery → Design → parallel Execution → Integration) with a per-task backend pipeline (feature branch → plan → codegen → lint/build → code review → security → QA → DbC → Tech Lead review → merge). Sub-team variants (backend/frontend code-v2, devops, coding_team) live inside `software_engineering_team/`; standalone Planning lives in `planning_team/`. Deep dive: [`software_engineering_team/README.md`](backend/agents/software_engineering_team/README.md).
 - **Unified API routing** — all teams mount under `/api/{team-slug}`; configs in `backend/unified_api/config.py`; the security gateway (`SECURITY_GATEWAY_ENABLED=true` by default) fronts all routes.
 - **Agent Console & Registry** — single entry point (UI `/agent-console`) for discovering, inspecting, and running specialist agents. Catalog: [`agent_registry/README.md`](backend/agents/agent_registry/README.md); ephemeral sandbox runner: `agent_provisioning_team/sandbox/README.md`; runs/inputs/diff data layer: [`agent_console/README.md`](backend/agents/agent_console/README.md).
@@ -102,7 +102,7 @@ Core, behavior-changing vars only. The complete reference (every var, defaults, 
 |---|---|
 | `LLM_PROVIDER` | `dummy` selects the no-LLM test/dev harness (the only load-bearing value); otherwise the Postgres provider list is the sole source. |
 | `LLM_BASE_URL` / `LLM_MODEL` | Default base URL / model for a provider-list entry whose field is blank (they no longer configure a live provider on their own). |
-| `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | Required for migrated teams; enables Postgres-backed stores via `shared_postgres`; no SQLite fallback. |
+| `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | Required for migrated teams; enables Postgres-backed stores via `shared.postgres`; no SQLite fallback. |
 | `JOB_SERVICE_URL` | Central job service; required by every team's `JobServiceClient`. |
 | `TEMPORAL_ADDRESS` (+ `_NAMESPACE`/`_TASK_QUEUE`) | Enables Temporal mode when set. |
 | `AGENT_CACHE` / `SE_WORKSPACE_DIR` | Shared cache root (Docker: `/data/agents`, namespaced per team) / root for SE per-job workspaces. |

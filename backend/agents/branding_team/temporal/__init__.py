@@ -1,6 +1,6 @@
 """Temporal workflow + activity package for the Branding team.
 
-Follows shared_temporal Pattern A: this package exports ``WORKFLOWS`` /
+Follows shared.temporal Pattern A: this package exports ``WORKFLOWS`` /
 ``ACTIVITIES`` and self-boots a worker on import when Temporal is enabled. The
 generic ``team_service`` entrypoint also boots the worker via
 ``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC``
@@ -51,7 +51,7 @@ __all__ = [
     "run_market_research_activity",
 ]
 
-from shared_temporal import is_temporal_enabled, start_team_worker  # noqa: E402
+from shared.temporal import is_temporal_enabled, start_team_worker  # noqa: E402
 
 if is_temporal_enabled():
     start_team_worker("branding", WORKFLOWS, ACTIVITIES, task_queue=TASK_QUEUE)

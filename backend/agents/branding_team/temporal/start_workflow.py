@@ -1,8 +1,8 @@
 """Start the Branding Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
 bridge, which polls for the worker's Temporal client to become ready before
-dispatching). We deliberately do NOT use ``shared_temporal.run_team_job`` here:
+dispatching). We deliberately do NOT use ``shared.temporal.run_team_job`` here:
 it creates its own job row (under the ``branding`` team slug) and sets
 ``status=running`` itself, which would collide with the API's ``create_job``
 (namespaced under ``branding_team``) and the activity-owned RUNNING/COMPLETED
@@ -16,7 +16,7 @@ from typing import Any
 
 from branding_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 from branding_team.temporal.workflows import BrandingWorkflow
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

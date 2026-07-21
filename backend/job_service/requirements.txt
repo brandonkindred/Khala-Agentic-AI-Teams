@@ -3,7 +3,7 @@ fastapi>=0.135,<0.137
 uvicorn>=0.44,<1.0
 pydantic>=2.12,<3.0
 psycopg2-binary>=2.9,<3.0
-# shared_postgres uses psycopg v3 + psycopg_pool (ConnectionPool for DDL + pooled conns).
+# shared.postgres uses psycopg v3 + psycopg_pool (ConnectionPool for DDL + pooled conns).
 psycopg[binary]>=3.3,<4.0
 psycopg_pool>=3.3,<4.0
 # Observability: exposes /metrics for Prometheus scraping

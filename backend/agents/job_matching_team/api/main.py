@@ -62,7 +62,7 @@ from job_matching_team.shared.job_store import (
     list_jobs,
     update_job,
 )
-from shared_app import create_team_app
+from shared.app import create_team_app
 from user_profile import SCHEMA as USER_PROFILE_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -194,7 +194,7 @@ def _dispatch_scan_via_temporal(job_id: str, payload: JobMatchRequest) -> bool:
         * ``job_id`` refers to a job row already created by the caller.
     Postconditions:
         * Returns False (dispatch not attempted) when Temporal is genuinely
-          unavailable (``shared_temporal`` not importable) or disabled
+          unavailable (``shared.temporal`` not importable) or disabled
           (``TEMPORAL_ADDRESS`` unset) — the caller then runs the scan on a
           daemon thread, so behavior is unchanged in those cases.
         * Returns True after a durable ``JobMatchingWorkflow`` has been started.
@@ -204,7 +204,7 @@ def _dispatch_scan_via_temporal(job_id: str, payload: JobMatchRequest) -> bool:
           caller surfaces the failure instead.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         # Temporal genuinely not installed in this image → thread mode.
         return False

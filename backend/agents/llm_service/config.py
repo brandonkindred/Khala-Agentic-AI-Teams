@@ -33,10 +33,10 @@ import os
 import threading
 from typing import Optional
 
-# shared_env is a dependency-free standard-library-only leaf module, so importing
+# shared.env is a dependency-free standard-library-only leaf module, so importing
 # it at module scope cannot create an import cycle (it imports nothing from here).
-from shared_env import env_flag_enabled as _env_flag_enabled
-from shared_env import parse_float as _parse_float
+from shared.env import env_flag_enabled as _env_flag_enabled
+from shared.env import parse_float as _parse_float
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ KNOWN_MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
 def env_flag_enabled(env_name: str) -> bool:
     """Shared parser for default-on boolean env toggles.
 
-    Thin re-export of the canonical :func:`shared_env.env_flag_enabled` so there is
+    Thin re-export of the canonical :func:`shared.env.env_flag_enabled` so there is
     one implementation; kept here for the many call sites that import it from
     ``llm_service.config``.
 
@@ -375,7 +375,7 @@ def _runtime(key: str) -> str:
     """Return a runtime-config value (UI-managed, Postgres-backed), or ``""``.
 
     Lazily delegates to :mod:`llm_service.runtime_config`. Any failure (Postgres
-    disabled, shared_postgres absent, read error) yields ``""`` so env-var
+    disabled, shared.postgres absent, read error) yields ``""`` so env-var
     resolution remains the fallback. Never raises.
     """
     try:
@@ -715,7 +715,7 @@ def resolve_context_size_for_model(model: str) -> Optional[int]:
     Resolve context size (tokens) for a model: env LLM_CONTEXT_SIZE (global override),
     then KNOWN_MODEL_CONTEXT[model], else None (caller may use /api/show or default).
     """
-    # Not expressible via shared_env.parse_int: an unset *or* invalid override must
+    # Not expressible via shared.env.parse_int: an unset *or* invalid override must
     # fall through to the model-specific KNOWN_MODEL_CONTEXT value (an Optional[int]),
     # not a fixed default, and a valid override is clamped up to a 2048 floor.
     raw = os.environ.get(ENV_LLM_CONTEXT_SIZE)

@@ -82,7 +82,7 @@ from llm_service import (
     with_model_override,
 )
 from llm_service.interface import LLMClient, LLMRateLimitError, LLMTemporaryError
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 from . import _path_setup  # noqa: F401
 from .pipeline._common import (

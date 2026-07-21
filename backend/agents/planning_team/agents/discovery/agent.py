@@ -15,7 +15,7 @@ from planning_team.agents.discovery.prompts import build_prompt
 from planning_team.models import ClientContext
 from planning_team.phases._util import as_client_context, assemble_material
 from planning_team.spec_digest import map_reduce
-from shared_llm_recovery import extract_json_object
+from shared.llm_recovery import extract_json_object
 
 logger = logging.getLogger(__name__)
 

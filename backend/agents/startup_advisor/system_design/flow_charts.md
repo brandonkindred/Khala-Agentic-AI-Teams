@@ -319,8 +319,8 @@ sequenceDiagram
     participant Uvicorn
     participant App as FastAPI app
     participant Lifespan as _lifespan()<br/>api/main.py:20-34
-    participant Registry as shared_postgres.register_team_schemas
-    participant Pool as shared_postgres pool
+    participant Registry as shared.postgres.register_team_schemas
+    participant Pool as shared.postgres pool
     participant PG as Postgres
 
     Uvicorn->>App: startup

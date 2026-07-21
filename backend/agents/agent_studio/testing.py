@@ -1,6 +1,6 @@
 """Shared test doubles for the Agent Studio suites.
 
-A package-level module (mirroring ``shared_postgres.testing``) so both the
+A package-level module (mirroring ``shared.postgres.testing``) so both the
 team-level tests (``agent_studio/tests/``) and the route tests
 (``unified_api/tests/``) use one ``FakeRegistry`` / ``seed_manifest`` instead of
 duplicating them. Not imported by production code.

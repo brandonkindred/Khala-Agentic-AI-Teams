@@ -7,7 +7,7 @@ the ledger traded TSLA".
 
 Run from ``backend/`` (same directory as ``Makefile``)::
 
-    PYTHONPATH=agents python3 -m investment_team.scripts.divergent_provenance \\
+    PYTHONPATH=.:agents python3 -m investment_team.scripts.divergent_provenance \\
         [--limit 50]
 
 Requires ``JOB_SERVICE_URL`` to be set (same env var as the running API).

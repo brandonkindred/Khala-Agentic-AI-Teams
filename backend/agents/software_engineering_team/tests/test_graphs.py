@@ -1,6 +1,6 @@
 """Tests for the SE team's Strands-graph builder modules.
 
-These modules are thin wrappers around ``shared_graph.build_*`` helpers; the
+These modules are thin wrappers around ``shared.graph.build_*`` helpers; the
 tests only need to import the builders and confirm they return a usable
 graph/swarm object — full graph execution is exercised by integration tests.
 """

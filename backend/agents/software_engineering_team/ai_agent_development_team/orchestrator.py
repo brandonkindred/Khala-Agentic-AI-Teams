@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from llm_service import LLMClient
-from shared_repo_context import read_repo_code_budgeted
+from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.models import Task
 
 from .models import (

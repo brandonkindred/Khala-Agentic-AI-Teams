@@ -38,7 +38,7 @@ branding, investment), it is intentionally small:
 - **Stateless store backed by a connection pool.**
   `StartupAdvisorConversationStore.__init__` takes no arguments and
   holds no state (`store.py:88-90`). Every method opens a
-  short-lived connection through `shared_postgres.get_conn()`
+  short-lived connection through `shared.postgres.get_conn()`
   (`store.py:29`), which is pool-backed, and each method is wrapped
   in `@timed_query` so slow reads and writes surface as structured
   log lines (`store.py:92,105,132,156,167,186,206,230`).
@@ -67,7 +67,7 @@ branding, investment), it is intentionally small:
   (`store.py:92,105,132,156,167,186,206,230`).
 - **Optional Temporal mode.** `temporal/__init__.py:38-41` starts a
   `startup_advisor-queue` worker only when
-  `shared_temporal.is_temporal_enabled()` returns true (i.e. when
+  `shared.temporal.is_temporal_enabled()` returns true (i.e. when
   `TEMPORAL_ADDRESS` is set). The team works identically in thread
   mode without Temporal.
 - **Lazy module-level singletons.** Both the store
@@ -111,7 +111,7 @@ flowchart TB
     subgraph persistence[Persistence layer]
         direction TB
         Store["StartupAdvisorConversationStore<br/>store.py:78-247<br/>@timed_query on every op"]
-        Pool["shared_postgres.get_conn()<br/>pool-backed"]
+        Pool["shared.postgres.get_conn()<br/>pool-backed"]
         PG[(Postgres<br/>startup_advisor_conversations<br/>startup_advisor_conv_messages<br/>startup_advisor_conv_artifacts)]
     end
 

@@ -518,7 +518,7 @@ def test_concurrent_update_task_does_not_serialize_on_a_slow_persist_write() -> 
     """
     import time
 
-    from shared_concurrency import LatestValueFlusher
+    from shared.concurrency import LatestValueFlusher
 
     write_delay = 0.05
     n = 10

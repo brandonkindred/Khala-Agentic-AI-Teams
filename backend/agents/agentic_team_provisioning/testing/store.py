@@ -2,7 +2,7 @@
 
 Follows the ``startup_advisor/store.py`` pattern exactly:
 stateless class, ``@timed_query`` on every method, short-lived
-connections via ``shared_postgres.get_conn``.
+connections via ``shared.postgres.get_conn``.
 
 All DDL lives in ``agentic_team_provisioning.postgres`` and is
 registered from the team's FastAPI lifespan.
@@ -17,8 +17,8 @@ from typing import Any, Optional
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class AgenticTestStore:
     """Postgres-backed store for test chat sessions, messages, and pipeline runs."""
 
     def __init__(self) -> None:
-        pass  # Stateless; pool lives in shared_postgres
+        pass  # Stateless; pool lives in shared.postgres
 
     # ------------------------------------------------------------------
     # Team mode

@@ -41,13 +41,13 @@ def _load_or_create_key() -> bytes:
       2. Persisted key file at {AGENT_CACHE}/integration.key
       3. Generate new key, persist it, return it
 
-    Delegates to ``shared_postgres.secrets`` so there is exactly ONE Fernet-key
+    Delegates to ``shared.postgres.secrets`` so there is exactly ONE Fernet-key
     derivation across the platform: the unified API (here) and every team
-    container (via ``shared_postgres``) derive the same key, which is what lets a
+    container (via ``shared.postgres``) derive the same key, which is what lets a
     secret written here be decrypted in a team container. Keeping two copies in
     sync by hand was the drift risk this removes.
     """
-    from shared_postgres.secrets import load_or_create_key
+    from shared.postgres.secrets import load_or_create_key
 
     return load_or_create_key()
 
@@ -55,11 +55,11 @@ def _load_or_create_key() -> bytes:
 def _get_fernet() -> Fernet:
     """Return the one process-wide Fernet instance shared across the platform.
 
-    Delegates to ``shared_postgres.secrets.get_fernet()`` so the unified API and
+    Delegates to ``shared.postgres.secrets.get_fernet()`` so the unified API and
     every team container encrypt/decrypt with a single cached Fernet (built once
     from the same key) instead of each module rebuilding its own per call.
     """
-    from shared_postgres.secrets import get_fernet
+    from shared.postgres.secrets import get_fernet
 
     return get_fernet()
 

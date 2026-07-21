@@ -82,7 +82,7 @@ from agentic_team_provisioning.runtime.agent_builder import (
 )
 from agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
 from agentic_team_provisioning.testing.store import get_test_store
-from shared_app import create_team_app
+from shared.app import create_team_app
 
 logger = logging.getLogger(__name__)
 
@@ -1263,12 +1263,12 @@ def _temporal_enabled() -> bool:
     """Return whether Temporal dispatch is active (``TEMPORAL_ADDRESS`` set).
 
     Preconditions: none.
-    Postconditions: ``True`` iff ``shared_temporal`` is importable and reports Temporal
-        enabled; ``False`` if Temporal is disabled or ``shared_temporal`` is absent (so
+    Postconditions: ``True`` iff ``shared.temporal`` is importable and reports Temporal
+        enabled; ``False`` if Temporal is disabled or ``shared.temporal`` is absent (so
         the daemon-thread path is always reachable).
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         return False
     return is_temporal_enabled()
@@ -1397,7 +1397,7 @@ def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputReq
         # timeout — so the run never gets stuck. We therefore do NOT 500 here (that would
         # contradict the already-committed running row); we log and return the updated row.
         from agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
-        from shared_temporal import signal_workflow_sync
+        from shared.temporal import signal_workflow_sync
 
         if not _test_store.try_resume_pipeline_run_temporal(run_id, req.input):
             raise HTTPException(
@@ -1446,7 +1446,7 @@ def cancel_pipeline_run(team_id: str, run_id: str):
         # activity is then a CAS no-op. A cancel-signal failure is best-effort: the row
         # is already cancelled and the workflow will observe it out-of-band.
         from agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
-        from shared_temporal import cancel_workflow_sync
+        from shared.temporal import cancel_workflow_sync
 
         _test_store.try_cancel_pipeline_run(run_id)
         try:

@@ -234,7 +234,7 @@ file.
 `postgres/__init__.py` declares a full Postgres schema
 (`branding_clients`, `branding_brands`, `branding_sessions`,
 `branding_conversations`, `branding_conv_messages`) registered via
-`shared_postgres.register_team_schemas` at FastAPI startup
+`shared.postgres.register_team_schemas` at FastAPI startup
 (`api/main.py:44-53`). This keeps the team ready for migration without
 forcing Postgres onto local dev or test environments.
 
@@ -254,7 +254,7 @@ a design service contract is defined (`adapters/design_assets.py:26-37`).
 Most branding runs complete in seconds, so the default execution model is
 a normal in-process Python call. When `TEMPORAL_ADDRESS` is set,
 `temporal/__init__.py:39-40` registers `BrandingWorkflow` with
-`shared_temporal.start_team_worker` on the `"branding-queue"` task queue
+`shared.temporal.start_team_worker` on the `"branding-queue"` task queue
 with a 2-hour `start_to_close_timeout`. This provides durable execution
 for long-running brand builds without making Temporal a hard dependency
 for the common case.

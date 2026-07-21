@@ -1,7 +1,7 @@
 """Per-job event bus for SSE streaming (blogging).
 
 A team-local binding over the shared bus algorithm in
-:mod:`shared_job_event_bus`. Pipeline threads call :func:`publish` to broadcast
+:mod:`shared.job_event_bus`. Pipeline threads call :func:`publish` to broadcast
 events; SSE endpoint generators call :func:`subscribe` / :func:`unsubscribe` to
 receive them via a thread-safe deque.
 
@@ -35,12 +35,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from shared_env_config import env_int
-from shared_job_event_bus import BusState, ReaperHandle, Subscription
-from shared_job_event_bus import cleanup_job as _cleanup_job
-from shared_job_event_bus import publish as _publish
-from shared_job_event_bus import subscribe as _subscribe
-from shared_job_event_bus import unsubscribe as _unsubscribe
+from shared.env_config import env_int
+from shared.job_event_bus import BusState, ReaperHandle, Subscription
+from shared.job_event_bus import cleanup_job as _cleanup_job
+from shared.job_event_bus import publish as _publish
+from shared.job_event_bus import subscribe as _subscribe
+from shared.job_event_bus import unsubscribe as _unsubscribe
 
 logger = logging.getLogger(__name__)
 

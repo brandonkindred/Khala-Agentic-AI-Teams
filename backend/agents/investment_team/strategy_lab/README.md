@@ -86,7 +86,7 @@ audit).
 Max number of near-miss LLM adjudications the `DeterministicAlignmentChecker` runs concurrently per
 `check()` (default `4`; sub-1 floors to `1` = fully serial).
 Near-miss candidates are collected during the trade loop and dispatched through
-`shared_concurrency.parallel_map` (the adjudicator is synchronous) instead of blocking the loop one
+`shared.concurrency.parallel_map` (the adjudicator is synchronous) instead of blocking the loop one
 trade at a time; verdicts are slotted back in trade order so the output is identical to the serial
 path regardless of completion timing. Trades cloud concurrency for wall time without changing the
 gate's result.
@@ -295,7 +295,7 @@ ending in thinking-off), and raises
 `extract_json_object` (design, design-review, refinement, zero-trade-repair, alignment, analysis) use
 `response_format="json"` (forces a JSON object on the wire); `CodeSynthesisAgent`, which emits a raw
 Python file, uses `response_format="text"`. `_parse_helpers.extract_json_object` is a thin **strict**
-wrapper over `shared_llm_recovery.extract_json_object(..., repair=False)`: it reuses the shared
+wrapper over `shared.llm_recovery.extract_json_object(..., repair=False)`: it reuses the shared
 string-aware brace scanner but keeps tolerant `json-repair` off, so a malformed or truncated payload
 raises `ValueError` and the spec-authoring agents re-prompt the model instead of accepting a repaired
 guess of half-written code. The **Bedrock** path is unchanged (native `BedrockModel`).

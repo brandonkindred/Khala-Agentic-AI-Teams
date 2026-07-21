@@ -1,9 +1,9 @@
 """Per-job event bus for SSE streaming (investment).
 
 A thin team-local binding over the shared bus algorithm in
-:mod:`shared_job_event_bus`. State is process-local to this module; pipeline
+:mod:`shared.job_event_bus`. State is process-local to this module; pipeline
 threads call :func:`publish`, SSE generators call :func:`subscribe` /
-:func:`unsubscribe`. See :mod:`shared_job_event_bus` for the multi-worker caveat.
+:func:`unsubscribe`. See :mod:`shared.job_event_bus` for the multi-worker caveat.
 
 A background reaper (lazily started on the first :func:`subscribe`) bounds
 in-memory growth: subscriptions that skip :func:`cleanup_job` — a crash, or an
@@ -12,7 +12,7 @@ evicted once idle past :data:`_SUB_TTL_SECONDS`, with a hard cap of
 :data:`_MAX_JOBS_TRACKED` tracked jobs. **Consumers MUST call**
 :meth:`Subscription.touch` at least once per TTL while their stream is alive so
 the reaper does not evict an actively connected client (see
-:class:`shared_job_event_bus.ReaperHandle`).
+:class:`shared.job_event_bus.ReaperHandle`).
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from shared_env_config import env_int
-from shared_job_event_bus import BusState, ReaperHandle, Subscription
-from shared_job_event_bus import cleanup_job as _cleanup_job
-from shared_job_event_bus import publish as _publish
-from shared_job_event_bus import subscribe as _subscribe
-from shared_job_event_bus import unsubscribe as _unsubscribe
+from shared.env_config import env_int
+from shared.job_event_bus import BusState, ReaperHandle, Subscription
+from shared.job_event_bus import cleanup_job as _cleanup_job
+from shared.job_event_bus import publish as _publish
+from shared.job_event_bus import subscribe as _subscribe
+from shared.job_event_bus import unsubscribe as _unsubscribe
 
 logger = logging.getLogger(__name__)
 

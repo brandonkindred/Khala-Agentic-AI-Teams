@@ -93,7 +93,7 @@ def run_paper_trading_activity(payload: dict[str, Any]) -> dict[str, Any]:
         _strategy_lab_records,
     )
     from investment_team.models import PaperTradingSession, StrategyLabRecord
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     session_id = payload["session_id"]
     lab_record_id = payload["lab_record_id"]

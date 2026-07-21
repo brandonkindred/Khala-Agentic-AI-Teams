@@ -17,7 +17,7 @@ from software_engineering_team.models import CodingTeamPlanInput, StackSpec, Tas
 from software_engineering_team.pause_cycle import _format_decisions
 from software_engineering_team.task_graph import TaskGraphService
 
-GIT_UTILS = "shared_git.git_utils"
+GIT_UTILS = "shared.git.git_utils"
 
 
 # --------------------------------------------------------------------------- helpers / stubs

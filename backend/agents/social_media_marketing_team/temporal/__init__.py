@@ -1,7 +1,7 @@
 """Temporal workflows and activities for the social media marketing team.
 
 Pattern A: this package exports ``WORKFLOWS`` and ``ACTIVITIES`` so
-``shared_temporal.start_team_worker`` can register a worker for the team. The
+``shared.temporal.start_team_worker`` can register a worker for the team. The
 workflow class lives in :mod:`workflows` (sandbox-safe -- no top-level
 non-deterministic calls); worker startup lives in :mod:`worker`. This ``__init__``
 must stay free of import-time side effects (no worker boot, no ``os.getenv``) -- the

@@ -13,7 +13,7 @@ asyncio-task, so two agents sharing one client each see their own attribution.
 ``asyncio.to_thread`` (used by the Strands adapter) copies the active context
 into the worker thread automatically; raw ``ThreadPoolExecutor`` fan-out does
 not — callers that fan out across raw threads should propagate context with
-``contextvars.copy_context()`` (see ``shared_concurrency/heartbeat.py``).
+``contextvars.copy_context()`` (see ``shared/concurrency/heartbeat.py``).
 
 Usage::
 

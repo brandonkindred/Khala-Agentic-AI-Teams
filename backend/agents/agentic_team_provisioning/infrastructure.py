@@ -23,8 +23,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from job_service_client import JobServiceClient
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 

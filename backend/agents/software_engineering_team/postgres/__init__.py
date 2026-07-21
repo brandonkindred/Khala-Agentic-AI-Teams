@@ -1,6 +1,6 @@
 """Postgres schema for the Software Engineering team's observability & learning layer.
 
-Pattern B (see ``shared_postgres/README.md``): this module is *pure data* with no
+Pattern B (see ``shared/postgres/README.md``): this module is *pure data* with no
 side effects. The SE FastAPI app's lifespan registers it via
 ``register_team_schemas(SCHEMA)`` (a no-op when ``POSTGRES_HOST`` is unset).
 
@@ -23,7 +23,7 @@ Four tables:
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="software_engineering",

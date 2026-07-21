@@ -1,6 +1,6 @@
 """Temporal worker for the Branding team.
 
-Worker startup follows shared_temporal Pattern A: the auto-boot in
+Worker startup follows shared.temporal Pattern A: the auto-boot in
 ``branding_team/temporal/__init__.py`` calls ``start_team_worker`` on import.
 ``start_branding_temporal_worker_thread`` exposes that same boot under the
 no-arg -> bool contract the generic ``team_service`` entrypoint invokes via
@@ -30,7 +30,7 @@ def start_branding_temporal_worker_thread() -> bool:
           this team, False when Temporal is disabled.
     """
     from branding_team.temporal import ACTIVITIES, WORKFLOWS
-    from shared_temporal import is_temporal_enabled, start_team_worker
+    from shared.temporal import is_temporal_enabled, start_team_worker
 
     if not is_temporal_enabled():
         return False

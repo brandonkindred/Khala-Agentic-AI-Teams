@@ -51,8 +51,8 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
-from shared_concurrency import parallel_map
-from shared_env_config import env_int
+from shared.concurrency import parallel_map
+from shared.env_config import env_int
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict, Severity
 from ..executor.predicate_evaluator import (
@@ -1321,7 +1321,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         Post: every reserved slot holds the finding/gate row produced from
         that trade's verdict — identical to what the serial path would have
         emitted, independent of completion order. Adjudications run through
-        :func:`shared_concurrency.parallel_map` (``STRATEGY_LAB_ALIGNMENT_
+        :func:`shared.concurrency.parallel_map` (``STRATEGY_LAB_ALIGNMENT_
         ADJUDICATION_CONCURRENCY`` workers) since the underlying adjudicator
         is synchronous; ``propagate_context`` keeps LLM attribution/request-id
         contextvars visible inside each worker.

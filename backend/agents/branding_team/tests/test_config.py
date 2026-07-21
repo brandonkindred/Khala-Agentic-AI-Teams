@@ -1,7 +1,7 @@
 """Env-parsing behavior the branding team relies on.
 
 The branding team no longer ships its own ``env_int``/``env_float``/``env_bool``;
-it consumes the canonical readers from :mod:`shared_env_config`. That module owns
+it consumes the canonical readers from :mod:`shared.env_config`. That module owns
 the exhaustive suite — these tests pin the specific semantics branding depends on
 after the migration: ``floor`` clamping (replacing the old ``minimum=``/
 ``positive=True`` guards) and WARNING logging on set-but-unparseable values (the
@@ -14,7 +14,7 @@ import logging
 
 import pytest
 
-from shared_env_config import env_bool, env_float, env_int
+from shared.env_config import env_bool, env_float, env_int
 
 _KNOB = "BRANDING_TEST_ENV_KNOB"
 
@@ -40,11 +40,11 @@ def test_env_int_warns_on_set_but_unparseable(
 ) -> None:
     """A set-but-unparseable int is surfaced at WARNING; an unset var is silent."""
     monkeypatch.delenv(_KNOB, raising=False)
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         env_int(_KNOB, 4, floor=1)
     assert not caplog.records  # unset: no warning
     monkeypatch.setenv(_KNOB, "not-an-int")
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         assert env_int(_KNOB, 4, floor=1) == 4
     assert any("Invalid int" in r.message for r in caplog.records)
 
@@ -78,7 +78,7 @@ def test_env_float_warns_on_set_but_unparseable(
 ) -> None:
     """A set-but-unparseable float is surfaced at WARNING."""
     monkeypatch.setenv(_KNOB, "abc")
-    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+    with caplog.at_level(logging.WARNING, logger="shared.env_config.config"):
         assert env_float(_KNOB, 2.0, floor=0.1) == pytest.approx(2.0)
     assert any("Invalid float" in r.message for r in caplog.records)
 

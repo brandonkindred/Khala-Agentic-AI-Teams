@@ -1,6 +1,6 @@
 """Start the accessibility-audit Temporal workflow from synchronous API code.
 
-Thin per-team wrapper over ``shared_temporal.start_workflow_sync`` (the shared
+Thin per-team wrapper over ``shared.temporal.start_workflow_sync`` (the shared
 sync->async bridge). The API owns its own job-store bookkeeping via
 ``JobServiceClient``, so we use ``start_workflow_sync`` (which does not touch the
 job store) rather than ``run_team_job``.
@@ -38,7 +38,7 @@ def start_accessibility_audit_workflow(job_id: str, audit_id: str, request_paylo
     from accessibility_audit_team.temporal.worker import (
         start_accessibility_audit_temporal_worker_thread,
     )
-    from shared_temporal import start_workflow_sync
+    from shared.temporal import start_workflow_sync
 
     # Ensure a worker (and thus the shared client/loop) exists in THIS process,
     # regardless of how the app is served. Idempotent: a no-op when one already
@@ -83,7 +83,7 @@ def start_accessibility_audit_retest_workflow(
     from accessibility_audit_team.temporal.worker import (
         start_accessibility_audit_temporal_worker_thread,
     )
-    from shared_temporal import start_workflow_sync
+    from shared.temporal import start_workflow_sync
 
     # Ensure a worker (and thus the shared client/loop) exists in THIS process.
     # Idempotent: a no-op when one already runs, and a no-op returning False when

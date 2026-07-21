@@ -3,7 +3,7 @@
 Guards the migration hazards the wiring was designed to avoid:
 
 1. **Self-bootstrap at import time.** Importing ``user_agent_founder.temporal``
-   used to call ``shared_temporal.start_team_worker(...)`` at module load. The
+   used to call ``shared.temporal.start_team_worker(...)`` at module load. The
    worker thread connects the Temporal client asynchronously, so the first
    ``start_founder_workflow`` call lost the race and raised ``RuntimeError:
    Temporal client not available``. Boot is now the team_service entrypoint's job
@@ -34,10 +34,10 @@ def _purge(prefix: str) -> None:
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("user_agent_founder.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("user_agent_founder.temporal")
         importlib.import_module("user_agent_founder.temporal.activities")
         importlib.import_module("user_agent_founder.temporal.workflows")
@@ -54,7 +54,7 @@ def test_workflow_registers_in_temporalio_sandbox():
     """Ground truth for sandbox safety: ``UserAgentFounderWorkflow`` (which imports
     the team's activities under ``workflow.unsafe.imports_passed_through()``) must
     import and instantiate inside the real ``SandboxedWorkflowRunner`` with
-    ``shared_temporal``'s passthrough restrictions, with no
+    ``shared.temporal``'s passthrough restrictions, with no
     ``RestrictedWorkflowAccessError``. This exercises exactly what the worker does
     at boot — a stronger check than an ``os.getenv`` import-spy proxy.
     """
@@ -62,7 +62,7 @@ def test_workflow_registers_in_temporalio_sandbox():
 
     import temporalio.workflow as _wf
 
-    from shared_temporal.worker import _build_workflow_runner
+    from shared.temporal.worker import _build_workflow_runner
 
     _purge("user_agent_founder.temporal")
     from user_agent_founder.temporal import WORKFLOWS

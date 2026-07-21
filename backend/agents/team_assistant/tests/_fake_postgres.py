@@ -1,4 +1,4 @@
-"""Shared dict-backed fake for ``shared_postgres.get_conn`` used by team_assistant tests.
+"""Shared dict-backed fake for ``shared.postgres.get_conn`` used by team_assistant tests.
 
 Approximates just enough of ``team_assistant_*`` table behaviour — in
 particular, the ``team_key`` scoping — to exercise the store's ownership

@@ -4,7 +4,7 @@ Coordinates role-separated specialist agents (defined in ``agents.py``) through
 a **per-stage seam** that is shared by BOTH runtime paths:
 
 - the thread path — :meth:`MarketResearchOrchestrator.run`, which fans the UX
-  stage out one call per transcript with ``shared_concurrency.parallel_map``,
+  stage out one call per transcript with ``shared.concurrency.parallel_map``,
   then runs psychology/consistency/viability/scripts;
 - the Temporal path — ``temporal/activities.py``, one durable
   ``@activity.defn`` per stage, calling the exact same methods.
@@ -24,7 +24,7 @@ import logging
 from functools import cached_property
 from typing import List, Tuple
 
-from shared_concurrency import parallel_map
+from shared.concurrency import parallel_map
 
 from .agents import (
     ConsistencyAgent,

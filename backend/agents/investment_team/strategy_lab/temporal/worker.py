@@ -49,7 +49,7 @@ def start_strategy_lab_temporal_worker_thread() -> bool:
         team keys in one process.
     """
     from investment_team.strategy_lab.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
-    from shared_temporal import is_temporal_enabled, start_team_worker
+    from shared.temporal import is_temporal_enabled, start_team_worker
 
     if not is_temporal_enabled():
         return False

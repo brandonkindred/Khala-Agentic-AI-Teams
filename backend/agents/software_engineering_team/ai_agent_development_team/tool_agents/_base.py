@@ -9,7 +9,7 @@ Every ``run`` parsed the model output with a bare
 ``json.loads(str(agent(prompt)).strip())`` — so fenced or prose-wrapped output
 raised :class:`json.JSONDecodeError` and crashed the microtask. This base
 captures the shared shape once and parses via the lightweight, stdlib-only
-:func:`shared_llm_recovery.extract_json_object` salvage engine, so malformed
+:func:`shared.llm_recovery.extract_json_object` salvage engine, so malformed
 output degrades to an empty result instead of raising. (It deliberately does not
 reuse ``shared.tool_agent_base.lenient_json_object``, whose module pulls in
 ``code_review_agent`` — a dependency not on the AI-agent-development team's path.)
@@ -27,7 +27,7 @@ import logging
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from shared_llm_recovery import extract_json_object
+from shared.llm_recovery import extract_json_object
 
 from ..models import ToolAgentInput, ToolAgentOutput
 

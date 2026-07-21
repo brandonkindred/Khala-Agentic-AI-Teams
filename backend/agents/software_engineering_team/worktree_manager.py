@@ -34,7 +34,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
-from shared_git.git_utils import (
+from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     UnsafeRepoPathError,
     add_worktree,
@@ -110,7 +110,7 @@ class WorktreeManager:
               development's current tip.
             - A worktree directory/registration left by a previous abnormal
               exit is pruned and recreated (self-healing) — see
-              ``shared_git.git_utils.add_worktree``.
+              ``shared.git.git_utils.add_worktree``.
             - Idempotent: a second call after a successful ``prepare()`` is a
               no-op.
         Raises:
@@ -157,7 +157,7 @@ class WorktreeManager:
               resulting path outside self._root (path separators, ``..`` traversal, or an
               absolute path) — agent ids ultimately trace back to Tech-Lead-generated or
               persisted stack names, not a fully trusted source, so this is validated the
-              same way ``shared_git.resolve_safe_repo_path`` guards repo-relative file
+              same way ``shared.git.resolve_safe_repo_path`` guards repo-relative file
               writes elsewhere: without it, a malformed agent id could route
               ``add_worktree``/``remove_worktree`` to create or delete an arbitrary
               filesystem path outside the intended worktree root.

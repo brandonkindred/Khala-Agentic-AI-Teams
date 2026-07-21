@@ -6,7 +6,7 @@ team_service entrypoint invokes at boot via the ``TEAM_TEMPORAL_WORKER_MODULE`` 
 backstop, so the Temporal worker (and its connected client) is ready before uvicorn
 serves its first request.
 
-Delegates to ``shared_temporal.start_team_worker`` so the worker runs under the shared
+Delegates to ``shared.temporal.start_team_worker`` so the worker runs under the shared
 ``SandboxedWorkflowRunner`` (pydantic/strands passthrough) and is idempotent per team --
 mirroring ``market_research_team.temporal.worker``.
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from shared_temporal import is_temporal_enabled, start_team_worker
+from shared.temporal import is_temporal_enabled, start_team_worker
 from social_media_marketing_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
 
 logger = logging.getLogger(__name__)

@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from pydantic import ValidationError
 
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 from ..models import BacktestConfig, ExpectancyForecast, StrategyLabRecord, StrategySpec
 from ..signal_intelligence_models import SignalIntelligenceBriefV1

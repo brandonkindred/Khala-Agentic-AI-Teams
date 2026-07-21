@@ -9,7 +9,7 @@ were byte-aligned, and their three ``plan`` bodies were copy-pasted with an
 inert ``(lambda _r: str(_r))`` wrapper and three subtly different inline JSON
 fallbacks. :class:`PlanGeneratorToolAgent` captures the shared lifecycle once and
 parses via the lightweight, stdlib-only
-:func:`shared_llm_recovery.extract_json_object` salvage engine; subclasses
+:func:`shared.llm_recovery.extract_json_object` salvage engine; subclasses
 declare only the differing prompt, field→label map, and fallback strings.
 
 Like the other code-v2 tool-agent bases, the concrete ``agent.py`` keeps a
@@ -26,7 +26,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from shared_llm_recovery import extract_json_object
+from shared.llm_recovery import extract_json_object
 
 from ..models import (
     ToolAgentInput,

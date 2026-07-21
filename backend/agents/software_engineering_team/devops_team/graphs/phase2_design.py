@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from strands.multiagent.graph import Graph
 
-from shared_graph import build_agent, build_fan_out_fan_in
+from shared.graph import build_agent, build_fan_out_fan_in
 
 
 def build_phase2_design_graph() -> Graph:

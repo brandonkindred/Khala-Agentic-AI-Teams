@@ -25,10 +25,10 @@ def _purge(prefix: str) -> None:
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package (and its submodules) must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("agent_studio.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("agent_studio.temporal")
         importlib.import_module("agent_studio.temporal.workflows")
         importlib.import_module("agent_studio.temporal.dispatch")

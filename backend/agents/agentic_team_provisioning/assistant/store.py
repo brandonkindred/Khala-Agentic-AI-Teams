@@ -1,6 +1,6 @@
 """Postgres-backed persistence for agentic teams and process-design conversations.
 
-Backed by the shared Khala Postgres instance via ``shared_postgres.get_conn``.
+Backed by the shared Khala Postgres instance via ``shared.postgres.get_conn``.
 DDL lives in ``agentic_team_provisioning.postgres`` and is registered from
 the team's FastAPI lifespan.
 """
@@ -22,8 +22,8 @@ from agentic_team_provisioning.models import (
     ConversationMessage,
     ProcessDefinition,
 )
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
@@ -31,18 +31,18 @@ logger = logging.getLogger(__name__)
 _STORE = "agentic_team_provisioning"
 
 
-def _row_ts(value: Any) -> str:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return str(value or "")
-
-
 class AgenticTeamStore:
     """Postgres-backed store for teams, processes, and conversations."""
 
     def __init__(self) -> None:
-        # Stateless; the connection pool lives inside shared_postgres.
+        # Stateless; the connection pool lives inside shared.postgres.
         pass
+
+    @staticmethod
+    def _row_ts(value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value or "")
 
     # ------------------------------------------------------------------
     # Teams
@@ -90,8 +90,8 @@ class AgenticTeamStore:
             description=row["description"],
             agents=agents,
             processes=processes,
-            created_at=_row_ts(row["created_at"]),
-            updated_at=_row_ts(row["updated_at"]),
+            created_at=self._row_ts(row["created_at"]),
+            updated_at=self._row_ts(row["updated_at"]),
         )
 
     @timed_query(store=_STORE, op="list_teams")
@@ -112,8 +112,8 @@ class AgenticTeamStore:
                 "name": r["name"],
                 "description": r["description"],
                 "process_count": int(r["process_count"] or 0),
-                "created_at": _row_ts(r["created_at"]),
-                "updated_at": _row_ts(r["updated_at"]),
+                "created_at": self._row_ts(r["created_at"]),
+                "updated_at": self._row_ts(r["updated_at"]),
             }
             for r in rows
         ]
@@ -570,7 +570,7 @@ class AgenticTeamStore:
             ConversationMessage(
                 role=r["role"],
                 content=r["content"],
-                timestamp=_row_ts(r["timestamp"]),
+                timestamp=self._row_ts(r["timestamp"]),
             )
             for r in rows
         ]
@@ -594,8 +594,8 @@ class AgenticTeamStore:
             {
                 "conversation_id": str(r["conversation_id"]),
                 "team_id": str(r["team_id"]),
-                "created_at": _row_ts(r["created_at"]),
-                "updated_at": _row_ts(r["updated_at"]),
+                "created_at": self._row_ts(r["created_at"]),
+                "updated_at": self._row_ts(r["updated_at"]),
                 "message_count": int(r["message_count"] or 0),
             }
             for r in rows
@@ -720,8 +720,8 @@ class AgenticTeamStore:
                 "provisioning_agent_id": r["provisioning_agent_id"],
                 "status": r["status"],
                 "error_message": r["error_message"],
-                "created_at": _row_ts(r["created_at"]),
-                "updated_at": _row_ts(r["updated_at"]),
+                "created_at": self._row_ts(r["created_at"]),
+                "updated_at": self._row_ts(r["updated_at"]),
             }
             for r in rows
         ]

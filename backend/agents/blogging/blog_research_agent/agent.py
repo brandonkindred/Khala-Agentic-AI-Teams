@@ -11,7 +11,7 @@ from strands import Agent
 logger = logging.getLogger(__name__)
 
 from llm_service import LLMJsonParseError, compact_text, extract_json_from_response  # noqa: E402
-from shared_concurrency import parallel_map  # noqa: E402
+from shared.concurrency import parallel_map  # noqa: E402
 
 from .agent_cache import AgentCache  # noqa: E402
 from .models import (  # noqa: E402

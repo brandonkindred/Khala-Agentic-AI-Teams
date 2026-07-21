@@ -54,11 +54,11 @@ def _env_flag(name: str) -> bool | None:
 
     Preconditions: ``name`` is an environment-variable name.
     Postconditions: ``None`` when ``name`` is absent/blank (so the caller can fall back
-        to the store); otherwise the shared :func:`shared_env_config.env_bool` vocabulary
+        to the store); otherwise the shared :func:`shared.env_config.env_bool` vocabulary
         (``true/1/yes/on`` → ``True``, ``false/0/no/off`` and any unrecognized value →
         ``False``). Reuses the platform helper so the truthy set stays single-sourced.
     """
-    from shared_env_config import env_bool
+    from shared.env_config import env_bool
 
     raw = os.environ.get(name)
     if raw is None or not raw.strip():

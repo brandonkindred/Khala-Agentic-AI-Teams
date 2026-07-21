@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 from strands import Agent
 
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ._llm_budget import DesignBudgetExhausted

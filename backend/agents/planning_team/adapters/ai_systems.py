@@ -1,7 +1,7 @@
 """
 Adapter to call the AI Systems Team for building a new agent system.
 
-Verified paths (ai_systems_team.api.main):
+Calls the AI Systems Team API:
 - POST /api/ai-systems/build -> AISystemRequest { project_name, spec_path, constraints?, output_dir? } -> { job_id }
 - GET  /api/ai-systems/build/status/{job_id} -> status, blueprint (when completed), current_phase, progress, error
 """
@@ -12,7 +12,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from shared_http.job_polling import get_json, poll_until_terminal, post_json
+from shared.http.job_polling import get_json, poll_until_terminal, post_json
 
 logger = logging.getLogger(__name__)
 

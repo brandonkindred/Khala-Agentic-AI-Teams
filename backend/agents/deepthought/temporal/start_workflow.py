@@ -1,6 +1,6 @@
 """Start the deepthought Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
 bridge), so the API handler owns its own job-store bookkeeping while the
 orchestrator runs durably on the Temporal worker.
 """
@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from deepthought.temporal import TASK_QUEUE, WORKFLOW_ID_PREFIX, DeepthoughtWorkflow
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

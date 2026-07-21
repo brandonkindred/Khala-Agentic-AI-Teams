@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-import shared_postgres.secrets as secrets_mod
+import shared.postgres.secrets as secrets_mod
 from llm_service import runtime_config as rc
 
 
@@ -90,9 +90,9 @@ def test_load_returns_empty_when_batch_read_raises(monkeypatch):
 
 def test_postgres_enabled_swallows_import_error(monkeypatch):
     """_postgres_enabled returns False (never raises) when the availability check throws."""
-    import shared_postgres
+    import shared.postgres
 
-    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", _raise_runtime_error)
+    monkeypatch.setattr(shared.postgres, "is_postgres_enabled", _raise_runtime_error)
     # _postgres_enabled must never raise.
     assert rc._postgres_enabled() is False
 

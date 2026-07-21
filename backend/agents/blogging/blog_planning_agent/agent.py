@@ -132,7 +132,7 @@ class BlogPlanningAgent:
 class _BlogPlanningAgentRunner:
     """Zero-arg-constructor shim over :class:`BlogPlanningAgent`.
 
-    The shared invoke dispatcher (``shared_agent_invoke.dispatch``) passes a
+    The shared invoke dispatcher (``shared.agent_invoke.dispatch``) passes a
     single raw JSON ``body: dict`` to ``.run``. The real ``BlogPlanningAgent``
     takes a ``PlanningInput`` plus a required ``length_policy`` keyword. This
     runner bridges the two — for sandbox/Agent-Console usage only. Production
@@ -186,7 +186,7 @@ def make_blog_planning_agent() -> _BlogPlanningAgentRunner:
     Wires an ``llm_service``-provided LLM client (env-configured: Ollama in
     production, ``DummyLLMClient`` when ``LLM_PROVIDER=dummy``) into a
     :class:`BlogPlanningAgent` and returns a runner that accepts a JSON body
-    from :class:`shared_agent_invoke.shim`.
+    from :class:`shared.agent_invoke.shim`.
 
     Preconditions:
         None (zero-arg).

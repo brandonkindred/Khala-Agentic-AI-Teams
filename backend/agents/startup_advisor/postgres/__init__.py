@@ -6,7 +6,7 @@ to Postgres. Registered from the team's FastAPI lifespan.
 
 from __future__ import annotations
 
-from shared_postgres import TeamSchema
+from shared.postgres import TeamSchema
 
 SCHEMA = TeamSchema(
     team="startup_advisor",

@@ -1,6 +1,6 @@
 """Temporal worker(s) for the Agent Provisioning team.
 
-Worker startup follows shared_temporal Pattern A: the auto-boot in
+Worker startup follows shared.temporal Pattern A: the auto-boot in
 ``agent_provisioning_team/temporal/__init__.py`` calls ``start_team_worker``
 on import. ``start_agent_provisioning_temporal_worker_thread`` exposes that
 same boot under the no-arg contract the generic team_service entrypoint
@@ -31,8 +31,8 @@ from temporalio.worker.workflow_sandbox import (
     SandboxRestrictions,
 )
 
-from agent_provisioning_team.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
+from shared.temporal.client import is_temporal_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def start_agent_provisioning_temporal_worker_thread() -> bool:
           :func:`start_agent_provisioning_sandbox_temporal_worker_thread`.
     """
     from agent_provisioning_team.temporal import ACTIVITIES, WORKFLOWS
-    from shared_temporal import start_team_worker
+    from shared.temporal import start_team_worker
 
     if not is_temporal_enabled():
         return False
@@ -92,7 +92,7 @@ def start_agent_provisioning_sandbox_temporal_worker_thread() -> bool:
     """
     from agent_provisioning_team.temporal import SANDBOX_ACTIVITIES, SANDBOX_WORKFLOWS
     from agent_provisioning_team.temporal.constants import SANDBOX_TASK_QUEUE
-    from shared_temporal import start_team_worker
+    from shared.temporal import start_team_worker
 
     if not is_temporal_enabled():
         return False
@@ -132,7 +132,7 @@ def create_agent_provisioning_worker(client: Optional[Client] = None) -> Optiona
     # Pass pydantic through the workflow sandbox so models with
     # datetime fields (DeliverResult.finalized_at, etc.) don't trip
     # pydantic-core's identity-based type check. See the longer
-    # explanation in shared_temporal/worker.py:_build_workflow_runner.
+    # explanation in shared/temporal/worker.py:_build_workflow_runner.
     sandbox_restrictions = SandboxRestrictions.default.with_passthrough_modules(
         "pydantic",
         "pydantic_core",

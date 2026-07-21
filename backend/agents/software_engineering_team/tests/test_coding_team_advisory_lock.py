@@ -20,7 +20,7 @@ from software_engineering_team.api.advisory_lock import advisory_lock
 
 def test_advisory_lock_process_only_when_postgres_unconfigured(monkeypatch) -> None:
     """With Postgres unconfigured, the body runs under the process lock alone."""
-    import shared_postgres
+    import shared.postgres as shared_postgres
 
     monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: False)
     lock = threading.Lock()
@@ -35,7 +35,7 @@ def test_advisory_lock_process_only_when_postgres_unconfigured(monkeypatch) -> N
 def test_advisory_lock_takes_pg_advisory_lock_when_postgres_enabled(monkeypatch) -> None:
     """With Postgres configured, entering the lock issues exactly one
     pg_advisory_xact_lock call keyed on (namespace, key)."""
-    import shared_postgres
+    import shared.postgres as shared_postgres
 
     conn = MagicMock()
 
@@ -57,7 +57,7 @@ def test_advisory_lock_releases_pg_connection_when_body_raises(monkeypatch) -> N
     """When Postgres acquisition succeeds but the body raises, the connection's
     context manager is still exited (via the ExitStack) — the advisory-lock
     transaction is not leaked — and the body's exception propagates unchanged."""
-    import shared_postgres
+    import shared.postgres as shared_postgres
 
     conn = MagicMock()
 
@@ -94,7 +94,7 @@ def test_advisory_lock_releases_pg_connection_when_body_raises(monkeypatch) -> N
 def test_advisory_lock_degrades_when_postgres_unavailable(monkeypatch) -> None:
     """A failing advisory-lock acquisition degrades to the process-local lock
     alone (logged) — must never raise or block the caller."""
-    import shared_postgres
+    import shared.postgres as shared_postgres
 
     monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(shared_postgres, "get_conn", MagicMock(side_effect=RuntimeError("pg down")))
@@ -105,7 +105,7 @@ def test_advisory_lock_degrades_when_postgres_unavailable(monkeypatch) -> None:
 def test_advisory_lock_process_lock_released_on_body_exception(monkeypatch) -> None:
     """The process lock is released even when the body raises, and the
     exception propagates unchanged."""
-    import shared_postgres
+    import shared.postgres as shared_postgres
 
     monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: False)
     lock = threading.Lock()

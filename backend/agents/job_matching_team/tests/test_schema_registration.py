@@ -74,14 +74,14 @@ def fresh_user_profile_tables(_real_postgres_host):
     already succeeded) still restores whatever it can, rather than leaving
     the shared instance stuck with a table missing.
     """
-    from shared_postgres.testing import drop_team_tables
+    from shared.postgres.testing import drop_team_tables
     from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
 
     try:
         drop_team_tables(USER_PROFILE_SCHEMA)
         yield
     finally:
-        from shared_postgres import ensure_team_schema
+        from shared.postgres import ensure_team_schema
 
         ensure_team_schema(USER_PROFILE_SCHEMA)
 
@@ -103,7 +103,7 @@ def test_registering_all_exposed_schemas_closes_the_race(fresh_user_profile_tabl
     runs, so it no longer falls back silently."""
     from job_matching_team.api.main import app as job_matching_app
     from job_matching_team.profile.career_store import load_career_profile
-    from shared_postgres import register_team_schemas
+    from shared.postgres import register_team_schemas
 
     schemas = job_matching_app.state.postgres_schemas
     assert len(schemas) >= 2  # sanity: both JOB_MATCHING_SCHEMA and USER_PROFILE_SCHEMA present
@@ -127,7 +127,7 @@ def test_missing_user_profile_schema_reproduces_the_original_bug(
     passing vacuously (e.g. a mis-scoped caplog logger)."""
     from job_matching_team.postgres import SCHEMA as JOB_MATCHING_SCHEMA
     from job_matching_team.profile.career_store import load_career_profile
-    from shared_postgres import register_team_schemas
+    from shared.postgres import register_team_schemas
 
     assert register_team_schemas(JOB_MATCHING_SCHEMA) is True  # only the primary schema
 

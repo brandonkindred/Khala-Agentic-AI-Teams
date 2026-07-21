@@ -1,8 +1,8 @@
 """Temporal workflows and worker for the Agent Provisioning team.
 
-Follows shared_temporal Pattern A: exports ``WORKFLOWS``/``ACTIVITIES`` and
+Follows shared.temporal Pattern A: exports ``WORKFLOWS``/``ACTIVITIES`` and
 self-boots a worker via ``start_team_worker`` when ``TEMPORAL_ADDRESS`` is
-set, so ``shared_temporal.teams_registry.start_all_team_workers`` picks up
+set, so ``shared.temporal.teams_registry.start_all_team_workers`` picks up
 this team the same way it picks up every other team.
 
 Sandbox workflows/activities are exported separately, as ``SANDBOX_WORKFLOWS``
@@ -26,7 +26,6 @@ from agent_provisioning_team.temporal.activities import (
     release_agent_lock_activity,
     setup_activity,
 )
-from agent_provisioning_team.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
 from agent_provisioning_team.temporal.sandbox_activities import (
     sandbox_acquire_activity,
@@ -42,6 +41,7 @@ from agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,
 )
+from shared.temporal.client import is_temporal_enabled
 
 WORKFLOWS = [
     AgentProvisioningWorkflow,
@@ -83,7 +83,10 @@ SANDBOX_ACTIVITIES = [
     sandbox_reap_activity,
 ]
 
-from shared_temporal import start_team_worker  # noqa: E402
+# Deferred: ``shared.temporal.worker`` imports team WORKFLOWS/ACTIVITIES at
+# registration time; importing ``start_team_worker`` above those lists would
+# circular-import this package while it is still defining WORKFLOWS/ACTIVITIES.
+from shared.temporal import start_team_worker  # noqa: E402
 
 if is_temporal_enabled():
     start_team_worker("agent_provisioning", WORKFLOWS, ACTIVITIES, task_queue=TASK_QUEUE)

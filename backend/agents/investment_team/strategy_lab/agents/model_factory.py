@@ -19,7 +19,7 @@ import os
 from typing import Any, Optional
 
 from llm_service.config import resolve_base_url, resolve_model, resolve_provider, resolve_timeout
-from shared_env_config import env_float
+from shared.env_config import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def _resolve_temperature(agent_key: str) -> float:
     Preconditions: ``agent_key`` is a non-empty model key.
     Postconditions: returns a float clamped to ``[0.0, 2.0]``, unconditionally
     (garbage, non-finite, or out-of-range env values fall back to the next
-    level in the precedence chain via :func:`shared_env_config.env_float`'s own
+    level in the precedence chain via :func:`shared.env_config.env_float`'s own
     clamping — this function never raises on a bad environment value).
     """
     global_default = env_float(

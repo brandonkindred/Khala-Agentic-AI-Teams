@@ -20,7 +20,7 @@ pytestmark = pytest.mark.integration
 def store():
     from job_matching_team.postgres import SCHEMA
     from job_matching_team.store import JobMatchingStore
-    from shared_postgres import ensure_team_schema
+    from shared.postgres import ensure_team_schema
 
     ensure_team_schema(SCHEMA)
     return JobMatchingStore()

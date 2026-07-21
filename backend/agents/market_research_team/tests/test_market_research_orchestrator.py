@@ -144,7 +144,7 @@ def test_orchestrator_split_mode_runs_psychology_and_consistency_concurrently(mo
     above) rather than a wall-clock timing bound to prove the two ran
     concurrently. Completion-order-independence of that combined order is
     ``parallel_map``'s own tested contract
-    (``shared_concurrency/tests/test_parallel_map.py::
+    (``shared/concurrency/tests/test_parallel_map.py::
     test_preserves_input_order_under_jittered_completion``), so it isn't
     re-proven with fragile timing here.
     """

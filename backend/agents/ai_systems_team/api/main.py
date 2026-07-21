@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
-from shared_app import create_team_app  # noqa: E402
+from shared.app import create_team_app  # noqa: E402
 
 from ..models import (
     AgentBlueprint,

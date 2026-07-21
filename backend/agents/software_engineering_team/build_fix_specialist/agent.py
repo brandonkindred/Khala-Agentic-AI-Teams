@@ -8,7 +8,7 @@ from strands import Agent
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from shared_llm_recovery import agent_call_json
+from shared.llm_recovery import agent_call_json
 
 from .models import BuildFixInput, BuildFixOutput, parse_code_edits
 from .prompts import BUILD_FIX_SPECIALIST_PROMPT

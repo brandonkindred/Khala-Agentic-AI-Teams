@@ -24,7 +24,7 @@ from agentic_team_provisioning.models import (
     StepType,
 )
 from agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
-from shared_concurrency import BackgroundHeartbeat
+from shared.concurrency import BackgroundHeartbeat
 
 
 def _now() -> datetime:

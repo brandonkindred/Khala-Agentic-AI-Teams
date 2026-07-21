@@ -2,7 +2,7 @@
 
 ``CodeReviewAgent.run`` is a synchronous call that must return a
 ``CodeReviewOutput``, so — unlike the fire-and-forget
-``shared_temporal.start_workflow_sync`` — this bridge *executes* the workflow and
+``shared.temporal.start_workflow_sync`` — this bridge *executes* the workflow and
 blocks for its result on the worker's asyncio loop.
 """
 
@@ -13,7 +13,7 @@ import logging
 from datetime import timedelta
 from typing import Any, Dict
 
-from shared_temporal.runner import _await_client
+from shared.temporal.runner import _await_client
 
 from .config import TASK_QUEUE, resolve_execute_timeout_s, resolve_execution_timeout_s
 

@@ -1,7 +1,7 @@
 """Start the agentic pipeline Temporal workflow from synchronous API code.
 
-Thin wrapper over ``shared_temporal.start_workflow_sync`` (the shared sync→async
-bridge). We deliberately do NOT use ``shared_temporal.run_team_job`` here: it creates
+Thin wrapper over ``shared.temporal.start_workflow_sync`` (the shared sync→async
+bridge). We deliberately do NOT use ``shared.temporal.run_team_job`` here: it creates
 its own ``JobServiceClient`` row and status bookkeeping, which would collide with the
 team's own ``AgenticTestStore`` run row (``agentic_test_pipeline_runs``) and the
 activity-owned RUNNING/COMPLETED/FAILED bookkeeping.
@@ -22,7 +22,7 @@ from agentic_team_provisioning.temporal import (
     AgenticPipelineWorkflow,
 )
 from agentic_team_provisioning.wait_timeout import resolve_wait_timeout_s
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 

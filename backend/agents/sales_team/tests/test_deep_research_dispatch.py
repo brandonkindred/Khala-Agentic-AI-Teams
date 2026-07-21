@@ -30,7 +30,7 @@ def bound_client(monkeypatch, fake_job_client):
 
 
 def test_run_dispatches_to_temporal_when_enabled(monkeypatch, bound_client, fake_job_client):
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: True)
     captured: dict = {}
     monkeypatch.setattr(
         "sales_team.temporal.start_workflow.start_deep_research_workflow",
@@ -51,7 +51,7 @@ def test_run_dispatches_to_temporal_when_enabled(monkeypatch, bound_client, fake
 
 
 def test_run_marks_job_failed_when_dispatch_raises(monkeypatch, bound_client, fake_job_client):
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: True)
 
     def _boom(job_id, request):
         raise RuntimeError("worker client not available")
@@ -67,13 +67,13 @@ def test_run_marks_job_failed_when_dispatch_raises(monkeypatch, bound_client, fa
 
 
 def test_dispatch_falls_through_to_thread_when_shared_temporal_missing(monkeypatch):
-    """If ``shared_temporal`` can't be imported at all, dispatch degrades to the
+    """If ``shared.temporal`` can't be imported at all, dispatch degrades to the
     thread path rather than erroring."""
     import sys
 
     monkeypatch.setitem(
-        sys.modules, "shared_temporal", None
-    )  # `from shared_temporal ...` → ImportError
+        sys.modules, "shared.temporal", None
+    )  # `from shared.temporal ...` → ImportError
     started: dict = {}
 
     class _FakeThread:
@@ -91,7 +91,7 @@ def test_dispatch_falls_through_to_thread_when_shared_temporal_missing(monkeypat
 
 
 def test_dispatch_helper_returns_thread_label_when_disabled(monkeypatch):
-    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
+    monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
     started: dict = {}
 
     class _FakeThread:

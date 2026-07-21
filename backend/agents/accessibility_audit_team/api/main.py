@@ -15,7 +15,7 @@ from job_service_client import (
     JOB_STATUS_PENDING,
     start_stale_job_monitor,
 )
-from shared_observability import init_otel
+from shared.observability import init_otel
 
 from ..audit_execution import (
     CreateAuditRequest,
@@ -134,13 +134,13 @@ def _resolve_temporal_dispatcher(
           naming what's being dispatched, for the fallback log message.
     Postconditions:
         - Returns ``None`` without calling ``import_dispatcher`` when the
-          ``shared_temporal`` package itself is unavailable or
+          ``shared.temporal`` package itself is unavailable or
           ``is_temporal_enabled()`` is ``False``.
         - Otherwise calls ``import_dispatcher``; returns its result, or ``None``
           (after logging a warning) if that import fails.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         return None
     if not is_temporal_enabled():
@@ -162,7 +162,7 @@ def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
 
     Preconditions:
         - None from the caller. Temporal enablement (``TEMPORAL_ADDRESS`` set) is
-          checked internally via ``shared_temporal.is_temporal_enabled()``.
+          checked internally via ``shared.temporal.is_temporal_enabled()``.
     Postconditions:
         - Returns the ``start_accessibility_audit_workflow`` callable when
           ``TEMPORAL_ADDRESS`` is set and the Temporal stack imports cleanly, else
@@ -183,7 +183,7 @@ def _get_retest_temporal_dispatcher() -> Optional[Callable[[str, str, list], str
 
     Preconditions:
         - None from the caller. Temporal enablement (``TEMPORAL_ADDRESS`` set) is
-          checked internally via ``shared_temporal.is_temporal_enabled()``.
+          checked internally via ``shared.temporal.is_temporal_enabled()``.
     Postconditions:
         - Returns ``start_accessibility_audit_retest_workflow`` when Temporal is
           enabled and the stack imports cleanly, else ``None`` so the caller falls

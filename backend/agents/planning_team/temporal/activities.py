@@ -367,7 +367,7 @@ def document_production_activity(
     from planning_team.models import Phase
     from planning_team.orchestrator import resolve_pra_answers
     from planning_team.phases import run_document_production
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     def _work() -> Dict[str, Any]:
         def _pra_answer_cb(questions: list) -> list:
@@ -452,7 +452,7 @@ def sub_agent_provisioning_activity(
     )
     from planning_team.models import Phase
     from planning_team.phases import run_sub_agent_provisioning
-    from shared_concurrency import BackgroundHeartbeat
+    from shared.concurrency import BackgroundHeartbeat
 
     def _work() -> Dict[str, Any]:
         with BackgroundHeartbeat(activity.heartbeat, _POLL_HEARTBEAT_INTERVAL_S, copy_context=True):

@@ -1,4 +1,4 @@
-"""Dict-backed fake for ``shared_postgres.get_conn`` used by user_profile tests.
+"""Dict-backed fake for ``shared.postgres.get_conn`` used by user_profile tests.
 
 Handles exactly the SQL emitted by ``user_profile.store`` so the unit tests
 run without a real Postgres (matching the default, non-integration suite).

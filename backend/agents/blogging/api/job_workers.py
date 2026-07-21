@@ -34,7 +34,7 @@ import threading
 from typing import Any, Callable, Optional, Tuple
 
 from job_service_client import JOB_STATUS_INTERRUPTED
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def _submit_async_job(target: Callable[..., Any], *args: Any) -> None:
     # non-callable slip through and only surface as a TypeError when a worker
     # dequeues it (where the bad item is logged and dropped, obscuring the caller bug).
     # An explicit raise (not assert) so the guard survives `python -O`/PYTHONOPTIMIZE,
-    # which strips asserts — matching shared_concurrency.parallel_map's boundary checks.
+    # which strips asserts — matching shared.concurrency.parallel_map's boundary checks.
     if not callable(target):
         raise TypeError(f"async job target must be callable, got {type(target).__name__}")
     _ensure_async_workers()

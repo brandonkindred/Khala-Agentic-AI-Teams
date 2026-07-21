@@ -10,7 +10,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from shared_app import create_team_app
+from shared.app import create_team_app
 from startup_advisor.pipeline import (
     DEFAULT_SUGGESTED,
     WELCOME_MESSAGE,
@@ -195,13 +195,13 @@ def _dispatch_advisor_message(job_id: str, message: str) -> str:
           ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
           started as a durable ``StartupAdvisorWorkflow``; otherwise the
           legacy thread path runs unchanged.
-        - A missing ``shared_temporal`` (Temporal not installed) falls
+        - A missing ``shared.temporal`` (Temporal not installed) falls
           through to the thread path; any *other* failure while starting the
           workflow propagates to the caller, which marks the job FAILED — a
           Temporal-enabled run is never silently downgraded.
     """
     try:
-        from shared_temporal import is_temporal_enabled
+        from shared.temporal import is_temporal_enabled
     except ImportError:
         is_temporal_enabled = None
 

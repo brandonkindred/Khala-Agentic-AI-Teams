@@ -35,7 +35,7 @@ all built.
   inject-on-invoke / writeback-on-return lifecycle consumed by
   `unified_api/routes/agents.py` — see below); the
   **scheduler** (`scheduler.py`, the live rollup→reflect→prune driver); the
-  **knowledge-graph layer** (`graph/`, see below) over `shared_neo4j`; and the **operator
+  **knowledge-graph layer** (`graph/`, see below) over `shared.neo4j`; and the **operator
   approval API** (`unified_api/routes/cognition.py`).
 
 - **Verified end-to-end** — a cognition+graph agent's invoke carries the assembled side
@@ -63,7 +63,7 @@ drains memory into the graph since a per-agent watermark; `retrieval.build_graph
 reads it back into the invoke side channel; and `reflection` optionally grounds its rule
 proposals with graph context — always additive, the human approval gate is never bypassed.
 Per-agent attachment is declared in the manifest `cognition.knowledge_graph` block
-(on by default). Gated on `NEO4J_BOLT_URL`; see `shared_neo4j/README.md`.
+(on by default). Gated on `NEO4J_BOLT_URL`; see `shared.neo4j/README.md`.
 
 ## Rollup engine
 
@@ -158,7 +158,7 @@ loop and logged to memory.
   drives the loop and reads the audit off the runner's return value, so agent code has
   nothing to forge into; integrity-critical tools additionally use `platform_bound`.
 
-The invoke shim (`shared_agent_invoke`) consumes these lazily — it unwraps the envelope,
+The invoke shim (`shared.agent_invoke`) consumes these lazily — it unwraps the envelope,
 opens the cognition side channel, drives a returned `ToolLoopPlan`, and returns the trusted
 `tool_audit` on its response envelope — without a hard dependency on this package (an image
 without cognition simply runs the agent unwrapped).
@@ -275,7 +275,7 @@ clamped to the documented floor, or the default where no floor is given) and are
 | `cognition.memory.retention_days_events` (manifest) | `manifest_scope.py` | `90` | **Event retention**: raw episodic events older than this are pruned by the scheduler's `prune_events` once the covering day summary exists and is non-stale. A per-agent manifest field, not an env var. |
 | `AGENT_COGNITION_DIGEST_EVENT_TOP_N` | `memory/retrieval.py` | `20` | In-progress event count folded into an agent's memory digest. The summary half is bounded by the caller-supplied **digest token budget** (`build_memory_digest(..., token_budget)`, trimmed via `compact_text`). |
 | `LLM_MODEL_cognition` | `llm_service` | resolved | Per-key model override for the cognition stack (rollup, reflection, graph). Resolution: `LLM_MODEL_cognition` → `LLM_MODEL` → platform fallback (`resolve_model("cognition")`). |
-| `AGENT_COGNITION_WRITEBACK_MAX_BYTES` | `shared_agent_invoke/limits.py` | `1048576` (1 MiB) | Byte cap on the `cognition_writeback` half of an invoke envelope; over-cap is truncated and flagged, never starving the user `output` (bounded separately by `AGENT_INVOKE_MAX_OUTPUT_BYTES`). |
+| `AGENT_COGNITION_WRITEBACK_MAX_BYTES` | `shared/agent_invoke/limits.py` | `1048576` (1 MiB) | Byte cap on the `cognition_writeback` half of an invoke envelope; over-cap is truncated and flagged, never starving the user `output` (bounded separately by `AGENT_INVOKE_MAX_OUTPUT_BYTES`). |
 | `AGENT_COGNITION_RUN_TTL_S` | `context.py` | `604800` (7 days, floor `3600`) | Ledger **idempotency TTL**: how long a terminal run row is retained for replay before the scheduler GCs it. |
 | `AGENT_COGNITION_RUN_LEASE_S` | `context.py` | `120` (floor `30`) | Lease an `in_progress` run claim holds before lazy expired-lease reclaim. |
 | `AGENT_COGNITION_INVOKE_ROLLUP_BUDGET` | `invoke_gate.py` | `8` (floor `1`) | Max rollup periods the lazy catch-up processes inline per invoke. |

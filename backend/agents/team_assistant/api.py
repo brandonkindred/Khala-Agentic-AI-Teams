@@ -167,7 +167,7 @@ def create_assistant_app(config: TeamAssistantConfig) -> FastAPI:
     # OpenTelemetry: instrument every team assistant sub-app so conversation
     # endpoints show up as server spans with the correct team_key attribute.
     try:
-        from shared_observability import instrument_fastapi_app
+        from shared.observability import instrument_fastapi_app
 
         instrument_fastapi_app(assistant_app, team_key=f"{config.team_key}_assistant")
     except Exception:

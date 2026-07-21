@@ -261,7 +261,7 @@ def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_meta, monkeypatch):
     # timeout fired by elapsed time.
     import time
 
-    from shared_postgres import client as pg_client
+    from shared.postgres import client as pg_client
 
     monkeypatch.setattr(pg_client, "default_probe_budget", lambda: 0.2)
     mock_cfg.side_effect = lambda: time.sleep(1.5) or {**dict(_GH_STATUS_CFG), "store_reachable": True}

@@ -22,7 +22,7 @@ import typing
 import pytest
 from temporalio.testing import ActivityEnvironment
 
-import shared_concurrency
+import shared.concurrency
 from road_trip_planning_team import pipeline as rtp_pipeline
 from road_trip_planning_team.models import (
     LogisticsPlan,
@@ -164,7 +164,7 @@ def test_recommend_activities_activity_returns_list_of_dicts(monkeypatch, sample
         def __exit__(self, *exc_info):
             return False
 
-    monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
+    monkeypatch.setattr(shared.concurrency, "BackgroundHeartbeat", _FakeBackgroundHeartbeat)
     profile = TravelerGroupProfile().model_dump()
     route = RoutePlan(route_summary="loop").model_dump()
 

@@ -2,13 +2,13 @@
 
 Mirrors :mod:`agent_console.store` in shape:
 
-* stateless class — pool lives in ``shared_postgres``;
+* stateless class — pool lives in ``shared.postgres``;
 * one public method per operation, decorated with ``@timed_query``;
 * methods translate Postgres errors into typed domain exceptions;
 * :func:`get_store` returns the process-wide singleton.
 
 The store does not manage transactions across operations; each method is
-its own transaction (``shared_postgres.get_conn`` commits on clean exit,
+its own transaction (``shared.postgres.get_conn`` commits on clean exit,
 rolls back on error). Multi-row writes that need atomicity (e.g. the
 grooming endpoint persisting scores for many stories) call the store
 inside an explicit transaction at the route layer.
@@ -42,8 +42,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from pydantic import BaseModel
 
-from shared_postgres import get_conn, is_postgres_enabled
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn, is_postgres_enabled
+from shared.postgres.metrics import timed_query
 
 from .models import (
     AcceptanceCriterion,
@@ -1707,7 +1707,7 @@ class ProductDeliveryStore:
 
 
 class _SafeConn:
-    """Context manager wrapper around ``shared_postgres.get_conn`` that
+    """Context manager wrapper around ``shared.postgres.get_conn`` that
     surfaces both connection-acquisition *and* query-time infra
     failures as :class:`ProductDeliveryStorageUnavailable`.
 
@@ -1823,7 +1823,7 @@ def _new_id() -> str:
 
 
 # Process-wide singleton. The store has no constructor side effects and
-# the connection pool lives in ``shared_postgres``, so a module-level
+# the connection pool lives in ``shared.postgres``, so a module-level
 # instance is sufficient — no `lru_cache` dance, no `cache_clear()`
 # calls in tests.
 _STORE_INSTANCE = ProductDeliveryStore()

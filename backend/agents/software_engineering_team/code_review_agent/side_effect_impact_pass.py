@@ -63,7 +63,7 @@ from typing import List, Optional, Tuple
 from strands import Agent, tool
 
 from llm_service import LLMClient
-from shared_env import env_flag_enabled
+from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
 from .chunking import _coerce_bool

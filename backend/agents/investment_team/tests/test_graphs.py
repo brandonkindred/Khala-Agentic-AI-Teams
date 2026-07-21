@@ -1,7 +1,7 @@
 """Tests for ``investment_team.graphs``.
 
 This module wires a Strands ``Graph`` builder with declarative node
-prompts. The tests mock out ``shared_graph.build_agent`` to avoid
+prompts. The tests mock out ``shared.graph.build_agent`` to avoid
 spinning up real Strands ``Agent`` instances (which would hit the LLM
 provider chain) and verify the resulting topology/configuration. The
 production code-path under test is pure wiring — the value here is
@@ -45,7 +45,7 @@ class _NoOpHooks:
 
 
 def _install_fake_build_agent(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    """Replace ``shared_graph.build_agent`` everywhere with a recorder.
+    """Replace ``shared.graph.build_agent`` everywhere with a recorder.
 
     Returns a list that accumulates the kwargs passed to each invocation,
     so tests can assert how many nodes were built and with which prompts.
@@ -56,9 +56,9 @@ def _install_fake_build_agent(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         recorded.append(kwargs)
         return _FakeAgent(**kwargs)
 
-    import shared_graph
+    import shared.graph
 
-    monkeypatch.setattr(shared_graph, "build_agent", _factory)
+    monkeypatch.setattr(shared.graph, "build_agent", _factory)
     # Strands' Graph/Swarm builders accept any object the user hands in.
     return recorded
 

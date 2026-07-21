@@ -1,11 +1,11 @@
 """Postgres data-access layer for saved inputs and runs.
 
 Follows the branding/blogging pattern:
-  * stateless class (pool lives in ``shared_postgres``)
+  * stateless class (pool lives in ``shared.postgres``)
   * one public method per operation, decorated with ``@timed_query``
   * methods translate Postgres errors into typed domain exceptions
 
-When ``POSTGRES_HOST`` is unset, ``shared_postgres.get_conn`` raises, and
+When ``POSTGRES_HOST`` is unset, ``shared.postgres.get_conn`` raises, and
 we wrap that into :class:`AgentConsoleStorageUnavailable` so the API
 layer can return a clean 503.
 """
@@ -22,8 +22,8 @@ from psycopg import errors as psycopg_errors
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn, is_postgres_enabled
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn, is_postgres_enabled
+from shared.postgres.metrics import timed_query
 
 from .models import RunCreate, RunRecord, RunSummary, SavedInput
 

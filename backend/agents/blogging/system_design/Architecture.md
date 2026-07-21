@@ -208,8 +208,8 @@ graph TD
     Blog["Blogging Team"]
 
     subgraph "Shared Infrastructure"
-        SP["shared_postgres/<br/>Schema registry + connection pool"]
-        ST["shared_temporal/<br/>Workflow orchestration + checkpoints"]
+        SP["shared.postgres/<br/>Schema registry + connection pool"]
+        ST["shared.temporal/<br/>Workflow orchestration + checkpoints"]
         LLM["llm_service/<br/>Unified LLM client (Ollama / Claude)"]
         EB["event_bus/<br/>SSE pub/sub per job"]
     end
@@ -226,8 +226,8 @@ graph TD
 
 | Module | Blogging Team Usage |
 |--------|---------------------|
-| **shared_postgres** | `blogging_stories` table for story bank persistence; schema registered at FastAPI lifespan startup via `register_team_schemas(SCHEMA)`. See `postgres/__init__.py` |
-| **shared_temporal** | `BlogFullPipelineWorkflow` wraps the full pipeline as a single long-lived activity. `schedule_to_close_timeout=12h`, `heartbeat_timeout=5m`, `RetryPolicy(maximum_attempts=3, initial_interval=30s, maximum_interval=2m, backoff_coefficient=2.0)`. A background heartbeat thread calls `activity.heartbeat()` every 30s (`shared/run_pipeline_job.py:170`). See `temporal/workflows.py:15-38` |
+| **shared.postgres** | `blogging_stories` table for story bank persistence; schema registered at FastAPI lifespan startup via `register_team_schemas(SCHEMA)`. See `postgres/__init__.py` |
+| **shared.temporal** | `BlogFullPipelineWorkflow` wraps the full pipeline as a single long-lived activity. `schedule_to_close_timeout=12h`, `heartbeat_timeout=5m`, `RetryPolicy(maximum_attempts=3, initial_interval=30s, maximum_interval=2m, backoff_coefficient=2.0)`. A background heartbeat thread calls `activity.heartbeat()` every 30s (`shared/run_pipeline_job.py:170`). See `temporal/workflows.py:15-38` |
 | **llm_service** | `get_client("blog")` returns an `OllamaLLMClient`; agents call `complete_json()` for structured output and `complete()` for text generation. Planning can use a different model via the `BLOG_PLANNING_MODEL` env var |
 | **event_bus** | Thread-safe SSE pub/sub (`shared/job_event_bus.py`): `run_pipeline_job.py` publishes update events for every job store mutation; the UI subscribes via `GET /job/{job_id}/stream` |
 

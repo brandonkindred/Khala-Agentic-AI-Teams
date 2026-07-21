@@ -63,7 +63,7 @@ def stream_job_status(job_id: str) -> StreamingResponse:
     from agents.blogging.api import main as _main
     from agents.blogging.shared.job_event_bus import subscribe, unsubscribe
 
-    from shared_sse import sse_job_stream_sync, sse_line
+    from shared.sse import sse_job_stream_sync, sse_line
 
     if _main.get_blog_job is None:
         raise HTTPException(status_code=501, detail="Job store not available")
@@ -186,8 +186,9 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
     request = FullPipelineRequest(**payload)
 
     try:
-        from agents.blogging.temporal.client import is_temporal_enabled
         from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
+
+        from shared.temporal.client import is_temporal_enabled
 
         if is_temporal_enabled():
             request_dict = request.model_dump(mode="json")
@@ -235,8 +236,9 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
     request = FullPipelineRequest(**payload)
 
     try:
-        from agents.blogging.temporal.client import is_temporal_enabled
         from agents.blogging.temporal.start_workflow import start_full_pipeline_workflow
+
+        from shared.temporal.client import is_temporal_enabled
 
         if is_temporal_enabled():
             request_dict = request.model_dump(mode="json")

@@ -3,7 +3,7 @@ Postgres-backed encrypted integration secrets (Fernet).
 
 The canonical store for Slack/Medium/Google-browser-login credentials.
 Uses the ``encrypted_integration_credentials`` table which is created at
-unified_api startup by ``shared_postgres.register_team_schemas`` (see
+unified_api startup by ``shared.postgres.register_team_schemas`` (see
 ``unified_api/postgres/__init__.py``) — no per-call DDL here.
 
 Every public operation is wrapped in ``@timed_query`` so production can
@@ -17,9 +17,9 @@ import logging
 import os
 import threading
 
-from shared_postgres import dsn as _shared_dsn
-from shared_postgres import statement_timeout_ms
-from shared_postgres.metrics import timed_query
+from shared.postgres import dsn as _shared_dsn
+from shared.postgres import statement_timeout_ms
+from shared.postgres.metrics import timed_query
 from unified_api.integration_credentials import get_integration_fernet
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def _dsn() -> str:
 
     Preconditions: ``POSTGRES_HOST`` is set (callers gate on
         :func:`postgres_credentials_enabled`).
-    Postconditions: delegates to ``shared_postgres.dsn()`` so this direct (un-pooled)
+    Postconditions: delegates to ``shared.postgres.dsn()`` so this direct (un-pooled)
         connection uses the EXACT same builder as the shared pool — every field escaped
         via ``psycopg.conninfo.make_conninfo`` (so a ``POSTGRES_USER``/``POSTGRES_PASSWORD``
         containing ``@``, ``:``, spaces, or other special chars is handled identically)
@@ -87,7 +87,7 @@ def _statement_timeout_options() -> str:
 
     Preconditions: none.
     Postconditions: returns ``-c statement_timeout={ms}`` from the shared
-        :func:`shared_postgres.statement_timeout_ms` (default 5000, floor 0); returns
+        :func:`shared.postgres.statement_timeout_ms` (default 5000, floor 0); returns
         ``""`` when set to 0 (disabled — WARNING: that removes the post-connect
         ``_LOCK``-release protection below). Sourcing the value from the shared helper
         keeps it in lockstep with the request-level ``wait_for`` budgets that size

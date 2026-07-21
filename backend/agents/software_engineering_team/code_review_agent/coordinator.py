@@ -91,7 +91,7 @@ from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
-from shared_env_config import env_bool
+from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,

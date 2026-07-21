@@ -4,7 +4,7 @@ The package must not repeat the two bugs the ``user_agent_founder`` team
 already fixed:
 
 1. **Self-bootstrapping a worker at import.** Importing the ``temporal``
-   package used to call ``shared_temporal.start_team_worker(...)`` at module
+   package used to call ``shared.temporal.start_team_worker(...)`` at module
    load, racing the first ``start_*_workflow`` call against the async client
    connect. Worker boot is the team_service entrypoint's job (or the registry),
    never a side effect of import.
@@ -29,10 +29,10 @@ def _purge(prefix: str) -> None:
 
 def test_importing_temporal_package_does_not_call_start_team_worker():
     """Loading the package (and submodules) must NOT spin up a worker thread."""
-    import shared_temporal
+    import shared.temporal
 
     _purge("job_matching_team.temporal")
-    with mock.patch.object(shared_temporal, "start_team_worker") as patched:
+    with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("job_matching_team.temporal")
         importlib.import_module("job_matching_team.temporal.workflows")
         importlib.import_module("job_matching_team.temporal.start_workflow")
@@ -71,7 +71,7 @@ def test_task_queue_matches_registry_convention():
 
 
 def test_team_registered_in_temporal_modules():
-    from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES
+    from shared.temporal.teams_registry import TEAM_TEMPORAL_MODULES
 
     assert TEAM_TEMPORAL_MODULES.get("job_matching") == "job_matching_team.temporal"
 
@@ -153,7 +153,7 @@ def test_start_job_matching_workflow_delegates_to_shared_bridge(monkeypatch):
     id, and the team task queue.
 
     The sync→async plumbing (client-ready wait, closed-loop rejection, coroutine
-    marshalling) lives in shared_temporal and is covered by its own tests, so we
+    marshalling) lives in shared.temporal and is covered by its own tests, so we
     only pin the call contract here rather than re-testing the bridge.
     """
     from job_matching_team.temporal import TASK_QUEUE, JobMatchingWorkflow

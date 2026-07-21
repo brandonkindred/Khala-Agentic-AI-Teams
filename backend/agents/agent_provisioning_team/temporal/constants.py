@@ -2,7 +2,7 @@
 
 import os
 
-from shared_env_config import env_int
+from shared.env_config import env_int
 
 TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE_AGENT_PROVISIONING", "agent-provisioning").strip()
 WORKFLOW_ID_PREFIX = "agent-provisioning-"
@@ -31,7 +31,7 @@ SANDBOX_TASK_QUEUE = os.getenv(
 
 # --- Sandbox lifecycle workflows -------------------------------------------
 # Activity timeouts (seconds). All numeric vars here parse defensively via
-# shared_env_config.env_int per CLAUDE.md ("garbage -> documented default,
+# shared.env_config.env_int per CLAUDE.md ("garbage -> documented default,
 # out-of-range -> clamped to floor/ceiling") rather than a raw int(os.getenv())
 # that would raise ValueError (crashing this module's import) on a malformed
 # value. The acquire ceiling must exceed the sandbox boot timeout

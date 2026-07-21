@@ -12,7 +12,7 @@ Temporal UI). ``market_research_finalize`` assembles the ``TeamOutput`` and
 writes COMPLETED.
 
 Import hygiene: top-level imports stay light (``temporalio``, typing,
-``phase_models``, ``shared_concurrency``); heavy imports (``orchestrator``,
+``phase_models``, ``shared.concurrency``); heavy imports (``orchestrator``,
 ``pipeline``, ``models``, ``job_store``) are lazy inside function bodies, and
 ``os.getenv`` is only ever reached at call time — never at import — so the
 temporalio workflow sandbox that re-imports sibling modules during workflow
@@ -43,7 +43,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from market_research_team.temporal.phase_models import MarketResearchRunContext
-from shared_concurrency import BackgroundHeartbeat
+from shared.concurrency import BackgroundHeartbeat
 
 _DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 # Heartbeat timeout the workflow schedules every long LLM activity with. Owned
@@ -69,7 +69,7 @@ def _heartbeat_interval_s() -> float:
           the ceiling guarantees beats always outpace the activity heartbeat
           timeout, so a mis-set interval can never spuriously fail activities.
     """
-    from shared_env_config import env_float
+    from shared.env_config import env_float
 
     return env_float(
         "MARKET_RESEARCH_TEMPORAL_HEARTBEAT_INTERVAL_S",

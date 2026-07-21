@@ -44,7 +44,7 @@ APScheduler>=3.11,<4.0
 pytz>=2026.1
 yfinance>=1.2,<2.0
 
-# Observability (OTEL_SDK_DISABLED=1 in the image, but shared_observability
+# Observability (OTEL_SDK_DISABLED=1 in the image, but shared.observability
 # imports must not fail — keep the SDK installed for graceful no-op path).
 prometheus-fastapi-instrumentator>=7.1,<8.0
 opentelemetry-api>=1.41,<2.0

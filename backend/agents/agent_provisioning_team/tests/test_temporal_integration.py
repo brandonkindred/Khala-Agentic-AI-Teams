@@ -33,7 +33,7 @@ def _no_open_pre_patch_executions():
 
 @patch("agent_provisioning_team.api.main.create_job")
 @patch("agent_provisioning_team.temporal.start_workflow.start_provisioning_workflow")
-@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
 def test_provision_routes_to_temporal_when_enabled(
     mock_enabled: MagicMock,
     mock_start: MagicMock,
@@ -62,7 +62,7 @@ def test_provision_routes_to_temporal_when_enabled(
 
 
 @patch("agent_provisioning_team.api.main.create_job")
-@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=False)
 def test_provision_returns_503_when_temporal_disabled(
     mock_enabled: MagicMock,
     mock_create_job: MagicMock,
@@ -81,7 +81,7 @@ def test_provision_returns_503_when_temporal_disabled(
     "agent_provisioning_team.temporal.start_workflow.provisioning_workflow_is_open",
     return_value=False,
 )
-@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=True)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=True)
 def test_resume_passes_skip_phases_and_prior_results(
     mock_enabled: MagicMock,
     mock_is_open: MagicMock,
@@ -115,7 +115,7 @@ def test_resume_passes_skip_phases_and_prior_results(
 
 
 @patch("agent_provisioning_team.api.main.get_job")
-@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=False)
 def test_resume_returns_503_when_temporal_disabled(
     mock_enabled: MagicMock,
     mock_get_job: MagicMock,
@@ -136,7 +136,7 @@ def test_resume_returns_503_when_temporal_disabled(
 
 
 @patch("agent_provisioning_team.api.main.get_job")
-@patch("agent_provisioning_team.temporal.client.is_temporal_enabled", return_value=False)
+@patch("shared.temporal.client.is_temporal_enabled", return_value=False)
 def test_restart_returns_503_when_temporal_disabled(
     mock_enabled: MagicMock,
     mock_get_job: MagicMock,

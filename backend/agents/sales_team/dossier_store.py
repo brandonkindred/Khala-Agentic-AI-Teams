@@ -1,7 +1,7 @@
 """Postgres-backed store for prospect dossiers and ranked prospect lists.
 
 Data is persisted in the shared Khala Postgres instance via
-``shared_postgres.get_conn``. DDL lives in ``sales_team.postgres`` and is
+``shared.postgres.get_conn``. DDL lives in ``sales_team.postgres`` and is
 registered from the team's FastAPI lifespan.
 
 Every public method is wrapped in ``@timed_query`` so slow reads and writes
@@ -18,8 +18,8 @@ from uuid import uuid4
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn
-from shared_postgres.metrics import timed_query
+from shared.postgres import get_conn
+from shared.postgres.metrics import timed_query
 
 from .models import DeepResearchResult, ProspectDossier
 
@@ -45,12 +45,12 @@ def _parse_ts(value: str) -> datetime:
 class DossierStore:
     """Persists ProspectDossier + DeepResearchResult records.
 
-    Stateless — the Postgres pool is owned by ``shared_postgres`` and reads
+    Stateless — the Postgres pool is owned by ``shared.postgres`` and reads
     the ``POSTGRES_*`` env vars. Intended to be instantiated per-request.
     """
 
     def __init__(self) -> None:
-        # Stateless; shared_postgres owns the pool.
+        # Stateless; shared.postgres owns the pool.
         pass
 
     # ------------------------------------------------------------------

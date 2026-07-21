@@ -1,6 +1,6 @@
 """Start investment Temporal workflows from synchronous API code.
 
-Thin wrappers over ``shared_temporal.start_workflow_sync`` — the shared
+Thin wrappers over ``shared.temporal.start_workflow_sync`` — the shared
 sync→async bridge that waits for the worker's connected client, then schedules
 ``client.start_workflow`` on the worker loop. These helpers do NOT touch the job
 store: the API handlers own their own run/job bookkeeping (active-run registry,
@@ -18,7 +18,7 @@ from investment_team.temporal import (
     WORKFLOW_ID_PREFIX,
     InvestmentBacktestWorkflow,
 )
-from shared_temporal import start_workflow_sync
+from shared.temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ def start_paper_trading_workflow(session_id: str, payload: dict[str, Any]) -> No
           never becomes available.
     """
     from investment_team.temporal.paper_trading import PaperTradingWorkflow
-    from shared_temporal import start_workflow_sync
+    from shared.temporal import start_workflow_sync
 
     workflow_id = f"{WORKFLOW_ID_PREFIX}pt-{session_id}"
     start_workflow_sync(
@@ -109,7 +109,7 @@ def signal_paper_trading_stop(session_id: str) -> None:
           ``investment-pt-{session_id}``; the running session terminates at the
           next bar. Raises ``RuntimeError`` if the worker client is unavailable.
     """
-    from shared_temporal import signal_workflow_sync
+    from shared.temporal import signal_workflow_sync
 
     workflow_id = f"{WORKFLOW_ID_PREFIX}pt-{session_id}"
     signal_workflow_sync(workflow_id, "stop")
@@ -175,7 +175,7 @@ def execute_advisory_workflow(op: str, payload: dict[str, Any], *, key: str) -> 
         ValidateProposalWorkflow,
         ValidateStrategyWorkflow,
     )
-    from shared_temporal import execute_workflow_sync
+    from shared.temporal import execute_workflow_sync
 
     workflows = {
         "create_proposal": CreateProposalWorkflow,

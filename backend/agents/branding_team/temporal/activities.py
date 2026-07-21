@@ -101,11 +101,11 @@ def run_branding_phase_activity(
     from branding_team.models import BrandingMission, BrandPhase
     from branding_team.orchestrator import orchestrator
 
-    # shared_concurrency is stdlib-only (threading/contextvars/logging) with no
+    # shared.concurrency is stdlib-only (threading/contextvars/logging) with no
     # import side effects, and this runs in the worker thread pool (outside the
     # workflow sandbox), so the call-time import is safe.
-    from shared_concurrency import BackgroundHeartbeat
-    from shared_temporal import load_checkpoint, save_checkpoint
+    from shared.concurrency import BackgroundHeartbeat
+    from shared.temporal import load_checkpoint, save_checkpoint
 
     job_id = payload["job_id"]
     existing = load_checkpoint(_CHECKPOINT_TEAM, job_id, phase)
@@ -223,7 +223,7 @@ def finalize_branding_activity(
     from branding_team.shared.job_store import mark_completed
     from branding_team.store import get_default_store
     from branding_team.temporal.constants import stop_index
-    from shared_temporal import load_checkpoint, save_checkpoint
+    from shared.temporal import load_checkpoint, save_checkpoint
 
     branding_store = get_default_store()
     job_id = payload["job_id"]

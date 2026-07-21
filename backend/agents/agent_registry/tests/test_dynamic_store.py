@@ -100,10 +100,10 @@ def test_store_active_when_postgres_on_outside_sandbox(monkeypatch: pytest.Monke
 
 
 def test_ensure_schema_registers_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    import shared_postgres
+    import shared.postgres
 
     calls = []
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda schema: calls.append(schema))
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda schema: calls.append(schema))
     monkeypatch.setattr(ds, "_schema_ensured", False)
     ds._ensure_schema()
     ds._ensure_schema()  # guarded — no second DDL apply
@@ -112,14 +112,14 @@ def test_ensure_schema_registers_once_per_process(monkeypatch: pytest.MonkeyPatc
 
 
 def test_ensure_schema_failure_leaves_guard_unset_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    import shared_postgres
+    import shared.postgres
 
     monkeypatch.setattr(ds, "_schema_ensured", False)
 
     def _boom(_schema):
         raise RuntimeError("postgres not ready")
 
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", _boom)
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", _boom)
     with pytest.raises(RuntimeError, match="postgres not ready"):
         ds._ensure_schema()
     # Guard stays False so a later write retries the DDL once Postgres recovers.
@@ -141,7 +141,7 @@ def test_upsert_ensures_schema_before_writing(monkeypatch: pytest.MonkeyPatch) -
 # CRUD (live Postgres — skipped when POSTGRES_HOST is unset)
 # --------------------------------------------------------------------------- #
 
-from shared_postgres import is_postgres_enabled  # noqa: E402
+from shared.postgres import is_postgres_enabled  # noqa: E402
 
 
 @pytest.mark.skipif(
@@ -151,8 +151,8 @@ class TestLivePostgres:
     @pytest.fixture(autouse=True)
     def _provision_schema(self):
         from agent_registry.postgres import SCHEMA
-        from shared_postgres import register_team_schemas
-        from shared_postgres.testing import truncate_team_tables
+        from shared.postgres import register_team_schemas
+        from shared.postgres.testing import truncate_team_tables
 
         register_team_schemas(SCHEMA)
         truncate_team_tables(SCHEMA)

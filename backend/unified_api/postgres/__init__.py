@@ -10,13 +10,13 @@ from __future__ import annotations
 
 from llm_service.provider_store import PROVIDER_TABLE_STATEMENTS
 from llm_service.provider_store import TABLE_NAME as PROVIDER_TABLE_NAME
-from shared_postgres import TeamSchema
-from shared_postgres.secrets import SECRETS_TABLE_DDL
+from shared.postgres import TeamSchema
+from shared.postgres.secrets import SECRETS_TABLE_DDL
 
 SCHEMA = TeamSchema(
     team="unified_api",
     database=None,  # default POSTGRES_DB
-    # Each CREATE TABLE lives once in its owning module (shared_postgres.secrets and
+    # Each CREATE TABLE lives once in its owning module (shared.postgres.secrets and
     # llm_service.provider_store), both of which also self-heal the table lazily, so
     # the registered schema and the lazy ensure can't drift.
     statements=[SECRETS_TABLE_DDL, *PROVIDER_TABLE_STATEMENTS],

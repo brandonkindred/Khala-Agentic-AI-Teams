@@ -5,7 +5,7 @@ team-specific fields.  Top-level columns (status, timestamps) are extracted
 for efficient indexing and querying.
 
 DDL is declared in :mod:`job_service.postgres` and applied at startup via
-``shared_postgres.register_team_schemas``. This module keeps its own
+``shared.postgres.register_team_schemas``. This module keeps its own
 ``psycopg2.pool.ThreadedConnectionPool`` for high-throughput CRUD (see
 ``close_pool`` below — it closes this local pool, not the shared one).
 """
@@ -27,7 +27,7 @@ import psycopg2.pool
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Connection pool (job-service-local; separate from shared_postgres which
+# Connection pool (job-service-local; separate from shared.postgres which
 # is only used at startup for DDL).
 # ---------------------------------------------------------------------------
 

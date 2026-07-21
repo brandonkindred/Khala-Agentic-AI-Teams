@@ -26,7 +26,7 @@ feature turns those normative requirements into a batteries-included core.
 **Hard constraint:** per-agent sandboxes are torn down with `docker compose down -v` (volumes
 deleted) after ~5 min idle and are network-isolated from `khala-stack`. Therefore anything
 that accumulates over time **must** live in the long-lived **platform Postgres**, namespaced
-by `agent_id` (via `shared_postgres`), and the agent must reach it only across the invoke
+by `agent_id` (via `shared.postgres`), and the agent must reach it only across the invoke
 boundary — never directly.
 
 ## 3. Goals & non-goals
@@ -119,7 +119,7 @@ flowchart LR
       RUL[rules<br/>store / reflection / enforcement]
       TLS[tools<br/>binding / runner]
     end
-    PG[(Platform Postgres<br/>shared_postgres)]
+    PG[(Platform Postgres<br/>shared.postgres)]
   end
 
   subgraph Ext["Existing infra (reused)"]
@@ -401,7 +401,7 @@ stateDiagram-v2
 
 ## 9. Data model
 
-`shared_postgres` `TeamSchema` (team=`agent_cognition`), all rows keyed by `agent_id`.
+`shared.postgres` `TeamSchema` (team=`agent_cognition`), all rows keyed by `agent_id`.
 
 - **`agent_cognition_events`** — append-only episodic memory: `id, agent_id, kind
   (observation|action|tool_call|outcome|error|feedback), content, data JSONB, salience,
@@ -461,7 +461,7 @@ cognition:
 > only raw episodic rows are pruned). Mirrors the `agent_console.prune.run_pruner` pattern.
 
 **Invoke envelope (cognition kept OUT of the user input contract):** the proxy must **not**
-add `cognition` as a sibling key to the agent's input — `shared_agent_invoke.dispatch.
+add `cognition` as a sibling key to the agent's input — `shared.agent_invoke.dispatch.
 invoke_entrypoint` passes the POST body straight to the manifest entrypoint, so an extra field
 would break agents with strict request models or non-object inputs. Instead the proxy wraps
 the body with an **explicit, namespaced envelope marker** (not merely the presence of an
@@ -581,7 +581,7 @@ flowchart TB
 
 | Need | Reuse | Path |
 |---|---|---|
-| Schema + registration (Pattern B) | `TeamSchema`, `register_team_schemas` | `shared_postgres/{schema,runner,registry}.py` |
+| Schema + registration (Pattern B) | `TeamSchema`, `register_team_schemas` | `shared.postgres/{schema,runner,registry}.py` |
 | Time-windowed JSONB store + LLM summary | Winning Posts Bank | `social_media_marketing_team/shared/winning_posts_bank.py` |
 | Periodic LLM extraction over accumulated data | Sales learning engine | `sales_team/learning_engine.py` |
 | Structured LLM summaries | `complete_validated` | `llm_service/structured.py` |
@@ -589,7 +589,7 @@ flowchart TB
 | Background periodic task | `run_pruner` + lifespan task | `agent_console/prune.py`, `unified_api/main.py` |
 | Tool defs / handlers / loop | `agent_git_tools`, `tool_loop` | `agent_git_tools/`, `llm_service/tool_loop.py` |
 | Tool/MCP registries | `LlmToolsService`, `IntegrationRegistry` | `agent_llm_tools_service/`, `integrations/registry.py` |
-| Author handle / query telemetry | `resolve_author`, `@timed_query` | `agent_console/author.py`, `shared_postgres/metrics.py` |
+| Author handle / query telemetry | `resolve_author`, `@timed_query` | `agent_console/author.py`, `shared/postgres/metrics.py` |
 
 **Net-new:** only the rules engine (store, reflection, predicate DSL + evaluator) and the
 cognition orchestration seam (`CognitiveContext`, inject/writeback contract, scheduler).
