@@ -9,14 +9,15 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from agents.blogging.temporal import ACTIVITIES, WORKFLOWS
+from agents.blogging.temporal.constants import TASK_QUEUE
+from temporalio.worker import Worker
+
 from shared.temporal.client import (
     connect_temporal_client,
     is_temporal_enabled,
     set_temporal_client,
     set_temporal_loop,
 )
-from agents.blogging.temporal.constants import TASK_QUEUE
-from temporalio.worker import Worker
 
 logger = logging.getLogger(__name__)
 

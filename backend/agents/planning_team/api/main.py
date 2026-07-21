@@ -229,8 +229,8 @@ def run_planning(request: PlanningRunRequest) -> PlanningRunResponse:
         )
 
     try:
-        from shared.temporal.client import is_temporal_enabled
         from planning_team.temporal.start_workflow import start_planning_workflow
+        from shared.temporal.client import is_temporal_enabled
 
         temporal_enabled = is_temporal_enabled()
     except ImportError:

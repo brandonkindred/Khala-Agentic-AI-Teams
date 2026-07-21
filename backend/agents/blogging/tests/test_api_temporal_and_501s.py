@@ -26,8 +26,9 @@ from ._api_test_utils import create_job as _create_job
 
 def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> None:
     """When is_temporal_enabled() returns True, route delegates to Temporal."""
-    from shared.temporal import client as tc_mod
     from agents.blogging.temporal import start_workflow as sw_mod
+
+    from shared.temporal import client as tc_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     called: dict = {}
@@ -46,8 +47,9 @@ def test_full_pipeline_async_with_temporal(client: TestClient, monkeypatch) -> N
 
 def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
     from agents.blogging.shared import blog_job_store as bjs
-    from shared.temporal import client as tc_mod
     from agents.blogging.temporal import start_workflow as sw_mod
+
+    from shared.temporal import client as tc_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     called: dict = {}
@@ -67,8 +69,9 @@ def test_resume_with_temporal(client: TestClient, monkeypatch) -> None:
 
 def test_restart_with_temporal(client: TestClient, monkeypatch) -> None:
     from agents.blogging.shared import blog_job_store as bjs
-    from shared.temporal import client as tc_mod
     from agents.blogging.temporal import start_workflow as sw_mod
+
+    from shared.temporal import client as tc_mod
 
     monkeypatch.setattr(tc_mod, "is_temporal_enabled", lambda: True)
     monkeypatch.setattr(sw_mod, "start_full_pipeline_workflow", lambda *a, **kw: None)

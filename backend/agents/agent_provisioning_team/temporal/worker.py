@@ -31,8 +31,8 @@ from temporalio.worker.workflow_sandbox import (
     SandboxRestrictions,
 )
 
-from shared.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
+from shared.temporal.client import is_temporal_enabled
 
 logger = logging.getLogger(__name__)
 

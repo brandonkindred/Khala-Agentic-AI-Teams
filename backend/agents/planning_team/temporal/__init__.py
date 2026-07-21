@@ -24,9 +24,9 @@ from planning_team.temporal.activities import (
     sub_agent_provisioning_activity,
     synthesis_activity,
 )
-from shared.temporal.client import is_temporal_enabled
 from planning_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 from planning_team.temporal.workflows import PlanningWorkflow
+from shared.temporal.client import is_temporal_enabled
 
 WORKFLOWS = [PlanningWorkflow]
 ACTIVITIES = [

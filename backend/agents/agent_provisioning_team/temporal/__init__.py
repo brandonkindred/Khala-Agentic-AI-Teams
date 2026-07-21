@@ -26,7 +26,6 @@ from agent_provisioning_team.temporal.activities import (
     release_agent_lock_activity,
     setup_activity,
 )
-from shared.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
 from agent_provisioning_team.temporal.sandbox_activities import (
     sandbox_acquire_activity,
@@ -42,6 +41,7 @@ from agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,
 )
+from shared.temporal.client import is_temporal_enabled
 
 WORKFLOWS = [
     AgentProvisioningWorkflow,
