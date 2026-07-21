@@ -123,7 +123,11 @@ def run_batch_coding_fixes_impl(
         language conventions.
     Postconditions:
         Returns a ``ProblemSolvingResult``; on LLM failure returns an unresolved
-        result carrying the actionable issues.
+        result carrying the actionable issues. A ``.py`` rewrite that fails to
+        parse (see :func:`~software_engineering_team.shared.code_completeness.reject_invalid_python`)
+        is discarded -- the prior version of that file is kept in ``files`` --
+        and any issue whose ``file_path`` matches a rejected file stays in
+        ``unresolved_issues`` even if the LLM reported it as addressed.
     """
     problem_solving_result_cls = models.ProblemSolvingResult
 
@@ -289,7 +293,12 @@ def _fix_issues_one_at_a_time_impl(
         ``has_language_conventions``.
     Postconditions:
         Returns ``(merged_files, fixes_applied, unresolved_issues)``;
-        ``merged_files`` is a fresh dict (never the caller's input object).
+        ``merged_files`` is a fresh dict (never the caller's input object). A
+        ``.py`` rewrite that fails to parse is discarded per-attempt (the
+        prior version of that file is kept); if the discarded file is the
+        current issue's own ``file_path``, that attempt is never counted as a
+        resolution -- even if the LLM's response claimed ``resolved`` -- and
+        the loop retries up to ``MAX_ITERATIONS_PER_ISSUE``.
     """
     merged = dict(current_files)
     fixes_applied: List[Dict[str, Any]] = []
@@ -382,6 +391,13 @@ def _fix_issues_one_at_a_time_impl(
             entry["fix"] = parsed.get("summary", "updated file(s)")
             entry["root_cause"] = parsed.get("root_cause", "")
             fixes_applied.append(entry)
+
+            # The LLM may claim "resolved" even though the fix for THIS issue's
+            # file was rejected above (a mixed response can have other, valid
+            # files) -- never trust "resolved" when the issue's own file didn't
+            # survive the completeness check; retry instead.
+            if issue.file_path in rejected_files:
+                continue
             if parsed.get("resolved"):
                 resolved_this = True
                 break
@@ -418,7 +434,9 @@ def _apply_tool_agents_problem_solve(
         ``ToolAgentPhaseInput``.
     Postconditions:
         Mutates ``merged``, ``fixes_applied`` and ``summary_parts`` in place; a
-        failing agent is logged and skipped.
+        failing agent is logged and skipped. A ``.py`` file a tool agent
+        returns that fails to parse is discarded before merging -- the prior
+        version of that file in ``merged`` is left untouched.
     """
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "problem_solve"):

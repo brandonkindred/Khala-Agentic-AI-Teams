@@ -321,6 +321,41 @@ def test_run_problem_solving_fix_success(monkeypatch):
     assert out.resolved is True
 
 
+def test_run_problem_solving_rejects_unparsable_python_even_if_resolved(monkeypatch):
+    """A mixed response (one valid file + the issue's own file broken) that
+    claims resolved=yes must NOT be trusted -- the issue's file was
+    discarded, so the issue must stay unresolved and retry."""
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_problem_solving,
+    )
+
+    # a.py (the issue's own file) is unparsable; b.py is valid. The LLM
+    # claims resolved=yes despite a.py never actually landing.
+    resp = (
+        "## FILE a.py ##\ndef broken(:\n    pass\n"
+        "## FILE b.py ##\nvalid = True\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nfixed\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    out = run_problem_solving(
+        llm=MagicMock(),
+        task=_task(),
+        review_result=_review_result([_issue(file_path="a.py")]),
+        current_files={"a.py": "original code"},
+    )
+    # a.py's broken rewrite was discarded -- prior content kept.
+    assert out.files["a.py"] == "original code"
+    # b.py, valid, did land.
+    assert out.files["b.py"] == "valid = True"
+    # The issue is NOT considered resolved despite the LLM's claim.
+    assert out.resolved is False
+    assert len(out.unresolved_issues) == 1
+
+
 def test_run_problem_solving_with_tool_agents(monkeypatch):
     from software_engineering_team.backend_code_v2_team.models import (
         ToolAgentKind,
@@ -354,6 +389,45 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
         tool_agents={ToolAgentKind.SECURITY: tool_agent},
     )
     assert "b.py" in out.files
+
+
+def test_run_problem_solving_tool_agent_partial_rejection(monkeypatch):
+    """A tool agent returning a mix of valid and unparsable Python files must
+    only merge the valid ones; the unparsable file is discarded."""
+    from software_engineering_team.backend_code_v2_team.models import (
+        ToolAgentKind,
+        ToolAgentPhaseOutput,
+    )
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_problem_solving,
+    )
+
+    resp = (
+        "## FILE a.py ##\nfixed\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    tool_agent = MagicMock()
+    tool_agent.problem_solve.return_value = ToolAgentPhaseOutput(
+        files={"b.py": "valid = True", "c.py": "def broken(:\n    pass\n"},
+        recommendations=["consider X"],
+        summary="tool ran",
+    )
+
+    out = run_problem_solving(
+        llm=MagicMock(),
+        task=_task(),
+        review_result=_review_result([_issue()]),
+        current_files={"a.py": "old", "c.py": "prior c content"},
+        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+    )
+    assert out.files["b.py"] == "valid = True"
+    # c.py's broken rewrite was discarded -- prior content kept.
+    assert out.files["c.py"] == "prior c content"
 
 
 def test_run_problem_solving_tool_agent_raises(monkeypatch):

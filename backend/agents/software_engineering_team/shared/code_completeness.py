@@ -3,7 +3,8 @@
 Used wherever an LLM re-emits a whole file (codegen, batch fixes, one-at-a-time
 fixes, tool-agent fixes, the DbC comments pass) so a syntactically incomplete
 rewrite is rejected before it's merged into the working file set, rather than
-silently written to disk.
+silently written to disk. Only ``.py`` files are validated -- non-Python files
+are always considered valid and passed through unchanged.
 """
 
 from __future__ import annotations
