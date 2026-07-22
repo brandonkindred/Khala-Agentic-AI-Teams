@@ -337,6 +337,14 @@ def test_fallback_no_model_returns_none_when_model_truthy():
     assert agent._fallback_no_model(object()) is None
 
 
+def test_fallback_no_model_returns_payload_when_model_empty_string():
+    agent = _FallbackAgent()
+    payload = agent._fallback_no_model("")
+
+    assert payload is not None
+    assert payload.tier == "no_model"
+
+
 def test_call_with_single_fallback_success():
     agent = _FallbackAgent()
     status, value = agent._call_with_single_fallback(lambda: "ok-value", log_label="demo")
@@ -387,6 +395,11 @@ def test_call_partial_tolerant_keeps_successes_skips_failures(caplog):
         r.name == _FallbackAgent.__module__ and "partial" in r.message and "nope" in r.message
         for r in caplog.records
     )
+
+
+def test_call_partial_tolerant_empty_items():
+    agent = _FallbackAgent()
+    assert agent._call_partial_tolerant([], lambda x: x) == []
 
 
 def test_call_partial_tolerant_truncates_long_item_context(caplog):

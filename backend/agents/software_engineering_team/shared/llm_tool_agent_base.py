@@ -167,6 +167,9 @@ class LlmToolAgentBase:
             return run_strands_agent(self._agent_factory(), model, prompt)
         return str(self._agent_factory()(model=model)(prompt)).strip()
 
+    # Fallback helpers read class attrs via type(self), not self: that keeps
+    # unbound callables from being bound as methods and avoids mutating shared
+    # class-level list defaults through an instance attribute.
     def _fallback_no_model(self, model: Any) -> Optional[FallbackPayload]:
         """Return the no-model payload when ``model`` is falsy; else ``None``.
 
