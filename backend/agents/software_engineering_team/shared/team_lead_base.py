@@ -12,7 +12,8 @@ constructor, their per-repo incremental briefing cache lookup
 overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
 (:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides a
-bounded retry/patch-loop via :meth:`BaseTeamLead._run_bounded_retry_loop`.
+gate-based phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`
+and a bounded retry/patch-loop via :meth:`BaseTeamLead._run_bounded_retry_loop`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
 passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
@@ -26,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, TypeVar
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
@@ -152,7 +153,8 @@ class BaseTeamLead(TeamLeadSharedState):
     Invariants: instance state includes ``llm``, the injected
     extensions/exclude_dirs/max_chars, ``_repo_context_caches``, plus the mixin
     fields (``llm_getter``, ``shared_config``, ``_status_callback``).
-    Also exposes :meth:`_run_bounded_retry_loop` as a reusable helper.
+    Also exposes :meth:`_run_gated_phases` and :meth:`_run_bounded_retry_loop`
+    as reusable helpers.
     """
 
     def __init__(
@@ -199,6 +201,25 @@ class BaseTeamLead(TeamLeadSharedState):
             )
             self._repo_context_caches[key] = cache
         return cache
+
+    def _run_gated_phases(
+        self,
+        phases: Sequence[Callable[[], Optional[T]]],
+    ) -> Optional[T]:
+        """Run phase callables in order; return the first failure payload.
+
+        Preconditions: ``phases`` is a sequence (may be empty); each element is
+          a zero-arg callable returning ``Optional[T]``.
+        Postconditions: invokes phases in order; on the first non-``None``
+          return value, returns that value and does not invoke later phases;
+          if every phase returns ``None`` (or ``phases`` is empty), returns
+          ``None``. Exceptions raised by a phase propagate to the caller.
+        """
+        for phase in phases:
+            failure = phase()
+            if failure is not None:
+                return failure
+        return None
 
     def _run_bounded_retry_loop(
         self,

@@ -457,6 +457,81 @@ def test_report_status_rejects_empty_phase():
         lead._report_status("")
 
 
+def test_run_gated_phases_all_succeed_returns_none():
+    lead = _make_lead()
+    calls: list[str] = []
+
+    def phase_a():
+        calls.append("a")
+        return None
+
+    def phase_b():
+        calls.append("b")
+        return None
+
+    def phase_c():
+        calls.append("c")
+        return None
+
+    result = lead._run_gated_phases([phase_a, phase_b, phase_c])
+    assert result is None
+    assert calls == ["a", "b", "c"]
+
+
+def test_run_gated_phases_early_exit_skips_later_phases():
+    lead = _make_lead()
+    calls: list[str] = []
+    failure = object()
+
+    def phase_ok():
+        calls.append("ok")
+        return None
+
+    def phase_fail():
+        calls.append("fail")
+        return failure
+
+    def phase_never():
+        calls.append("never")
+        return None
+
+    result = lead._run_gated_phases([phase_ok, phase_fail, phase_never])
+    assert result is failure
+    assert calls == ["ok", "fail"]
+
+
+def test_run_gated_phases_empty_sequence_returns_none():
+    lead = _make_lead()
+    assert lead._run_gated_phases([]) is None
+
+
+def test_run_gated_phases_propagates_phase_exceptions():
+    lead = _make_lead()
+
+    def boom():
+        raise RuntimeError("phase exploded")
+
+    with pytest.raises(RuntimeError, match="phase exploded"):
+        lead._run_gated_phases([boom])
+
+
+@pytest.mark.parametrize("payload", [0, "", False], ids=["zero", "empty_str", "false"])
+def test_run_gated_phases_treats_falsy_non_none_payload_as_failure(payload):
+    lead = _make_lead()
+    calls = []
+
+    def phase_falsy():
+        calls.append("falsy")
+        return payload  # falsy but not None -> must be treated as failure
+
+    def phase_never():
+        calls.append("never")
+        return None
+
+    assert lead._run_gated_phases([phase_falsy, phase_never]) is payload
+    assert calls == ["falsy"]
+
+
 def test_bounded_retry_loop_success_on_first_attempt():
     lead = _make_lead()
     calls: list[int] = []
