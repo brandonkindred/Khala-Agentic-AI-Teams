@@ -94,13 +94,15 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
-    ``_run_preflight`` / ``_run_planning_and_branch_setup`` from
-    :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
-    repo-briefing sets, progress callback, and the integration-only ``run_workflow``,
-    which calls the base class's ``_run_preflight`` and
-    ``_run_planning_and_branch_setup`` for its branch-checkout/tooling-verification
-    and planning/feature-branch-creation steps respectively.
+    ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
+    ``_run_deliver_and_finalize`` from :class:`BaseV2DevelopmentAgent`; supplies
+    the backend tooling detection, repo-briefing sets, progress callback, and the
+    integration-only ``run_workflow``, which calls the base helpers for
+    preflight, planning/branch setup, and deliver/finalize.
     """
+
+    _TEAM_LABEL = "Backend"
+    _DELIVER_IN_PROGRESS_STATUS = "Committing changes and preparing delivery"
 
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = _BACKEND_REPO_BRIEFING_MAX_CHARS) -> str:
@@ -370,56 +372,25 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             )
 
         # ── Phase: Deliver ───────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
-        result.current_phase = Phase.DELIVER
-        _update_job(
-            current_phase="deliver",
-            progress=90,
-            status_text="Committing changes and preparing delivery",
-        )
-
-        try:
-            deliver_result = run_deliver(
-                task_id=task_id,
-                repo_path=repo_path,
-                files=current_files,
-                summary=exec_result.summary,
-                task_title=task.title or "",
-                tool_agents=tool_agents,
-                task_description=task.description or "",
-                feature_branch_name=feature_branch_name,
-                merge_to_development=merge_to_development,
-            )
-            result.deliver_result = deliver_result
-            delivered = (
-                deliver_result.merged if merge_to_development else deliver_result.branch_ready
-            )
-            result.success = delivered and failed_count == 0
-            result.summary = f"{exec_result.summary} {deliver_result.summary}"
-            if failed_count > 0:
-                result.needs_followup = True
-                result.summary += f" ({failed_count} microtask(s) failed review)"
-        except Exception as exc:
-            result.failure_reason = f"Deliver failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-
-        elapsed = time.monotonic() - start_time
-        final_status = (
-            "Backend task complete" if result.success else "Backend task completed with issues"
-        )
-        _update_job(
-            current_phase="deliver",
-            progress=100 if result.success else 95,
-            status_text=final_status,
-        )
-        logger.info(
-            "[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
-            task_id,
-            "SUCCEEDED" if result.success else "PARTIAL",
-            elapsed,
-            completed_count,
-            failed_count,
+        self._run_deliver_and_finalize(
+            task_id=task_id,
+            repo_path=repo_path,
+            current_files=current_files,
+            exec_summary=exec_result.summary,
+            task_title=task.title or "",
+            task_description=task.description or "",
+            tool_agents=tool_agents,
+            feature_branch_name=feature_branch_name,
+            merge_to_development=merge_to_development,
+            failed_count=failed_count,
+            completed_count=completed_count,
+            start_time=start_time,
+            result=result,
+            run_deliver=run_deliver,
+            update_job=_update_job,
+            logger=logger,
+            team_label=self._TEAM_LABEL,
+            deliver_in_progress_status=self._DELIVER_IN_PROGRESS_STATUS,
         )
         return result
 

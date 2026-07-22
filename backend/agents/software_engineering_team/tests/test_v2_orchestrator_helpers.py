@@ -794,3 +794,163 @@ class TestRunPlanningAndBranchSetup:
         assert planning_result is fake_result
         assert feature_branch_name is None
         assert failure_reason is None
+
+
+class _FakeDeliverResult:
+    def __init__(
+        self,
+        *,
+        merged: bool = False,
+        branch_ready: bool = False,
+        summary: str = "delivered",
+    ):
+        self.merged = merged
+        self.branch_ready = branch_ready
+        self.summary = summary
+
+
+class _FakeWorkflowResult:
+    def __init__(self):
+        self.current_phase = None
+        self.deliver_result = None
+        self.success = False
+        self.summary = ""
+        self.needs_followup = False
+        self.failure_reason = None
+
+
+class TestRunDeliverAndFinalize:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_deliver_and_finalize`` helper."""
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_deliver_and_finalize")
+
+    @staticmethod
+    def _call(**overrides):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = overrides.pop("result", _FakeWorkflowResult())
+        kwargs = {
+            "task_id": "t1",
+            "repo_path": overrides.pop("repo_path"),
+            "current_files": {"a.py"},
+            "exec_summary": "exec done",
+            "task_title": "Do the thing",
+            "task_description": "desc",
+            "tool_agents": {},
+            "feature_branch_name": "feature/t1",
+            "merge_to_development": True,
+            "failed_count": 0,
+            "completed_count": 2,
+            "start_time": 100.0,
+            "result": result,
+            "run_deliver": lambda **kw: _FakeDeliverResult(merged=True),
+            "update_job": lambda **kw: None,
+            "logger": TestRunDeliverAndFinalize._logger(),
+            "team_label": "Backend",
+            "deliver_in_progress_status": "Committing changes and preparing delivery",
+        }
+        kwargs.update(overrides)
+        failure = BaseV2DevelopmentAgent._run_deliver_and_finalize(**kwargs)
+        return failure, result
+
+    def test_success_merge_emits_complete_status(self, tmp_path: Path, monkeypatch):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 105.0)
+        update_calls = []
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            update_job=lambda **kw: update_calls.append(kw),
+            run_deliver=lambda **kw: _FakeDeliverResult(merged=True, summary="merged ok"),
+        )
+
+        assert failure is None
+        assert result.success is True
+        assert result.summary == "exec done merged ok"
+        assert result.needs_followup is False
+        assert update_calls[0] == {
+            "current_phase": "deliver",
+            "progress": 90,
+            "status_text": "Committing changes and preparing delivery",
+        }
+        assert update_calls[-1] == {
+            "current_phase": "deliver",
+            "progress": 100,
+            "status_text": "Backend task complete",
+        }
+
+    def test_failed_microtasks_mark_partial_and_followup(self, tmp_path: Path, monkeypatch):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 110.0)
+        update_calls = []
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            failed_count=1,
+            team_label="Frontend",
+            deliver_in_progress_status="Committing changes and preparing delivery...",
+            update_job=lambda **kw: update_calls.append(kw),
+            run_deliver=lambda **kw: _FakeDeliverResult(merged=True, summary="merged"),
+        )
+
+        assert failure is None
+        assert result.success is False
+        assert result.needs_followup is True
+        assert "(1 microtask(s) failed review)" in result.summary
+        assert update_calls[0]["status_text"] == "Committing changes and preparing delivery..."
+        assert update_calls[-1] == {
+            "current_phase": "deliver",
+            "progress": 95,
+            "status_text": "Frontend task completed with issues",
+        }
+
+    def test_branch_ready_path_when_not_merging(self, tmp_path: Path, monkeypatch):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 102.0)
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            merge_to_development=False,
+            run_deliver=lambda **kw: _FakeDeliverResult(branch_ready=True, summary="branch ready"),
+        )
+
+        assert failure is None
+        assert result.success is True
+        assert result.summary == "exec done branch ready"
+
+    def test_deliver_exception_returns_failure_reason(self, tmp_path: Path, caplog):
+        def _boom(**kwargs):
+            raise RuntimeError("push failed")
+
+        with caplog.at_level("ERROR", logger="test_run_deliver_and_finalize"):
+            failure, result = self._call(repo_path=tmp_path, run_deliver=_boom)
+
+        assert failure == "Deliver failed: push failed"
+        assert result.failure_reason == failure
+        assert result.success is False
+        assert "Deliver failed: push failed" in caplog.text
+
+    def test_workflow_timing_log_on_success(self, tmp_path: Path, monkeypatch, caplog):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 112.5)
+
+        with caplog.at_level("INFO", logger="test_run_deliver_and_finalize"):
+            failure, _result = self._call(
+                repo_path=tmp_path,
+                completed_count=3,
+                failed_count=0,
+                start_time=100.0,
+            )
+
+        assert failure is None
+        assert (
+            "WORKFLOW SUCCEEDED in 12.5s (3 microtasks completed, 0 failed review)" in caplog.text
+        )
