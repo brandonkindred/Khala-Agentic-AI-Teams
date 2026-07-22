@@ -4,8 +4,8 @@ Models for the backend-code-v2 team.
 Structurally identical workflow models are shared with frontend v2 in
 ``software_engineering_team.shared.v2_models`` and re-exported here. Only the
 types that bind a backend-specific ``ToolAgentKind``/``MicrotaskStatus`` enum,
-the backend ``Microtask``, a backend language default, or backend-only
-per-phase review config are defined locally.
+the backend ``Microtask``, a backend language default, or backend-specific
+``MicrotaskReviewConfig`` knobs are defined locally.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from software_engineering_team.shared.v2_models import (
     DocumentationPhaseResult,
     DocumentationSelfReviewResult,
     Phase,
+    PhaseReviewResult,
     ProblemSolvingResult,
     ReviewIssue,
     ReviewResult,
@@ -140,25 +141,6 @@ class ExecutionResult(BaseModel):
         default_factory=list, description="Microtasks with updated status"
     )
     summary: str = Field(default="")
-
-
-class PhaseReviewResult(BaseModel):
-    """Output of a single phase-specific review (code review, QA, security, or documentation)."""
-
-    passed: bool = Field(default=False)
-    issues: List[ReviewIssue] = Field(default_factory=list)
-    summary: str = Field(default="")
-    phase_name: str = Field(
-        default="", description="Name of the phase: code_review, qa, security, documentation"
-    )
-    raw_issue_count: Optional[int] = Field(
-        default=None,
-        description=(
-            "Number of code-review issues the LLM fallback found before grounding "
-            "filtered any out; None when the LLM fallback never ran (e.g. the external "
-            "code_review_agent succeeded) or reported no count."
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------

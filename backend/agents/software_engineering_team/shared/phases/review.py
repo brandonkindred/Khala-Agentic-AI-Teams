@@ -11,13 +11,13 @@ security gates that follow code review.
 
 Unlike the other ``shared/phases/*.py`` modules, this one does not take a
 ``models: PhaseModels`` bundle: the body only ever constructs ``ReviewIssue``
-(one shared definition, imported directly — not team-varying) and the team's
-phase-result type (``PhaseReviewResult`` on backend; there is no frontend
-equivalent yet, so it cannot be a ``PhaseModels`` member without breaking
-frontend's conformance to that Protocol elsewhere). The result type is instead
-injected as a narrow constructor, ``phase_review_result_cls`` — the same
-one-off-constructor idiom :class:`~software_engineering_team.shared.v2_review.ReviewConfig`
-already uses for ``tool_phase_input_factory``.
+(one shared definition, imported directly — not team-varying) and the shared
+:class:`~software_engineering_team.shared.v2_models.PhaseReviewResult` (or an
+equivalent constructor). The result type is injected as a narrow constructor,
+``phase_review_result_cls`` — the same one-off-constructor idiom
+:class:`~software_engineering_team.shared.v2_review.ReviewConfig` already uses
+for ``tool_phase_input_factory``. Both code-v2 teams re-export
+``PhaseReviewResult`` from ``shared.v2_models`` and pass it here.
 """
 
 from __future__ import annotations
@@ -200,7 +200,7 @@ class _AgentTestingPhaseSpec:
     phase_label: str  # e.g. "QA testing" -> "<label> phase for <id>"
     next_step: str  # logged "Next step -> <...>"
     detail_run_msg: str
-    tool_kind: Any  # string enum value, e.g. "testing_qa" / "security"
+    tool_kind: str  # enum value, e.g. "testing_qa" / "security"
     tool_detail_msg: str
     tool_label: str  # used in the "<label> tool agent review failed" warning
     missing_agent_label: str  # e.g. "QA agent"
@@ -225,18 +225,26 @@ def _run_agent_testing_phase(
     cache: Optional[AgentReviewCache] = None,
     phase_review_result_cls: Callable[..., Any],
     tool_phase_input_factory: Callable[..., Any],
+    tool_phase_includes_context: bool,
 ) -> Any:
     """Shared QA/security testing-phase body parameterised by ``spec``.
 
     Preconditions: when ``review_agent`` is not None, ``agent_runner`` runs it
     over ``files`` and returns ``ReviewIssue``s. ``cache``: see
     ``software_engineering_team.shared.agent_review``.
+    ``tool_phase_includes_context`` matches
+    :attr:`~software_engineering_team.shared.v2_review.ReviewConfig.tool_phase_includes_context`
+    — when ``False``, ``existing_code`` / ``spec_context`` / ``language`` are
+    omitted from the tool-phase input (same rule as ``_run_tool_agents_review``).
     Postconditions: returns a ``phase_review_result_cls`` instance that fails
     on any critical/high issue, including a synthesised "gate skipped" issue
     when neither ``review_agent`` nor the spec's tool agent is available. An
     outright ``agent_runner`` failure never propagates: it is reported as a
     synthetic issue at ``spec.missing_severity`` instead, mirroring
     ``_qa_review_step``/``_security_review_step``'s identical containment.
+    An outright tool-agent ``.review()`` failure is contained to a logged
+    warning only — no synthetic issue is added, so the phase may still pass
+    when the tool agent is the only source of findings.
     """
     task_id = task.id
     microtask_id = microtask.id
@@ -291,19 +299,21 @@ def _run_agent_testing_phase(
             if detail_callback:
                 detail_callback(spec.tool_detail_msg)
             try:
-                phase_inp = tool_phase_input_factory(
-                    phase=Phase.REVIEW,
-                    microtask=microtask,
-                    repo_path=str(repo_path) if repo_path else "",
-                    existing_code="",
-                    spec_context=task.description or "",
-                    language=language,
-                    current_files=files,
-                    review_issues=issues,
-                    task_title=task.title or "",
-                    task_description=f"Microtask: {microtask.description or microtask.title}",
-                    task_id=task_id,
-                )
+                phase_inp_kwargs: Dict[str, Any] = {
+                    "phase": Phase.REVIEW,
+                    "microtask": microtask,
+                    "repo_path": str(repo_path) if repo_path else "",
+                    "current_files": files,
+                    "review_issues": issues,
+                    "task_title": task.title or "",
+                    "task_description": f"Microtask: {microtask.description or microtask.title}",
+                    "task_id": task_id,
+                }
+                if tool_phase_includes_context:
+                    phase_inp_kwargs["existing_code"] = ""
+                    phase_inp_kwargs["spec_context"] = task.description or ""
+                    phase_inp_kwargs["language"] = language
+                phase_inp = tool_phase_input_factory(**phase_inp_kwargs)
                 out = tool_agent.review(phase_inp)
                 if out.issues:
                     issues.extend(out.issues)
@@ -392,6 +402,7 @@ def run_qa_testing_phase_impl(
     cache: Optional[AgentReviewCache] = None,
     phase_review_result_cls: Callable[..., Any],
     tool_phase_input_factory: Callable[..., Any],
+    tool_phase_includes_context: bool,
 ) -> Any:
     """Run QA testing phase: bug detection, test coverage, quality assurance.
 
@@ -400,6 +411,9 @@ def run_qa_testing_phase_impl(
           ``review_agent`` is not None.
         - ``phase_review_result_cls`` / ``tool_phase_input_factory`` construct
           the team's result / tool-phase input types.
+        - ``tool_phase_includes_context`` is the team's
+          :attr:`~software_engineering_team.shared.v2_review.ReviewConfig.tool_phase_includes_context`
+          flag (forwarded to ``_run_agent_testing_phase``).
     Postconditions:
         - Delegates to ``_run_agent_testing_phase`` with ``_QA_TESTING_PHASE_SPEC``;
           never raises (containment is the helper's).
@@ -418,6 +432,7 @@ def run_qa_testing_phase_impl(
         cache=cache,
         phase_review_result_cls=phase_review_result_cls,
         tool_phase_input_factory=tool_phase_input_factory,
+        tool_phase_includes_context=tool_phase_includes_context,
     )
 
 
@@ -435,6 +450,7 @@ def run_security_testing_phase_impl(
     cache: Optional[AgentReviewCache] = None,
     phase_review_result_cls: Callable[..., Any],
     tool_phase_input_factory: Callable[..., Any],
+    tool_phase_includes_context: bool,
 ) -> Any:
     """Run security testing phase: vulnerability scanning, security best practices.
 
@@ -455,4 +471,5 @@ def run_security_testing_phase_impl(
         cache=cache,
         phase_review_result_cls=phase_review_result_cls,
         tool_phase_input_factory=tool_phase_input_factory,
+        tool_phase_includes_context=tool_phase_includes_context,
     )

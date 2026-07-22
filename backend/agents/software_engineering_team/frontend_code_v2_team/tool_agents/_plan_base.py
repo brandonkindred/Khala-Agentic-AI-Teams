@@ -7,26 +7,26 @@ object, and turn selected fields into ``recommendations``. Their ``run``,
 ``execute`` (stub), and ``review``/``problem_solve``/``deliver`` (static stubs)
 were byte-aligned, and their three ``plan`` bodies were copy-pasted with an
 inert ``(lambda _r: str(_r))`` wrapper and three subtly different inline JSON
-fallbacks. :class:`PlanGeneratorToolAgent` captures the shared lifecycle once and
-parses via the lightweight, stdlib-only
-:func:`shared.llm_recovery.extract_json_object` salvage engine; subclasses
-declare only the differing prompt, field→label map, and fallback strings.
+fallbacks. :class:`PlanGeneratorToolAgent` captures the shared lifecycle once as
+a thin :class:`~software_engineering_team.shared.llm_tool_agent_base.LlmToolAgentBase`
+specialization (Plan recipe: JSON model resolution, inline invocation, extract
+JSON salvage, 3-tier fallbacks). Subclasses declare only the differing prompt,
+field→label map, and fallback strings.
 
 Like the other code-v2 tool-agent bases, the concrete ``agent.py`` keeps a
 top-level ``from strands import Agent`` so tests can
-``monkeypatch.setattr(<agent_module>, "Agent", ...)``; the base resolves
-``Agent`` from the concrete subclass module via :meth:`_agent_factory`.
+``monkeypatch.setattr(<agent_module>, "Agent", ...)``; the inherited
+:meth:`LlmToolAgentBase._agent_factory` resolves ``Agent`` from the concrete
+subclass module.
 """
 
 from __future__ import annotations
 
-import importlib
 import logging
 from typing import List, Optional, Sequence, Tuple
 
 from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from shared.llm_recovery import extract_json_object
+from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 
 from ..models import (
     ToolAgentInput,
@@ -36,17 +36,36 @@ from ..models import (
 )
 
 
-class PlanGeneratorToolAgent:
+class PlanGeneratorToolAgent(LlmToolAgentBase):
     """Base for plan-phase generator tool agents.
 
     Subclasses set :attr:`log_label`, the phase summaries, the no-model / LLM-error
     fallbacks, the ordered :attr:`field_labels` map, and implement
     :meth:`_build_plan_prompt`.
 
-    Invariants: instance state is limited to ``_model`` and ``llm`` — so tests
-    that build an instance via ``__new__`` and set those attributes behave
-    identically to a constructed instance.
+    Preconditions:
+        Subclasses that call :meth:`plan` set :attr:`field_labels` and implement
+        :meth:`_build_plan_prompt`.
+
+    Postconditions:
+        Construction (when :attr:`resolve_models` is true) sets ``self.llm`` and
+        ``self._model`` via the shared Plan recipe.
+
+    Invariants:
+        Instance state is limited to ``_model`` and ``llm`` — so tests that build
+        an instance via ``__new__`` and set those attributes behave identically
+        to a constructed instance. Plan recipe attrs stay
+        ``resolve_models=True``, ``response_format="json"``,
+        ``get_strands_model_fn=get_strands_model``, ``use_run_strands_agent=False``,
+        ``json_parse_strategy="extract"``.
     """
+
+    # --- LlmToolAgentBase Plan recipe ------------------------------------
+    resolve_models: bool = True
+    response_format: str = "json"
+    get_strands_model_fn = get_strands_model
+    json_parse_strategy: str = "extract"
+    # use_run_strands_agent remains False (inline Agent(prompt) path)
 
     # Labels / summaries (subclasses override) --------------------------------
     log_label: str = "Plan"
@@ -55,7 +74,7 @@ class PlanGeneratorToolAgent:
     problem_solve_summary: str = ""
     deliver_summary: str = ""
 
-    # Plan-phase fallbacks (subclasses override) ------------------------------
+    # Plan-phase fallbacks (subclasses override; shared helpers read via type(self))
     no_model_recommendations: List[str] = []
     no_model_summary: str = ""
     llm_error_recommendations: List[str] = []
@@ -71,18 +90,9 @@ class PlanGeneratorToolAgent:
     # recommendations from the parsed model output.
     field_labels: Sequence[Tuple[str, str]] = ()
 
-    def __init__(self, llm=None) -> None:
-        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
-        self.llm = llm  # kept for backward compat checks
-
     @property
     def _logger(self) -> logging.Logger:
         return logging.getLogger(type(self).__module__)
-
-    def _agent_factory(self):
-        """Resolve ``Agent`` from the concrete subclass module (monkeypatchable)."""
-        mod = importlib.import_module(type(self).__module__)
-        return getattr(mod, "Agent")
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         """Delegate to :meth:`execute`."""
@@ -104,42 +114,57 @@ class PlanGeneratorToolAgent:
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Generate plan-phase artifacts from a single LLM prompt.
 
-        Preconditions: the subclass sets :attr:`field_labels` and implements
-        :meth:`_build_plan_prompt`.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput`; a missing model,
-        an LLM error, or unparseable output each yield the corresponding declared
-        fallback rather than raising.
+        Preconditions:
+            The subclass sets :attr:`field_labels` and implements
+            :meth:`_build_plan_prompt`. ``self._model`` is set (possibly falsy).
+
+        Postconditions:
+            Returns a :class:`ToolAgentPhaseOutput`. A missing model, an LLM
+            error, or unparseable output each yield the corresponding declared
+            fallback rather than raising. Empty-parse failures also emit the
+            historical warning log before applying empty-tier messages.
         """
-        if not self._model:
+        no_model = self._fallback_no_model(self._model)
+        if no_model is not None:
             return ToolAgentPhaseOutput(
-                recommendations=list(self.no_model_recommendations),
-                summary=self.no_model_summary,
+                recommendations=no_model.recommendations,
+                summary=no_model.summary,
             )
+
         prompt = self._build_plan_prompt(inp)
-        try:
-            raw = str(self._agent_factory()(model=self._model)(prompt)).strip()
-        except Exception as e:
-            self._logger.warning("%s plan LLM call failed: %s", self.log_label, e)
+        status, result = self._call_with_single_fallback(
+            lambda: self._invoke_llm(self._model, prompt),
+            log_label=f"{self.log_label} plan",
+        )
+        if status == "error":
             return ToolAgentPhaseOutput(
-                recommendations=list(self.llm_error_recommendations),
-                summary=self.llm_error_summary,
+                recommendations=result.recommendations,
+                summary=result.summary,
             )
-        data = extract_json_object(raw)
+
+        raw = result
+        data = self._parse_llm_json(raw)
         if data is None:
             self._logger.warning(
                 "%s plan: model output did not parse as JSON; using empty plan output",
                 self.log_label,
             )
             data = {}
+
         recommendations = [
             f"{label}: {data[key]}" for key, label in self.field_labels if data.get(key)
         ]
-        if not recommendations:
-            recommendations = list(self.empty_recommendations)
         summary = data.get("summary", self.default_summary)
-        if not summary and self.empty_summary_override is not None:
-            summary = self.empty_summary_override
-        return ToolAgentPhaseOutput(recommendations=recommendations, summary=summary)
+        if summary is None:
+            summary = ""
+        payload = self._fallback_empty_parse(
+            recommendations=recommendations,
+            summary=summary,
+        )
+        return ToolAgentPhaseOutput(
+            recommendations=payload.recommendations,
+            summary=payload.summary,
+        )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Return the static review stub."""
