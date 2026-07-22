@@ -931,12 +931,12 @@ def test_write_files_and_commit_reports_unsafe_path_as_failure(tmp_path: Path):
 def test_v2_team_phase_wrappers_stay_byte_identical(phase_module: str) -> None:
     """The backend and frontend copies of a v2 phase wrapper are byte-identical.
 
-    The two teams deliberately keep separate copies of ``phases/deliver.py``
-    and ``phases/documentation.py``: each copy is the per-team monkeypatch
-    boundary that wires that team's models into the shared implementations in
-    ``shared/phases/``. They must stay separate — but they must also stay
-    identical, so a one-sided edit (a fix applied to one team only) fails
-    loudly here instead of silently forking the behavior.
+    The two teams deliberately keep separate thin copies of ``phases/deliver.py``
+    and ``phases/documentation.py``: each copy is the per-team monkeypatch /
+    model-binding boundary that wires that team's models into the shared
+    ``make_run_*`` factories in ``shared/phases/``. They must stay separate —
+    but they must also stay identical, so a one-sided edit (a fix applied to
+    one team only) fails loudly here instead of silently forking the behavior.
 
     Preconditions:
         - Both team packages are importable (their ``__init__`` resolves).

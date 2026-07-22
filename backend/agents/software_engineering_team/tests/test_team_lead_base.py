@@ -11,6 +11,7 @@ import pytest
 from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
+    TeamLeadSharedState,
     copy_development_result_fields,
 )
 from software_engineering_team.shared.v2_models import Phase, SetupResult
@@ -37,6 +38,63 @@ def test_init_stores_llm_and_starts_with_empty_cache_dict():
     assert lead.llm is llm
     assert lead._repo_context_caches == {}
     assert lead._status_callback is None
+
+
+def test_shared_state_defaults_and_stores_getter():
+    llm = MagicMock(name="llm")
+    getter = MagicMock(return_value=llm)
+    state = TeamLeadSharedState(getter)
+    assert state.llm_getter is getter
+    assert state.shared_config == {}
+    assert state._status_callback is None
+    assert state._llm_for("worker-a") is llm
+    getter.assert_called_once_with("worker-a")
+
+
+def test_shared_state_shallow_copies_shared_config():
+    original = {"mode": "swarm", "nested": {"k": 1}}
+    state = TeamLeadSharedState(lambda _aid: None, shared_config=original)
+    assert state.shared_config == original
+    assert state.shared_config is not original
+    original["mode"] = "mutated"
+    original["nested"]["k"] = 99
+    assert state.shared_config["mode"] == "swarm"
+    # Shallow copy only: nested object is shared by design (YAGNI — no deep copy).
+    assert state.shared_config["nested"]["k"] == 99
+    state.shared_config["mode"] = "instance"
+    assert original["mode"] == "mutated"
+
+
+def test_shared_state_rejects_non_callable_getter():
+    with pytest.raises(AssertionError):
+        TeamLeadSharedState(None)  # type: ignore[arg-type]
+
+
+def test_shared_state_rejects_non_mapping_config():
+    with pytest.raises(AssertionError):
+        TeamLeadSharedState(lambda _aid: None, shared_config=["bad"])  # type: ignore[arg-type]
+
+
+def test_shared_state_llm_for_rejects_non_str_agent_id():
+    state = TeamLeadSharedState(lambda _aid: None)
+    with pytest.raises(AssertionError):
+        state._llm_for(123)  # type: ignore[arg-type]
+
+
+def test_base_team_lead_adapts_llm_client_to_getter():
+    llm = MagicMock(name="lead-llm")
+    lead = BaseTeamLead(
+        llm,
+        extensions=frozenset({".py"}),
+        exclude_dirs=frozenset({".git"}),
+        max_chars=100,
+    )
+    assert isinstance(lead, TeamLeadSharedState)
+    assert lead.llm is llm
+    assert lead.shared_config == {}
+    assert lead._status_callback is None
+    assert lead._llm_for("ignored") is llm
+    assert lead._llm_for("") is llm
 
 
 def test_repo_context_cache_for_is_lazy_and_reused(tmp_path: Path):
@@ -379,7 +437,180 @@ def test_report_status_swallows_callback_errors():
     lead._report_status("phase4", detail="review")  # must not raise
 
 
+def test_report_status_logs_callback_errors(monkeypatch):
+    import software_engineering_team.shared.team_lead_base as team_lead_base
+
+    mock_warning = MagicMock()
+    monkeypatch.setattr(team_lead_base.logger, "warning", mock_warning)
+    lead = _make_lead()
+    lead._status_callback = lambda **_k: (_ for _ in ()).throw(RuntimeError("callback exploded"))
+    lead._report_status("phase4", detail="review")
+    assert mock_warning.called
+    logged = " ".join(str(arg) for call in mock_warning.call_args_list for arg in call[0])
+    assert "team lead status callback failed" in logged
+    assert "callback exploded" in logged
+
+
 def test_report_status_rejects_empty_phase():
     lead = _make_lead()
     with pytest.raises(AssertionError):
         lead._report_status("")
+
+
+def test_run_gated_phases_all_succeed_returns_none():
+    lead = _make_lead()
+    calls: list[str] = []
+
+    def phase_a():
+        calls.append("a")
+        return None
+
+    def phase_b():
+        calls.append("b")
+        return None
+
+    def phase_c():
+        calls.append("c")
+        return None
+
+    result = lead._run_gated_phases([phase_a, phase_b, phase_c])
+    assert result is None
+    assert calls == ["a", "b", "c"]
+
+
+def test_run_gated_phases_early_exit_skips_later_phases():
+    lead = _make_lead()
+    calls: list[str] = []
+    failure = object()
+
+    def phase_ok():
+        calls.append("ok")
+        return None
+
+    def phase_fail():
+        calls.append("fail")
+        return failure
+
+    def phase_never():
+        calls.append("never")
+        return None
+
+    result = lead._run_gated_phases([phase_ok, phase_fail, phase_never])
+    assert result is failure
+    assert calls == ["ok", "fail"]
+
+
+def test_run_gated_phases_empty_sequence_returns_none():
+    lead = _make_lead()
+    assert lead._run_gated_phases([]) is None
+
+
+def test_run_gated_phases_propagates_phase_exceptions():
+    lead = _make_lead()
+
+    def boom():
+        raise RuntimeError("phase exploded")
+
+    with pytest.raises(RuntimeError, match="phase exploded"):
+        lead._run_gated_phases([boom])
+
+
+@pytest.mark.parametrize("payload", [0, "", False], ids=["zero", "empty_str", "false"])
+def test_run_gated_phases_treats_falsy_non_none_payload_as_failure(payload):
+    lead = _make_lead()
+    calls = []
+
+    def phase_falsy():
+        calls.append("falsy")
+        return payload  # falsy but not None -> must be treated as failure
+
+    def phase_never():
+        calls.append("never")
+        return None
+
+    assert lead._run_gated_phases([phase_falsy, phase_never]) is payload
+    assert calls == ["falsy"]
+
+
+def test_bounded_retry_loop_success_on_first_attempt():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        return {"ok": True, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=3,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is True
+    assert result == {"ok": True, "n": 0}
+    assert calls == [0]
+
+
+def test_bounded_retry_loop_success_after_n_attempts():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        return {"ok": i >= 2, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=5,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is True
+    assert result == {"ok": True, "n": 2}
+    assert calls == [0, 1, 2]
+
+
+def test_bounded_retry_loop_exhausted_retries():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        return {"ok": False, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=3,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is False
+    assert result == {"ok": False, "n": 2}
+    assert calls == [0, 1, 2]
+
+
+def test_bounded_retry_loop_abort_on_none():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        if i == 1:
+            return None
+        return {"ok": False, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=5,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is False
+    assert result is None
+    assert calls == [0, 1]
+
+
+def test_bounded_retry_loop_rejects_non_positive_max_iterations():
+    lead = _make_lead()
+    with pytest.raises(AssertionError):
+        lead._run_bounded_retry_loop(
+            max_iterations=0,
+            attempt=lambda _i: {"ok": True},
+            is_success=lambda _r: True,
+        )

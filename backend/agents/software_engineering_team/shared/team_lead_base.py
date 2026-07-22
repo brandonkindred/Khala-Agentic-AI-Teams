@@ -1,14 +1,19 @@
 """
 Shared base for the code-v2 Team Leads (backend + frontend).
 
+``TeamLeadSharedState`` is the minimal shared construct for swarm-style
+orchestrators: LLM resolution, an opaque ``shared_config`` bag, and the
+optional per-run status callback — state only, with no phase sequencing.
+
+``BaseTeamLead`` builds on that mixin for code-v2 single-pass leads.
 ``BackendCodeV2TeamLead`` and ``FrontendCodeV2TeamLead`` share their
 constructor, their per-repo incremental briefing cache lookup
 (:meth:`BaseTeamLead._repo_context_cache_for`), the field-copy tail that
 overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
-(:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides an
-optional per-run status/progress callback via
-:meth:`BaseTeamLead._report_status`.
+(:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides a
+gate-based phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`
+and a bounded retry/patch-loop via :meth:`BaseTeamLead._run_bounded_retry_loop`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
 passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
@@ -22,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, TypeVar
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
@@ -30,6 +35,8 @@ from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.v2_models import Phase
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # The 13 fields a code-v2 development-agent result hands off to its team
 # lead's own result object. ``setup_result`` is deliberately excluded: it is
@@ -66,61 +73,43 @@ def copy_development_result_fields(dst: Any, src: Any) -> None:
         setattr(dst, field, getattr(src, field))
 
 
-class BaseTeamLead:
-    """Shared base for the code-v2 Team Leads.
+class TeamLeadSharedState:
+    """Minimal shared state for team leads and swarm-style orchestrators.
 
-    Subclasses provide the per-team repo-briefing filter constants (via
-    ``__init__``) and a thin ``run_workflow`` that delegates to
-    :meth:`_run_setup_and_delegate` with late-bound module globals.
+    Holds LLM resolution (``llm_getter``), an opaque ``shared_config`` bag, and
+    the optional per-run status callback. Intentionally excludes phase
+    sequencing, setup/delegate, worktree management, and swarm locking — those
+    stay on the concrete orchestrator (or on ``BaseTeamLead`` for single-pass
+    leads). Round-based swarms can adopt this mixin for state storage without
+    inheriting the single-pass phase model.
 
-    Invariants: instance state is limited to ``llm``, the injected
-    extensions/exclude_dirs/max_chars, ``_repo_context_caches``, and
-    ``_status_callback`` (optional per-run status hook; default None).
+    Invariants: ``llm_getter`` is callable; ``shared_config`` is a dict owned by
+    this instance (shallow-copied at init); ``_status_callback`` defaults to None.
     """
 
     def __init__(
         self,
-        llm_client: LLMClient,
+        llm_getter: Callable[[str], Any],
         *,
-        extensions: FrozenSet[str],
-        exclude_dirs: FrozenSet[str],
-        max_chars: int,
+        shared_config: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._extensions = extensions
-        self._exclude_dirs = exclude_dirs
-        self._max_chars = max_chars
-        # Per-repo incremental briefing cache, reused across the team lead's
-        # run_workflow calls (the coding-team worker reuses one team lead for all
-        # tasks in a job), so the N tasks of a job re-read only the files each
-        # merge touched instead of re-walking the whole repo N times.
-        self._repo_context_caches: Dict[Path, RepoContextCache] = {}
-        # Optional per-run status/progress callback. Subclasses assign this at the
-        # start of run_workflow (and clear it when the run ends); BaseTeamLead does
-        # not accept it via the constructor.
+        assert callable(llm_getter), "llm_getter must be callable"
+        if shared_config is not None:
+            assert isinstance(shared_config, Mapping), "shared_config must be a mapping"
+        self.llm_getter = llm_getter
+        self.shared_config: Dict[str, Any] = dict(shared_config or {})
+        # Optional per-run status/progress callback. Consumers assign this for a
+        # run (and should clear it when the run ends); not accepted via constructor.
         self._status_callback: Optional[Callable[..., None]] = None
 
-    def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
-        """Return the incremental briefing cache for ``repo_path``, creating it lazily.
+    def _llm_for(self, agent_id: str) -> Any:
+        """Resolve an LLM client for ``agent_id`` via ``llm_getter``.
 
-        Preconditions: ``repo_path`` is a directory the development agent will scan.
-        Postconditions: returns a ``RepoContextCache`` configured with this team's
-          repo-briefing contract (extensions / exclude dirs / char budget); the same
-          instance is returned for the same resolved repo across calls. Raises
-          ``AssertionError`` if the precondition is violated (caller bug).
+        Preconditions: ``agent_id`` is a str (may be empty for constant getters).
+        Postconditions: returns whatever ``llm_getter(agent_id)`` returns.
         """
-        assert repo_path.is_dir(), "repo_path must be a directory"
-        key = repo_path.resolve()
-        cache = self._repo_context_caches.get(key)
-        if cache is None:
-            cache = RepoContextCache(
-                extensions=self._extensions,
-                exclude_dirs=self._exclude_dirs,
-                max_chars=self._max_chars,
-            )
-            self._repo_context_caches[key] = cache
-        return cache
+        assert isinstance(agent_id, str), "agent_id must be a str"
+        return self.llm_getter(agent_id)
 
     def _report_status(
         self,
@@ -148,6 +137,120 @@ class BaseTeamLead:
             callback(**payload)
         except Exception as e:
             logger.warning("team lead status callback failed (ignored): %s", e)
+
+
+class BaseTeamLead(TeamLeadSharedState):
+    """Shared base for the code-v2 Team Leads.
+
+    Subclasses provide the per-team repo-briefing filter constants (via
+    ``__init__``) and a thin ``run_workflow`` that delegates to
+    :meth:`_run_setup_and_delegate` with late-bound module globals.
+
+    Inherits ``TeamLeadSharedState`` for LLM resolution / shared_config / status
+    hook storage. Adapts the historical single ``llm_client`` into a constant
+    ``llm_getter`` while exposing ``self.llm`` for existing callers.
+
+    Invariants: instance state includes ``llm``, the injected
+    extensions/exclude_dirs/max_chars, ``_repo_context_caches``, plus the mixin
+    fields (``llm_getter``, ``shared_config``, ``_status_callback``).
+    Also exposes :meth:`_run_gated_phases` and :meth:`_run_bounded_retry_loop`
+    as reusable helpers.
+    """
+
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        *,
+        extensions: FrozenSet[str],
+        exclude_dirs: FrozenSet[str],
+        max_chars: int,
+    ) -> None:
+        assert llm_client is not None, "llm_client is required"
+        TeamLeadSharedState.__init__(
+            self,
+            llm_getter=lambda _agent_id: llm_client,
+            shared_config={},
+        )
+        self.llm = llm_client
+        self._extensions = extensions
+        self._exclude_dirs = exclude_dirs
+        self._max_chars = max_chars
+        # Per-repo incremental briefing cache, reused across the team lead's
+        # run_workflow calls (the coding-team worker reuses one team lead for all
+        # tasks in a job), so the N tasks of a job re-read only the files each
+        # merge touched instead of re-walking the whole repo N times.
+        self._repo_context_caches: Dict[Path, RepoContextCache] = {}
+
+    def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
+        """Return the incremental briefing cache for ``repo_path``, creating it lazily.
+
+        Preconditions: ``repo_path`` is a directory the development agent will scan.
+        Postconditions: returns a ``RepoContextCache`` configured with this team's
+          repo-briefing contract (extensions / exclude dirs / char budget); the same
+          instance is returned for the same resolved repo across calls. Raises
+          ``AssertionError`` if the precondition is violated (caller bug).
+        """
+        assert repo_path.is_dir(), "repo_path must be a directory"
+        key = repo_path.resolve()
+        cache = self._repo_context_caches.get(key)
+        if cache is None:
+            cache = RepoContextCache(
+                extensions=self._extensions,
+                exclude_dirs=self._exclude_dirs,
+                max_chars=self._max_chars,
+            )
+            self._repo_context_caches[key] = cache
+        return cache
+
+    def _run_gated_phases(
+        self,
+        phases: Sequence[Callable[[], Optional[T]]],
+    ) -> Optional[T]:
+        """Run phase callables in order; return the first failure payload.
+
+        Preconditions: ``phases`` is a sequence (may be empty); each element is
+          a zero-arg callable returning ``Optional[T]``.
+        Postconditions: invokes phases in order; on the first non-``None``
+          return value, returns that value and does not invoke later phases;
+          if every phase returns ``None`` (or ``phases`` is empty), returns
+          ``None``. Exceptions raised by a phase propagate to the caller.
+        """
+        for phase in phases:
+            failure = phase()
+            if failure is not None:
+                return failure
+        return None
+
+    def _run_bounded_retry_loop(
+        self,
+        *,
+        max_iterations: int,
+        attempt: Callable[[int], Optional[T]],
+        is_success: Callable[[T], bool],
+    ) -> Tuple[bool, Optional[T]]:
+        """Run ``attempt`` up to ``max_iterations`` times until success or abort.
+
+        Preconditions: ``max_iterations >= 1``; ``attempt`` and ``is_success`` are callable.
+        Postconditions:
+          - On success: returns ``(True, result)`` where ``is_success(result)`` is True.
+          - On abort (``attempt`` returns ``None``): returns ``(False, None)`` and does
+            not call further iterations.
+          - On exhausted retries: returns ``(False, last_non_none_result)``.
+          - Exceptions from ``attempt`` / ``is_success`` propagate unchanged.
+        """
+        assert max_iterations >= 1, "max_iterations must be >= 1"
+        assert callable(attempt), "attempt must be callable"
+        assert callable(is_success), "is_success must be callable"
+
+        last: Optional[T] = None
+        for i in range(max_iterations):
+            result = attempt(i)
+            if result is None:
+                return False, None
+            if is_success(result):
+                return True, result
+            last = result
+        return False, last
 
     def _run_setup_and_delegate(
         self,
@@ -192,7 +295,10 @@ class BaseTeamLead:
             ``failure_reason`` set and without calling the development agent.
           - On success: ``repo_path`` is a directory; returns the team-lead result with
             ``setup_result`` preserved and the 13 development-handoff fields copied from
-            the inner agent result.
+            the inner agent result. The development agent also receives
+            ``repo_context_cache`` from ``self._repo_context_cache_for(repo_path)``, so
+            subsequent tasks on the same resolved repo reuse the incremental briefing
+            cache instead of re-walking the tree.
           - Progress 2/3/5 ``job_updater`` calls include the canonical ``status_text``
             strings when ``job_updater`` is provided; updater exceptions are logged
             at DEBUG and do not abort the workflow.
