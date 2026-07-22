@@ -443,17 +443,18 @@ def test_run_gated_phases_propagates_phase_exceptions():
         lead._run_gated_phases([boom])
 
 
-def test_run_gated_phases_treats_falsy_non_none_payload_as_failure():
+@pytest.mark.parametrize("payload", [0, "", False], ids=["zero", "empty_str", "false"])
+def test_run_gated_phases_treats_falsy_non_none_payload_as_failure(payload):
     lead = _make_lead()
     calls = []
 
-    def phase_zero():
-        calls.append("zero")
-        return 0  # falsy but not None -> must be treated as failure
+    def phase_falsy():
+        calls.append("falsy")
+        return payload  # falsy but not None -> must be treated as failure
 
     def phase_never():
         calls.append("never")
         return None
 
-    assert lead._run_gated_phases([phase_zero, phase_never]) == 0
-    assert calls == ["zero"]
+    assert lead._run_gated_phases([phase_falsy, phase_never]) is payload
+    assert calls == ["falsy"]
