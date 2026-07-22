@@ -419,15 +419,6 @@ class TestDevOpsPipelineDebugPatchLoop:
 class TestDebugPatchOnce:
     """Unit coverage for DevOpsTeamLeadAgent._debug_patch_once."""
 
-    def _make_lead_with_stubs(self):
-        from software_engineering_team.devops_team.orchestrator import (
-            DevOpsTeamLeadAgent,
-            _DebugPatchState,
-        )
-
-        lead = DevOpsTeamLeadAgent(llm_client=DummyLLMClient())
-        return lead, _DebugPatchState
-
     def test_returns_none_when_debug_not_fixable(self) -> None:
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.orchestrator import (
@@ -443,8 +434,12 @@ class TestDebugPatchOnce:
 
         lead.infra_debug_agent = _Debug()  # type: ignore[assignment]
         state = _DebugPatchState(
-            exec_results=[{"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}],
-            exec_failures=[{"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}],
+            exec_results=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
+            exec_failures=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
             exec_gate_map={"terraform_validate": "fail"},
             exec_findings=["e"],
         )
@@ -529,8 +524,12 @@ class TestDebugPatchOnce:
         )
         artifacts = {"main.tf": "broken"}
         state = _DebugPatchState(
-            exec_results=[{"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}],
-            exec_failures=[{"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}],
+            exec_results=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
+            exec_failures=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
             exec_gate_map={"terraform_validate": "fail"},
             exec_findings=["e"],
         )
