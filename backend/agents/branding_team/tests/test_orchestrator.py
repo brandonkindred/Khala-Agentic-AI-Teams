@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from branding_team import (
-    BrandingMission,
     BrandingTeamOrchestrator,
     BrandPhase,
     HumanReview,
@@ -37,21 +36,12 @@ from branding_team.models import (
     WritingGuidelines,
 )
 from branding_team.tests._fake_postgres import install_fake_postgres
+from branding_team.tests.conftest import make_mission
 
 
 @pytest.fixture(autouse=False)
 def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
     return install_fake_postgres(monkeypatch)
-
-
-def _mission() -> BrandingMission:
-    return BrandingMission(
-        company_name="Northstar Labs",
-        company_description="A strategic studio helping product teams ship cohesive digital experiences",
-        target_audience="enterprise product leaders",
-        values=["clarity", "trust", "momentum"],
-        differentiators=["hands-on partnership", "execution speed"],
-    )
 
 
 def _full_strategic_core() -> StrategicCoreOutput:
@@ -242,7 +232,13 @@ ALL_PHASES = [
 def test_full_run_approved() -> None:
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
-        result = orchestrator.run(mission=_mission(), human_review=HumanReview(approved=True))
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
 
     assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
     assert result.current_phase == BrandPhase.COMPLETE
@@ -272,7 +268,10 @@ def test_requires_human_approval() -> None:
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
-            mission=_mission(),
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
             human_review=HumanReview(approved=False, feedback="Need legal review."),
         )
 
@@ -300,7 +299,12 @@ def test_brand_checks() -> None:
             ),
         ]
         result = orchestrator.run(
-            mission=_mission(), human_review=HumanReview(approved=True), brand_checks=checks
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+            brand_checks=checks,
         )
 
     assert len(result.brand_checks) == 2
@@ -325,7 +329,10 @@ def test_market_research_integration() -> None:
         )
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
-            mission=_mission(),
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
             human_review=HumanReview(approved=True),
             include_market_research=True,
         )
@@ -337,7 +344,10 @@ def test_design_assets_integration() -> None:
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
-            mission=_mission(),
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
             human_review=HumanReview(approved=True),
             include_design_assets=True,
         )
@@ -351,7 +361,10 @@ def test_run_with_store_appends_version(fake_pg) -> None:
 
     store = BrandingStore()
     client = store.create_client("Test Client")
-    mission = _mission()
+    mission = make_mission(
+        company_description="A strategic studio helping product teams ship cohesive digital experiences",
+        values=["clarity", "trust", "momentum"],
+    )
     brand = store.create_brand(client.id, mission)
     assert brand is not None
     assert brand.version == 0
@@ -376,7 +389,10 @@ def test_run_phase_stops_at_strategic_core() -> None:
     with _patch_graph_invoke(["phase1_strategic_core"]):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run_phase(
-            mission=_mission(),
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
             phase=BrandPhase.STRATEGIC_CORE,
             human_review=HumanReview(approved=True),
         )
@@ -406,7 +422,10 @@ def test_approved_partial_run_is_not_rollout_ready() -> None:
         with _patch_graph_invoke(phases):
             orchestrator = BrandingTeamOrchestrator()
             result = orchestrator.run_phase(
-                mission=_mission(),
+                mission=make_mission(
+                    company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                    values=["clarity", "trust", "momentum"],
+                ),
                 phase=phase,
                 human_review=HumanReview(approved=True),
             )
@@ -419,7 +438,13 @@ def test_approved_partial_run_is_not_rollout_ready() -> None:
 def test_phase_gates_are_populated() -> None:
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
-        result = orchestrator.run(mission=_mission(), human_review=HumanReview(approved=True))
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
     assert len(result.phase_gates) == 5
     for gate in result.phase_gates:
         assert gate.status.value in ("approved", "not_started", "pending_review", "in_progress")
@@ -429,7 +454,13 @@ def test_phase_absorbed_fields_populated() -> None:
     """Verify sub-team outputs are accessible via their phase-output homes."""
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
-        result = orchestrator.run(mission=_mission(), human_review=HumanReview(approved=True))
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
 
     # Writing guidelines absorbed into narrative_messaging
     assert result.narrative_messaging.writing_guidelines.voice_principles
@@ -463,7 +494,17 @@ def test_gather_integrations_market_research_failure_returns_none() -> None:
         raise RuntimeError("market research down")
 
     with patch("branding_team.adapters.market_research.request_market_research_async", _boom):
-        snapshot, design = asyncio.run(_gather_integrations(_mission(), None, True, False))
+        snapshot, design = asyncio.run(
+            _gather_integrations(
+                make_mission(
+                    company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                    values=["clarity", "trust", "momentum"],
+                ),
+                None,
+                True,
+                False,
+            )
+        )
     assert snapshot is None
     assert design is None
 
