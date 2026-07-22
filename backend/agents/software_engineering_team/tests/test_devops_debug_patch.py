@@ -229,7 +229,7 @@ class TestInfraPatchAgent:
 
 class TestDevOpsPipelineDebugPatchLoop:
     def test_loop_terminates_after_max_iterations(self) -> None:
-        """Execution always fails -> loop must stop at MAX_INFRA_FIX_ITERATIONS."""
+        """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts."""
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
         client = _ScriptedClient(
@@ -300,6 +300,15 @@ class TestDevOpsPipelineDebugPatchLoop:
 
         agent._run_execution_tools = always_fail_exec  # type: ignore[assignment]
 
+        debug_calls = [0]
+        original_debug_run = agent.infra_debug_agent.run
+
+        def counting_debug_run(*args: Any, **kwargs: Any) -> Any:
+            debug_calls[0] += 1
+            return original_debug_run(*args, **kwargs)
+
+        agent.infra_debug_agent.run = counting_debug_run  # type: ignore[method-assign]
+
         from software_engineering_team.devops_team.models import DevOpsTaskSpec
 
         spec = DevOpsTaskSpec(
@@ -321,8 +330,89 @@ class TestDevOpsPipelineDebugPatchLoop:
                 build_verifier=None,
                 write_changes=False,
             )
-        # Loop ran and completed (didn't hang)
         assert result is not None
+        assert debug_calls[0] == 3
+
+    def test_loop_soft_aborts_when_debug_not_fixable(self) -> None:
+        """Unfixable debug result aborts the retry loop after a single attempt."""
+        from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
+
+        client = _ScriptedClient(
+            [
+                {"approved_for_execution": True, "clarification_requests": []},
+                {"artifacts": {"main.tf": "resource {}"}, "summary": "infra"},
+                {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
+                {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
+                {
+                    "errors": [{"error_type": "permissions", "error_message": "denied"}],
+                    "summary": "not fixable",
+                    "fixable": False,
+                },
+                {"approved": True, "summary": "ok", "findings": []},
+                {"approved": True, "summary": "ok"},
+                {"quality_gates": {}, "summary": "ok"},
+                {"files": {}, "summary": "doc ok"},
+            ]
+        )
+
+        agent = DevOpsTeamLeadAgent(llm_client=client)
+
+        def always_fail_exec(repo_str: str, artifacts: Dict[str, str]) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "tool": "terraform",
+                    "command": "validate",
+                    "success": False,
+                    "checks": {"terraform_validate": "fail"},
+                    "findings": ["Access denied"],
+                    "failure_class": "execution",
+                }
+            ]
+
+        agent._run_execution_tools = always_fail_exec  # type: ignore[assignment]
+
+        debug_calls = [0]
+        original_debug_run = agent.infra_debug_agent.run
+
+        def counting_debug_run(*args: Any, **kwargs: Any) -> Any:
+            debug_calls[0] += 1
+            return original_debug_run(*args, **kwargs)
+
+        agent.infra_debug_agent.run = counting_debug_run  # type: ignore[method-assign]
+
+        patch_calls = [0]
+        original_patch_run = agent.infra_patch_agent.run
+
+        def counting_patch_run(*args: Any, **kwargs: Any) -> Any:
+            patch_calls[0] += 1
+            return original_patch_run(*args, **kwargs)
+
+        agent.infra_patch_agent.run = counting_patch_run  # type: ignore[method-assign]
+
+        from software_engineering_team.devops_team.models import DevOpsTaskSpec
+
+        spec = DevOpsTaskSpec(
+            task_id="t1",
+            title="Test",
+            goal={"summary": "test"},
+            platform_scope={"cloud": "on-premises", "environments": ["dev"]},
+            acceptance_criteria=["IaC validates"],
+            constraints={"secrets": {"source": "env"}},
+        )
+
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            result = agent._run_pipeline(
+                repo_path=Path(td),
+                task_spec=spec,
+                build_verifier=None,
+                write_changes=False,
+            )
+        assert result is not None
+        assert debug_calls[0] == 1
+        assert patch_calls[0] == 0
 
     def test_loop_converges_on_fixable_error(self) -> None:
         """Execution fails once, patch fixes it, second execution succeeds."""
