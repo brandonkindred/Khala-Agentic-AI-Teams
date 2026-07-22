@@ -81,7 +81,8 @@ class _FakeCursor:
 
         if norm.startswith("select 1 from branding_clients where id"):
             (client_id,) = params
-            self._last_fetch_one = (1,) if client_id in self._db["clients"] else None
+            # dict_row shape — callers only check presence via ``is not None``.
+            self._last_fetch_one = {"1": 1} if client_id in self._db["clients"] else None
             return
 
         # -- brands -------------------------------------------------------
@@ -120,7 +121,8 @@ class _FakeCursor:
 
         if norm.startswith("select 1 from branding_brands where id"):
             (brand_id,) = params
-            self._last_fetch_one = (1,) if brand_id in self._db["brands"] else None
+            # dict_row shape — callers only check presence via ``is not None``.
+            self._last_fetch_one = {"1": 1} if brand_id in self._db["brands"] else None
             return
 
         if norm.startswith("select client_id, data from branding_brands where id"):
@@ -265,7 +267,8 @@ class _FakeCursor:
 
         if norm.startswith("select 1 from branding_conversations where conversation_id"):
             (cid,) = params
-            self._last_fetch_one = (1,) if cid in self._db["conversations"] else None
+            # dict_row shape — callers only check presence via ``is not None``.
+            self._last_fetch_one = {"1": 1} if cid in self._db["conversations"] else None
             return
 
         if norm.startswith(
@@ -297,7 +300,7 @@ class _FakeCursor:
                     "timestamp": ts2,
                 }
             )
-            self._last_fetch_one = (new_id,)
+            self._last_fetch_one = {"id": new_id}
             self.rowcount = 1
             return
 
@@ -407,7 +410,11 @@ class _FakeCursor:
         if norm.startswith("select brand_id from branding_conversations where conversation_id"):
             (cid,) = params
             conv = self._db["conversations"].get(cid)
-            self._last_fetch_one = (conv["brand_id"] if conv else None,) if conv else None
+            # Match ``dict_row``: a row dict when the conversation exists, else None.
+            if conv is None:
+                self._last_fetch_one = None
+            else:
+                self._last_fetch_one = {"brand_id": conv["brand_id"]}
             return
 
         # -- sessions -----------------------------------------------------
@@ -462,17 +469,9 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
         yield _FakeConn(db, ids)
 
     import branding_team._db as db_mod
-    import branding_team.assistant.store as assistant_store_mod
-    import branding_team.store as store_mod
 
-    # ``BrandingStore`` and ``BrandingConversationStore`` route Postgres access
-    # through ``branding_team._db`` (see ``PostgresHelperMixin``) rather than
-    # importing ``get_conn`` themselves, so only patch those modules when the
-    # attribute is still present (e.g. mid-migration).
-    if hasattr(store_mod, "get_conn"):
-        monkeypatch.setattr(store_mod, "get_conn", _fake_get_conn)
-    if hasattr(assistant_store_mod, "get_conn"):
-        monkeypatch.setattr(assistant_store_mod, "get_conn", _fake_get_conn)
+    # BrandingStore and BrandingConversationStore both use PostgresHelperMixin
+    # from branding_team._db, so patching _db.get_conn covers them.
     monkeypatch.setattr(db_mod, "get_conn", _fake_get_conn)
 
     # ``branding_team.api.state`` imports ``get_conn`` at module scope for the

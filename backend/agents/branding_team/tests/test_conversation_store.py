@@ -144,3 +144,21 @@ def test_get_by_brand_id_loads_non_none_latest_output(fake_pg: dict) -> None:
     assert rcid == cid
     assert latest_output is not None
     assert latest_output.mission_summary == "live"
+
+
+def test_get_conversation_brand_id_dict_row(fake_pg: dict) -> None:
+    """get_conversation_brand_id reads brand_id via dict_row (string key).
+
+    Preconditions:
+        Fake Postgres is installed; conversations may or may not exist / have a brand.
+    Postconditions:
+        Returns the brand id string when set, else None — never raises on row shape.
+    """
+    store = BrandingConversationStore()
+    assert store.get_conversation_brand_id("missing") is None
+
+    unbound = store.create(mission=_mission())
+    assert store.get_conversation_brand_id(unbound) is None
+
+    bound = store.create(brand_id="brand_abc", mission=_mission())
+    assert store.get_conversation_brand_id(bound) == "brand_abc"

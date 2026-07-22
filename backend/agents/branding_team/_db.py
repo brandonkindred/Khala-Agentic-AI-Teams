@@ -2,9 +2,12 @@
 
 Consumed by ``store.py`` (``BrandingStore``) and ``assistant/store.py``
 (``BrandingConversationStore``); ``api/state.py`` still hand-writes its own
-scaffolding (tracked separately). This module reproduces the exact
-``get_conn()`` / ``cursor(row_factory=dict_row)`` semantics those stores
-hand-write in every method, so adopting it is a drop-in replacement.
+scaffolding (tracked separately).
+
+``_fetch_one`` and ``_fetch_all`` use ``dict_row`` cursors (matching the
+stores' former ``cursor(row_factory=dict_row)`` scaffolding). ``_execute``
+uses the default cursor since it only returns ``rowcount``. ``_transaction``
+yields a ``dict_row`` cursor for multi-statement work.
 """
 
 from __future__ import annotations
