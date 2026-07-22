@@ -45,7 +45,7 @@ _ALWAYS_ON_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fen
 
 
 def _fallback_compliance_report(exc: Exception) -> ComplianceReport:
-    """When the LLM cannot return parseable JSON, fail closed with actionable guidance (no crash)."""
+    """When the compliance check cannot complete (JSON parse failure or unexpected error), fail closed with actionable guidance (no crash)."""
     return ComplianceReport(
         status="FAIL",
         violations=[],
