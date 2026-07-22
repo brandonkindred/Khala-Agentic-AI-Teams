@@ -179,6 +179,20 @@ def make_run_deliver(
         feature_branch_name: Optional[str] = None,
         merge_to_development: bool = True,
     ) -> Any:
+        """Create feature branch, write files, commit, merge to development.
+
+        If the Git branch management agent is present, delegate all git operations to it
+        (merge to development when feature_branch_name is set, or create/write/commit/merge
+        when not). When merge_to_development is False, commit the feature branch and leave
+        it unmerged, ready for an external Tech Lead review instead of merging/deleting it.
+
+        Preconditions:
+            ``repo_path`` is a git repo; ``files`` maps relative paths to content.
+        Postconditions:
+            Returns a ``DeliverResult``. Each call builds a fresh ``DeliverGitOps`` from
+            the current attributes on ``git_ns`` and delegates entirely to
+            ``run_deliver_impl``; git side effects run through that ``ops`` bundle.
+        """
         ops = DeliverGitOps(
             abort_merge=git_ns.abort_merge,
             checkout_branch=git_ns.checkout_branch,
