@@ -99,9 +99,9 @@ class BaseTeamLead:
         # tasks in a job), so the N tasks of a job re-read only the files each
         # merge touched instead of re-walking the whole repo N times.
         self._repo_context_caches: Dict[Path, RepoContextCache] = {}
-        # Optional per-run status/progress callback. Subclasses assign this at the
-        # start of run_workflow (and clear it when the run ends); BaseTeamLead does
-        # not accept it via the constructor.
+        # Optional per-run status/progress callback. Subclasses may assign this at
+        # the start of run_workflow (and clear it when the run ends); BaseTeamLead
+        # does not accept it via the constructor. Defaults to None (no-op hook).
         self._status_callback: Optional[Callable[..., None]] = None
 
     def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
