@@ -137,6 +137,12 @@ class BaseTeamLead:
     ) -> Any:
         """Run setup, verify lint/test readiness, then delegate to the development agent.
 
+        Passthrough kwargs (``architecture``, ``spec_content``, review/tool agents,
+        ``build_verifier``, ``job_updater``, ``review_config``, and
+        ``merge_to_development``) are forwarded unchanged to the development agent's
+        ``run_workflow``. ``merge_to_development`` defaults to True; when False,
+        delivery prepares a feature branch for external review instead of merging.
+
         Preconditions:
           - ``repo_path`` is a filesystem path the setup phase can operate on (created
             if missing — matching ``run_setup_impl``).
