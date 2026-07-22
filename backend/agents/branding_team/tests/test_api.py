@@ -672,7 +672,9 @@ def test_attach_conversation_unknown_conversation_404() -> None:
 
 def test_list_clients_pagination_query_params() -> None:
     """GET /clients honors limit/offset and returns non-overlapping pages."""
-    created = {client.post("/clients", json={"name": f"Page Client {i}"}).json()["id"] for i in range(4)}
+    created = {
+        client.post("/clients", json={"name": f"Page Client {i}"}).json()["id"] for i in range(4)
+    }
     first = client.get("/clients", params={"limit": 2, "offset": 0})
     second = client.get("/clients", params={"limit": 2, "offset": 2})
     assert first.status_code == 200 and second.status_code == 200
