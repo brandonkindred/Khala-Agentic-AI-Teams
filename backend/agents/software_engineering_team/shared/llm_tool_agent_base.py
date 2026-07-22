@@ -1,10 +1,10 @@
-"""Dependency-light skeleton shared by the LLM tool-agent base classes.
+"""Dependency-light base shared by the LLM tool-agent classes.
 
-Holds just the ``_agent_factory`` monkeypatch resolver and a bare constructor.
-Deliberately imports nothing from ``code_review_agent`` (or any team-specific
-model/parsing module) so it can be depended on from any team without pulling
-in the code-review engine. Model resolution, LLM invocation, JSON parsing,
-and fallback logic are intentionally out of scope for this skeleton.
+Holds the ``_agent_factory`` monkeypatch resolver and an opt-in, class-attribute
+parameterized model-resolution step. Deliberately imports nothing from
+``code_review_agent`` so it can be depended on from any team without pulling in
+the code-review engine. LLM invocation, JSON parsing, and fallback logic remain
+out of scope here.
 
 Preconditions:
     None beyond standard Python import semantics.
@@ -14,31 +14,69 @@ Postconditions:
     (verified by ``tests/test_llm_tool_agent_base.py``).
 
 Invariants:
-    ``LlmToolAgentBase`` instance state is limited to ``self.llm``.
+    ``LlmToolAgentBase`` always stores ``self.llm``. When ``resolve_models`` is
+    true it also stores ``self._model``, and ``self._model_json`` when
+    ``uses_json_model`` is true.
 """
 
 from __future__ import annotations
 
 import importlib
+from typing import Any, Callable, Optional
 
 
 class LlmToolAgentBase:
-    """Bare constructor plus the shared ``_agent_factory`` resolver.
+    """Bare constructor, shared ``_agent_factory``, and opt-in model resolution.
+
+    Subclasses opt into resolution by setting ``resolve_models = True`` and
+    (when needed) overriding ``response_format``, ``uses_json_model``, and/or
+    ``get_strands_model_fn``.
+
+    Recipes:
+        Review-like — ``resolve_models = True`` (defaults give text mode; set
+        ``uses_json_model = True`` for a second JSON-mode model).
+        Plan/Json-like — ``resolve_models = True``, ``response_format = "json"``,
+        ``get_strands_model_fn = <callable>``.
 
     Preconditions:
-        ``llm``, if provided, is whatever the concrete subclass's model
-        resolution expects (this base does not inspect it).
+        ``llm``, if provided, is whatever ``resolve_strands_model`` accepts
+        (Strands ``Model``, ``LLMClient``, or ``None``).
 
     Postconditions:
-        ``self.llm`` holds the value passed to the constructor (``None`` by
-        default).
+        ``self.llm`` holds the constructor argument. If ``resolve_models`` is
+        true, ``self._model`` is set; if ``uses_json_model`` is also true,
+        ``self._model_json`` is set.
 
     Invariants:
-        No other instance state is introduced by this class.
+        Resolution runs only when ``resolve_models`` is true. The
+        ``get_strands_model_fn`` kwarg is forwarded only when the class attr
+        is not ``None``.
     """
+
+    resolve_models: bool = False
+    response_format: str = "text"
+    uses_json_model: bool = False
+    get_strands_model_fn: Optional[Callable[..., Any]] = None
 
     def __init__(self, llm=None) -> None:
         self.llm = llm
+        if not self.resolve_models:
+            return
+
+        from llm_service.strands_model import resolve_strands_model
+
+        get_strands_model_fn = type(self).get_strands_model_fn
+        resolve_kwargs: dict[str, Any] = {"response_format": self.response_format}
+        if get_strands_model_fn is not None:
+            resolve_kwargs["get_strands_model_fn"] = get_strands_model_fn
+
+        self._model = resolve_strands_model(llm, **resolve_kwargs)
+
+        if self.uses_json_model:
+            json_kwargs: dict[str, Any] = {"response_format": "json"}
+            if get_strands_model_fn is not None:
+                json_kwargs["get_strands_model_fn"] = get_strands_model_fn
+            self._model_json = resolve_strands_model(llm, **json_kwargs)
 
     def _agent_factory(self):
         """Resolve ``Agent`` from the concrete subclass's defining module.

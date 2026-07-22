@@ -255,7 +255,7 @@ class _PersistentDict:
         self._client.delete_job(key)
         return job.get("data", job)
 
-    def values(self) -> list:
+    def values(self) -> List[Any]:
         jobs = self._client.list_jobs() or []
         return [j.get("data", j) for j in jobs]
 
@@ -843,7 +843,7 @@ def _run_backtest_background(
     strategy: StrategySpec,
     config: BacktestConfig,
     submitted_by: str,
-    notes: Optional[str],
+    notes: List[str],
 ) -> None:
     try:
         if _bt_is_job_cancelled(job_id):
@@ -892,8 +892,8 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
     Returns `{job_id, status}` immediately; poll
     `GET /backtests/status/{job_id}` for the completed ``RunBacktestResponse``
     in the ``result`` field. Strategies with generated ``strategy_code`` run
-    in a sandbox (the normal Strategy Lab path); legacy code-less strategies
-    fall back to LLM-driven bar-by-bar evaluation.
+    in a sandbox (the normal Strategy Lab path); strategies without
+    ``strategy_code`` are rejected with a 422.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -4184,12 +4184,14 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
 
 @app.on_event("startup")
 def _recover_orphaned_paper_trading_sessions() -> None:
-    """Mark sessions left in ``running`` status by a previous process as ``failed``.
+    """Mark sessions left in an active status by a previous process as ``failed``.
+
+    Active statuses covered: ``RUNNING``, ``OPENING``, ``WARMING_UP``, or ``LIVE``.
 
     The paper-trade worker runs in a non-daemon thread so graceful shutdowns wait
     for it, but SIGKILL/crashes can still orphan a session. Without this recovery
-    pass, such sessions would sit in ``running`` forever and clients would poll
-    indefinitely with no terminal transition.
+    pass, such sessions would sit in an active status forever and clients would
+    poll indefinitely with no terminal transition.
     """
     try:
         with _lock:

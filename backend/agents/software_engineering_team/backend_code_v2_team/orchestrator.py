@@ -17,10 +17,7 @@ from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.team_lead_base import (
-    BaseTeamLead,
-    copy_development_result_fields,
-)
+from software_engineering_team.shared.team_lead_base import BaseTeamLead
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
@@ -28,7 +25,6 @@ from .models import (
     BackendCodeV2WorkflowResult,
     MicrotaskReviewConfig,
     MicrotaskReviewFailedError,
-    MicrotaskStatus,
     Phase,
     ToolAgentKind,
 )
@@ -94,13 +90,17 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
-    ``_run_preflight`` / ``_run_planning_and_branch_setup`` from
-    :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
-    repo-briefing sets, progress callback, and the integration-only ``run_workflow``,
-    which calls the base class's ``_run_preflight`` and
-    ``_run_planning_and_branch_setup`` for its branch-checkout/tooling-verification
-    and planning/feature-branch-creation steps respectively.
+    ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
+    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
+    ``_run_deliver_and_finalize`` from :class:`BaseV2DevelopmentAgent`; supplies
+    the backend tooling detection, repo-briefing sets, progress callback, and
+    the integration-only ``run_workflow``, which calls the base helpers for
+    preflight, planning/branch setup, bookkeeping, documentation, and
+    deliver/finalize.
     """
+
+    _TEAM_LABEL = "Backend"
+    _DELIVER_IN_PROGRESS_STATUS = "Committing changes and preparing delivery"
 
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = _BACKEND_REPO_BRIEFING_MAX_CHARS) -> str:
@@ -315,111 +315,57 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             result.failure_reason = "Execution produced no files."
             return result
 
-        completed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.COMPLETED
+        completed_count, failed_count = self._record_execution_bookkeeping(
+            task_id=task_id,
+            result=result,
+            exec_result=exec_result,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            git_agent=git_agent,
+            logger=logger,
         )
-        failed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.REVIEW_FAILED
-        )
-        result.iterations_used = completed_count
-
-        if (
-            feature_branch_name
-            and git_agent is not None
-            and hasattr(git_agent, "commit_current_changes")
-        ):
-            try:
-                git_agent.commit_current_changes(
-                    repo_path, f"feat: {completed_count} microtasks completed"
-                )
-            except Exception as exc:
-                logger.warning("[%s] Git agent commit_current_changes raised: %s", task_id, exc)
 
         result.final_files = current_files
 
         # ── Phase: Documentation ────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
-        result.current_phase = Phase.DOCUMENTATION
-        _update_job(
-            current_phase="documentation",
-            progress=80,
+        from .phases.documentation import run_documentation_phase
+
+        current_files = self._run_documentation_phase(
+            task_id=task_id,
+            task=task,
+            repo_path=repo_path,
+            llm=self.llm,
+            exec_result=exec_result,
+            planning_result=planning_result,
+            tool_agents=tool_agents,
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=run_documentation_phase,
+            update_job=_update_job,
+            logger=logger,
             status_text="Generating documentation and API specs",
         )
 
-        from .phases.documentation import run_documentation_phase
-
-        try:
-            doc_result = run_documentation_phase(
-                llm=self.llm,
-                task=task,
-                repo_path=repo_path,
-                execution_result=exec_result,
-                planning_result=planning_result,
-                tool_agents=tool_agents,
-            )
-            result.documentation_result = doc_result
-            if doc_result.files:
-                current_files.update(doc_result.files)
-                result.final_files = current_files
-            logger.info("[%s] Documentation phase complete: %s", task_id, doc_result.summary)
-        except Exception as exc:
-            logger.warning(
-                "[%s] Documentation phase failed: %s. Next step -> Continuing to Deliver phase",
-                task_id,
-                exc,
-            )
-
         # ── Phase: Deliver ───────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
-        result.current_phase = Phase.DELIVER
-        _update_job(
-            current_phase="deliver",
-            progress=90,
-            status_text="Committing changes and preparing delivery",
-        )
-
-        try:
-            deliver_result = run_deliver(
-                task_id=task_id,
-                repo_path=repo_path,
-                files=current_files,
-                summary=exec_result.summary,
-                task_title=task.title or "",
-                tool_agents=tool_agents,
-                task_description=task.description or "",
-                feature_branch_name=feature_branch_name,
-                merge_to_development=merge_to_development,
-            )
-            result.deliver_result = deliver_result
-            delivered = (
-                deliver_result.merged if merge_to_development else deliver_result.branch_ready
-            )
-            result.success = delivered and failed_count == 0
-            result.summary = f"{exec_result.summary} {deliver_result.summary}"
-            if failed_count > 0:
-                result.needs_followup = True
-                result.summary += f" ({failed_count} microtask(s) failed review)"
-        except Exception as exc:
-            result.failure_reason = f"Deliver failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-
-        elapsed = time.monotonic() - start_time
-        final_status = (
-            "Backend task complete" if result.success else "Backend task completed with issues"
-        )
-        _update_job(
-            current_phase="deliver",
-            progress=100 if result.success else 95,
-            status_text=final_status,
-        )
-        logger.info(
-            "[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
-            task_id,
-            "SUCCEEDED" if result.success else "PARTIAL",
-            elapsed,
-            completed_count,
-            failed_count,
+        self._run_deliver_and_finalize(
+            task_id=task_id,
+            repo_path=repo_path,
+            current_files=current_files,
+            exec_summary=exec_result.summary,
+            task_title=task.title or "",
+            task_description=task.description or "",
+            tool_agents=tool_agents,
+            feature_branch_name=feature_branch_name,
+            merge_to_development=merge_to_development,
+            failed_count=failed_count,
+            completed_count=completed_count,
+            start_time=start_time,
+            result=result,
+            run_deliver=run_deliver,
+            update_job=_update_job,
+            logger=logger,
+            team_label=self._TEAM_LABEL,
+            deliver_in_progress_status=self._DELIVER_IN_PROGRESS_STATUS,
         )
         return result
 
@@ -455,73 +401,17 @@ class BackendCodeV2TeamLead(BaseTeamLead):
         review_config: Optional[MicrotaskReviewConfig] = None,
         merge_to_development: bool = True,
     ) -> BackendCodeV2WorkflowResult:
-        """
-        Run setup, verify lint/test readiness, then execute the backend 5-phase workflow.
+        """Run setup, verify lint/test readiness, then execute the backend 5-phase workflow.
 
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.
         """
-        task_id = task.id
-        result = BackendCodeV2WorkflowResult(task_id=task_id)
-
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as exc:
-                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
-
-        # ── Setup phase (Backend Tech Lead) ─────────────────────────────
-        result.current_phase = Phase.SETUP
-        _update_job(
-            current_phase="setup",
-            progress=2,
-            status_text="Setting up repository and development environment",
-        )
-        try:
-            setup_result = run_setup(repo_path=repo_path, task_title=task.title or "")
-            result.setup_result = setup_result
-        except Exception as exc:
-            result.failure_reason = f"Setup failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-        _update_job(current_phase="setup", progress=3, status_text="Repository setup complete")
-
-        # ── Verify linting and testing are configured ─────────────────
-        if not getattr(setup_result, "linting_configured", False):
-            logger.warning(
-                "[%s] Linting not configured after setup — coding cannot proceed without linting",
-                task_id,
-            )
-            result.failure_reason = (
-                "Setup completed but linting is not configured. "
-                "Linting must be set up before any coding tasks can begin."
-            )
-            return result
-
-        if not getattr(setup_result, "testing_configured", False):
-            logger.warning(
-                "[%s] Testing not configured after setup — coding cannot proceed without testing",
-                task_id,
-            )
-            result.failure_reason = (
-                "Setup completed but testing is not configured. "
-                "Testing must be set up before any coding tasks can begin."
-            )
-            return result
-
-        logger.info("[%s] Linting and testing verified — proceeding to coding phase", task_id)
-        _update_job(
-            current_phase="setup",
-            progress=5,
-            status_text="Linting and testing verified; ready for development",
-        )
-
-        # ── Delegate to Backend Development Agent ──────────────────────
-        dev_agent = BackendDevelopmentAgent(self.llm)
-        inner = dev_agent.run_workflow(
+        return self._run_setup_and_delegate(
             repo_path=repo_path,
             task=task,
+            result_cls=BackendCodeV2WorkflowResult,
+            run_setup_fn=run_setup,
+            development_agent_cls=BackendDevelopmentAgent,
             architecture=architecture,
             spec_content=spec_content,
             qa_agent=qa_agent,
@@ -533,7 +423,4 @@ class BackendCodeV2TeamLead(BaseTeamLead):
             job_updater=job_updater,
             review_config=review_config,
             merge_to_development=merge_to_development,
-            repo_context_cache=self._repo_context_cache_for(repo_path),
         )
-        copy_development_result_fields(result, inner)
-        return result
