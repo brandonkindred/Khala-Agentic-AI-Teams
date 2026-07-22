@@ -1,5 +1,7 @@
 """Tests for the blog fact-check agent."""
 
+import json
+
 import pytest
 from agents.blogging.blog_fact_check_agent import BlogFactCheckAgent
 
@@ -33,6 +35,24 @@ def test_fact_check_with_work_dir(tmp_path):
     report = agent.run("Test draft.", work_dir=tmp_path)
     assert report.claims_status in ("PASS", "FAIL")
     assert (tmp_path / "fact_check_report.json").exists()
+
+
+def test_fact_check_on_llm_request_callback(monkeypatch) -> None:
+    """on_llm_request callback is invoked before the LLM call."""
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"claims_status": "PASS", "risk_status": "PASS"})
+
+    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    seen: list[str] = []
+    agent = BlogFactCheckAgent(llm_client=object())
+    agent.run("Some draft.", on_llm_request=lambda msg: seen.append(msg))
+    assert seen == ["Checking facts and claims..."]
 
 
 @pytest.mark.parametrize("kind", ["rate_limit", "temporary"])

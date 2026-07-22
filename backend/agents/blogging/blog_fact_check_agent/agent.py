@@ -23,12 +23,12 @@ from .prompts import FACT_CHECK_PROMPT
 
 try:
     from agents.blogging.shared.artifacts import write_artifact
-except ImportError:
+except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared modules; not exercised because conftest guarantees the import path resolves.
     write_artifact = None
 
 try:
     from agents.blogging.shared.errors import FactCheckError, LLMError
-except ImportError:
+except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared.errors; not exercised because conftest guarantees the import path resolves.
 
     class FactCheckError(Exception):
         pass
@@ -180,7 +180,7 @@ def run_fact_check_from_work_dir(
     """Run fact-check using artifacts from work_dir."""
     try:
         from agents.blogging.shared.artifacts import read_artifact
-    except ImportError:
+    except ImportError:  # pragma: no cover - defensive ImportError fallback; not exercised because conftest guarantees the import path resolves.
         raise ImportError("shared.artifacts required")
 
     draft = read_artifact(work_dir, draft_artifact, default="")
