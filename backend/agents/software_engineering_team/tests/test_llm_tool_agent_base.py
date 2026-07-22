@@ -341,3 +341,53 @@ def test_fallback_empty_parse_empty_recommendations_sequence_uses_class_attr():
     payload = agent._fallback_empty_parse(recommendations=[])
 
     assert payload.recommendations == ["empty-rec"]
+
+
+def test_call_with_single_fallback_default_log_label(caplog):
+    import logging
+
+    agent = _FallbackAgent()
+
+    with caplog.at_level(logging.WARNING):
+        status, payload = agent._call_with_single_fallback(
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+    assert status == "error"
+    assert payload.tier == "call_error"
+    assert any(_FallbackAgent.__name__ in r.message and "boom" in r.message for r in caplog.records)
+
+
+def test_call_partial_tolerant_default_log_label(caplog):
+    import logging
+
+    agent = _FallbackAgent()
+
+    with caplog.at_level(logging.WARNING):
+        results = agent._call_partial_tolerant(
+            ["bad"],
+            lambda _item: (_ for _ in ()).throw(ValueError("nope")),
+        )
+
+    assert results == []
+    assert any(_FallbackAgent.__name__ in r.message and "nope" in r.message for r in caplog.records)
+
+
+def test_fallback_empty_parse_preserves_falsy_summary_when_override_is_none():
+    class EmptyOverrideNone(LlmToolAgentBase):
+        default_summary = ""
+        empty_summary_override = None
+
+    payload = EmptyOverrideNone()._fallback_empty_parse(summary="")
+
+    assert payload.tier == "empty_parse"
+    assert payload.summary == ""
+
+
+def test_fallback_empty_parse_empty_class_recommendations_when_missing():
+    class NoEmptyRecs(LlmToolAgentBase):
+        empty_recommendations = []
+
+    payload = NoEmptyRecs()._fallback_empty_parse()
+
+    assert payload.recommendations == []
