@@ -630,6 +630,64 @@ def test_run_gated_phases_treats_falsy_non_none_payload_as_failure(payload):
     assert calls == ["falsy"]
 
 
+def test_run_phase_gates_all_succeed_returns_none():
+    lead = _make_lead()
+    calls: list[str] = []
+
+    def gate_a():
+        calls.append("a")
+        return None
+
+    def gate_b():
+        calls.append("b")
+        return None
+
+    def gate_c():
+        calls.append("c")
+        return None
+
+    result = lead._run_phase_gates([gate_a, gate_b, gate_c])
+    assert result is None
+    assert calls == ["a", "b", "c"]
+
+
+def test_run_phase_gates_early_exit_skips_later_gates():
+    lead = _make_lead()
+    calls: list[str] = []
+    failure = object()
+
+    def gate_ok():
+        calls.append("ok")
+        return None
+
+    def gate_fail():
+        calls.append("fail")
+        return failure
+
+    def gate_never():
+        calls.append("never")
+        return None
+
+    result = lead._run_phase_gates([gate_ok, gate_fail, gate_never])
+    assert result is failure
+    assert calls == ["ok", "fail"]
+
+
+def test_run_phase_gates_empty_sequence_returns_none():
+    lead = _make_lead()
+    assert lead._run_phase_gates([]) is None
+
+
+def test_run_phase_gates_propagates_gate_exceptions():
+    lead = _make_lead()
+
+    def boom():
+        raise RuntimeError("gate exploded")
+
+    with pytest.raises(RuntimeError, match="gate exploded"):
+        lead._run_phase_gates([boom])
+
+
 def test_bounded_retry_loop_success_on_first_attempt():
     lead = _make_lead()
     calls: list[int] = []

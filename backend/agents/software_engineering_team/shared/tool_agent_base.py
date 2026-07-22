@@ -21,21 +21,22 @@ differing values as class attributes.
 Two behaviors are load-bearing and must be preserved by every subclass:
 
 * The concrete ``agent.py`` keeps a top-level ``from strands import Agent`` so
-  tests can ``monkeypatch.setattr(<agent_module>, "Agent", ...)``. The base
-  resolves ``Agent`` from the *subclass* module (:meth:`_agent_factory`) so the
-  patch is honored.
-* ``__init__`` resolves the LLM model(s) via ``resolve_strands_model`` imported
-  *inside* the method, so tests that monkeypatch the resolver are honored.
+  tests can ``monkeypatch.setattr(<agent_module>, "Agent", ...)``. ``Agent`` is
+  resolved from the *subclass* module via :meth:`LlmToolAgentBase._agent_factory`
+  (inherited) so the patch is honored.
+* Model resolution is opted in via :class:`~software_engineering_team.shared.llm_tool_agent_base.LlmToolAgentBase`
+  (``resolve_models = True``), which lazy-imports
+  ``llm_service.strands_model.resolve_strands_model``.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
+from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 from software_engineering_team.shared.v2_models import (
     ReviewIssue,
     ToolAgentOutput,
@@ -114,14 +115,26 @@ def lenient_json_object(
         return {}
 
 
-class BaseReviewToolAgent:
+class BaseReviewToolAgent(LlmToolAgentBase):
     """Template for the review + single-issue-fix tool agents.
+
+    Inherits :class:`~software_engineering_team.shared.llm_tool_agent_base.LlmToolAgentBase`
+    for model resolution, LLM invocation, and the ``Agent`` factory. When
+    :attr:`resolve_models` / :attr:`use_run_strands_agent` are set (Review
+    recipe), those behaviors come from the shared base.
 
     Invariants: instance state is limited to ``_model`` (always),
     ``_model_json`` (when :attr:`uses_json_model`), and ``llm`` — so tests that
     build instances via ``__new__`` and set those attributes behave identically
     to constructed instances.
     """
+
+    # --- LlmToolAgentBase Review recipe ---------------------------------
+    resolve_models: bool = True
+    response_format: str = "text"
+    use_run_strands_agent: bool = True
+    json_parse_strategy: str = "lenient"
+    # review_parse_mode / uses_json_model already declared below as "text" / False
 
     # --- Labels (subclasses override) ------------------------------------
     name: str = "Tool"  # used for deliver, problem_solve, and "<name> review"
@@ -183,14 +196,6 @@ class BaseReviewToolAgent:
     _parse_review: Optional[Callable[[str], Dict[str, Any]]] = None
     _parse_single_issue: Optional[Callable[[str], Dict[str, Any]]] = None
 
-    def __init__(self, llm=None) -> None:
-        from software_engineering_team.shared.strands_model import resolve_strands_model
-
-        self._model = resolve_strands_model(llm, response_format="text")
-        if self.uses_json_model:
-            self._model_json = resolve_strands_model(llm, response_format="json")
-        self.llm = llm  # kept for backward compat checks
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -199,19 +204,19 @@ class BaseReviewToolAgent:
         """Logger named for the concrete subclass module (faithful warnings)."""
         return logging.getLogger(type(self).__module__)
 
-    def _agent_factory(self):
-        """Resolve ``Agent`` from the concrete subclass's defining module.
-
-        This is what lets ``monkeypatch.setattr(<agent_module>, "Agent", ...)``
-        intercept LLM calls made from this shared base.
-        """
-        mod = importlib.import_module(type(self).__module__)
-        return getattr(mod, "Agent")
-
     def _run_agent(self, model, prompt: str) -> str:
-        from software_engineering_team.shared.strands_model import run_strands_agent
+        """Invoke the LLM via the shared base path (``run_strands_agent``).
 
-        return run_strands_agent(self._agent_factory(), model, prompt)
+        Kept as a named alias so intermediates (e.g. documentation tool agents)
+        that call ``_run_agent`` keep working without edits.
+
+        Preconditions:
+            ``use_run_strands_agent`` is True on this class (Review recipe).
+
+        Postconditions:
+            Returns the stripped string from ``_invoke_llm``.
+        """
+        return self._invoke_llm(model, prompt)
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
         return "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:20])[
@@ -331,7 +336,7 @@ class BaseReviewToolAgent:
         if self.review_via_engine:
             return self._engine_review(inp)
         review_label = f"{self.name} review"
-        if not self._model:
+        if self._fallback_no_model(self._model) is not None:
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no LLM).")
         code_text = self._build_code_text(inp.current_files)
         if not code_text.strip():
@@ -341,22 +346,18 @@ class BaseReviewToolAgent:
             code=code_text,
         )
         model = getattr(self, self.review_model_attr)
-        try:
-            raw = self._run_agent(model, prompt)
-        except Exception as e:
-            self._logger.warning("%s LLM call failed: %s", review_label, e)
+        status, result = self._call_with_single_fallback(
+            lambda: self._invoke_llm(model, prompt),
+            log_label=review_label,
+        )
+        if status == "error":
             return ToolAgentPhaseOutput(summary=f"{review_label} failed (LLM error).")
-        if self.review_parse_mode == "json":
-            data = lenient_json_object(
-                raw,
-                logger=self._logger,
-                context=review_label,
-                on_fail_msg="reporting 0 issues.",
-            )
-        else:
-            data = self._parse_review(raw)
+        raw = result
+        self.parse_context = review_label
+        self.parse_on_fail_msg = "reporting 0 issues."
+        data = self._parse_llm_json(raw)
         issues: List[ReviewIssue] = []
-        for item in data.get("issues") or []:
+        for item in (data or {}).get("issues") or []:
             if isinstance(item, dict):
                 issues.append(
                     ReviewIssue(
