@@ -437,6 +437,20 @@ def test_report_status_swallows_callback_errors():
     lead._report_status("phase4", detail="review")  # must not raise
 
 
+def test_report_status_logs_callback_errors(monkeypatch):
+    import software_engineering_team.shared.team_lead_base as team_lead_base
+
+    mock_warning = MagicMock()
+    monkeypatch.setattr(team_lead_base.logger, "warning", mock_warning)
+    lead = _make_lead()
+    lead._status_callback = lambda **_k: (_ for _ in ()).throw(RuntimeError("callback exploded"))
+    lead._report_status("phase4", detail="review")
+    assert mock_warning.called
+    logged = " ".join(str(arg) for call in mock_warning.call_args_list for arg in call[0])
+    assert "team lead status callback failed" in logged
+    assert "callback exploded" in logged
+
+
 def test_report_status_rejects_empty_phase():
     lead = _make_lead()
     with pytest.raises(AssertionError):

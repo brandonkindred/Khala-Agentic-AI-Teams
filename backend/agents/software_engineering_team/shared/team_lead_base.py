@@ -239,7 +239,10 @@ class BaseTeamLead(TeamLeadSharedState):
             ``failure_reason`` set and without calling the development agent.
           - On success: ``repo_path`` is a directory; returns the team-lead result with
             ``setup_result`` preserved and the 13 development-handoff fields copied from
-            the inner agent result.
+            the inner agent result. The development agent also receives
+            ``repo_context_cache`` from ``self._repo_context_cache_for(repo_path)``, so
+            subsequent tasks on the same resolved repo reuse the incremental briefing
+            cache instead of re-walking the tree.
           - Progress 2/3/5 ``job_updater`` calls include the canonical ``status_text``
             strings when ``job_updater`` is provided; updater exceptions are logged
             at DEBUG and do not abort the workflow.
