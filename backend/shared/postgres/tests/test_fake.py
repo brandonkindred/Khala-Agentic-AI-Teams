@@ -139,3 +139,51 @@ def test_install_fake_postgres_patches_get_conn(monkeypatch):
 
     assert db is not None
     assert db["notes"][0]["text"] == "hello"
+
+
+def test_install_fake_postgres_patches_modules(monkeypatch):
+    class StoreMod:
+        get_conn = object()
+
+    class OtherMod:
+        get_conn = object()
+
+    store = StoreMod()
+    other = OtherMod()
+    db = install_fake_postgres(
+        monkeypatch,
+        modules=[store, other],
+        dispatch=_sample_dispatch(),
+        db={"items": {}},
+    )
+    assert db == {"items": {}}
+
+    with store.get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO items VALUES (%s, %s)",
+            ("x", {"z": 9}),
+        )
+        assert cur.rowcount == 1
+
+    with other.get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT payload FROM items WHERE id = %s", ("x",))
+        assert cur.fetchone() == {"payload": {"z": 9}}
+
+
+def test_install_uses_default_empty_db(monkeypatch):
+    class Mod:
+        get_conn = None
+
+    mod = Mod()
+    db = install_fake_postgres(monkeypatch, modules=[mod], dispatch=_sample_dispatch())
+    assert db == {}
+    with mod.get_conn() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO items VALUES (%s, %s)", ("k", {"v": 1}))
+    assert db["items"]["k"] == {"v": 1}
+
+
+def test_cursor_preserves_row_factory():
+    conn = FakeConn({}, _sample_dispatch())
+    sentinel = object()
+    cur = conn.cursor(row_factory=sentinel)
+    assert cur.row_factory is sentinel
