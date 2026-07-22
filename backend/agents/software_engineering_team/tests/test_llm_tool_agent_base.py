@@ -256,9 +256,7 @@ def test_invoke_llm_inline_path_does_not_call_run_strands_agent(monkeypatch):
         wrapper_calls.append((agent_factory, model, prompt))
         return "from-wrapper"
 
-    monkeypatch.setattr(
-        "llm_service.strands_model.run_strands_agent", fake_run_strands_agent
-    )
+    monkeypatch.setattr("llm_service.strands_model.run_strands_agent", fake_run_strands_agent)
 
     class _FakeAgent:
         def __init__(self, *, model):
@@ -288,17 +286,13 @@ def test_invoke_llm_wrapped_path_delegates_to_run_strands_agent(monkeypatch):
         wrapper_calls.append((agent_factory, model, prompt))
         return "wrapped-result"
 
-    monkeypatch.setattr(
-        "llm_service.strands_model.run_strands_agent", fake_run_strands_agent
-    )
+    monkeypatch.setattr("llm_service.strands_model.run_strands_agent", fake_run_strands_agent)
 
     class WrappedLike(LlmToolAgentBase):
         use_run_strands_agent = True
 
     agent = WrappedLike()
-    monkeypatch.setattr(
-        type(agent), "_agent_factory", lambda self: sentinel_factory
-    )
+    monkeypatch.setattr(type(agent), "_agent_factory", lambda self: sentinel_factory)
 
     model = object()
     result = agent._invoke_llm(model, "the prompt")
