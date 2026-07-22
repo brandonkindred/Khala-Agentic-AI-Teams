@@ -1101,3 +1101,75 @@ def test_fe_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
         and "security agent exploded" in i.description
         for i in result.issues
     )
+
+
+def test_fe_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path):
+    """Successful build + empty LLM review → passed with no issues."""
+    from software_engineering_team.frontend_code_v2_team.models import Microtask
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        run_code_review_phase,
+    )
+
+    monkeypatch.setattr(
+        review_mod,
+        "_run_llm_review",
+        lambda **_kw: MagicMock(issues=[], raw_issue_count=0),
+    )
+
+    result = run_code_review_phase(
+        llm=MagicMock(),
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        repo_path=tmp_path,
+        files={"x.ts": "code"},
+        build_verifier=lambda *_a, **_k: (True, "ok"),
+    )
+
+    assert result.passed is True
+    assert result.phase_name == "code_review"
+    assert result.issues == []
+
+
+def test_fe_run_qa_testing_phase_passes_when_clean(monkeypatch):
+    """Successful QA agent with no findings → passed with no issues."""
+    from software_engineering_team.frontend_code_v2_team.models import Microtask
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        run_qa_testing_phase,
+    )
+
+    monkeypatch.setattr(review_mod, "_run_qa_agent", lambda **_kw: [])
+
+    result = run_qa_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.ts": "code"},
+        qa_agent=MagicMock(),
+    )
+
+    assert result.passed is True
+    assert result.phase_name == "qa"
+    assert result.issues == []
+
+
+def test_fe_run_security_testing_phase_passes_when_clean(monkeypatch):
+    """Successful security agent with no findings → passed with no issues."""
+    from software_engineering_team.frontend_code_v2_team.models import Microtask
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        run_security_testing_phase,
+    )
+
+    monkeypatch.setattr(review_mod, "_run_security_agent", lambda **_kw: [])
+
+    result = run_security_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.ts": "code"},
+        security_agent=MagicMock(),
+    )
+
+    assert result.passed is True
+    assert result.phase_name == "security"
+    assert result.issues == []

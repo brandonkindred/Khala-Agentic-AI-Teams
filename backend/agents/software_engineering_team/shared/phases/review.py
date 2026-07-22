@@ -242,6 +242,9 @@ def _run_agent_testing_phase(
     outright ``agent_runner`` failure never propagates: it is reported as a
     synthetic issue at ``spec.missing_severity`` instead, mirroring
     ``_qa_review_step``/``_security_review_step``'s identical containment.
+    An outright tool-agent ``.review()`` failure is contained to a logged
+    warning only — no synthetic issue is added, so the phase may still pass
+    when the tool agent is the only source of findings.
     """
     task_id = task.id
     microtask_id = microtask.id

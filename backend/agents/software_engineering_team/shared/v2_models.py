@@ -100,9 +100,8 @@ class PhaseReviewResult(BaseModel):
     raw_issue_count: Optional[int] = Field(
         default=None,
         description=(
-            "Number of code-review issues the LLM fallback found before grounding "
-            "filtered any out; None when the LLM fallback never ran (e.g. the external "
-            "code_review_agent succeeded) or reported no count."
+            "Number of issues found by the LLM fallback before grounding filtered "
+            "any out; None when the LLM fallback never ran or reported no count."
         ),
     )
 
