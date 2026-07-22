@@ -200,7 +200,7 @@ class _AgentTestingPhaseSpec:
     phase_label: str  # e.g. "QA testing" -> "<label> phase for <id>"
     next_step: str  # logged "Next step -> <...>"
     detail_run_msg: str
-    tool_kind: Any  # string enum value, e.g. "testing_qa" / "security"
+    tool_kind: str  # enum value, e.g. "testing_qa" / "security"
     tool_detail_msg: str
     tool_label: str  # used in the "<label> tool agent review failed" warning
     missing_agent_label: str  # e.g. "QA agent"
