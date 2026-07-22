@@ -222,6 +222,9 @@ def run_review(
     the external QA/security/build runners are injected as module-level callables
     so this module stays the test patch surface for ``Agent`` /
     ``resolve_text_mode_strands_model`` / ``_run_qa_agent`` / ``_run_security_agent``.
+
+    Preconditions: ``execution_result`` exposes ``.files``.
+    Postconditions: see the shared ``run_review``.
     """
     return _shared_run_review(
         config=REVIEW_CONFIG,

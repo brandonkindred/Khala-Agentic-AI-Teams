@@ -259,12 +259,24 @@ def run_microtask_review(
     language: str = "python",
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
+    cache: Optional[AgentReviewCache] = None,
 ) -> ReviewResult:
     """Run full review on a single microtask's output files.
 
     Thin wrapper over
     :func:`software_engineering_team.shared.v2_review.run_microtask_review`; see
     :func:`run_review` for the injection rationale.
+
+    Preconditions:
+        - ``microtask`` exposes ``.id``/``.title``/``.description``.
+        - ``cache``: see ``software_engineering_team.shared.agent_review``;
+          forwarded to the QA/security steps only.
+
+    Postconditions:
+        - Delegates to ``_shared_run_microtask_review``, which forwards
+          ``review_context`` into the code-review step's ``CodeReviewInput``
+          (``None`` when omitted, so existing callers are unaffected). See the
+          shared function for the full review-result contract.
     """
     return _shared_run_microtask_review(
         config=REVIEW_CONFIG,
@@ -287,6 +299,7 @@ def run_microtask_review(
         build_verify_fn=_run_build_verification,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
+        agent_review_cache=cache,
     )
 
 

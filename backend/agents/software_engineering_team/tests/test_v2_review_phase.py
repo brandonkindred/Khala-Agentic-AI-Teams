@@ -1225,3 +1225,38 @@ def test_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
         and "security agent exploded" in i.description
         for i in result.issues
     )
+
+
+def test_run_microtask_review_forwards_cache(monkeypatch, tmp_path: Path):
+    """Optional ``cache`` reaches the QA step via ``agent_review_cache`` (parity with FE)."""
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import run_microtask_review
+    from software_engineering_team.shared.agent_review import AgentReviewCache
+
+    seen: dict = {}
+
+    def _qa(**kw):
+        seen["cache"] = kw.get("cache")
+        return []
+
+    monkeypatch.setattr(review_mod, "_run_qa_agent", _qa)
+    monkeypatch.setattr(review_mod, "_run_security_agent", lambda **_kw: [])
+    monkeypatch.setattr(
+        review_mod,
+        "_run_llm_review",
+        lambda **_kw: MagicMock(issues=[], raw_issue_count=0),
+    )
+
+    cache = AgentReviewCache()
+    run_microtask_review(
+        llm=MagicMock(),
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        qa_agent=MagicMock(),
+        cache=cache,
+    )
+
+    assert seen["cache"] is cache
