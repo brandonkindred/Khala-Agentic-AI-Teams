@@ -86,3 +86,61 @@ def test_run_compliance_from_work_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_mod, "Agent", _Agent)
     report = run_compliance_from_work_dir(tmp_path, llm_client=object())
     assert report.status in ("PASS", "FAIL")
+
+
+def test_compliance_on_llm_request_callback(monkeypatch, brand_spec_prompt) -> None:
+    """on_llm_request callback is invoked before the LLM call."""
+    from agents.blogging.blog_compliance_agent import agent as comp_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return '{"status": "PASS", "violations": [], "required_fixes": [], "notes": "ok"}'
+
+    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    seen: list[str] = []
+    agent = BlogComplianceAgent(llm_client=object())
+    agent.run("draft", brand_spec_prompt, on_llm_request=lambda msg: seen.append(msg))
+    assert seen == ["Checking compliance with brand guidelines..."]
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_compliance_transient_error_reraises(monkeypatch, brand_spec_prompt, kind) -> None:
+    """Transient LLM-transport errors re-raise unwrapped (delegated to Temporal)."""
+    from agents.blogging.blog_compliance_agent import agent as comp_mod
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise err_cls("transient outage")
+
+    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    agent = BlogComplianceAgent(llm_client=object())
+    with pytest.raises(err_cls):
+        agent.run("draft", brand_spec_prompt)
+
+
+def test_compliance_exhausted_json_fallback(monkeypatch, brand_spec_prompt, tmp_path) -> None:
+    """Repeated invalid JSON yields a FAIL fallback report and writes the artifact."""
+    from agents.blogging.blog_compliance_agent import agent as comp_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return "not json at all"
+
+    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    agent = BlogComplianceAgent(llm_client=object())
+    report = agent.run("draft", brand_spec_prompt, work_dir=tmp_path)
+    assert report.status == "FAIL"
+    assert (tmp_path / "compliance_report.json").exists()
