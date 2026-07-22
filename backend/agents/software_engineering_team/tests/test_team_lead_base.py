@@ -222,7 +222,7 @@ def test_build_team_failure_result_rejects_success_override():
 
 
 def test_build_team_failure_result_rejects_failure_reason_kwarg():
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         build_team_failure_result(_FakeTeamResult, "x", failure_reason="y")
 
 
@@ -261,7 +261,7 @@ def test_apply_team_failure_rejects_success_override():
 
 def test_apply_team_failure_rejects_failure_reason_kwarg():
     result = SimpleNamespace(success=True, failure_reason="")
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         apply_team_failure(result, "x", failure_reason="y")
 
 
