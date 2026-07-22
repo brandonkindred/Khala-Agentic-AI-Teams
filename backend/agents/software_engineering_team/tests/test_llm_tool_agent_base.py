@@ -79,3 +79,109 @@ def test_module_import_does_not_pull_in_code_review_agent():
         env=env,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# opt-in model resolution (parameterized recipes)
+# ---------------------------------------------------------------------------
+
+
+def _patch_resolve(monkeypatch, fake):
+    """Patch the lazy-imported resolver before constructing an opted-in agent."""
+    monkeypatch.setattr("llm_service.strands_model.resolve_strands_model", fake)
+
+
+def test_resolve_models_false_does_not_set_model(monkeypatch):
+    calls = []
+
+    def fake_resolve(llm, **kwargs):
+        calls.append((llm, kwargs))
+        return object()
+
+    _patch_resolve(monkeypatch, fake_resolve)
+
+    agent = LlmToolAgentBase(llm=object())
+
+    assert not hasattr(agent, "_model")
+    assert not hasattr(agent, "_model_json")
+    assert calls == []
+
+
+def test_review_like_resolves_text_model_without_get_strands_model_fn(monkeypatch):
+    calls = []
+    text_model = object()
+
+    def fake_resolve(llm, **kwargs):
+        calls.append((llm, dict(kwargs)))
+        return text_model
+
+    _patch_resolve(monkeypatch, fake_resolve)
+
+    class ReviewLike(LlmToolAgentBase):
+        resolve_models = True
+
+    llm = object()
+    agent = ReviewLike(llm=llm)
+
+    assert agent._model is text_model
+    assert not hasattr(agent, "_model_json")
+    assert len(calls) == 1
+    assert calls[0][0] is llm
+    assert calls[0][1] == {"response_format": "text"}
+    assert "get_strands_model_fn" not in calls[0][1]
+
+
+def test_review_like_uses_json_model_resolves_second_json_model(monkeypatch):
+    calls = []
+    text_model = object()
+    json_model = object()
+
+    def fake_resolve(llm, **kwargs):
+        calls.append((llm, dict(kwargs)))
+        return text_model if kwargs.get("response_format") == "text" else json_model
+
+    _patch_resolve(monkeypatch, fake_resolve)
+
+    class ReviewJsonLike(LlmToolAgentBase):
+        resolve_models = True
+        uses_json_model = True
+
+    llm = object()
+    agent = ReviewJsonLike(llm=llm)
+
+    assert agent._model is text_model
+    assert agent._model_json is json_model
+    assert len(calls) == 2
+    assert calls[0][1] == {"response_format": "text"}
+    assert calls[1][1] == {"response_format": "json"}
+    assert "get_strands_model_fn" not in calls[0][1]
+    assert "get_strands_model_fn" not in calls[1][1]
+
+
+def test_plan_json_like_resolves_with_get_strands_model_fn(monkeypatch):
+    calls = []
+    json_model = object()
+    sentinel_fn = object()
+
+    def fake_resolve(llm, **kwargs):
+        calls.append((llm, dict(kwargs)))
+        return json_model
+
+    _patch_resolve(monkeypatch, fake_resolve)
+
+    class PlanJsonLike(LlmToolAgentBase):
+        resolve_models = True
+        response_format = "json"
+        get_strands_model_fn = sentinel_fn
+
+    llm = object()
+    agent = PlanJsonLike(llm=llm)
+
+    assert agent._model is json_model
+    assert not hasattr(agent, "_model_json")
+    assert len(calls) == 1
+    assert calls[0][0] is llm
+    assert calls[0][1] == {
+        "response_format": "json",
+        "get_strands_model_fn": sentinel_fn,
+    }
