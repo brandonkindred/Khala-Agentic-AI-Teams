@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run the full regression checklist on the migrated devops single-shot stack and open a PR whose body is the closeout note (evidence + confirmation), closing the closeout and parent issues.
+**Goal:** Run the full regression checklist on the migrated devops single-shot stack and open a PR whose body is the closeout note (evidence + confirmation). Close the closeout and parent issues after merge — manually when the PR base is not the default branch.
 
 **Architecture:** Verification-only on branch `refactor/devops-single-shot-closeout` from the fully migrated stack tip. No production code changes. Design/plan docs already on the branch may be the only file diffs. Capture command output for the PR body.
 
@@ -17,6 +17,7 @@
 - No GitHub issue numbers in code, comments, commit messages, or docs (PR body / issue comments only).
 - Work from the closeout worktree based on `refactor/migrate-boilerplate-devops-agents` tip.
 - Use main-repo `backend/.venv/bin/python` if the worktree has no local venv.
+- GitHub only auto-closes issues when a PR with closing keywords merges into the **default** branch. This closeout PR targets a feature branch, so closing keywords are for linking only — close the issues manually after merge (or retarget to `main` once the stack lands there).
 
 ## File map
 
@@ -168,7 +169,7 @@ Skip if already committed.
 
 **Interfaces:**
 - Consumes: evidence from Task 1
-- Produces: GitHub PR URL closing the closeout and parent issues
+- Produces: GitHub PR URL; issue closure via manual step after merge when base ≠ default branch
 
 - [ ] **Step 1: Push branch**
 
@@ -180,8 +181,11 @@ git push -u origin HEAD
 
 1. Closeout note: all 7 agents are thin `DevOpsSingleShotAgent` subclasses; `complete_json_with_continuation` is documented as canonical in `_agent_template.py`.
 2. Evidence table: test counts, smoke OK, ruff OK, coverage %.
-3. Auto-close keywords for the closeout sub-issue and the parent standardization issue.
+3. Linking `Closes` keywords for the closeout sub-issue and the parent standardization issue (linking only while base ≠ default branch).
+4. Explicit note that issues will be closed **manually** after this PR merges, because GitHub auto-close requires merge into the default branch.
 
-- [ ] **Step 3: After PR is open, comment on the parent issue** linking the PR and stating verification passed (optional if `Closes` on PR is enough; still add a short comment for human-readable closeout).
+- [ ] **Step 3: After PR is open, comment on the parent issue** linking the PR and stating verification passed.
+
+- [ ] **Step 4: After this PR merges into the stack branch**, manually close the closeout and parent issues with a comment referencing the PR (unless the PR was retargeted to `main` and auto-close already applied).
 
 No further commits unless the PR needs a fix from failed verification (then stop and escalate).

@@ -14,7 +14,8 @@ Confirm the completed `DevOpsSingleShotAgent` migration stack satisfies the pare
 | Closeout note location | PR body only (no separate closeout markdown artifact) |
 | Branch base | `refactor/migrate-boilerplate-devops-agents` tip (all seven agents migrated) |
 | Production code | No changes |
-| PR keywords | Close both the closeout sub-issue and the parent standardization issue |
+| PR keywords | Include linking `Closes` lines in the PR body for discoverability |
+| Issue closure | Manual after merge when the PR base is not the default branch — GitHub only auto-closes on merge into the default branch |
 | Empty diff | Acceptable; evidence lives in the PR body |
 
 ## Verification checklist
@@ -42,4 +43,4 @@ Confirm the completed `DevOpsSingleShotAgent` migration stack satisfies the pare
 | Lint clean on touched files | Step 4 |
 | 90% coverage on touched files | Step 5 |
 | Closeout confirms config-driven + canonical helper | Step 6 (PR body) |
-| Parent issue closable | PR closes closeout + parent |
+| Parent issue closable | After this PR merges into the stack branch, manually close the closeout and parent issues (or retarget/land on `main` later so default-branch auto-close can apply) |
