@@ -28,15 +28,7 @@ from branding_team.graphs.shared import (
 )
 from branding_team.graphs.top_level import build_branding_graph
 from branding_team.models import BrandingMission, BrandPhase
-
-
-def _mission() -> BrandingMission:
-    return BrandingMission(
-        company_name="Northstar Labs",
-        company_description="A strategic studio for enterprise product teams",
-        target_audience="enterprise product leaders",
-    )
-
+from branding_team.tests.conftest import make_mission
 
 # ---------------------------------------------------------------------------
 # Per-phase builders (each transitively constructs its specialist agents)
@@ -136,5 +128,9 @@ def test_should_advance_past() -> None:
 
 
 def test_serialize_mission_roundtrips_company_name() -> None:
-    text = serialize_mission(_mission())
+    text = serialize_mission(
+        make_mission(
+            company_description="A strategic studio for enterprise product teams",
+        )
+    )
     assert "Northstar Labs" in text
