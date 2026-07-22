@@ -8,8 +8,9 @@ overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
 (:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides an
 optional per-run status/progress callback via
-:meth:`BaseTeamLead._report_status`. This base also provides a bounded
-retry/patch-loop via :meth:`BaseTeamLead._run_bounded_retry_loop`.
+:meth:`BaseTeamLead._report_status`, a gate-based phase-sequencing helper
+via :meth:`BaseTeamLead._run_gated_phases`, and a bounded retry/patch-loop
+via :meth:`BaseTeamLead._run_bounded_retry_loop`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
 passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
@@ -23,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, FrozenSet, Optional, Sequence, Tuple, TypeVar
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
@@ -100,9 +101,9 @@ class BaseTeamLead:
         # tasks in a job), so the N tasks of a job re-read only the files each
         # merge touched instead of re-walking the whole repo N times.
         self._repo_context_caches: Dict[Path, RepoContextCache] = {}
-        # Optional per-run status/progress callback. Subclasses assign this at the
-        # start of run_workflow (and clear it when the run ends); BaseTeamLead does
-        # not accept it via the constructor.
+        # Optional per-run status/progress callback. Subclasses may assign this at
+        # the start of run_workflow (and clear it when the run ends); BaseTeamLead
+        # does not accept it via the constructor. Defaults to None (no-op hook).
         self._status_callback: Optional[Callable[..., None]] = None
 
     def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
@@ -152,6 +153,25 @@ class BaseTeamLead:
             callback(**payload)
         except Exception as e:
             logger.warning("team lead status callback failed (ignored): %s", e)
+
+    def _run_gated_phases(
+        self,
+        phases: Sequence[Callable[[], Optional[T]]],
+    ) -> Optional[T]:
+        """Run phase callables in order; return the first failure payload.
+
+        Preconditions: ``phases`` is a sequence (may be empty); each element is
+          a zero-arg callable returning ``Optional[T]``.
+        Postconditions: invokes phases in order; on the first non-``None``
+          return value, returns that value and does not invoke later phases;
+          if every phase returns ``None`` (or ``phases`` is empty), returns
+          ``None``. Exceptions raised by a phase propagate to the caller.
+        """
+        for phase in phases:
+            failure = phase()
+            if failure is not None:
+                return failure
+        return None
 
     def _run_bounded_retry_loop(
         self,
