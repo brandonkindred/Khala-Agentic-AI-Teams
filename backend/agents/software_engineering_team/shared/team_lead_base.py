@@ -8,7 +8,8 @@ overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
 (:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides an
 optional per-run status/progress callback via
-:meth:`BaseTeamLead._report_status`.
+:meth:`BaseTeamLead._report_status`. This base also provides a gate-based
+phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
 passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Optional, Sequence, Tuple, TypeVar
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
@@ -50,6 +51,8 @@ _DEVELOPMENT_RESULT_FIELDS = (
     "failure_reason",
     "needs_followup",
 )
+
+T = TypeVar("T")
 
 
 def copy_development_result_fields(dst: Any, src: Any) -> None:
@@ -148,6 +151,25 @@ class BaseTeamLead:
             callback(**payload)
         except Exception as e:
             logger.warning("team lead status callback failed (ignored): %s", e)
+
+    def _run_gated_phases(
+        self,
+        phases: Sequence[Callable[[], Optional[T]]],
+    ) -> Optional[T]:
+        """Run phase callables in order; return the first failure payload.
+
+        Preconditions: ``phases`` is a sequence (may be empty); each element is
+          a zero-arg callable returning ``Optional[T]``.
+        Postconditions: invokes phases in order; on the first non-``None``
+          return value, returns that value and does not invoke later phases;
+          if every phase returns ``None`` (or ``phases`` is empty), returns
+          ``None``. Exceptions raised by a phase propagate to the caller.
+        """
+        for phase in phases:
+            failure = phase()
+            if failure is not None:
+                return failure
+        return None
 
     def _run_setup_and_delegate(
         self,
