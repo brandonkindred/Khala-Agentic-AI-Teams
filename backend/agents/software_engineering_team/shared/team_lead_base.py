@@ -12,7 +12,8 @@ constructor, their per-repo incremental briefing cache lookup
 overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
 (:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides a
-gate-based phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`
+gate-based phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`,
+an intra-phase multi-gate hook via :meth:`BaseTeamLead._run_phase_gates`,
 and a bounded retry/patch-loop via :meth:`BaseTeamLead._run_bounded_retry_loop`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
@@ -210,8 +211,8 @@ class BaseTeamLead(TeamLeadSharedState):
     Invariants: instance state includes ``llm``, the injected
     extensions/exclude_dirs/max_chars, ``_repo_context_caches``, plus the mixin
     fields (``llm_getter``, ``shared_config``, ``_status_callback``).
-    Also exposes :meth:`_run_gated_phases` and :meth:`_run_bounded_retry_loop`
-    as reusable helpers.
+    Also exposes :meth:`_run_gated_phases`, :meth:`_run_phase_gates`, and
+    :meth:`_run_bounded_retry_loop` as reusable helpers.
     """
 
     def __init__(
@@ -277,6 +278,19 @@ class BaseTeamLead(TeamLeadSharedState):
             if failure is not None:
                 return failure
         return None
+
+    def _run_phase_gates(
+        self,
+        gates: Sequence[Callable[[], Optional[T]]],
+    ) -> Optional[T]:
+        """Run intra-phase gate callables; return the first failure payload.
+
+        Preconditions: ``gates`` is a sequence (may be empty); each element is
+          a zero-arg callable returning ``Optional[T]``.
+        Postconditions: same as :meth:`_run_gated_phases` — first non-``None``
+          wins; all-``None`` / empty → ``None``; exceptions propagate.
+        """
+        return self._run_gated_phases(gates)
 
     def _run_bounded_retry_loop(
         self,
