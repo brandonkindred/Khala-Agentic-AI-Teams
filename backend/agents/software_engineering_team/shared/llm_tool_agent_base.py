@@ -1,12 +1,13 @@
 """Dependency-light base shared by the LLM tool-agent classes.
 
 Holds the ``_agent_factory`` monkeypatch resolver, an opt-in class-attribute
-parameterized model-resolution step, and an opt-in fallback-handling step
+parameterized model-resolution step, an opt-in parameterized LLM invocation
+step (inline vs ``run_strands_agent``), and an opt-in fallback-handling step
 (no-model / call-error / empty-parse, plus partial-failure-tolerant calls).
 Deliberately imports nothing from ``code_review_agent`` so it can be depended
-on from any team without pulling in the code-review engine. LLM invocation and
-JSON parsing remain out of scope here; fallback helpers are available capability
-and are not auto-wired into subclasses.
+on from any team without pulling in the code-review engine. JSON parsing
+remains out of scope here; fallback helpers are available capability and are
+not auto-wired into subclasses.
 
 Preconditions:
     None beyond standard Python import semantics.
@@ -51,11 +52,15 @@ class FallbackPayload:
 
 
 class LlmToolAgentBase:
-    """Bare constructor, shared ``_agent_factory``, model resolution, and fallbacks.
+    """Bare constructor, shared ``_agent_factory``, model resolution, invocation, and fallbacks.
 
     Subclasses opt into resolution by setting ``resolve_models = True`` and
     (when needed) overriding ``response_format``, ``uses_json_model``, and/or
     ``get_strands_model_fn``.
+
+    Subclasses opt into the ``run_strands_agent`` wrapper by setting
+    ``use_run_strands_agent = True``; the default keeps the inline
+    ``str(agent(prompt)).strip()`` call.
 
     Fallback helpers are call-site opt-in: override the Plan-shaped class-attr
     vocabulary and invoke ``_fallback_no_model``, ``_call_with_single_fallback``,
@@ -64,9 +69,11 @@ class LlmToolAgentBase:
 
     Recipes:
         Review-like — ``resolve_models = True`` (defaults give text mode; set
-        ``uses_json_model = True`` for a second JSON-mode model).
+        ``uses_json_model = True`` for a second JSON-mode model);
+        ``use_run_strands_agent = True``.
         Plan/Json-like — ``resolve_models = True``, ``response_format = "json"``,
-        ``get_strands_model_fn = <callable>``.
+        ``get_strands_model_fn = <callable>``; leave
+        ``use_run_strands_agent`` false for the inline path.
 
     Preconditions:
         ``llm``, if provided, is whatever ``resolve_strands_model`` accepts
@@ -80,13 +87,16 @@ class LlmToolAgentBase:
     Invariants:
         Resolution runs only when ``resolve_models`` is true. The
         ``get_strands_model_fn`` kwarg is forwarded only when the class attr
-        is not ``None``. Fallback list attrs are copied before return.
+        is not ``None``. Invocation uses ``run_strands_agent`` only when
+        ``use_run_strands_agent`` is true. Fallback list attrs are copied
+        before return.
     """
 
     resolve_models: bool = False
     response_format: str = "text"
     uses_json_model: bool = False
     get_strands_model_fn: Optional[Callable[..., Any]] = None
+    use_run_strands_agent: bool = False
 
     # Plan-shaped fallback vocabulary (subclasses override; helpers copy lists).
     no_model_recommendations: List[str] = []
@@ -133,6 +143,29 @@ class LlmToolAgentBase:
         """
         mod = importlib.import_module(type(self).__module__)
         return getattr(mod, "Agent")
+
+    def _invoke_llm(self, model, prompt: str) -> str:
+        """Run a one-shot LLM call via the selected invocation path.
+
+        When ``use_run_strands_agent`` is true, delegates to
+        ``llm_service.strands_model.run_strands_agent`` (matching today's
+        review-agent wrapper path). Otherwise uses the inline
+        ``str(agent(prompt)).strip()`` call (matching today's plan/json
+        generators).
+
+        Preconditions:
+            ``self._agent_factory()(model=model)`` returns a callable that
+            accepts ``prompt`` and returns a value coercible with ``str``.
+
+        Postconditions:
+            Returns the stripped string result. Exceptions from building or
+            running the agent propagate unchanged.
+        """
+        if self.use_run_strands_agent:
+            from llm_service.strands_model import run_strands_agent
+
+            return run_strands_agent(self._agent_factory(), model, prompt)
+        return str(self._agent_factory()(model=model)(prompt)).strip()
 
     def _fallback_no_model(self, model: Any) -> Optional[FallbackPayload]:
         """Return the no-model payload when ``model`` is falsy; else ``None``.
