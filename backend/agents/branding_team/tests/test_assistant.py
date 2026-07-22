@@ -16,7 +16,7 @@ from branding_team.assistant.agent import (
     _parse_extraction,
     _strip_accidental_json,
 )
-from branding_team.models import BrandingMission
+from branding_team.tests.conftest import make_mission
 
 pytestmark = [pytest.mark.integration]
 
@@ -114,9 +114,7 @@ def test_parse_extraction_top_level_fallback_collects_nested_palettes() -> None:
     )
     mission_update, _ = _parse_extraction(raw)
     assert mission_update["company_name"] == "Acme"
-    assert mission_update["color_palettes"] == [
-        {"name": "warm", "colors": ["#aa3300", "#ffcc99"]}
-    ]
+    assert mission_update["color_palettes"] == [{"name": "warm", "colors": ["#aa3300", "#ffcc99"]}]
 
 
 def test_strip_accidental_json_suppresses_bare_json_object() -> None:
@@ -187,7 +185,7 @@ def test_strip_accidental_json_suppresses_mission_after_stray_open_brace() -> No
     earlier implementation aborted the entire scan on the first unmatched
     brace and let the later mission JSON leak through to the user."""
     raw = (
-        'See { example pseudo-code, then the real payload: '
+        "See { example pseudo-code, then the real payload: "
         '{"company_name": "Acme", "target_audience": "devs"} done.'
     )
     assert _strip_accidental_json(raw) == ""
@@ -195,10 +193,7 @@ def test_strip_accidental_json_suppresses_mission_after_stray_open_brace() -> No
 
 def test_strip_accidental_json_handles_multiple_stray_open_braces() -> None:
     """Several stray ``{`` characters before mission JSON must not stop the scan."""
-    raw = (
-        'Plenty { of { unbalanced { junk before '
-        '{"company_name": "Acme"} the payload'
-    )
+    raw = 'Plenty { of { unbalanced { junk before {"company_name": "Acme"} the payload'
     assert _strip_accidental_json(raw) == ""
 
 
@@ -221,7 +216,7 @@ def test_strip_accidental_json_preserves_prose_with_unrelated_nested_json() -> N
 
 
 def test_merge_mission_update() -> None:
-    current = BrandingMission(
+    current = make_mission(
         company_name="TBD",
         company_description="To be discussed.",
         target_audience="TBD",
@@ -254,7 +249,7 @@ def test_branding_assistant_agent_two_stage_returns_natural_reply_and_extracts_m
         )
     )
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
     reply, updated_mission, suggested_questions = agent.respond(
@@ -289,7 +284,7 @@ def test_branding_assistant_agent_suppresses_accidental_json_from_conversation_l
         )
     )
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
     reply, updated_mission, _ = agent.respond(
@@ -307,7 +302,7 @@ def test_branding_assistant_agent_handles_extraction_failure_gracefully() -> Non
     conversation_llm = MagicMock(return_value="Got it — tell me more about your audience.")
     extraction_llm = MagicMock(side_effect=Exception("extractor down"))
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="Acme", company_description="Software company.", target_audience="TBD"
     )
     reply, updated_mission, suggested_questions = agent.respond(
@@ -345,7 +340,7 @@ def test_branding_assistant_agent_legacy_llm_kwarg_drives_both_stages() -> None:
 
     fake_llm.side_effect = _side_effect
     agent = BrandingAssistantAgent(llm=fake_llm)
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
 
@@ -375,7 +370,7 @@ def test_branding_assistant_agent_explicit_kwargs_override_legacy_llm() -> None:
     )
     agent.respond(
         messages=[],
-        current_mission=BrandingMission(
+        current_mission=make_mission(
             company_name="TBD", company_description="To be discussed.", target_audience="TBD"
         ),
         user_message="Hi",
@@ -390,7 +385,7 @@ def test_branding_assistant_agent_handles_conversation_llm_failure() -> None:
     conversation_llm = MagicMock(side_effect=Exception("LLM unavailable"))
     extraction_llm = MagicMock()
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
     reply, updated_mission, suggested_questions = agent.respond(
