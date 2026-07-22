@@ -255,7 +255,7 @@ class _PersistentDict:
         self._client.delete_job(key)
         return job.get("data", job)
 
-    def values(self) -> list:
+    def values(self) -> List[Any]:
         jobs = self._client.list_jobs() or []
         return [j.get("data", j) for j in jobs]
 

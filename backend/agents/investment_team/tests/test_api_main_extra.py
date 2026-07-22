@@ -385,6 +385,16 @@ def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     assert pd.get("missing", "SENTINEL") == "SENTINEL"
 
 
+def test_persistent_dict_values_return_annotation() -> None:
+    """_PersistentDict.values must advertise List[Any] for static analysis."""
+    from typing import get_type_hints
+
+    from investment_team.api.main import _PersistentDict
+
+    hints = get_type_hints(_PersistentDict.values)
+    assert hints["return"] == List[Any]
+
+
 # ---------------------------------------------------------------------------
 # _run_backtest_background — direct invocation with stubbed dependencies
 # ---------------------------------------------------------------------------
