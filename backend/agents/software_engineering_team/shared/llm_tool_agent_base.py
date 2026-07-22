@@ -1,10 +1,11 @@
 """Dependency-light base shared by the LLM tool-agent classes.
 
-Holds the ``_agent_factory`` monkeypatch resolver and an opt-in, class-attribute
-parameterized model-resolution step. Deliberately imports nothing from
-``code_review_agent`` so it can be depended on from any team without pulling in
-the code-review engine. LLM invocation, JSON parsing, and fallback logic remain
-out of scope here.
+Holds the ``_agent_factory`` monkeypatch resolver, an opt-in, class-attribute
+parameterized model-resolution step, and an opt-in parameterized LLM
+invocation step (inline vs ``run_strands_agent``). Deliberately imports
+nothing from ``code_review_agent`` so it can be depended on from any team
+without pulling in the code-review engine. JSON parsing and fallback logic
+remain out of scope here.
 
 Preconditions:
     None beyond standard Python import semantics.
@@ -26,17 +27,24 @@ from typing import Any, Callable, Optional
 
 
 class LlmToolAgentBase:
-    """Bare constructor, shared ``_agent_factory``, and opt-in model resolution.
+    """Bare constructor, shared ``_agent_factory``, opt-in model resolution,
+    and opt-in LLM invocation.
 
     Subclasses opt into resolution by setting ``resolve_models = True`` and
     (when needed) overriding ``response_format``, ``uses_json_model``, and/or
     ``get_strands_model_fn``.
 
+    Subclasses opt into the ``run_strands_agent`` wrapper by setting
+    ``use_run_strands_agent = True``; the default keeps the inline
+    ``str(agent(prompt)).strip()`` call.
+
     Recipes:
         Review-like — ``resolve_models = True`` (defaults give text mode; set
-        ``uses_json_model = True`` for a second JSON-mode model).
+        ``uses_json_model = True`` for a second JSON-mode model);
+        ``use_run_strands_agent = True``.
         Plan/Json-like — ``resolve_models = True``, ``response_format = "json"``,
-        ``get_strands_model_fn = <callable>``.
+        ``get_strands_model_fn = <callable>``; leave
+        ``use_run_strands_agent`` false for the inline path.
 
     Preconditions:
         ``llm``, if provided, is whatever ``resolve_strands_model`` accepts
@@ -50,13 +58,15 @@ class LlmToolAgentBase:
     Invariants:
         Resolution runs only when ``resolve_models`` is true. The
         ``get_strands_model_fn`` kwarg is forwarded only when the class attr
-        is not ``None``.
+        is not ``None``. Invocation uses ``run_strands_agent`` only when
+        ``use_run_strands_agent`` is true.
     """
 
     resolve_models: bool = False
     response_format: str = "text"
     uses_json_model: bool = False
     get_strands_model_fn: Optional[Callable[..., Any]] = None
+    use_run_strands_agent: bool = False
 
     def __init__(self, llm=None) -> None:
         self.llm = llm
@@ -94,3 +104,26 @@ class LlmToolAgentBase:
         """
         mod = importlib.import_module(type(self).__module__)
         return getattr(mod, "Agent")
+
+    def _invoke_llm(self, model, prompt: str) -> str:
+        """Run a one-shot LLM call via the selected invocation path.
+
+        When ``use_run_strands_agent`` is true, delegates to
+        ``llm_service.strands_model.run_strands_agent`` (matching today's
+        review-agent wrapper path). Otherwise uses the inline
+        ``str(agent(prompt)).strip()`` call (matching today's plan/json
+        generators).
+
+        Preconditions:
+            ``self._agent_factory()(model=model)`` returns a callable that
+            accepts ``prompt`` and returns a value coercible with ``str``.
+
+        Postconditions:
+            Returns the stripped string result. Exceptions from building or
+            running the agent propagate unchanged.
+        """
+        if self.use_run_strands_agent:
+            from llm_service.strands_model import run_strands_agent
+
+            return run_strands_agent(self._agent_factory(), model, prompt)
+        return str(self._agent_factory()(model=model)(prompt)).strip()
