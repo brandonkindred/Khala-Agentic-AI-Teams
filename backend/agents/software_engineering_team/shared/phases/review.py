@@ -11,13 +11,13 @@ security gates that follow code review.
 
 Unlike the other ``shared/phases/*.py`` modules, this one does not take a
 ``models: PhaseModels`` bundle: the body only ever constructs ``ReviewIssue``
-(one shared definition, imported directly — not team-varying) and the team's
-phase-result type (``PhaseReviewResult`` on backend; there is no frontend
-equivalent yet, so it cannot be a ``PhaseModels`` member without breaking
-frontend's conformance to that Protocol elsewhere). The result type is instead
-injected as a narrow constructor, ``phase_review_result_cls`` — the same
-one-off-constructor idiom :class:`~software_engineering_team.shared.v2_review.ReviewConfig`
-already uses for ``tool_phase_input_factory``.
+(one shared definition, imported directly — not team-varying) and the shared
+:class:`~software_engineering_team.shared.v2_models.PhaseReviewResult` (or an
+equivalent constructor). The result type is injected as a narrow constructor,
+``phase_review_result_cls`` — the same one-off-constructor idiom
+:class:`~software_engineering_team.shared.v2_review.ReviewConfig` already uses
+for ``tool_phase_input_factory``. Both code-v2 teams re-export
+``PhaseReviewResult`` from ``shared.v2_models`` and pass it here.
 """
 
 from __future__ import annotations

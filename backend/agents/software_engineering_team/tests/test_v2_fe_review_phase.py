@@ -996,3 +996,108 @@ def test_fe_run_review_code_review_llm_fallback_failure_does_not_drop_other_step
 
     assert any(i.source == "qa" and i.description == "qa issue" for i in result.issues)
     assert any(i.source == "code_review" and i.severity == "high" for i in result.issues)
+
+
+# ---------------------------------------------------------------------------
+# Phase-specific testing gates (run_code_review_phase / run_qa_testing_phase /
+# run_security_testing_phase)
+# ---------------------------------------------------------------------------
+
+
+def test_fe_run_code_review_phase_build_failure_is_contained(monkeypatch, tmp_path: Path):
+    """Build failure inside the standalone code-review gate becomes a critical
+    synthetic issue and fails the phase — it must not raise."""
+    from software_engineering_team.frontend_code_v2_team.models import Microtask
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        run_code_review_phase,
+    )
+
+    monkeypatch.setattr(
+        review_mod,
+        "_run_llm_review",
+        lambda **_kw: MagicMock(issues=[], raw_issue_count=0),
+    )
+
+    result = run_code_review_phase(
+        llm=MagicMock(),
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        repo_path=tmp_path,
+        files={"x.ts": "code"},
+        build_verifier=lambda *_a, **_k: (False, "tsc failed"),
+    )
+
+    assert result.passed is False
+    assert result.phase_name == "code_review"
+    assert any(
+        i.source == "build" and i.severity == "critical" and "tsc failed" in i.description
+        for i in result.issues
+    )
+
+
+def test_fe_run_qa_testing_phase_agent_failure_is_contained(monkeypatch):
+    """An outright QA-agent failure inside the standalone testing-phase gate must not
+    propagate — it becomes a synthetic high-severity issue instead of raising, mirroring
+    ``_qa_review_step``'s identical containment in the fan-out path.
+
+    ``_run_qa_agent`` itself is patched (rather than ``qa_agent.run``) because
+    ``run_chunked_agent_review`` already catches and skips a per-chunk ``qa_agent.run``
+    failure — the guard under test here is for a failure in the step itself, not a chunk.
+    """
+    from software_engineering_team.frontend_code_v2_team.models import Microtask
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        run_qa_testing_phase,
+    )
+
+    def _boom(**_kw):
+        raise RuntimeError("qa agent exploded")
+
+    monkeypatch.setattr(review_mod, "_run_qa_agent", _boom)
+
+    result = run_qa_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.ts": "code"},
+        qa_agent=MagicMock(),
+    )
+
+    assert result.passed is False
+    assert any(
+        i.source == "qa" and i.severity == "high" and "qa agent exploded" in i.description
+        for i in result.issues
+    )
+
+
+def test_fe_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
+    """An outright security-agent failure inside the standalone testing-phase gate must not
+    propagate — it becomes a synthetic critical-severity issue instead of raising, mirroring
+    ``_security_review_step``'s identical containment in the fan-out path. See
+    ``test_fe_run_qa_testing_phase_agent_failure_is_contained`` for why the step function
+    itself (not ``security_agent.run``) is patched."""
+    from software_engineering_team.frontend_code_v2_team.models import Microtask
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        run_security_testing_phase,
+    )
+
+    def _boom(**_kw):
+        raise RuntimeError("security agent exploded")
+
+    monkeypatch.setattr(review_mod, "_run_security_agent", _boom)
+
+    result = run_security_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.ts": "code"},
+        security_agent=MagicMock(),
+    )
+
+    assert result.passed is False
+    assert any(
+        i.source == "security"
+        and i.severity == "critical"
+        and "security agent exploded" in i.description
+        for i in result.issues
+    )
