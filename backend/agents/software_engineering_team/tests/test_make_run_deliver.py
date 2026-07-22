@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import types
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from software_engineering_team.shared.deliver_utils import DeliverGitOps
 
