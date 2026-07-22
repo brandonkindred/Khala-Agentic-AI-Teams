@@ -1,4 +1,4 @@
-"""Tests for DevOps infra debug and patch agents (Phase 5)."""
+"""Tests for DevOps infra debug/patch agents and Phase 4.6 debug-patch loop."""
 
 from __future__ import annotations
 
@@ -230,7 +230,10 @@ class TestInfraPatchAgent:
 class TestDevOpsPipelineDebugPatchLoop:
     def test_loop_terminates_after_max_iterations(self) -> None:
         """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts."""
-        from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
+        from software_engineering_team.devops_team.orchestrator import (
+            MAX_INFRA_FIX_ITERATIONS,
+            DevOpsTeamLeadAgent,
+        )
 
         client = _ScriptedClient(
             [
@@ -331,7 +334,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                 write_changes=False,
             )
         assert result is not None
-        assert debug_calls[0] == 3
+        assert debug_calls[0] == MAX_INFRA_FIX_ITERATIONS
 
     def test_loop_soft_aborts_when_debug_not_fixable(self) -> None:
         """Unfixable debug result aborts the retry loop after a single attempt."""
@@ -522,7 +525,12 @@ class TestDebugPatchOnce:
             def run(self, *_a, **_k):
                 return IaCDebugOutput(errors=[], summary="nope", fixable=False)
 
+        class _TripWirePatch:
+            def run(self, *_a, **_k):
+                raise AssertionError("patch agent must not run when debug is not fixable")
+
         lead.infra_debug_agent = _Debug()  # type: ignore[assignment]
+        lead.infra_patch_agent = _TripWirePatch()  # type: ignore[assignment]
         state = _DebugPatchState(
             exec_results=[
                 {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
@@ -575,6 +583,128 @@ class TestDebugPatchOnce:
             max_iterations=3,
         )
         assert out is None
+
+    def test_returns_none_when_patch_agent_raises(self) -> None:
+        from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
+        from software_engineering_team.devops_team.orchestrator import (
+            DevOpsTeamLeadAgent,
+            _DebugPatchState,
+        )
+
+        lead = DevOpsTeamLeadAgent(llm_client=DummyLLMClient())
+
+        class _Debug:
+            def run(self, *_a, **_k):
+                return IaCDebugOutput(errors=[], summary="fixable", fixable=True)
+
+        class _Patch:
+            def run(self, *_a, **_k):
+                raise RuntimeError("patch boom")
+
+        lead.infra_debug_agent = _Debug()  # type: ignore[assignment]
+        lead.infra_patch_agent = _Patch()  # type: ignore[assignment]
+        state = _DebugPatchState(
+            exec_results=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
+            exec_failures=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
+            exec_gate_map={"terraform_validate": "fail"},
+            exec_findings=["e"],
+        )
+        out = lead._debug_patch_once(
+            0,
+            state=state,
+            aggregated_artifacts={"main.tf": "x"},
+            repo_path=__import__("pathlib").Path("."),
+            repo_str=".",
+            write_changes=False,
+            subdir="",
+            max_iterations=3,
+        )
+        assert out is None
+
+    def test_returns_none_when_patch_artifacts_empty(self) -> None:
+        from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
+        from software_engineering_team.devops_team.infra_patch_agent import IaCPatchOutput
+        from software_engineering_team.devops_team.orchestrator import (
+            DevOpsTeamLeadAgent,
+            _DebugPatchState,
+        )
+
+        lead = DevOpsTeamLeadAgent(llm_client=DummyLLMClient())
+
+        class _Debug:
+            def run(self, *_a, **_k):
+                return IaCDebugOutput(errors=[], summary="fixable", fixable=True)
+
+        class _Patch:
+            def run(self, *_a, **_k):
+                return IaCPatchOutput(patched_artifacts={}, summary="no edits", edits_applied=0)
+
+        lead.infra_debug_agent = _Debug()  # type: ignore[assignment]
+        lead.infra_patch_agent = _Patch()  # type: ignore[assignment]
+        state = _DebugPatchState(
+            exec_results=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
+            exec_failures=[
+                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+            ],
+            exec_gate_map={"terraform_validate": "fail"},
+            exec_findings=["e"],
+        )
+        out = lead._debug_patch_once(
+            0,
+            state=state,
+            aggregated_artifacts={"main.tf": "x"},
+            repo_path=__import__("pathlib").Path("."),
+            repo_str=".",
+            write_changes=False,
+            subdir="",
+            max_iterations=3,
+        )
+        assert out is None
+
+    def test_returns_state_unchanged_when_exec_failures_empty(self) -> None:
+        from software_engineering_team.devops_team.orchestrator import (
+            DevOpsTeamLeadAgent,
+            _DebugPatchState,
+        )
+
+        lead = DevOpsTeamLeadAgent(llm_client=DummyLLMClient())
+
+        class _TripWireDebug:
+            def run(self, *_a, **_k):
+                raise AssertionError("debug agent must not run when exec_failures is empty")
+
+        class _TripWirePatch:
+            def run(self, *_a, **_k):
+                raise AssertionError("patch agent must not run when exec_failures is empty")
+
+        lead.infra_debug_agent = _TripWireDebug()  # type: ignore[assignment]
+        lead.infra_patch_agent = _TripWirePatch()  # type: ignore[assignment]
+        state = _DebugPatchState(
+            exec_results=[
+                {"success": True, "tool": "terraform", "command": "validate", "findings": []}
+            ],
+            exec_failures=[],
+            exec_gate_map={"terraform_validate": "pass"},
+            exec_findings=[],
+        )
+        out = lead._debug_patch_once(
+            0,
+            state=state,
+            aggregated_artifacts={"main.tf": "x"},
+            repo_path=__import__("pathlib").Path("."),
+            repo_str=".",
+            write_changes=False,
+            subdir="",
+            max_iterations=3,
+        )
+        assert out is state
+        assert out.exec_failures == []
 
     def test_returns_state_with_cleared_failures_on_success(self) -> None:
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput

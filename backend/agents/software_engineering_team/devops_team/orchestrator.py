@@ -131,6 +131,9 @@ from .tool_agents import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Bounded Phase 4.6 debug → patch → re-exec iterations for fixable infra failures.
+MAX_INFRA_FIX_ITERATIONS = 3
+
 
 @dataclass
 class _DebugPatchState:
@@ -730,7 +733,6 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         # Phase 4.6: Debug-patch loop for fixable execution failures.
         # Consume BaseTeamLead's bounded retry helper without inheriting the
         # code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-        MAX_INFRA_FIX_ITERATIONS = 3
         exec_failures = [er for er in exec_results if not er.get("success", True)]
         state = _DebugPatchState(
             exec_results=exec_results,
