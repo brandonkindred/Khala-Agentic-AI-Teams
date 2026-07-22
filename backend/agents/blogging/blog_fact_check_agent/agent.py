@@ -13,14 +13,10 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
-from llm_service import (
-    LLMJsonParseError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    extract_json_from_response,
-)
+from llm_service import LLMRateLimitError, LLMTemporaryError
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
@@ -41,9 +37,14 @@ except ImportError:
         pass
 
 
-_MAX_JSON_RETRIES = 2
-
 logger = logging.getLogger(__name__)
+
+_ALWAYS_ON_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
+
+_JSON_RETRY_SUFFIX = (
+    "\n\nCRITICAL: Your previous response contained invalid JSON. "
+    "Output ONLY a single valid JSON object. No code blocks or markdown in values."
+)
 
 
 class BlogFactCheckAgent:
@@ -95,63 +96,37 @@ class BlogFactCheckAgent:
         if on_llm_request:
             on_llm_request("Checking facts and claims...")
 
-        agent = Agent(
-            model=self._model, system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip()
-        )
-
-        data = None
-        for attempt in range(_MAX_JSON_RETRIES):
-            current_prompt = prompt
-            if attempt > 0:
-                current_prompt = prompt + (
-                    "\n\nCRITICAL: Your previous response contained invalid JSON. "
-                    "Output ONLY a single valid JSON object. No code blocks or markdown in values."
-                )
-            current_prompt += "\n\nRespond with valid JSON only, no markdown fences."
-            try:
-                result = agent(current_prompt)
-                data = extract_json_from_response(str(result).strip())
-                break
-            except LLMJsonParseError as e:
-                logger.warning(
-                    "Fact-check JSON parse failed (attempt %d/%d): %s",
-                    attempt + 1,
-                    _MAX_JSON_RETRIES,
-                    e,
-                )
-                continue
-            except (LLMRateLimitError, LLMTemporaryError) as e:
-                # Transient LLM-transport errors (raised only after the client exhausts its
-                # own retries) propagate unwrapped so the Temporal activity funnel can retry
-                # the whole stage, instead of being masked as a terminal FactCheckError.
-                # Log at the agent boundary so the transient failure is visible in thread
-                # mode too (outside Temporal, which would otherwise be the only logger).
-                logger.warning("Fact-check agent hit a transient LLM error, re-raising: %s", e)
-                raise
-            except Exception as e:
-                # logger.exception captures the full traceback at ERROR level so an
-                # unexpected/programming error is visible before being wrapped in the
-                # domain FactCheckError (which the gate funnel treats as a BloggingError).
-                logger.exception("Fact-check failed: %s", e)
-                raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
-
-        if data is None:
-            logger.warning(
-                "Fact-check JSON parse failed after %d attempts; using fallback FAIL report",
-                _MAX_JSON_RETRIES,
+        def _agent_factory():
+            return Agent(
+                model=self._model,
+                system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip(),
             )
-            report = FactCheckReport(
-                claims_status="FAIL",
-                risk_status="FAIL",
-                risk_flags=["Could not parse fact-check result; re-run fact check."],
-                required_disclaimers=[],
-                notes=f"Fallback report: JSON parse failed after {_MAX_JSON_RETRIES} attempts.",
+
+        prompt_for_helper = prompt + _ALWAYS_ON_JSON_INSTRUCTION
+
+        def _on_exhausted(_exc: Exception) -> Dict[str, Any]:
+            return {
+                "claims_status": "FAIL",
+                "risk_status": "FAIL",
+                "risk_flags": ["Could not parse fact-check result; re-run fact check."],
+                "required_disclaimers": [],
+                "notes": "Fallback report: JSON parse failed after 2 attempts.",
+            }
+
+        try:
+            data = call_json_with_retry(
+                _agent_factory,
+                prompt_for_helper,
+                max_attempts=2,
+                strict_json_suffix=_JSON_RETRY_SUFFIX,
+                on_exhausted=_on_exhausted,
+                logger=logger,
             )
-            if work_dir and write_artifact:
-                fc_data = report.to_dict()
-                write_artifact(work_dir, "fact_check_report.json", fc_data)
-                logger.info("Wrote fact_check_report.json: claims=FAIL risk=FAIL (fallback)")
-            return report
+        except (LLMRateLimitError, LLMTemporaryError):
+            raise
+        except Exception as e:
+            logger.exception("Fact-check failed: %s", e)
+            raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
 
         claims_status = (data.get("claims_status") or "PASS").upper()
         if claims_status not in ("PASS", "FAIL"):
