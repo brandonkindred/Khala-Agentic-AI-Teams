@@ -1,11 +1,11 @@
 """Dependency-light base shared by the LLM tool-agent classes.
 
 Holds the ``_agent_factory`` monkeypatch resolver, an opt-in, class-attribute
-parameterized model-resolution step, and an opt-in parameterized LLM
-invocation step (inline vs ``run_strands_agent``). Deliberately imports
-nothing from ``code_review_agent`` so it can be depended on from any team
-without pulling in the code-review engine. JSON parsing and fallback logic
-remain out of scope here.
+parameterized model-resolution step, an opt-in parameterized LLM invocation
+step (inline vs ``run_strands_agent``), and an opt-in parameterized JSON-
+parsing step (lenient vs extract). Deliberately imports nothing from
+``code_review_agent`` so it can be depended on from any team without pulling
+in the code-review engine.
 
 Preconditions:
     None beyond standard Python import semantics.
@@ -23,7 +23,8 @@ Invariants:
 from __future__ import annotations
 
 import importlib
-from typing import Any, Callable, Optional
+import logging
+from typing import Any, Callable, Dict, Optional
 
 
 class LlmToolAgentBase:
@@ -45,6 +46,12 @@ class LlmToolAgentBase:
         Plan/Json-like — ``resolve_models = True``, ``response_format = "json"``,
         ``get_strands_model_fn = <callable>``; leave
         ``use_run_strands_agent`` false for the inline path.
+        Review JSON parse — ``json_parse_strategy = "lenient"``,
+        ``review_parse_mode = "json"`` (failure → ``{}``).
+        Review text parse — ``json_parse_strategy = "lenient"``,
+        ``review_parse_mode = "text"``, ``_parse_review = <callable>``.
+        Plan/Json extract parse — ``json_parse_strategy = "extract"``
+        (failure → ``None``).
 
     Preconditions:
         ``llm``, if provided, is whatever ``resolve_strands_model`` accepts
@@ -67,6 +74,11 @@ class LlmToolAgentBase:
     uses_json_model: bool = False
     get_strands_model_fn: Optional[Callable[..., Any]] = None
     use_run_strands_agent: bool = False
+    json_parse_strategy: str = "lenient"  # "lenient" | "extract"
+    review_parse_mode: str = "json"  # "json" | "text"; only for lenient
+    parse_context: str = ""
+    parse_on_fail_msg: str = "reporting empty result."
+    _parse_review: Optional[Callable[[str], Dict[str, Any]]] = None
 
     def __init__(self, llm=None) -> None:
         self.llm = llm
@@ -127,3 +139,49 @@ class LlmToolAgentBase:
 
             return run_strands_agent(self._agent_factory(), model, prompt)
         return str(self._agent_factory()(model=model)(prompt)).strip()
+
+    def _parse_llm_json(self, raw: str) -> Optional[Dict[str, Any]]:
+        """Parse model output via the selected JSON-salvage strategy.
+
+        When ``json_parse_strategy`` is ``"extract"``, delegates to
+        ``shared.llm_recovery.extract_json_object`` (failure → ``None``).
+        When ``"lenient"`` and ``review_parse_mode == "text"``, calls
+        ``self._parse_review(raw)``. Otherwise uses
+        ``tool_agent_base.lenient_json_object`` (failure → ``{}``).
+
+        Preconditions:
+            ``raw`` is a ``str``. ``json_parse_strategy`` is ``"lenient"`` or
+            ``"extract"``. If strategy is ``"lenient"``, ``review_parse_mode``
+            is ``"json"`` or ``"text"``. If mode is ``"text"``,
+            ``_parse_review`` is not ``None``.
+
+        Postconditions:
+            Returns a ``dict`` for lenient/text paths (``{}`` on lenient JSON
+            failure). Returns ``dict | None`` for extract (``None`` on failure).
+            Does not import ``tool_agent_base`` or ``shared.llm_recovery`` until
+            the corresponding branch runs.
+        """
+        strategy = type(self).json_parse_strategy
+        assert strategy in ("lenient", "extract"), strategy
+
+        if strategy == "extract":
+            from shared.llm_recovery import extract_json_object
+
+            return extract_json_object(raw)
+
+        mode = type(self).review_parse_mode
+        assert mode in ("json", "text"), mode
+
+        if mode == "text":
+            parse_review = type(self)._parse_review
+            assert parse_review is not None, "_parse_review required for text mode"
+            return parse_review(raw)
+
+        from software_engineering_team.shared.tool_agent_base import lenient_json_object
+
+        return lenient_json_object(
+            raw,
+            logger=logging.getLogger(type(self).__module__),
+            context=self.parse_context,
+            on_fail_msg=self.parse_on_fail_msg,
+        )
