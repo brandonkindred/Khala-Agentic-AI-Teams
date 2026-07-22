@@ -1,9 +1,10 @@
 """Test helpers for ``shared.postgres``.
 
 Small utilities that are useful only in tests — kept out of the main
-package so production imports don't pull them in. The key primitive is
-``truncate_team_tables``: given a ``TeamSchema`` with an explicit
-``table_names`` list, wipe every table so the next test starts clean.
+package so production imports don't pull them in. Includes live-Postgres
+truncate helpers (``truncate_team_tables``, ``truncate_all_teams``,
+``drop_team_tables``) and re-exports the in-memory fake scaffold from
+``shared.postgres.fake`` for store unit tests that must not hit Postgres.
 """
 
 from __future__ import annotations
@@ -29,9 +30,7 @@ def truncate_team_tables(schema: TeamSchema) -> int:
     ``ensure_team_schema``'s policy of failing loudly on misuse).
     """
     if not is_postgres_enabled():
-        raise RuntimeError(
-            f"truncate_team_tables called for team={schema.team} but POSTGRES_HOST is not set."
-        )
+        raise RuntimeError(f"truncate_team_tables called for team={schema.team} but POSTGRES_HOST is not set.")
     if not schema.table_names:
         return 0
 
@@ -65,9 +64,7 @@ def drop_team_tables(schema: TeamSchema) -> int:
     ``ensure_team_schema``'s policy of failing loudly on misuse).
     """
     if not is_postgres_enabled():
-        raise RuntimeError(
-            f"drop_team_tables called for team={schema.team} but POSTGRES_HOST is not set."
-        )
+        raise RuntimeError(f"drop_team_tables called for team={schema.team} but POSTGRES_HOST is not set.")
     if not schema.table_names:
         return 0
 
@@ -106,3 +103,23 @@ def _quote_ident(name: str) -> str:
     if '"' in name:
         raise ValueError(f"refusing to quote identifier containing a double-quote: {name!r}")
     return f'"{name}"'
+
+
+# Re-export the in-memory fake scaffold so callers can import from either
+# ``shared.postgres.testing`` or ``shared.postgres.fake``.
+from shared.postgres.fake import (  # noqa: E402
+    FakeConn,
+    FakeCursor,
+    install_fake_postgres,
+    unwrap_json,
+)
+
+__all__ = [
+    "FakeConn",
+    "FakeCursor",
+    "drop_team_tables",
+    "install_fake_postgres",
+    "truncate_all_teams",
+    "truncate_team_tables",
+    "unwrap_json",
+]
