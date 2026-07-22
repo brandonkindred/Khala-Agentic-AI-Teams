@@ -31,6 +31,7 @@ class _PhaseInput:
 
 
 def test_run_qa_testing_phase_impl_contains_agent_failure():
+    """QA agent_runner failure becomes a synthetic high issue; phase fails without raising."""
     from software_engineering_team.shared.phases.review import run_qa_testing_phase_impl
 
     def _boom(**_kw):
@@ -56,6 +57,7 @@ def test_run_qa_testing_phase_impl_contains_agent_failure():
 
 
 def test_run_security_testing_phase_impl_contains_agent_failure():
+    """Security agent_runner failure becomes a synthetic critical issue; phase fails without raising."""
     from software_engineering_team.shared.phases.review import run_security_testing_phase_impl
 
     def _boom(**_kw):
@@ -83,6 +85,7 @@ def test_run_security_testing_phase_impl_contains_agent_failure():
 
 
 def test_run_agent_testing_phase_skips_gate_when_no_agents():
+    """With neither QA agent nor tool agent, the gate synthesizes a skip issue and fails."""
     from software_engineering_team.shared.phases.review import (
         _QA_TESTING_PHASE_SPEC,
         _run_agent_testing_phase,
@@ -115,6 +118,7 @@ def test_run_agent_testing_phase_skips_gate_when_no_agents():
 
 
 def test_run_agent_testing_phase_invokes_tool_agent_via_factory():
+    """Wired tool agent receives a factory-built phase input and its issues are folded in."""
     from software_engineering_team.shared.phases.review import (
         _QA_TESTING_PHASE_SPEC,
         _run_agent_testing_phase,
@@ -205,6 +209,7 @@ def test_run_agent_testing_phase_omits_context_when_flag_false():
 
 
 def test_run_security_testing_phase_skips_gate_when_no_agents():
+    """With neither security agent nor tool agent, the gate synthesizes a skip issue and fails."""
     from software_engineering_team.shared.phases.review import (
         _SECURITY_TESTING_PHASE_SPEC,
         _run_agent_testing_phase,
@@ -240,6 +245,7 @@ def test_run_security_testing_phase_skips_gate_when_no_agents():
 
 
 def test_run_agent_testing_phase_tool_agent_exception_is_contained():
+    """A tool-agent .review() exception is logged and swallowed; phase may still pass."""
     from software_engineering_team.shared.phases.review import (
         _QA_TESTING_PHASE_SPEC,
         _run_agent_testing_phase,
@@ -273,6 +279,7 @@ def test_run_agent_testing_phase_tool_agent_exception_is_contained():
 
 
 def test_run_agent_testing_phase_invokes_detail_callback():
+    """Detail callback receives both the agent-run and tool-agent review progress messages."""
     from software_engineering_team.shared.phases.review import (
         _QA_TESTING_PHASE_SPEC,
         _run_agent_testing_phase,
@@ -308,6 +315,7 @@ def test_run_agent_testing_phase_invokes_detail_callback():
 
 
 def test_run_code_review_phase_impl_build_failure_adds_critical_issue():
+    """Build verifier failure becomes a critical build issue and fails the code-review phase."""
     from pathlib import Path
 
     from software_engineering_team.backend_code_v2_team.phases._profile import REVIEW_CONFIG
@@ -338,6 +346,7 @@ def test_run_code_review_phase_impl_build_failure_adds_critical_issue():
 
 
 def test_run_code_review_phase_impl_maps_lint_findings():
+    """Lint tool findings are mapped into ReviewIssues and progress callbacks still fire."""
     from pathlib import Path
 
     from software_engineering_team.backend_code_v2_team.phases._profile import REVIEW_CONFIG

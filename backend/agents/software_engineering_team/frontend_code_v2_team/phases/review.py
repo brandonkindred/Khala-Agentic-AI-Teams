@@ -2,7 +2,7 @@
 Review phase: code review, build verification, lint, QA, security.
 
 Uses passed-in quality agents when available; LLM-based review otherwise.
-No code from frontend_team is used.
+No code from the legacy ``frontend_team`` agent is used.
 """
 
 from __future__ import annotations
