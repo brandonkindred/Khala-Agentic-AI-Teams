@@ -5,35 +5,41 @@ Shared base for the code-v2 Development Agents (backend + frontend).
 constructor, their repo-briefing read (including the incremental
 :class:`~software_engineering_team.shared.repo_context_cache.RepoContextCache`
 fast path), their tool-runner construction, their planning + feature-branch
-setup (``_run_planning_and_branch_setup``), and their post-execution
-bookkeeping (``_record_execution_bookkeeping``) verbatim; only the per-team
-tool-agent roster, tooling detection, repo extension/exclude sets, and the
-remainder of the integration-only ``run_workflow`` (execution, documentation,
-deliver, and final status wiring) differ. This base holds the shared members;
-each team subclasses it and supplies the divergent parts.
+setup (``_run_planning_and_branch_setup``), their post-execution
+bookkeeping (``_record_execution_bookkeeping``), their documentation phase
+(``_run_documentation_phase``), and their deliver + final status/logging
+(``_run_deliver_and_finalize``) verbatim; only the per-team tool-agent roster,
+tooling detection, repo extension/exclude sets, and the remainder of the
+integration-only ``run_workflow`` (execution) differ. This base holds the
+shared members; each team subclasses it and supplies the divergent parts via
+class attributes (``_TEAM_LABEL``, ``_DELIVER_IN_PROGRESS_STATUS``) and overrides.
 
 The still-divergent parts of ``run_workflow`` deliberately stay per-team: they
-are ``# pragma: no cover`` integration code carrying ~100 lines of
-team-specific status/progress/result wiring, so converging them safely is a
-separate, test-guarded change rather than part of this base.
+are ``# pragma: no cover`` integration code carrying team-specific
+status/progress/result wiring, so converging them safely is a separate,
+test-guarded change rather than part of this base.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
+from software_engineering_team.shared.v2_models import Phase
 
 
 class BaseV2DevelopmentAgent:
     """Shared base for the code-v2 Development Agents.
 
     Subclasses provide the per-team ``_read_repo_code`` (extension/exclude sets +
-    briefing budget), ``_detect_tooling``, tool-agent roster, and ``run_workflow``.
+    briefing budget), ``_detect_tooling``, tool-agent roster, ``run_workflow``,
+    and class attributes ``_TEAM_LABEL`` / ``_DELIVER_IN_PROGRESS_STATUS`` used
+    by ``_run_deliver_and_finalize``.
 
     Invariants: instance state is limited to ``llm`` and ``_repo_context_cache``,
     so a subclass built via ``__new__`` and given those two attributes behaves
@@ -339,6 +345,184 @@ class BaseV2DevelopmentAgent:
                 logger.warning("[%s] Git agent commit_current_changes raised: %s", task_id, exc)
 
         return completed_count, failed_count
+
+    @staticmethod
+    def _run_documentation_phase(
+        *,
+        task_id: str,
+        task: Any,
+        repo_path: Path,
+        llm: LLMClient,
+        exec_result: Any,
+        planning_result: Any,
+        tool_agents: Dict[Any, Any],
+        result: Any,
+        current_files: Dict[str, str],
+        run_documentation_phase: Callable[..., Any],
+        update_job: Callable[..., None],
+        logger: logging.Logger,
+        status_text: str,
+    ) -> Dict[str, str]:
+        """Run the documentation phase and merge any new files into ``current_files``.
+
+        Extracted from ``run_workflow`` so the documentation status update +
+        phase invocation + file-merge + exception-swallow block is defined once;
+        ``run_documentation_phase`` is injected (the caller's late-imported
+        module-level name) so tests that monkeypatch
+        ``phases.documentation.run_documentation_phase`` keep working.
+        ``status_text`` is parameterized because backend and frontend differ
+        (``"Generating documentation and API specs"`` vs.
+        ``"Generating documentation and API docs..."``).
+
+        Preconditions: ``status_text`` is the team-specific job status string.
+          ``result`` exposes ``current_phase``, ``documentation_result``, and
+          ``final_files`` attributes. ``current_files`` is the mutable
+          post-execution file map.
+        Postconditions: ``result.current_phase`` is ``Phase.DOCUMENTATION``.
+          On success, ``result.documentation_result`` is set and any
+          ``doc_result.files`` are merged into ``current_files`` /
+          ``result.final_files``. On failure, logs a warning and leaves
+          ``documentation_result`` unset. Never raises; returns the (possibly
+          updated) ``current_files`` dict.
+        """
+        logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
+        result.current_phase = Phase.DOCUMENTATION
+        update_job(
+            current_phase="documentation",
+            progress=80,
+            status_text=status_text,
+        )
+
+        try:
+            doc_result = run_documentation_phase(
+                llm=llm,
+                task=task,
+                repo_path=repo_path,
+                execution_result=exec_result,
+                planning_result=planning_result,
+                tool_agents=tool_agents,
+            )
+            result.documentation_result = doc_result
+            if doc_result.files:
+                current_files.update(doc_result.files)
+                result.final_files = current_files
+            logger.info("[%s] Documentation phase complete: %s", task_id, doc_result.summary)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Documentation phase failed: %s. Next step -> Continuing to Deliver phase",
+                task_id,
+                exc,
+            )
+
+        return current_files
+
+    @staticmethod
+    def _run_deliver_and_finalize(
+        *,
+        task_id: str,
+        repo_path: Path,
+        current_files: Any,
+        exec_summary: str,
+        task_title: str,
+        task_description: str,
+        tool_agents: Dict[Any, Any],
+        feature_branch_name: Optional[str],
+        merge_to_development: bool,
+        failed_count: int,
+        completed_count: int,
+        start_time: float,
+        result: Any,
+        run_deliver: Callable[..., Any],
+        update_job: Callable[..., None],
+        logger: logging.Logger,
+        team_label: str,
+        deliver_in_progress_status: str,
+    ) -> Optional[str]:
+        """Run deliver, then emit final job status and workflow timing log.
+
+        Extracted from ``run_workflow`` so the deliver-invocation + result
+        mutation + final status/logging sequence is defined once. ``run_deliver``
+        is injected (the caller's own module-level name) so tests that
+        monkeypatch a team's orchestrator module keep working unchanged.
+        ``team_label`` and ``deliver_in_progress_status`` are passed explicitly
+        from each subclass's class attributes so the one real per-team string
+        differences are preserved without hardcoding.
+
+        Preconditions: ``repo_path`` is an existing directory.
+          ``run_deliver`` follows the team ``run_deliver`` keyword signature.
+          ``result`` is a mutable workflow-result object with ``current_phase``,
+          ``deliver_result``, ``success``, ``summary``, ``needs_followup``, and
+          ``failure_reason`` attributes. ``start_time`` was captured via
+          ``time.monotonic()`` before this helper runs.
+        Postconditions: on a non-raising ``run_deliver`` result (including soft
+          failure where ``merged``/``branch_ready`` is false), mutates ``result``
+          (sets ``deliver_result``, ``success``, ``summary``, and optionally
+          ``needs_followup``), emits the final job update, logs workflow timing,
+          and returns ``None``. Soft deliver failure leaves ``result.success``
+          false and finalizes with the ``"{team_label} task completed with
+          issues"`` status. On deliver exception, sets ``result.failure_reason``,
+          logs the error, and returns the failure-reason string; callers may
+          ignore that return value and always ``return result``, since the
+          failure is already on ``result.failure_reason``. In-progress status
+          text is ``deliver_in_progress_status``; final status is
+          ``"{team_label} task complete"`` or
+          ``"{team_label} task completed with issues"``. Never raises on its own.
+        """
+        logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
+        result.current_phase = Phase.DELIVER
+        update_job(
+            current_phase="deliver",
+            progress=90,
+            status_text=deliver_in_progress_status,
+        )
+
+        try:
+            deliver_result = run_deliver(
+                task_id=task_id,
+                repo_path=repo_path,
+                files=current_files,
+                summary=exec_summary,
+                task_title=task_title,
+                tool_agents=tool_agents,
+                task_description=task_description,
+                feature_branch_name=feature_branch_name,
+                merge_to_development=merge_to_development,
+            )
+            result.deliver_result = deliver_result
+            delivered = (
+                deliver_result.merged if merge_to_development else deliver_result.branch_ready
+            )
+            result.success = delivered and failed_count == 0
+            result.summary = f"{exec_summary} {deliver_result.summary}"
+            if failed_count > 0:
+                result.needs_followup = True
+                result.summary += f" ({failed_count} microtask(s) failed review)"
+        except Exception as exc:
+            failure_reason = f"Deliver failed: {exc}"
+            result.failure_reason = failure_reason
+            logger.error("[%s] %s", task_id, failure_reason)
+            return failure_reason
+
+        elapsed = time.monotonic() - start_time
+        final_status = (
+            f"{team_label} task complete"
+            if result.success
+            else f"{team_label} task completed with issues"
+        )
+        update_job(
+            current_phase="deliver",
+            progress=100 if result.success else 95,
+            status_text=final_status,
+        )
+        logger.info(
+            "[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
+            task_id,
+            "SUCCEEDED" if result.success else "PARTIAL",
+            elapsed,
+            completed_count,
+            failed_count,
+        )
+        return None
 
     def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
         """Per-team repo briefing reader.
