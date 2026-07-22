@@ -13,9 +13,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
-from strands import Agent
-
 from agents.blogging.shared.json_retry import call_json_with_retry
+from strands import Agent
 
 from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT
