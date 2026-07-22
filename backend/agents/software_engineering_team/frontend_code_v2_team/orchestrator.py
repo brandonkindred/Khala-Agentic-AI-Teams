@@ -28,7 +28,6 @@ from .models import (
     FrontendCodeV2WorkflowResult,
     MicrotaskReviewConfig,
     MicrotaskReviewFailedError,
-    MicrotaskStatus,
     Phase,
     ToolAgentKind,
 )
@@ -116,10 +115,11 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
     ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
-    ``_run_documentation_phase`` / ``_run_deliver_and_finalize`` from
-    :class:`BaseV2DevelopmentAgent`; supplies the frontend tooling detection,
-    repo-briefing sets, and the integration-only ``run_workflow``, which calls
-    the base helpers for preflight, planning/branch setup, documentation, and
+    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
+    ``_run_deliver_and_finalize`` from :class:`BaseV2DevelopmentAgent`; supplies
+    the frontend tooling detection, repo-briefing sets, and the
+    integration-only ``run_workflow``, which calls the base helpers for
+    preflight, planning/branch setup, bookkeeping, documentation, and
     deliver/finalize.
     """
 
@@ -326,25 +326,15 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
             result.failure_reason = "Execution produced no files."
             return result
 
-        completed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.COMPLETED
+        completed_count, failed_count = self._record_execution_bookkeeping(
+            task_id=task_id,
+            result=result,
+            exec_result=exec_result,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            git_agent=git_agent,
+            logger=logger,
         )
-        failed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.REVIEW_FAILED
-        )
-        result.iterations_used = completed_count
-
-        if (
-            feature_branch_name
-            and git_agent is not None
-            and hasattr(git_agent, "commit_current_changes")
-        ):
-            try:
-                git_agent.commit_current_changes(
-                    repo_path, f"feat: {completed_count} microtasks completed"
-                )
-            except Exception as exc:
-                logger.warning("[%s] Git agent commit_current_changes raised: %s", task_id, exc)
 
         result.final_files = current_files
 
