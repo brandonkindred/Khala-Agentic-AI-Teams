@@ -34,6 +34,7 @@ def test_init_stores_llm_and_starts_with_empty_cache_dict():
     lead = BaseTeamLead(llm, extensions=frozenset({".py"}), exclude_dirs=frozenset(), max_chars=100)
     assert lead.llm is llm
     assert lead._repo_context_caches == {}
+    assert lead._status_callback is None
 
 
 def test_repo_context_cache_for_is_lazy_and_reused(tmp_path: Path):
@@ -115,3 +116,58 @@ def test_copy_development_result_fields_copies_all_shared_fields():
     assert dst.needs_followup is True
     # setup_result is deliberately excluded from the copy.
     assert dst.setup_result == "dst-setup"
+
+
+def test_report_status_noop_when_callback_unset():
+    lead = _make_lead()
+    assert lead._status_callback is None
+    lead._report_status("phase1", detail="starting")  # must not raise
+
+
+def test_report_status_forwards_hybrid_payload():
+    lead = _make_lead()
+    calls = []
+
+    def _cb(**kwargs):
+        calls.append(kwargs)
+
+    lead._status_callback = _cb
+    lead._report_status(
+        "phase2",
+        detail="change design",
+        progress=0.4,
+        status_text="DevOps phase 2",
+    )
+    assert calls == [
+        {
+            "phase": "phase2",
+            "detail": "change design",
+            "progress": 0.4,
+            "status_text": "DevOps phase 2",
+        }
+    ]
+
+
+def test_report_status_omits_none_progress():
+    lead = _make_lead()
+    calls = []
+    lead._status_callback = lambda **kwargs: calls.append(kwargs)
+    lead._report_status("phase3", detail="validation")
+    assert calls == [{"phase": "phase3", "detail": "validation"}]
+    assert "progress" not in calls[0]
+
+
+def test_report_status_swallows_callback_errors():
+    lead = _make_lead()
+
+    def _boom(**_kwargs):
+        raise RuntimeError("callback exploded")
+
+    lead._status_callback = _boom
+    lead._report_status("phase4", detail="review")  # must not raise
+
+
+def test_report_status_rejects_empty_phase():
+    lead = _make_lead()
+    with pytest.raises(AssertionError):
+        lead._report_status("")

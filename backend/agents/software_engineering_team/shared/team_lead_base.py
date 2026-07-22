@@ -7,7 +7,8 @@ constructor, their per-repo incremental briefing cache lookup
 overlays their inner ``*DevelopmentAgent`` result onto their own result
 object; only the injected repo-briefing extension/exclude/char-budget
 constants and the bulk of ``run_workflow`` (setup-phase orchestration,
-status/progress wiring) differ. This base holds the shared members; each team
+status/progress wiring) differ. This base also provides an optional per-run
+status/progress callback via :meth:`BaseTeamLead._report_status`; each team
 subclasses it and supplies the divergent parts.
 
 ``run_workflow`` itself deliberately stays per-team: it is ``# pragma: no
@@ -21,11 +22,14 @@ resolving per-subclass-module).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any, Dict, FrozenSet
+from typing import Any, Callable, Dict, FrozenSet, Optional
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
+
+logger = logging.getLogger(__name__)
 
 # The 13 fields a code-v2 development-agent result hands off to its team
 # lead's own result object. ``setup_result`` is deliberately excluded: it is
@@ -69,7 +73,8 @@ class BaseTeamLead:
     ``__init__``) and their own ``run_workflow``.
 
     Invariants: instance state is limited to ``llm``, the injected
-    extensions/exclude_dirs/max_chars, and ``_repo_context_caches``.
+    extensions/exclude_dirs/max_chars, ``_repo_context_caches``, and
+    ``_status_callback`` (optional per-run status hook; default None).
     """
 
     def __init__(
@@ -90,6 +95,10 @@ class BaseTeamLead:
         # tasks in a job), so the N tasks of a job re-read only the files each
         # merge touched instead of re-walking the whole repo N times.
         self._repo_context_caches: Dict[Path, RepoContextCache] = {}
+        # Optional per-run status/progress callback. Subclasses assign this at the
+        # start of run_workflow (and clear it when the run ends); BaseTeamLead does
+        # not accept it via the constructor.
+        self._status_callback: Optional[Callable[..., None]] = None
 
     def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
         """Return the incremental briefing cache for ``repo_path``, creating it lazily.
@@ -111,3 +120,30 @@ class BaseTeamLead:
             )
             self._repo_context_caches[key] = cache
         return cache
+
+    def _report_status(
+        self,
+        phase: str,
+        detail: str = "",
+        progress: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Report phase progress via the optional per-run status callback.
+
+        Preconditions: ``phase`` is a non-empty str.
+        Postconditions: if ``_status_callback`` is set, it is invoked once with
+          kwargs ``phase``, ``detail``, optional ``progress`` (omitted when
+          None), and ``**extra``; callback exceptions are logged and swallowed;
+          if the callback is None, this is a no-op. Never raises into the caller.
+        """
+        assert isinstance(phase, str) and phase, "phase must be a non-empty str"
+        callback = self._status_callback
+        if callback is None:
+            return
+        payload: Dict[str, Any] = {"phase": phase, "detail": detail, **extra}
+        if progress is not None:
+            payload["progress"] = progress
+        try:
+            callback(**payload)
+        except Exception as e:
+            logger.warning("team lead status callback failed (ignored): %s", e)
