@@ -3,17 +3,8 @@
 from __future__ import annotations
 
 from branding_team.agents import BrandComplianceAgent
-from branding_team.models import BrandCheckRequest, BrandingMission
-
-
-def _mission() -> BrandingMission:
-    return BrandingMission(
-        company_name="Northstar Labs",
-        company_description="A studio for product teams",
-        target_audience="enterprise product leaders",
-        values=["clarity", "trust", "tech"],
-        differentiators=["hands-on partnership", "execution speed"],
-    )
+from branding_team.models import BrandCheckRequest
+from branding_team.tests.conftest import make_mission
 
 
 def test_word_boundary_avoids_substring_false_positives() -> None:
@@ -26,7 +17,7 @@ def test_word_boundary_avoids_substring_false_positives() -> None:
             asset_description="A fintech logistics platform for cathedrals",
         )
     ]
-    (result,) = agent.evaluate(checks, _mission())
+    (result,) = agent.evaluate(checks, make_mission())
     # No whole-word brand cue present -> not on brand, no false 'tech' match.
     assert result.is_on_brand is False
     assert "tech" not in result.rationale[1]
@@ -43,7 +34,7 @@ def test_on_brand_when_multiple_whole_words_match() -> None:
             ),
         )
     ]
-    (result,) = agent.evaluate(checks, _mission())
+    (result,) = agent.evaluate(checks, make_mission())
     # 'trust' and the 'enterprise product leaders' phrase both match.
     assert result.is_on_brand is True
     assert result.revision_suggestions == []
@@ -51,4 +42,4 @@ def test_on_brand_when_multiple_whole_words_match() -> None:
 
 def test_empty_checks_returns_empty() -> None:
     agent = BrandComplianceAgent()
-    assert agent.evaluate([], _mission()) == []
+    assert agent.evaluate([], make_mission()) == []

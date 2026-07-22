@@ -27,6 +27,7 @@ from software_engineering_team.models import (
     Task,
     TaskStatus,
 )
+from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
     _BACKEND_V2_STACK_SPEC,
@@ -181,6 +182,29 @@ def _make_swarm(tmp_path, tech_lead, workers, *, spec_content=""):
     # Bypass the external quality-gate tools (build/lint/code-review) — not under test here.
     swarm._run_quality_gates = lambda *a, **k: True  # type: ignore[method-assign]
     return swarm, graph
+
+
+def test_coding_team_swarm_is_team_lead_shared_state(tmp_path):
+    """Preconditions: CodingTeamSwarm is constructed with a stub getter and empty workers.
+    Postconditions: swarm is a TeamLeadSharedState; shared_config is {}; llm_getter identity
+      is preserved; _status_callback defaults to None.
+    """
+
+    def getter(key: str):
+        return None
+
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[],
+        graph=TaskGraphService(job_id="j1"),
+        path=Path(tmp_path),
+        agent_ids=[],
+        llm_getter=getter,
+    )
+    assert isinstance(swarm, TeamLeadSharedState)
+    assert swarm.llm_getter is getter
+    assert swarm.shared_config == {}
+    assert swarm._status_callback is None
 
 
 def _patch_git(monkeypatch, diff: str = "", merge=(True, "ok")):
