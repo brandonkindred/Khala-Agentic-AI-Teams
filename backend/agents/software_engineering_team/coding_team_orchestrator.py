@@ -71,6 +71,7 @@ from software_engineering_team.reasoning_capture import (
     _thinking_flush_interval_s,
     _ThinkingBuffer,
 )
+from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 from software_engineering_team.swarm_assignment import _AssignmentMixin
 from software_engineering_team.swarm_implementation import _ImplementationMixin
 from software_engineering_team.swarm_review import _ReviewMixin
@@ -583,7 +584,13 @@ def run_coding_team_orchestrator(
         coord.stop()
 
 
-class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin, _RevisionCapMixin):
+class CodingTeamSwarm(
+    TeamLeadSharedState,
+    _AssignmentMixin,
+    _ImplementationMixin,
+    _ReviewMixin,
+    _RevisionCapMixin,
+):
     """Coordinator (Tech Lead) + frontend/backend v2 implementation-worker swarm pattern.
 
     The coordinator assigns ready tasks to free workers. Each worker implements
@@ -591,9 +598,11 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin, _Rev
     coordinator reviews (the swarm's sole code-review pass) and merges approved
     tasks.
 
-    Behavior is spread across four mixins by responsibility (assignment,
-    implementation, review, revision-cap bookkeeping) — see
-    coding_team/swarm_assignment.py, swarm_implementation.py, swarm_review.py,
+    Inherits ``TeamLeadSharedState`` for LLM resolution (``llm_getter``), an opaque
+    ``shared_config`` bag, and the optional per-run status callback — state storage
+    only; phase sequencing stays off this swarm. Behavior is otherwise spread across
+    four mixins by responsibility (assignment, implementation, review, revision-cap
+    bookkeeping) — see swarm_assignment.py, swarm_implementation.py, swarm_review.py,
     swarm_revision_cap.py.
     """
 
@@ -609,13 +618,17 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin, _Rev
         engine_provider: Any = None,
         spec_content: str = "",
     ) -> None:
+        TeamLeadSharedState.__init__(
+            self,
+            llm_getter=llm_getter,
+            shared_config={},
+        )
         self.tech_lead = tech_lead
         self.workers = workers
         self.graph = graph
         self.path = path
         self.agent_ids = agent_ids
         self.agent_team_keys = {w.agent_id: _worker_team_key(w) for w in workers}
-        self.llm_getter = llm_getter
         # Injected implementation engines (build/lint); None → quality gates are skipped.
         self.engine_provider = engine_provider
         # The plan's final spec content (CodingTeamPlanInput.final_spec_content), forwarded to the
