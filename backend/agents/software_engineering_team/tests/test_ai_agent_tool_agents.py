@@ -39,7 +39,8 @@ AGENTS = [
 def _tool_input() -> ToolAgentInput:
     return ToolAgentInput(
         microtask=Microtask(id="m1", title="Wire the runtime", description="Do the thing"),
-        spec_context="spec details" * 1000,  # exercises the spec truncation
+        # Long context is passed through in full (truncation was removed intentionally).
+        spec_context="spec details" * 1000,
     )
 
 
@@ -88,8 +89,10 @@ def test_run_parses_valid_json(monkeypatch, module_name: str, class_name: str) -
     assert out.files == {"a.py": "print('hi')"}
     assert out.recommendations == ["do x"]
     assert out.summary == "done"
-    # Spec context was truncated to MAX_SPEC_CHARS before prompting.
+    assert out.success is True
+    # Spec context is forwarded in full (no truncation).
     assert "spec details" in captured["prompt"]
+    assert captured["prompt"].count("spec details") == 1000
 
 
 def test_run_recovers_from_fenced_output(monkeypatch) -> None:
@@ -129,11 +132,13 @@ def test_run_degrades_on_non_json(monkeypatch) -> None:
     assert out.files == {}
     assert out.recommendations == []
     assert out.summary == ""
+    # Empty-parse keeps the historical success=True default.
+    assert out.success is True
 
 
 @pytest.mark.parametrize("module_name,class_name", AGENTS)
 def test_run_no_model_returns_empty(module_name: str, class_name: str) -> None:
-    """Missing model returns empty files/recommendations/summary without calling the LLM."""
+    """Missing model returns unsuccessful empty output without calling the LLM."""
     mod = _load(module_name)
     inst = getattr(mod, class_name).__new__(getattr(mod, class_name))
     inst._model = None
@@ -142,11 +147,12 @@ def test_run_no_model_returns_empty(module_name: str, class_name: str) -> None:
     assert out.files == {}
     assert out.recommendations == []
     assert out.summary == ""
+    assert out.success is False
 
 
 @pytest.mark.parametrize("module_name,class_name", AGENTS)
 def test_run_llm_exception_returns_empty(monkeypatch, module_name: str, class_name: str) -> None:
-    """An exception from the LLM call degrades to empty output instead of propagating."""
+    """An exception from the LLM call degrades to unsuccessful empty output."""
 
     class _BoomAgent:
         def __init__(self, **kwargs):
@@ -164,3 +170,4 @@ def test_run_llm_exception_returns_empty(monkeypatch, module_name: str, class_na
     assert out.files == {}
     assert out.recommendations == []
     assert out.summary == ""
+    assert out.success is False

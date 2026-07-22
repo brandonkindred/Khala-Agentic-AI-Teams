@@ -36,10 +36,6 @@ from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBas
 
 from ..models import ToolAgentInput, ToolAgentOutput
 
-# Spec context is truncated to this many characters before prompting (the value
-# every concrete agent used inline).
-MAX_SPEC_CHARS = 5_000
-
 
 class JsonGeneratorToolAgent(LlmToolAgentBase):
     """Base for one-shot tool agents that return a JSON ``files``/``recommendations``/``summary`` object.
@@ -62,7 +58,9 @@ class JsonGeneratorToolAgent(LlmToolAgentBase):
         ``get_strands_model_fn=get_strands_model``, ``use_run_strands_agent=False``,
         ``json_parse_strategy="extract"``. Fallback class attrs stay empty so
         no-model / call-error / empty-parse all degrade to empty
-        ``files``/``recommendations``/``summary``.
+        ``files``/``recommendations``/``summary``. No-model and call-error
+        paths also set ``success=False``; empty-parse keeps the historical
+        ``success=True`` default.
     """
 
     # --- LlmToolAgentBase Plan/Json recipe --------------------------------
@@ -84,20 +82,25 @@ class JsonGeneratorToolAgent(LlmToolAgentBase):
         recommendations: Optional[Sequence[str]] = None,
         summary: str = "",
     ) -> ToolAgentOutput:
-        """Build the shared empty tool-agent shape (files always ``{}``).
+        """Build the unsuccessful empty tool-agent shape (files always ``{}``).
+
+        Used by the no-model and call-error fallbacks so ``run_execution`` marks
+        the microtask ``FAILED`` instead of treating an LLM outage as complete.
 
         Preconditions:
             ``recommendations``, when provided, is a sequence of strings;
             ``summary`` is a string.
 
         Postconditions:
-            Returns a :class:`ToolAgentOutput` with ``files={}`` and the given
-            recommendations/summary (defaulting recommendations to ``[]``).
+            Returns a :class:`ToolAgentOutput` with ``files={}``,
+            ``success=False``, and the given recommendations/summary (defaulting
+            recommendations to ``[]``).
         """
         return ToolAgentOutput(
             files={},
             recommendations=list(recommendations) if recommendations else [],
             summary=summary,
+            success=False,
         )
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
@@ -109,10 +112,11 @@ class JsonGeneratorToolAgent(LlmToolAgentBase):
             ``self._model`` is set (possibly falsy).
 
         Postconditions:
-            Returns a :class:`ToolAgentOutput`. A missing model, an LLM call
-            exception, or model output that is not a clean JSON object (fenced,
-            prose-wrapped, or empty) each yield empty ``files``/``recommendations``
-            and an empty ``summary`` rather than raising.
+            Returns a :class:`ToolAgentOutput`. A missing model or an LLM call
+            exception yields empty ``files``/``recommendations``/``summary`` with
+            ``success=False``. Model output that is not a clean JSON object
+            (fenced, prose-wrapped, or empty) yields the same empty fields with
+            the historical ``success=True`` default rather than raising.
         """
         no_model = self._fallback_no_model(self._model)
         if no_model is not None:
