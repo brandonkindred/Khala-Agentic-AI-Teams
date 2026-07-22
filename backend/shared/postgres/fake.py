@@ -112,9 +112,25 @@ class FakeCursor:
         raise AssertionError(f"unexpected SQL in fake cursor: {sql!r}")
 
     def fetchone(self) -> Any:
+        """Return the last single-row result set by a handler.
+
+        Preconditions:
+            None — may be called before any handler ran.
+        Postconditions:
+            Returns the value last written via ``set_one`` or direct ``_one``
+            assignment; ``None`` if no row was recorded.
+        """
         return self._one
 
     def fetchall(self) -> list:
+        """Return the last multi-row result set by a handler.
+
+        Preconditions:
+            None — may be called before any handler ran.
+        Postconditions:
+            Returns the list last written via ``set_all`` or direct ``_all``
+            assignment; empty list if no rows were recorded.
+        """
         return self._all
 
 
@@ -133,11 +149,30 @@ class FakeConn:
         dispatch: DispatchTable,
         ids: itertools.count | None = None,
     ) -> None:
+        """Bind shared backing store and dispatch table for cursors.
+
+        Preconditions:
+            ``db`` is a mutable mapping shared across cursors from this conn.
+            ``dispatch`` is a valid ``DispatchTable``.
+            ``ids`` if provided is an iterator of int-like ids; otherwise a
+            ``itertools.count(1)`` is used.
+        Postconditions:
+            ``self._db``, ``self._dispatch``, and ``self._ids`` are stored for
+            every subsequent ``cursor()`` call.
+        """
         self._db = db
         self._dispatch = dispatch
         self._ids = ids if ids is not None else itertools.count(1)
 
     def cursor(self, row_factory: Any = None) -> FakeCursor:
+        """Create a cursor sharing this connection's db and ids iterator.
+
+        Preconditions:
+            None — ``row_factory`` is accepted for API compatibility only.
+        Postconditions:
+            Returns a ``FakeCursor`` backed by the same ``db`` and ``ids``
+            as every other cursor from this connection.
+        """
         return FakeCursor(self._db, self._dispatch, self._ids, row_factory=row_factory)
 
 

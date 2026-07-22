@@ -105,3 +105,37 @@ def test_cursor_context_manager():
     cur = FakeCursor({}, _sample_dispatch())
     with cur as entered:
         assert entered is cur
+
+
+def test_fake_conn_cursor_shares_db_and_ids():
+    db: dict = {}
+    conn = FakeConn(db, _sample_dispatch())
+    cur_a = conn.cursor()
+    cur_b = conn.cursor()
+
+    cur_a.execute("INSERT INTO items VALUES (%s, %s)", ("a", {"n": 1}))
+    cur_b.execute("SELECT payload FROM items WHERE id = %s", ("a",))
+    assert cur_b.fetchone() == {"payload": {"n": 1}}
+
+    cur_a.execute("INSERT INTO notes VALUES (%s)", ("one",))
+    cur_b.execute("INSERT INTO notes VALUES (%s)", ("two",))
+    assert cur_a.fetchone() == (1,)
+    assert cur_b.fetchone() == (2,)
+
+
+def test_install_fake_postgres_patches_get_conn(monkeypatch):
+    stub = SimpleNamespace(get_conn=None)
+    db = install_fake_postgres(
+        monkeypatch,
+        modules=[stub],
+        dispatch=_sample_dispatch(),
+        id_start=10,
+    )
+
+    with stub.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO notes VALUES (%s)", ("hello",))
+            assert cur.fetchone() == (10,)
+
+    assert db is not None
+    assert db["notes"][0]["text"] == "hello"
