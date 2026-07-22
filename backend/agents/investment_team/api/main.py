@@ -2045,7 +2045,7 @@ def _translate_advisory_failure(exc: Exception) -> HTTPException:
     from temporalio.exceptions import WorkflowAlreadyStartedError
 
     cause: Optional[BaseException] = exc
-    seen: set = set()
+    seen: set[int] = set()
     # ``exc`` keeps its own __cause__ chain alive for this call's duration, so
     # id() reuse from garbage collection can't happen here — the depth cap is
     # pure belt-and-suspenders against a pathologically long or malformed chain.
