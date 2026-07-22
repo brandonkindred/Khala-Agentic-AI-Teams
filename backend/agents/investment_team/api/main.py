@@ -2037,7 +2037,8 @@ def _start_paper_trading(session_id: str, payload: Dict[str, Any]) -> None:
     """Dispatch ``PaperTradingWorkflow`` for a session (Temporal-only, fire-and-forget).
 
     Preconditions:
-        - ``session_id`` names a session already created in ``running`` status.
+        - ``session_id`` names a session already created in ``running`` or
+          ``OPENING`` status.
         - ``payload`` satisfies ``run_paper_trading_activity``'s preconditions.
     Postconditions:
         - The durable workflow is started. Raises ``HTTPException(503)`` when
@@ -3759,10 +3760,10 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
     Because paper trading can take 2-3 minutes (market data fetch + sandbox
     execution + LLM divergence analysis), this endpoint validates inputs, creates
-    a session in ``running`` status, kicks off a background worker, and returns
-    the running session immediately. Clients should poll
-    ``GET /strategy-lab/paper-trade/{session_id}`` for progress until ``status``
-    is ``completed`` or ``failed``.
+    a session in ``OPENING`` status (live path) or ``running`` status (legacy
+    path), kicks off a background worker, and returns that session immediately.
+    Clients should poll ``GET /strategy-lab/paper-trade/{session_id}`` for
+    progress until ``status`` is ``completed`` or ``failed``.
     """
     # 1 — Look up the winning strategy lab record (synchronous validation)
     with _lock:
@@ -3932,9 +3933,11 @@ def _live_paper_enabled() -> bool:
     }
 
 
-# Per-session StopController registry. The POST /stop endpoint looks up the
-# controller by session_id and calls ``request_stop()``; the running session
-# polls it between bars. Guarded by ``_lock`` shared with other session state.
+# Per-session in-process StopController registry used by
+# ``_run_live_paper_trading_background``: the worker registers a controller and
+# polls it between bars. The POST /stop endpoint does not read this dict — it
+# delivers stop via a Temporal signal (``_signal_paper_trading_stop``). Guarded
+# by ``_lock`` shared with other session state.
 _live_paper_stop_controllers: Dict[str, Any] = {}
 
 # Paper-trading statuses that mean a session is still in flight. Used by the
@@ -4313,6 +4316,10 @@ def _recover_orphaned_paper_trading_sessions() -> None:
         try:
             session = PaperTradingSession.parse_persisted(raw)
         except Exception:
+            logger.debug(
+                "Paper-trade recovery: skipping unparseable session record",
+                exc_info=True,
+            )
             continue
         if session.status not in _active_statuses:
             continue

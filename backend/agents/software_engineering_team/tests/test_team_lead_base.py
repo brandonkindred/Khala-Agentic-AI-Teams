@@ -12,6 +12,8 @@ from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
     TeamLeadSharedState,
+    apply_team_failure,
+    build_team_failure_result,
     copy_development_result_fields,
 )
 from software_engineering_team.shared.v2_models import Phase, SetupResult
@@ -176,6 +178,102 @@ def test_copy_development_result_fields_copies_all_shared_fields():
     assert dst.needs_followup is True
     # setup_result is deliberately excluded from the copy.
     assert dst.setup_result == "dst-setup"
+
+
+class _FakeTeamResult:
+    """Minimal constructor-shaped result for factory tests (devops-like)."""
+
+    def __init__(self, *, success: bool = True, failure_reason: str = "", **extra):
+        self.success = success
+        self.failure_reason = failure_reason
+        for key, value in extra.items():
+            setattr(self, key, value)
+
+
+def test_build_team_failure_result_sets_envelope():
+    result = build_team_failure_result(_FakeTeamResult, "boom")
+    assert result.success is False
+    assert result.failure_reason == "boom"
+
+
+def test_build_team_failure_result_forwards_partial_state():
+    package = {"task_id": "t1", "status": "blocked"}
+    result = build_team_failure_result(
+        _FakeTeamResult,
+        "Quality gates failed",
+        completion_package=package,
+        iterations=2,
+    )
+    assert result.success is False
+    assert result.failure_reason == "Quality gates failed"
+    assert result.completion_package == package
+    assert result.iterations == 2
+
+
+def test_build_team_failure_result_allows_empty_failure_reason():
+    result = build_team_failure_result(_FakeTeamResult, "")
+    assert result.success is False
+    assert result.failure_reason == ""
+
+
+def test_build_team_failure_result_rejects_success_override():
+    with pytest.raises(AssertionError):
+        build_team_failure_result(_FakeTeamResult, "x", success=True)
+
+
+def test_build_team_failure_result_rejects_failure_reason_kwarg():
+    with pytest.raises(TypeError):
+        build_team_failure_result(_FakeTeamResult, "x", failure_reason="y")
+
+
+def test_build_team_failure_result_rejects_non_callable_cls():
+    with pytest.raises(AssertionError):
+        build_team_failure_result(None, "x")  # type: ignore[arg-type]
+
+
+def test_build_team_failure_result_rejects_non_str_failure_reason():
+    with pytest.raises(AssertionError):
+        build_team_failure_result(_FakeTeamResult, None)  # type: ignore[arg-type]
+
+
+def test_apply_team_failure_mutates_in_place_and_returns_same_object():
+    result = SimpleNamespace(success=True, failure_reason="", summary="keep-me", phase="setup")
+    out = apply_team_failure(result, "Setup failed: disk full", phase="failed")
+    assert out is result
+    assert result.success is False
+    assert result.failure_reason == "Setup failed: disk full"
+    assert result.phase == "failed"
+    assert result.summary == "keep-me"  # unrelated field preserved
+
+
+def test_apply_team_failure_allows_empty_failure_reason():
+    result = SimpleNamespace(success=True, failure_reason="old")
+    apply_team_failure(result, "")
+    assert result.success is False
+    assert result.failure_reason == ""
+
+
+def test_apply_team_failure_rejects_success_override():
+    result = SimpleNamespace(success=True, failure_reason="")
+    with pytest.raises(AssertionError):
+        apply_team_failure(result, "x", success=True)
+
+
+def test_apply_team_failure_rejects_failure_reason_kwarg():
+    result = SimpleNamespace(success=True, failure_reason="")
+    with pytest.raises(TypeError):
+        apply_team_failure(result, "x", failure_reason="y")
+
+
+def test_apply_team_failure_rejects_none_result():
+    with pytest.raises(AssertionError):
+        apply_team_failure(None, "x")
+
+
+def test_apply_team_failure_rejects_non_str_failure_reason():
+    result = SimpleNamespace(success=True, failure_reason="")
+    with pytest.raises(AssertionError):
+        apply_team_failure(result, None)  # type: ignore[arg-type]
 
 
 def _make_task(task_id: str = "t1") -> Task:
@@ -530,6 +628,64 @@ def test_run_gated_phases_treats_falsy_non_none_payload_as_failure(payload):
 
     assert lead._run_gated_phases([phase_falsy, phase_never]) is payload
     assert calls == ["falsy"]
+
+
+def test_run_phase_gates_all_succeed_returns_none():
+    lead = _make_lead()
+    calls: list[str] = []
+
+    def gate_a():
+        calls.append("a")
+        return None
+
+    def gate_b():
+        calls.append("b")
+        return None
+
+    def gate_c():
+        calls.append("c")
+        return None
+
+    result = lead._run_phase_gates([gate_a, gate_b, gate_c])
+    assert result is None
+    assert calls == ["a", "b", "c"]
+
+
+def test_run_phase_gates_early_exit_skips_later_gates():
+    lead = _make_lead()
+    calls: list[str] = []
+    failure = object()
+
+    def gate_ok():
+        calls.append("ok")
+        return None
+
+    def gate_fail():
+        calls.append("fail")
+        return failure
+
+    def gate_never():
+        calls.append("never")
+        return None
+
+    result = lead._run_phase_gates([gate_ok, gate_fail, gate_never])
+    assert result is failure
+    assert calls == ["ok", "fail"]
+
+
+def test_run_phase_gates_empty_sequence_returns_none():
+    lead = _make_lead()
+    assert lead._run_phase_gates([]) is None
+
+
+def test_run_phase_gates_propagates_gate_exceptions():
+    lead = _make_lead()
+
+    def boom():
+        raise RuntimeError("gate exploded")
+
+    with pytest.raises(RuntimeError, match="gate exploded"):
+        lead._run_phase_gates([boom])
 
 
 def test_bounded_retry_loop_success_on_first_attempt():

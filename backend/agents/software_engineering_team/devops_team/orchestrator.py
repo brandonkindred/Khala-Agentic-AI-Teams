@@ -23,6 +23,7 @@ from software_engineering_team.shared.git_utils import (
 )
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -130,11 +131,27 @@ from .tool_agents import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-class DevOpsTeamLeadAgent:
-    """Coordinates specialized DevOps agents with hard gates."""
+class DevOpsTeamLeadAgent(TeamLeadSharedState):
+    """Coordinates specialized DevOps agents with hard gates.
+
+    Inherits ``TeamLeadSharedState`` for the optional per-run status hook
+    (``_report_status`` / ``_status_callback``). Pipeline phase status always
+    emits INFO logs via :meth:`_log_pipeline_status`; the optional callback is
+    a separate forward channel and may be set/cleared per run without losing
+    historical log output.
+
+    Invariants: ``self.llm`` is the client passed to ``__init__``; specialist
+    agents and tools are constructed once; ``_status_callback`` defaults to
+    None (mixin default) and is independent of fallback logging.
+    """
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
+        TeamLeadSharedState.__init__(
+            self,
+            llm_getter=lambda _agent_id: llm_client,
+            shared_config={},
+        )
         self.llm = llm_client
         self.task_clarifier = DevOpsTaskClarifierAgent(llm_client)
         self.iac_agent = InfrastructureAsCodeAgent(llm_client)
@@ -157,6 +174,50 @@ class DevOpsTeamLeadAgent:
         self.helm_exec_tool = HelmExecutionToolAgent()
         self.infra_debug_agent = InfraDebugAgent(llm_client)
         self.infra_patch_agent = InfraPatchAgent(llm_client)
+
+    @staticmethod
+    def _log_pipeline_status(
+        *,
+        phase: str,
+        detail: str = "",
+        progress: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Emit the historical pipeline status line at INFO.
+
+        Preconditions: ``phase`` is a non-empty str (enforced by ``_report_status``
+          before invocation).
+        Postconditions: logs ``detail`` when non-empty, otherwise logs
+          ``DevOps team pipeline: {phase}``; ``progress`` and ``extra`` are ignored
+          (reserved for external consumers). Never raises.
+        """
+        if detail:
+            logger.info("%s", detail)
+        else:
+            logger.info("DevOps team pipeline: %s", phase)
+
+    def _report_status(
+        self,
+        phase: str,
+        detail: str = "",
+        progress: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Log phase status, then forward to the optional ``_status_callback``.
+
+        Fallback INFO logging is independent of ``_status_callback`` so clearing
+        the callback after an instrumented run (the shared per-run contract) does
+        not silence later pipeline status on a reused lead.
+
+        Preconditions: ``phase`` is a non-empty str.
+        Postconditions: emits the historical INFO line via ``_log_pipeline_status``;
+          then invokes ``TeamLeadSharedState._report_status`` (no-op when callback
+          is None; forwards kwargs when set; swallows callback errors). Never
+          raises into the caller.
+        """
+        assert isinstance(phase, str) and phase, "phase must be a non-empty str"
+        self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
+        TeamLeadSharedState._report_status(self, phase, detail=detail, progress=progress, **extra)
 
     @staticmethod
     def _build_legacy_spec(
@@ -385,90 +446,147 @@ class DevOpsTeamLeadAgent:
         write_changes: bool,
         subdir: str = "",
     ) -> DevOpsTeamResult:
-        logger.info("DevOps team pipeline: starting task %s", task_spec.task_id)
-
-        # Phase 1: intake + clarification
-        env_block = self._enforce_env_policy(task_spec)
-        if env_block:
-            return DevOpsTeamResult(
-                success=False, failure_reason=f"Environment policy violation: {env_block}"
-            )
-
-        clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
-        if not clarifier.approved_for_execution:
-            return DevOpsTeamResult(
-                success=False,
-                failure_reason="Clarification required: "
-                + "; ".join(clarifier.clarification_requests[:3]),
-            )
-
-        subtask_contracts = self._build_subtask_contracts(task_spec)
-        logger.info("DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts))
-
-        # Phase 2: change design / implementation (3-way parallel fan-out)
-        logger.info("DevOps team pipeline: phase 2 - change design (parallel)")
-        repo_summary = self.repo_navigator_tool.run(
-            RepoNavigatorInput(repo_path=str(repo_path))
-        ).summary
-        # Enable parallel execution unless the backing LLM client is a
-        # DummyLLMClient (or subclass) — scripted test clients use a shared
-        # sequential response list that breaks under concurrent access.
-        from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
-
-        use_parallel = not isinstance(self.llm, _Dummy)
-        phase2 = run_phase2_parallel(
-            self.iac_agent,
-            self.cicd_agent,
-            self.deployment_agent,
-            task_spec,
-            repo_summary=repo_summary,
-            parallel=use_parallel,
+        self._report_status(
+            "start",
+            detail=f"DevOps team pipeline: starting task {task_spec.task_id}",
         )
-        iac_result = phase2["iac_result"]
-        cicd_result = phase2["cicd_result"]
-        deploy_result = phase2["deploy_result"]
-        aggregated_artifacts: Dict[str, str] = phase2["aggregated_artifacts"]
 
-        if write_changes and aggregated_artifacts:
-            # Cut a feature branch from development up front (mirroring the code-v2
-            # teams) so every intermediate write/patch commit lands on the branch
-            # and development stays clean until the reviewed Phase 5 merge. Without
-            # this, writes would commit straight to the checked-out development
-            # branch and the later merge would be an empty no-op.
-            dev_ok, dev_msg = ensure_development_branch(repo_path)
-            if not dev_ok:
+        # Phase outputs shared with Phase 4+ (set by the gated phase callables).
+        iac_result: Any = None
+        cicd_result: Any = None
+        deploy_result: Any = None
+        aggregated_artifacts: Dict[str, str] = {}
+
+        def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
+            """Phase 1: environment policy + task clarification gates.
+
+            Preconditions: ``task_spec`` is the pipeline input for this run.
+            Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
+              clarifier rejection; otherwise builds subtask contracts, logs their
+              count, and returns ``None`` so later phases run.
+            """
+            env_block = self._enforce_env_policy(task_spec)
+            if env_block:
+                return DevOpsTeamResult(
+                    success=False, failure_reason=f"Environment policy violation: {env_block}"
+                )
+
+            clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
+            if not clarifier.approved_for_execution:
                 return DevOpsTeamResult(
                     success=False,
-                    failure_reason=f"Cannot prepare {DEVELOPMENT_BRANCH} branch: {dev_msg}",
+                    failure_reason="Clarification required: "
+                    + "; ".join(clarifier.clarification_requests[:3]),
                 )
-            branch_ok, branch_msg = create_feature_branch(
-                repo_path,
-                DEVELOPMENT_BRANCH,
-                make_branch_suffix(task_spec.task_id, task_spec.title),
-            )
-            if not branch_ok:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=f"Cannot create feature branch: {branch_msg}"
-                )
-            ok, msg = write_agent_output(
-                repo_path=repo_path,
-                output={
-                    "files": aggregated_artifacts,
-                    "commit_message": f"feat(devops): implement task [{task_spec.task_id}]",
-                },
-                subdir=subdir,
-            )
-            if not ok and msg != NO_FILES_TO_WRITE_MSG:
-                return DevOpsTeamResult(success=False, failure_reason=msg)
 
-        # Phase 3: write changes (branch + implementation)
-        logger.info(
-            "DevOps team pipeline: phase 3 - branch + implementation (%d artifact files)",
-            len(aggregated_artifacts),
+            subtask_contracts = self._build_subtask_contracts(task_spec)
+            logger.info(
+                "DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts)
+            )
+            return None
+
+        def _phase2_parallel_design() -> Optional[DevOpsTeamResult]:
+            """Phase 2: change design / implementation (3-way parallel fan-out).
+
+            Preconditions: Phase 1 returned ``None``.
+            Postconditions: sets ``iac_result``, ``cicd_result``, ``deploy_result``,
+              and ``aggregated_artifacts`` from the parallel fan-out; always returns
+              ``None`` (this phase has no early-exit gate today).
+            """
+            nonlocal iac_result, cicd_result, deploy_result, aggregated_artifacts
+            self._report_status(
+                "phase2",
+                detail="DevOps team pipeline: phase 2 - change design (parallel)",
+            )
+            repo_summary = self.repo_navigator_tool.run(
+                RepoNavigatorInput(repo_path=str(repo_path))
+            ).summary
+            # Enable parallel execution unless the backing LLM client is a
+            # DummyLLMClient (or subclass) — scripted test clients use a shared
+            # sequential response list that breaks under concurrent access.
+            from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
+
+            use_parallel = not isinstance(self.llm, _Dummy)
+            phase2 = run_phase2_parallel(
+                self.iac_agent,
+                self.cicd_agent,
+                self.deployment_agent,
+                task_spec,
+                repo_summary=repo_summary,
+                parallel=use_parallel,
+            )
+            iac_result = phase2["iac_result"]
+            cicd_result = phase2["cicd_result"]
+            deploy_result = phase2["deploy_result"]
+            aggregated_artifacts = phase2["aggregated_artifacts"]
+            return None
+
+        def _phase3_branch_write() -> Optional[DevOpsTeamResult]:
+            """Phase 3: feature branch + artifact write gates.
+
+            Preconditions: Phase 2 returned ``None`` (artifacts may be empty).
+            Postconditions: when ``write_changes`` and artifacts are present, prepares
+              the development branch, cuts a feature branch, and writes artifacts —
+              returning a failed ``DevOpsTeamResult`` on any of those gates; otherwise
+              reports phase-3 status and returns ``None``.
+            """
+            if write_changes and aggregated_artifacts:
+                # Cut a feature branch from development up front (mirroring the
+                # code-v2 teams) so every intermediate write/patch commit lands
+                # on the branch and development stays clean until the reviewed
+                # Phase 5 merge. Without this, writes would commit straight to
+                # the checked-out development branch and the later merge would
+                # be an empty no-op.
+                dev_ok, dev_msg = ensure_development_branch(repo_path)
+                if not dev_ok:
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason=(f"Cannot prepare {DEVELOPMENT_BRANCH} branch: {dev_msg}"),
+                    )
+                branch_ok, branch_msg = create_feature_branch(
+                    repo_path,
+                    DEVELOPMENT_BRANCH,
+                    make_branch_suffix(task_spec.task_id, task_spec.title),
+                )
+                if not branch_ok:
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason=f"Cannot create feature branch: {branch_msg}",
+                    )
+                ok, msg = write_agent_output(
+                    repo_path=repo_path,
+                    output={
+                        "files": aggregated_artifacts,
+                        "commit_message": (f"feat(devops): implement task [{task_spec.task_id}]"),
+                    },
+                    subdir=subdir,
+                )
+                if not ok and msg != NO_FILES_TO_WRITE_MSG:
+                    return DevOpsTeamResult(success=False, failure_reason=msg)
+
+            self._report_status(
+                "phase3",
+                detail=(
+                    "DevOps team pipeline: phase 3 - branch + implementation "
+                    f"({len(aggregated_artifacts)} artifact files)"
+                ),
+            )
+            return None
+
+        # Consume BaseTeamLead's gate-based phase sequencer without inheriting
+        # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
+        early_exit = BaseTeamLead._run_gated_phases(
+            self,
+            [_phase1_intake_clarify, _phase2_parallel_design, _phase3_branch_write],
         )
+        if early_exit is not None:
+            return early_exit
 
         # Phase 4: tool validation + independent reviews
-        logger.info("DevOps team pipeline: phase 4 - validation and review")
+        self._report_status(
+            "phase4",
+            detail="DevOps team pipeline: phase 4 - validation and review",
+        )
         iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
         policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
         cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
@@ -483,7 +601,10 @@ class DevOpsTeamLeadAgent:
         tool_gate_map.update(dry_run_checks.checks)
 
         # Phase 4.5: Execution verification
-        logger.info("DevOps team pipeline: phase 4.5 - execution verification")
+        self._report_status(
+            "phase4.5",
+            detail="DevOps team pipeline: phase 4.5 - execution verification",
+        )
         repo_str = str(repo_path)
         exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
         exec_gate_map: Dict[str, str] = {}
@@ -506,11 +627,12 @@ class DevOpsTeamLeadAgent:
         for fix_iter in range(MAX_INFRA_FIX_ITERATIONS):
             if not exec_failures:
                 break
-            logger.info(
-                "DevOps team pipeline: phase 4.6 - debug-patch iteration %d/%d (%d failures)",
-                fix_iter + 1,
-                MAX_INFRA_FIX_ITERATIONS,
-                len(exec_failures),
+            self._report_status(
+                "phase4.6",
+                detail=(
+                    "DevOps team pipeline: phase 4.6 - debug-patch iteration "
+                    f"{fix_iter + 1}/{MAX_INFRA_FIX_ITERATIONS} ({len(exec_failures)} failures)"
+                ),
             )
             combined_output = "\n---\n".join(
                 "\n".join(ef.get("findings", [])) for ef in exec_failures
@@ -622,7 +744,10 @@ class DevOpsTeamLeadAgent:
                 )
 
         # Phase 5: commit, merge, release readiness
-        logger.info("DevOps team pipeline: phase 5 - completion package assembly")
+        self._report_status(
+            "phase5",
+            detail="DevOps team pipeline: phase 5 - completion package assembly",
+        )
         doc = self.doc_runbook_agent.run(
             DocumentationRunbookInput(
                 task_id=task_spec.task_id,

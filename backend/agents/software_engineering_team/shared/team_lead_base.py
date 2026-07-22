@@ -12,7 +12,8 @@ constructor, their per-repo incremental briefing cache lookup
 overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
 (:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides a
-gate-based phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`
+gate-based phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`,
+an intra-phase multi-gate hook via :meth:`BaseTeamLead._run_phase_gates`,
 and a bounded retry/patch-loop via :meth:`BaseTeamLead._run_bounded_retry_loop`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
@@ -21,6 +22,11 @@ passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
 subclass orchestrator module at call time so tests can monkeypatch
 ``orchestrator.run_setup`` / ``orchestrator.*DevelopmentAgent`` as module-level
 attributes (see ``test_team_lead_propagates_development_handoff_fields``).
+
+Shared failure-envelope helpers (:func:`build_team_failure_result`,
+:func:`apply_team_failure`) construct or mutate team results with
+``success=False`` and a ``failure_reason``, usable by phase-sequential and
+swarm orchestrators alike.
 """
 
 from __future__ import annotations
@@ -71,6 +77,58 @@ def copy_development_result_fields(dst: Any, src: Any) -> None:
     """
     for field in _DEVELOPMENT_RESULT_FIELDS:
         setattr(dst, field, getattr(src, field))
+
+
+def build_team_failure_result(
+    result_cls: Callable[..., T],
+    failure_reason: str,
+    **partial_state: Any,
+) -> T:
+    """Construct a failure envelope: success=False + failure_reason + optional partial state.
+
+    Preconditions: ``result_cls`` is callable as
+      ``result_cls(success=False, failure_reason=..., **partial_state)``;
+      ``failure_reason`` is a str; ``partial_state`` must not include ``success``
+      or ``failure_reason``.
+    Postconditions: returns an instance with ``success is False`` and
+      ``failure_reason`` equal to the given string; each ``partial_state`` key is
+      forwarded to the constructor.
+    """
+    assert callable(result_cls), "result_cls must be callable"
+    assert isinstance(failure_reason, str), "failure_reason must be a str"
+    assert "success" not in partial_state, "success is fixed to False"
+    assert "failure_reason" not in partial_state, (
+        "pass failure_reason as the dedicated argument, not in kwargs"
+    )
+    return result_cls(success=False, failure_reason=failure_reason, **partial_state)
+
+
+def apply_team_failure(
+    result: Any,
+    failure_reason: str,
+    **partial_fields: Any,
+) -> Any:
+    """Mutate an existing result into the failure envelope; return the same object.
+
+    Preconditions: ``result`` is not None and exposes assignable ``success`` /
+      ``failure_reason`` attributes (and any keys in ``partial_fields``);
+      ``failure_reason`` is a str; ``partial_fields`` must not include ``success``
+      or ``failure_reason``.
+    Postconditions: ``result.success is False``; ``result.failure_reason`` equals
+      the given string; each ``partial_fields`` key is set via ``setattr``;
+      returns ``result`` (same identity). Unrelated attributes are left untouched.
+    """
+    assert result is not None, "result is required"
+    assert isinstance(failure_reason, str), "failure_reason must be a str"
+    assert "success" not in partial_fields, "success is fixed to False"
+    assert "failure_reason" not in partial_fields, (
+        "pass failure_reason as the dedicated argument, not in kwargs"
+    )
+    result.success = False
+    result.failure_reason = failure_reason
+    for key, value in partial_fields.items():
+        setattr(result, key, value)
+    return result
 
 
 class TeamLeadSharedState:
@@ -153,8 +211,8 @@ class BaseTeamLead(TeamLeadSharedState):
     Invariants: instance state includes ``llm``, the injected
     extensions/exclude_dirs/max_chars, ``_repo_context_caches``, plus the mixin
     fields (``llm_getter``, ``shared_config``, ``_status_callback``).
-    Also exposes :meth:`_run_gated_phases` and :meth:`_run_bounded_retry_loop`
-    as reusable helpers.
+    Also exposes :meth:`_run_gated_phases`, :meth:`_run_phase_gates`, and
+    :meth:`_run_bounded_retry_loop` as reusable helpers.
     """
 
     def __init__(
@@ -220,6 +278,19 @@ class BaseTeamLead(TeamLeadSharedState):
             if failure is not None:
                 return failure
         return None
+
+    def _run_phase_gates(
+        self,
+        gates: Sequence[Callable[[], Optional[T]]],
+    ) -> Optional[T]:
+        """Run intra-phase gate callables; return the first failure payload.
+
+        Preconditions: ``gates`` is a sequence (may be empty); each element is
+          a zero-arg callable returning ``Optional[T]``.
+        Postconditions: same as :meth:`_run_gated_phases` — first non-``None``
+          wins; all-``None`` / empty → ``None``; exceptions propagate.
+        """
+        return self._run_gated_phases(gates)
 
     def _run_bounded_retry_loop(
         self,

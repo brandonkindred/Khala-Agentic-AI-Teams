@@ -15,6 +15,8 @@ suite no longer requires Postgres or a live job-service.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from investment_team.api.main import (
@@ -175,3 +177,28 @@ def test_recovery_leaves_terminal_sessions_untouched() -> None:
     finally:
         _paper_trading_sessions.pop("pt-done", None)
         _paper_trading_sessions.pop("pt-err", None)
+
+
+def test_recovery_logs_and_skips_unparseable_session(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unparseable rows are skipped with a debug log; valid orphans still recover."""
+    _paper_trading_sessions["pt-bad"] = {"not": "a-paper-trading-session"}
+    valid = _make_session("pt-good", PaperTradingStatus.OPENING)
+    _install_session(valid)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="investment_team.api.main"):
+            _recover_orphaned_paper_trading_sessions()
+        skip_records = [
+            r
+            for r in caplog.records
+            if "Paper-trade recovery: skipping unparseable session record" in r.getMessage()
+        ]
+        assert len(skip_records) == 1
+        assert skip_records[0].exc_info is not None
+        assert _fetch_session("pt-good").status == PaperTradingStatus.FAILED
+        # Corrupt row remains present and is not rewritten into a valid session.
+        assert "pt-bad" in _paper_trading_sessions
+    finally:
+        _paper_trading_sessions.pop("pt-bad", None)
+        _paper_trading_sessions.pop("pt-good", None)
