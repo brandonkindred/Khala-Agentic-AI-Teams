@@ -7,14 +7,16 @@ this collapses the remaining orchestration wrapper into one place.
 
 Git callables are supplied by the caller through ``ops`` (a ``DeliverGitOps``)
 so the team module remains the monkeypatch boundary for tests — this module
-never imports git functions directly.
+never imports git functions directly. ``make_run_deliver`` builds that ``ops``
+bundle from a caller-supplied ``git_ns`` at call time and returns the bound
+team-facing ``run_deliver``.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from software_engineering_team.shared.deliver_utils import (
     DeliverGitOps,
@@ -141,3 +143,65 @@ def run_deliver_impl(
         ops=ops,
         logger=logger,
     )
+
+
+def make_run_deliver(
+    *,
+    git_ns: Any,
+    models: PhaseModels,
+    commit_msg_template: str,
+    logger: logging.Logger,
+) -> Callable[..., Any]:
+    """Bind a team-module ``run_deliver`` that keeps ``git_ns`` as the patch surface.
+
+    Preconditions:
+        ``git_ns`` exposes ``abort_merge``, ``checkout_branch``,
+        ``commit_working_tree``, ``create_feature_branch``, ``delete_branch``,
+        ``merge_branch``, and ``write_agent_output``; ``models`` satisfies
+        ``PhaseModels``; ``commit_msg_template`` has ``{scope}`` and
+        ``{summary}`` slots; ``logger`` is a ``logging.Logger``.
+    Postconditions:
+        Returns a keyword-only ``run_deliver`` matching the code-v2 team public
+        signature. Each call builds a fresh ``DeliverGitOps`` from the *current*
+        attributes on ``git_ns`` (so monkeypatches after bind still apply) and
+        delegates entirely to ``run_deliver_impl``.
+    """
+
+    def run_deliver(
+        *,
+        task_id: str,
+        repo_path: Path,
+        files: Dict[str, str],
+        summary: str,
+        task_title: str = "",
+        tool_agents: Optional[Dict[Any, Any]] = None,
+        task_description: str = "",
+        feature_branch_name: Optional[str] = None,
+        merge_to_development: bool = True,
+    ) -> Any:
+        ops = DeliverGitOps(
+            abort_merge=git_ns.abort_merge,
+            checkout_branch=git_ns.checkout_branch,
+            commit_working_tree=git_ns.commit_working_tree,
+            create_feature_branch=git_ns.create_feature_branch,
+            delete_branch=git_ns.delete_branch,
+            merge_branch=git_ns.merge_branch,
+            write_agent_output=git_ns.write_agent_output,
+        )
+        return run_deliver_impl(
+            task_id=task_id,
+            repo_path=repo_path,
+            files=files,
+            summary=summary,
+            task_title=task_title,
+            tool_agents=tool_agents,
+            task_description=task_description,
+            feature_branch_name=feature_branch_name,
+            merge_to_development=merge_to_development,
+            ops=ops,
+            commit_msg_template=commit_msg_template,
+            models=models,
+            logger=logger,
+        )
+
+    return run_deliver
