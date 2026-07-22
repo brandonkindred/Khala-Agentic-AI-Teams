@@ -441,3 +441,19 @@ def test_run_gated_phases_propagates_phase_exceptions():
 
     with pytest.raises(RuntimeError, match="phase exploded"):
         lead._run_gated_phases([boom])
+
+
+def test_run_gated_phases_treats_falsy_non_none_payload_as_failure():
+    lead = _make_lead()
+    calls = []
+
+    def phase_zero():
+        calls.append("zero")
+        return 0  # falsy but not None -> must be treated as failure
+
+    def phase_never():
+        calls.append("never")
+        return None
+
+    assert lead._run_gated_phases([phase_zero, phase_never]) == 0
+    assert calls == ["zero"]

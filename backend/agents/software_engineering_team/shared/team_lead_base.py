@@ -8,8 +8,8 @@ overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
 (:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides an
 optional per-run status/progress callback via
-:meth:`BaseTeamLead._report_status`. This base also provides a gate-based
-phase-sequencing helper via :meth:`BaseTeamLead._run_gated_phases`.
+:meth:`BaseTeamLead._report_status` and a gate-based phase-sequencing helper
+via :meth:`BaseTeamLead._run_gated_phases`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
 passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
