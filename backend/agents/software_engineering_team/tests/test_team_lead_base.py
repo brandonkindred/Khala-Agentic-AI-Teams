@@ -12,6 +12,8 @@ from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
     TeamLeadSharedState,
+    apply_team_failure,
+    build_team_failure_result,
     copy_development_result_fields,
 )
 from software_engineering_team.shared.v2_models import Phase, SetupResult
@@ -176,6 +178,102 @@ def test_copy_development_result_fields_copies_all_shared_fields():
     assert dst.needs_followup is True
     # setup_result is deliberately excluded from the copy.
     assert dst.setup_result == "dst-setup"
+
+
+class _FakeTeamResult:
+    """Minimal constructor-shaped result for factory tests (devops-like)."""
+
+    def __init__(self, *, success: bool = True, failure_reason: str = "", **extra):
+        self.success = success
+        self.failure_reason = failure_reason
+        for key, value in extra.items():
+            setattr(self, key, value)
+
+
+def test_build_team_failure_result_sets_envelope():
+    result = build_team_failure_result(_FakeTeamResult, "boom")
+    assert result.success is False
+    assert result.failure_reason == "boom"
+
+
+def test_build_team_failure_result_forwards_partial_state():
+    package = {"task_id": "t1", "status": "blocked"}
+    result = build_team_failure_result(
+        _FakeTeamResult,
+        "Quality gates failed",
+        completion_package=package,
+        iterations=2,
+    )
+    assert result.success is False
+    assert result.failure_reason == "Quality gates failed"
+    assert result.completion_package == package
+    assert result.iterations == 2
+
+
+def test_build_team_failure_result_allows_empty_failure_reason():
+    result = build_team_failure_result(_FakeTeamResult, "")
+    assert result.success is False
+    assert result.failure_reason == ""
+
+
+def test_build_team_failure_result_rejects_success_override():
+    with pytest.raises(AssertionError):
+        build_team_failure_result(_FakeTeamResult, "x", success=True)
+
+
+def test_build_team_failure_result_rejects_failure_reason_kwarg():
+    with pytest.raises(TypeError):
+        build_team_failure_result(_FakeTeamResult, "x", failure_reason="y")
+
+
+def test_build_team_failure_result_rejects_non_callable_cls():
+    with pytest.raises(AssertionError):
+        build_team_failure_result(None, "x")  # type: ignore[arg-type]
+
+
+def test_build_team_failure_result_rejects_non_str_failure_reason():
+    with pytest.raises(AssertionError):
+        build_team_failure_result(_FakeTeamResult, None)  # type: ignore[arg-type]
+
+
+def test_apply_team_failure_mutates_in_place_and_returns_same_object():
+    result = SimpleNamespace(success=True, failure_reason="", summary="keep-me", phase="setup")
+    out = apply_team_failure(result, "Setup failed: disk full", phase="failed")
+    assert out is result
+    assert result.success is False
+    assert result.failure_reason == "Setup failed: disk full"
+    assert result.phase == "failed"
+    assert result.summary == "keep-me"  # unrelated field preserved
+
+
+def test_apply_team_failure_allows_empty_failure_reason():
+    result = SimpleNamespace(success=True, failure_reason="old")
+    apply_team_failure(result, "")
+    assert result.success is False
+    assert result.failure_reason == ""
+
+
+def test_apply_team_failure_rejects_success_override():
+    result = SimpleNamespace(success=True, failure_reason="")
+    with pytest.raises(AssertionError):
+        apply_team_failure(result, "x", success=True)
+
+
+def test_apply_team_failure_rejects_failure_reason_kwarg():
+    result = SimpleNamespace(success=True, failure_reason="")
+    with pytest.raises(TypeError):
+        apply_team_failure(result, "x", failure_reason="y")
+
+
+def test_apply_team_failure_rejects_none_result():
+    with pytest.raises(AssertionError):
+        apply_team_failure(None, "x")
+
+
+def test_apply_team_failure_rejects_non_str_failure_reason():
+    result = SimpleNamespace(success=True, failure_reason="")
+    with pytest.raises(AssertionError):
+        apply_team_failure(result, None)  # type: ignore[arg-type]
 
 
 def _make_task(task_id: str = "t1") -> Task:
