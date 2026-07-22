@@ -336,7 +336,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         if self.review_via_engine:
             return self._engine_review(inp)
         review_label = f"{self.name} review"
-        if not self._model:
+        if self._fallback_no_model(self._model) is not None:
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no LLM).")
         code_text = self._build_code_text(inp.current_files)
         if not code_text.strip():
@@ -346,22 +346,18 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             code=code_text,
         )
         model = getattr(self, self.review_model_attr)
-        try:
-            raw = self._run_agent(model, prompt)
-        except Exception as e:
-            self._logger.warning("%s LLM call failed: %s", review_label, e)
+        status, result = self._call_with_single_fallback(
+            lambda: self._invoke_llm(model, prompt),
+            log_label=review_label,
+        )
+        if status == "error":
             return ToolAgentPhaseOutput(summary=f"{review_label} failed (LLM error).")
-        if self.review_parse_mode == "json":
-            data = lenient_json_object(
-                raw,
-                logger=self._logger,
-                context=review_label,
-                on_fail_msg="reporting 0 issues.",
-            )
-        else:
-            data = self._parse_review(raw)
+        raw = result
+        self.parse_context = review_label
+        self.parse_on_fail_msg = "reporting 0 issues."
+        data = self._parse_llm_json(raw)
         issues: List[ReviewIssue] = []
-        for item in data.get("issues") or []:
+        for item in (data or {}).get("issues") or []:
             if isinstance(item, dict):
                 issues.append(
                     ReviewIssue(
