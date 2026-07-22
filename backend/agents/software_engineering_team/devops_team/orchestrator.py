@@ -23,6 +23,7 @@ from software_engineering_team.shared.git_utils import (
 )
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
+from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -130,11 +131,27 @@ from .tool_agents import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-class DevOpsTeamLeadAgent:
-    """Coordinates specialized DevOps agents with hard gates."""
+class DevOpsTeamLeadAgent(TeamLeadSharedState):
+    """Coordinates specialized DevOps agents with hard gates.
+
+    Inherits ``TeamLeadSharedState`` for the optional per-run status hook
+    (``_report_status`` / ``_status_callback``). Pipeline phase status always
+    emits INFO logs via :meth:`_log_pipeline_status`; the optional callback is
+    a separate forward channel and may be set/cleared per run without losing
+    historical log output.
+
+    Invariants: ``self.llm`` is the client passed to ``__init__``; specialist
+    agents and tools are constructed once; ``_status_callback`` defaults to
+    None (mixin default) and is independent of fallback logging.
+    """
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
+        TeamLeadSharedState.__init__(
+            self,
+            llm_getter=lambda _agent_id: llm_client,
+            shared_config={},
+        )
         self.llm = llm_client
         self.task_clarifier = DevOpsTaskClarifierAgent(llm_client)
         self.iac_agent = InfrastructureAsCodeAgent(llm_client)
@@ -157,6 +174,50 @@ class DevOpsTeamLeadAgent:
         self.helm_exec_tool = HelmExecutionToolAgent()
         self.infra_debug_agent = InfraDebugAgent(llm_client)
         self.infra_patch_agent = InfraPatchAgent(llm_client)
+
+    @staticmethod
+    def _log_pipeline_status(
+        *,
+        phase: str,
+        detail: str = "",
+        progress: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Emit the historical pipeline status line at INFO.
+
+        Preconditions: ``phase`` is a non-empty str (enforced by ``_report_status``
+          before invocation).
+        Postconditions: logs ``detail`` when non-empty, otherwise logs
+          ``DevOps team pipeline: {phase}``; ``progress`` and ``extra`` are ignored
+          (reserved for external consumers). Never raises.
+        """
+        if detail:
+            logger.info("%s", detail)
+        else:
+            logger.info("DevOps team pipeline: %s", phase)
+
+    def _report_status(
+        self,
+        phase: str,
+        detail: str = "",
+        progress: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Log phase status, then forward to the optional ``_status_callback``.
+
+        Fallback INFO logging is independent of ``_status_callback`` so clearing
+        the callback after an instrumented run (the shared per-run contract) does
+        not silence later pipeline status on a reused lead.
+
+        Preconditions: ``phase`` is a non-empty str.
+        Postconditions: emits the historical INFO line via ``_log_pipeline_status``;
+          then invokes ``TeamLeadSharedState._report_status`` (no-op when callback
+          is None; forwards kwargs when set; swallows callback errors). Never
+          raises into the caller.
+        """
+        assert isinstance(phase, str) and phase, "phase must be a non-empty str"
+        self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
+        TeamLeadSharedState._report_status(self, phase, detail=detail, progress=progress, **extra)
 
     @staticmethod
     def _build_legacy_spec(
@@ -385,7 +446,10 @@ class DevOpsTeamLeadAgent:
         write_changes: bool,
         subdir: str = "",
     ) -> DevOpsTeamResult:
-        logger.info("DevOps team pipeline: starting task %s", task_spec.task_id)
+        self._report_status(
+            "start",
+            detail=f"DevOps team pipeline: starting task {task_spec.task_id}",
+        )
 
         # Phase 1: intake + clarification
         env_block = self._enforce_env_policy(task_spec)
@@ -406,7 +470,10 @@ class DevOpsTeamLeadAgent:
         logger.info("DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts))
 
         # Phase 2: change design / implementation (3-way parallel fan-out)
-        logger.info("DevOps team pipeline: phase 2 - change design (parallel)")
+        self._report_status(
+            "phase2",
+            detail="DevOps team pipeline: phase 2 - change design (parallel)",
+        )
         repo_summary = self.repo_navigator_tool.run(
             RepoNavigatorInput(repo_path=str(repo_path))
         ).summary
@@ -462,13 +529,19 @@ class DevOpsTeamLeadAgent:
                 return DevOpsTeamResult(success=False, failure_reason=msg)
 
         # Phase 3: write changes (branch + implementation)
-        logger.info(
-            "DevOps team pipeline: phase 3 - branch + implementation (%d artifact files)",
-            len(aggregated_artifacts),
+        self._report_status(
+            "phase3",
+            detail=(
+                "DevOps team pipeline: phase 3 - branch + implementation "
+                f"({len(aggregated_artifacts)} artifact files)"
+            ),
         )
 
         # Phase 4: tool validation + independent reviews
-        logger.info("DevOps team pipeline: phase 4 - validation and review")
+        self._report_status(
+            "phase4",
+            detail="DevOps team pipeline: phase 4 - validation and review",
+        )
         iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
         policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
         cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
@@ -483,7 +556,10 @@ class DevOpsTeamLeadAgent:
         tool_gate_map.update(dry_run_checks.checks)
 
         # Phase 4.5: Execution verification
-        logger.info("DevOps team pipeline: phase 4.5 - execution verification")
+        self._report_status(
+            "phase4.5",
+            detail="DevOps team pipeline: phase 4.5 - execution verification",
+        )
         repo_str = str(repo_path)
         exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
         exec_gate_map: Dict[str, str] = {}
@@ -506,11 +582,12 @@ class DevOpsTeamLeadAgent:
         for fix_iter in range(MAX_INFRA_FIX_ITERATIONS):
             if not exec_failures:
                 break
-            logger.info(
-                "DevOps team pipeline: phase 4.6 - debug-patch iteration %d/%d (%d failures)",
-                fix_iter + 1,
-                MAX_INFRA_FIX_ITERATIONS,
-                len(exec_failures),
+            self._report_status(
+                "phase4.6",
+                detail=(
+                    "DevOps team pipeline: phase 4.6 - debug-patch iteration "
+                    f"{fix_iter + 1}/{MAX_INFRA_FIX_ITERATIONS} ({len(exec_failures)} failures)"
+                ),
             )
             combined_output = "\n---\n".join(
                 "\n".join(ef.get("findings", [])) for ef in exec_failures
@@ -622,7 +699,10 @@ class DevOpsTeamLeadAgent:
                 )
 
         # Phase 5: commit, merge, release readiness
-        logger.info("DevOps team pipeline: phase 5 - completion package assembly")
+        self._report_status(
+            "phase5",
+            detail="DevOps team pipeline: phase 5 - completion package assembly",
+        )
         doc = self.doc_runbook_agent.run(
             DocumentationRunbookInput(
                 task_id=task_spec.task_id,
