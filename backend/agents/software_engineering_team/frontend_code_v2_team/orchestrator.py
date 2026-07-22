@@ -18,10 +18,7 @@ from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.team_lead_base import (
-    BaseTeamLead,
-    copy_development_result_fields,
-)
+from software_engineering_team.shared.team_lead_base import BaseTeamLead
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
 from .models import (
@@ -456,61 +453,12 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.
         """
-        task_id = task.id
-        result = FrontendCodeV2WorkflowResult(task_id=task_id)
-
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as exc:
-                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
-
-        result.current_phase = Phase.SETUP
-        _update_job(current_phase="setup", progress=2)
-        try:
-            setup_result = run_setup(repo_path=repo_path, task_title=task.title or "")
-            result.setup_result = setup_result
-        except Exception as exc:
-            result.failure_reason = f"Setup failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-        _update_job(current_phase="setup", progress=3)
-
-        # ── Verify linting and testing are configured ─────────────────
-        if not getattr(setup_result, "linting_configured", False):
-            logger.warning(
-                "[%s] Linting not configured after setup — coding cannot proceed without linting",
-                task_id,
-            )
-            result.failure_reason = (
-                "Setup completed but linting is not configured. "
-                "Linting must be set up before any coding tasks can begin."
-            )
-            return result
-
-        if not getattr(setup_result, "testing_configured", False):
-            logger.warning(
-                "[%s] Testing not configured after setup — coding cannot proceed without testing",
-                task_id,
-            )
-            result.failure_reason = (
-                "Setup completed but testing is not configured. "
-                "Testing must be set up before any coding tasks can begin."
-            )
-            return result
-
-        logger.info("[%s] Linting and testing verified — proceeding to coding phase", task_id)
-        _update_job(
-            current_phase="setup",
-            progress=5,
-            status_text="Linting and testing verified; ready for development",
-        )
-
-        dev_agent = FrontendDevelopmentAgent(self.llm)
-        inner = dev_agent.run_workflow(
+        return self._run_setup_and_delegate(
             repo_path=repo_path,
             task=task,
+            result_cls=FrontendCodeV2WorkflowResult,
+            run_setup_fn=run_setup,
+            development_agent_cls=FrontendDevelopmentAgent,
             architecture=architecture,
             spec_content=spec_content,
             qa_agent=qa_agent,
@@ -522,7 +470,4 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
             job_updater=job_updater,
             review_config=review_config,
             merge_to_development=merge_to_development,
-            repo_context_cache=self._repo_context_cache_for(repo_path),
         )
-        copy_development_result_fields(result, inner)
-        return result
