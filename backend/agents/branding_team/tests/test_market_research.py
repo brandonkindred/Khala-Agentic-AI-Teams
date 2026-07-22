@@ -11,16 +11,8 @@ import httpx
 import pytest
 
 from branding_team.adapters import market_research as mr
-from branding_team.models import BrandingMission, CompetitiveSnapshot
-
-
-def _mission() -> BrandingMission:
-    return BrandingMission(
-        company_name="Acme",
-        company_description="A company that builds developer tools",
-        target_audience="developers",
-        differentiators=["speed", "clarity"],
-    )
+from branding_team.models import CompetitiveSnapshot
+from branding_team.tests.conftest import make_mission
 
 
 class _FakeResp:
@@ -66,7 +58,14 @@ def _patch_client(monkeypatch, submit: _FakeResp, statuses: list[_FakeResp]) -> 
 
 
 def test_build_payload_shapes_request() -> None:
-    payload = mr._build_payload(_mission())
+    payload = mr._build_payload(
+        make_mission(
+            company_name="Acme",
+            company_description="A company that builds developer tools",
+            target_audience="developers",
+            differentiators=["speed", "clarity"],
+        )
+    )
     assert "Acme" in payload["product_concept"]
     assert payload["target_users"] == "developers"
     assert "speed" in payload["business_goal"]
@@ -103,7 +102,17 @@ def test_map_to_competitive_snapshot_defaults_summary() -> None:
 def test_request_returns_none_when_unconfigured(monkeypatch) -> None:
     monkeypatch.delenv("UNIFIED_API_BASE_URL", raising=False)
     monkeypatch.delenv("BRANDING_MARKET_RESEARCH_URL", raising=False)
-    assert mr.request_market_research(_mission()) is None
+    assert (
+        mr.request_market_research(
+            make_mission(
+                company_name="Acme",
+                company_description="A company that builds developer tools",
+                target_audience="developers",
+                differentiators=["speed", "clarity"],
+            )
+        )
+        is None
+    )
 
 
 def test_request_success_returns_snapshot(monkeypatch) -> None:
@@ -113,7 +122,14 @@ def test_request_success_returns_snapshot(monkeypatch) -> None:
         submit=_FakeResp({"job_id": "j1"}),
         statuses=[_FakeResp({"status": "completed", "result": {"mission_summary": "done"}})],
     )
-    snap = mr.request_market_research(_mission())
+    snap = mr.request_market_research(
+        make_mission(
+            company_name="Acme",
+            company_description="A company that builds developer tools",
+            target_audience="developers",
+            differentiators=["speed", "clarity"],
+        )
+    )
     assert isinstance(snap, CompetitiveSnapshot)
     assert snap.summary == "done"
 
@@ -122,7 +138,14 @@ def test_request_raises_when_no_job_id(monkeypatch) -> None:
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
     _patch_client(monkeypatch, submit=_FakeResp({}), statuses=[])
     with pytest.raises(RuntimeError, match="no job_id"):
-        mr.request_market_research(_mission())
+        mr.request_market_research(
+            make_mission(
+                company_name="Acme",
+                company_description="A company that builds developer tools",
+                target_audience="developers",
+                differentiators=["speed", "clarity"],
+            )
+        )
 
 
 def test_request_raises_on_terminal_failure(monkeypatch) -> None:
@@ -133,14 +156,28 @@ def test_request_raises_on_terminal_failure(monkeypatch) -> None:
         statuses=[_FakeResp({"status": "failed", "error": "boom"})],
     )
     with pytest.raises(RuntimeError, match="ended with status failed"):
-        mr.request_market_research(_mission())
+        mr.request_market_research(
+            make_mission(
+                company_name="Acme",
+                company_description="A company that builds developer tools",
+                target_audience="developers",
+                differentiators=["speed", "clarity"],
+            )
+        )
 
 
 def test_request_wraps_transport_errors(monkeypatch) -> None:
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
     _patch_client(monkeypatch, submit=_FakeResp({}, status_code=500), statuses=[])
     with pytest.raises(RuntimeError, match="Market research request failed"):
-        mr.request_market_research(_mission())
+        mr.request_market_research(
+            make_mission(
+                company_name="Acme",
+                company_description="A company that builds developer tools",
+                target_audience="developers",
+                differentiators=["speed", "clarity"],
+            )
+        )
 
 
 def test_request_offloads_when_loop_running(monkeypatch) -> None:
@@ -159,7 +196,14 @@ def test_request_offloads_when_loop_running(monkeypatch) -> None:
         # Called synchronously inside a running loop, so request_market_research's
         # internal run_coroutine call must offload to a worker thread instead of
         # calling asyncio.run on the live loop.
-        return mr.request_market_research(_mission())
+        return mr.request_market_research(
+            make_mission(
+                company_name="Acme",
+                company_description="A company that builds developer tools",
+                target_audience="developers",
+                differentiators=["speed", "clarity"],
+            )
+        )
 
     snap = asyncio.run(_driver())
     assert snap.summary == "offloaded"
