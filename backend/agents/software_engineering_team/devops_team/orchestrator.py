@@ -23,7 +23,7 @@ from software_engineering_team.shared.git_utils import (
 )
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
-from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -451,91 +451,136 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             detail=f"DevOps team pipeline: starting task {task_spec.task_id}",
         )
 
-        # Phase 1: intake + clarification
-        env_block = self._enforce_env_policy(task_spec)
-        if env_block:
-            return DevOpsTeamResult(
-                success=False, failure_reason=f"Environment policy violation: {env_block}"
-            )
+        # Phase outputs shared with Phase 4+ (set by the gated phase callables).
+        iac_result: Any = None
+        cicd_result: Any = None
+        deploy_result: Any = None
+        aggregated_artifacts: Dict[str, str] = {}
 
-        clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
-        if not clarifier.approved_for_execution:
-            return DevOpsTeamResult(
-                success=False,
-                failure_reason="Clarification required: "
-                + "; ".join(clarifier.clarification_requests[:3]),
-            )
+        def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
+            """Phase 1: environment policy + task clarification gates.
 
-        subtask_contracts = self._build_subtask_contracts(task_spec)
-        logger.info("DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts))
+            Preconditions: ``task_spec`` is the pipeline input for this run.
+            Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
+              clarifier rejection; otherwise builds subtask contracts, logs their
+              count, and returns ``None`` so later phases run.
+            """
+            env_block = self._enforce_env_policy(task_spec)
+            if env_block:
+                return DevOpsTeamResult(
+                    success=False, failure_reason=f"Environment policy violation: {env_block}"
+                )
 
-        # Phase 2: change design / implementation (3-way parallel fan-out)
-        self._report_status(
-            "phase2",
-            detail="DevOps team pipeline: phase 2 - change design (parallel)",
-        )
-        repo_summary = self.repo_navigator_tool.run(
-            RepoNavigatorInput(repo_path=str(repo_path))
-        ).summary
-        # Enable parallel execution unless the backing LLM client is a
-        # DummyLLMClient (or subclass) — scripted test clients use a shared
-        # sequential response list that breaks under concurrent access.
-        from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
-
-        use_parallel = not isinstance(self.llm, _Dummy)
-        phase2 = run_phase2_parallel(
-            self.iac_agent,
-            self.cicd_agent,
-            self.deployment_agent,
-            task_spec,
-            repo_summary=repo_summary,
-            parallel=use_parallel,
-        )
-        iac_result = phase2["iac_result"]
-        cicd_result = phase2["cicd_result"]
-        deploy_result = phase2["deploy_result"]
-        aggregated_artifacts: Dict[str, str] = phase2["aggregated_artifacts"]
-
-        if write_changes and aggregated_artifacts:
-            # Cut a feature branch from development up front (mirroring the code-v2
-            # teams) so every intermediate write/patch commit lands on the branch
-            # and development stays clean until the reviewed Phase 5 merge. Without
-            # this, writes would commit straight to the checked-out development
-            # branch and the later merge would be an empty no-op.
-            dev_ok, dev_msg = ensure_development_branch(repo_path)
-            if not dev_ok:
+            clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
+            if not clarifier.approved_for_execution:
                 return DevOpsTeamResult(
                     success=False,
-                    failure_reason=f"Cannot prepare {DEVELOPMENT_BRANCH} branch: {dev_msg}",
+                    failure_reason="Clarification required: "
+                    + "; ".join(clarifier.clarification_requests[:3]),
                 )
-            branch_ok, branch_msg = create_feature_branch(
-                repo_path,
-                DEVELOPMENT_BRANCH,
-                make_branch_suffix(task_spec.task_id, task_spec.title),
-            )
-            if not branch_ok:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=f"Cannot create feature branch: {branch_msg}"
-                )
-            ok, msg = write_agent_output(
-                repo_path=repo_path,
-                output={
-                    "files": aggregated_artifacts,
-                    "commit_message": f"feat(devops): implement task [{task_spec.task_id}]",
-                },
-                subdir=subdir,
-            )
-            if not ok and msg != NO_FILES_TO_WRITE_MSG:
-                return DevOpsTeamResult(success=False, failure_reason=msg)
 
-        # Phase 3: write changes (branch + implementation)
-        self._report_status(
-            "phase3",
-            detail=(
-                "DevOps team pipeline: phase 3 - branch + implementation "
-                f"({len(aggregated_artifacts)} artifact files)"
-            ),
+            subtask_contracts = self._build_subtask_contracts(task_spec)
+            logger.info(
+                "DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts)
+            )
+            return None
+
+        def _phase2_parallel_design() -> Optional[DevOpsTeamResult]:
+            """Phase 2: change design / implementation (3-way parallel fan-out).
+
+            Preconditions: Phase 1 returned ``None``.
+            Postconditions: sets ``iac_result``, ``cicd_result``, ``deploy_result``,
+              and ``aggregated_artifacts`` from the parallel fan-out; always returns
+              ``None`` (this phase has no early-exit gate today).
+            """
+            nonlocal iac_result, cicd_result, deploy_result, aggregated_artifacts
+            self._report_status(
+                "phase2",
+                detail="DevOps team pipeline: phase 2 - change design (parallel)",
+            )
+            repo_summary = self.repo_navigator_tool.run(
+                RepoNavigatorInput(repo_path=str(repo_path))
+            ).summary
+            # Enable parallel execution unless the backing LLM client is a
+            # DummyLLMClient (or subclass) — scripted test clients use a shared
+            # sequential response list that breaks under concurrent access.
+            from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
+
+            use_parallel = not isinstance(self.llm, _Dummy)
+            phase2 = run_phase2_parallel(
+                self.iac_agent,
+                self.cicd_agent,
+                self.deployment_agent,
+                task_spec,
+                repo_summary=repo_summary,
+                parallel=use_parallel,
+            )
+            iac_result = phase2["iac_result"]
+            cicd_result = phase2["cicd_result"]
+            deploy_result = phase2["deploy_result"]
+            aggregated_artifacts = phase2["aggregated_artifacts"]
+            return None
+
+        def _phase3_branch_write() -> Optional[DevOpsTeamResult]:
+            """Phase 3: feature branch + artifact write gates.
+
+            Preconditions: Phase 2 returned ``None`` (artifacts may be empty).
+            Postconditions: when ``write_changes`` and artifacts are present, prepares
+              the development branch, cuts a feature branch, and writes artifacts —
+              returning a failed ``DevOpsTeamResult`` on any of those gates; otherwise
+              reports phase-3 status and returns ``None``.
+            """
+            if write_changes and aggregated_artifacts:
+                # Cut a feature branch from development up front (mirroring the
+                # code-v2 teams) so every intermediate write/patch commit lands
+                # on the branch and development stays clean until the reviewed
+                # Phase 5 merge. Without this, writes would commit straight to
+                # the checked-out development branch and the later merge would
+                # be an empty no-op.
+                dev_ok, dev_msg = ensure_development_branch(repo_path)
+                if not dev_ok:
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason=(f"Cannot prepare {DEVELOPMENT_BRANCH} branch: {dev_msg}"),
+                    )
+                branch_ok, branch_msg = create_feature_branch(
+                    repo_path,
+                    DEVELOPMENT_BRANCH,
+                    make_branch_suffix(task_spec.task_id, task_spec.title),
+                )
+                if not branch_ok:
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason=f"Cannot create feature branch: {branch_msg}",
+                    )
+                ok, msg = write_agent_output(
+                    repo_path=repo_path,
+                    output={
+                        "files": aggregated_artifacts,
+                        "commit_message": (f"feat(devops): implement task [{task_spec.task_id}]"),
+                    },
+                    subdir=subdir,
+                )
+                if not ok and msg != NO_FILES_TO_WRITE_MSG:
+                    return DevOpsTeamResult(success=False, failure_reason=msg)
+
+            self._report_status(
+                "phase3",
+                detail=(
+                    "DevOps team pipeline: phase 3 - branch + implementation "
+                    f"({len(aggregated_artifacts)} artifact files)"
+                ),
+            )
+            return None
+
+        # Consume BaseTeamLead's gate-based phase sequencer without inheriting
+        # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
+        early_exit = BaseTeamLead._run_gated_phases(
+            self,
+            [_phase1_intake_clarify, _phase2_parallel_design, _phase3_branch_write],
         )
+        if early_exit is not None:
+            return early_exit
 
         # Phase 4: tool validation + independent reviews
         self._report_status(
