@@ -322,12 +322,8 @@ class BaseV2DevelopmentAgent:
           exceptions from the commit are logged as warnings and never raised.
           Never raises on its own.
         """
-        completed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == "completed"
-        )
-        failed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == "review_failed"
-        )
+        completed_count = sum(1 for mt in exec_result.microtasks if mt.status == "completed")
+        failed_count = sum(1 for mt in exec_result.microtasks if mt.status == "review_failed")
         result.iterations_used = completed_count
 
         if (
@@ -340,9 +336,7 @@ class BaseV2DevelopmentAgent:
                     repo_path, f"feat: {completed_count} microtasks completed"
                 )
             except Exception as exc:
-                logger.warning(
-                    "[%s] Git agent commit_current_changes raised: %s", task_id, exc
-                )
+                logger.warning("[%s] Git agent commit_current_changes raised: %s", task_id, exc)
 
         return completed_count, failed_count
 

@@ -825,9 +825,7 @@ class TestRecordExecutionBookkeeping:
 
         git_agent = MagicMock()
         result = _FakeWorkflowResult()
-        exec_result = _FakeExecResult(
-            ["completed", "completed", "review_failed", "pending"]
-        )
+        exec_result = _FakeExecResult(["completed", "completed", "review_failed", "pending"])
 
         completed_count, failed_count = BaseV2DevelopmentAgent._record_execution_bookkeeping(
             task_id="t1",
@@ -888,20 +886,16 @@ class TestRecordExecutionBookkeeping:
         exec_result = _FakeExecResult(["completed", "review_failed"])
 
         with caplog.at_level("WARNING", logger="test_record_execution_bookkeeping"):
-            completed_count, failed_count = (
-                BaseV2DevelopmentAgent._record_execution_bookkeeping(
-                    task_id="t1",
-                    result=result,
-                    exec_result=exec_result,
-                    repo_path=tmp_path,
-                    feature_branch_name="feature/t1",
-                    git_agent=git_agent,
-                    logger=self._logger(),
-                )
+            completed_count, failed_count = BaseV2DevelopmentAgent._record_execution_bookkeeping(
+                task_id="t1",
+                result=result,
+                exec_result=exec_result,
+                repo_path=tmp_path,
+                feature_branch_name="feature/t1",
+                git_agent=git_agent,
+                logger=self._logger(),
             )
 
         assert (completed_count, failed_count) == (1, 1)
         assert result.iterations_used == 1
-        assert any(
-            "Git agent commit_current_changes raised" in r.message for r in caplog.records
-        )
+        assert any("Git agent commit_current_changes raised" in r.message for r in caplog.records)
