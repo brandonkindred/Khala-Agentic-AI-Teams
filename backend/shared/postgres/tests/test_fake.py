@@ -187,3 +187,12 @@ def test_cursor_preserves_row_factory():
     sentinel = object()
     cur = conn.cursor(row_factory=sentinel)
     assert cur.row_factory is sentinel
+
+
+def test_reexport_from_testing():
+    from shared.postgres import testing as testing_mod
+
+    assert testing_mod.FakeCursor is FakeCursor
+    assert testing_mod.FakeConn is FakeConn
+    assert testing_mod.install_fake_postgres is install_fake_postgres
+    assert testing_mod.unwrap_json is unwrap_json
