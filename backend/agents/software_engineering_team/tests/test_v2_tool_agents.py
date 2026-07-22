@@ -11,6 +11,12 @@ from __future__ import annotations
 
 import json
 
+from llm_service import get_strands_model
+from software_engineering_team.frontend_code_v2_team.tool_agents._plan_base import (
+    PlanGeneratorToolAgent,
+)
+from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
+
 
 def _microtask():
     from software_engineering_team.frontend_code_v2_team.models import (
@@ -55,6 +61,23 @@ def _tool_input():
         spec_content="",
         repo_path="/tmp",
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan generator base (LlmToolAgentBase recipe)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_generator_inherits_llm_tool_agent_base() -> None:
+    assert issubclass(PlanGeneratorToolAgent, LlmToolAgentBase)
+
+
+def test_plan_generator_selects_plan_recipe() -> None:
+    assert PlanGeneratorToolAgent.resolve_models is True
+    assert PlanGeneratorToolAgent.response_format == "json"
+    assert PlanGeneratorToolAgent.get_strands_model_fn is get_strands_model
+    assert PlanGeneratorToolAgent.use_run_strands_agent is False
+    assert PlanGeneratorToolAgent.json_parse_strategy == "extract"
 
 
 # ---------------------------------------------------------------------------
