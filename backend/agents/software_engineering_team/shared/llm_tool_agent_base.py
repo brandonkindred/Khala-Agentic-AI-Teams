@@ -1,11 +1,13 @@
 """Dependency-light base shared by the LLM tool-agent classes.
 
-Holds the ``_agent_factory`` monkeypatch resolver, an opt-in, class-attribute
-parameterized model-resolution step, and an opt-in parameterized LLM
-invocation step (inline vs ``run_strands_agent``). Deliberately imports
-nothing from ``code_review_agent`` so it can be depended on from any team
-without pulling in the code-review engine. JSON parsing and fallback logic
-remain out of scope here.
+Holds the ``_agent_factory`` monkeypatch resolver, an opt-in class-attribute
+parameterized model-resolution step, an opt-in parameterized LLM invocation
+step (inline vs ``run_strands_agent``), and an opt-in fallback-handling step
+(no-model / call-error / empty-parse, plus partial-failure-tolerant calls).
+Deliberately imports nothing from ``code_review_agent`` so it can be depended
+on from any team without pulling in the code-review engine. JSON parsing
+remains out of scope here; fallback helpers are available capability and are
+not auto-wired into subclasses.
 
 Preconditions:
     None beyond standard Python import semantics.
@@ -17,18 +19,40 @@ Postconditions:
 Invariants:
     ``LlmToolAgentBase`` always stores ``self.llm``. When ``resolve_models`` is
     true it also stores ``self._model``, and ``self._model_json`` when
-    ``uses_json_model`` is true.
+    ``uses_json_model`` is true. Fallback helpers never mutate class-attr lists
+    shared across instances.
 """
 
 from __future__ import annotations
 
 import importlib
-from typing import Any, Callable, Optional
+import logging
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, List, Literal, Optional, Sequence, Tuple, Union
+
+FallbackTier = Literal["no_model", "call_error", "empty_parse"]
+
+
+@dataclass(frozen=True)
+class FallbackPayload:
+    """Generic fallback result for callers to wrap into their own output types.
+
+    Preconditions:
+        ``tier`` is one of the three taxonomy labels; ``recommendations`` is a
+        list (copied by helpers before construction).
+
+    Postconditions:
+        Immutable; ``recommendations`` and ``summary`` are safe to read without
+        mutating shared class state.
+    """
+
+    tier: FallbackTier
+    recommendations: List[str]
+    summary: str
 
 
 class LlmToolAgentBase:
-    """Bare constructor, shared ``_agent_factory``, opt-in model resolution,
-    and opt-in LLM invocation.
+    """Bare constructor, shared ``_agent_factory``, model resolution, invocation, and fallbacks.
 
     Subclasses opt into resolution by setting ``resolve_models = True`` and
     (when needed) overriding ``response_format``, ``uses_json_model``, and/or
@@ -37,6 +61,11 @@ class LlmToolAgentBase:
     Subclasses opt into the ``run_strands_agent`` wrapper by setting
     ``use_run_strands_agent = True``; the default keeps the inline
     ``str(agent(prompt)).strip()`` call.
+
+    Fallback helpers are call-site opt-in: override the Plan-shaped class-attr
+    vocabulary and invoke ``_fallback_no_model``, ``_call_with_single_fallback``,
+    ``_call_partial_tolerant``, and/or ``_fallback_empty_parse``. Nothing in
+    ``__init__`` enables them automatically.
 
     Recipes:
         Review-like — ``resolve_models = True`` (defaults give text mode; set
@@ -59,7 +88,8 @@ class LlmToolAgentBase:
         Resolution runs only when ``resolve_models`` is true. The
         ``get_strands_model_fn`` kwarg is forwarded only when the class attr
         is not ``None``. Invocation uses ``run_strands_agent`` only when
-        ``use_run_strands_agent`` is true.
+        ``use_run_strands_agent`` is true. Fallback list attrs are copied
+        before return.
     """
 
     resolve_models: bool = False
@@ -67,6 +97,15 @@ class LlmToolAgentBase:
     uses_json_model: bool = False
     get_strands_model_fn: Optional[Callable[..., Any]] = None
     use_run_strands_agent: bool = False
+
+    # Plan-shaped fallback vocabulary (subclasses override; helpers copy lists).
+    no_model_recommendations: List[str] = []
+    no_model_summary: str = ""
+    llm_error_recommendations: List[str] = []
+    llm_error_summary: str = ""
+    empty_recommendations: List[str] = []
+    default_summary: str = ""
+    empty_summary_override: Optional[str] = None
 
     def __init__(self, llm=None) -> None:
         self.llm = llm
@@ -127,3 +166,120 @@ class LlmToolAgentBase:
 
             return run_strands_agent(self._agent_factory(), model, prompt)
         return str(self._agent_factory()(model=model)(prompt)).strip()
+
+    # Fallback helpers read class attrs via type(self), not self: that keeps
+    # unbound callables from being bound as methods and avoids mutating shared
+    # class-level list defaults through an instance attribute.
+    def _fallback_no_model(self, model: Any) -> Optional[FallbackPayload]:
+        """Return the no-model payload when ``model`` is falsy; else ``None``.
+
+        Preconditions:
+            None.
+
+        Postconditions:
+            Falsy ``model`` yields ``tier="no_model"`` with a copy of
+            ``no_model_recommendations`` and ``no_model_summary``. Truthy
+            ``model`` yields ``None``. Does not log.
+        """
+        if model:
+            return None
+        return FallbackPayload(
+            tier="no_model",
+            recommendations=list(type(self).no_model_recommendations),
+            summary=type(self).no_model_summary,
+        )
+
+    def _call_with_single_fallback(
+        self,
+        fn: Callable[[], Any],
+        *,
+        log_label: str = "",
+    ) -> Union[Tuple[Literal["ok"], Any], Tuple[Literal["error"], FallbackPayload]]:
+        """Run ``fn`` once; on ``Exception`` return the call-error fallback.
+
+        Preconditions:
+            ``fn`` is a zero-argument callable.
+
+        Postconditions:
+            Success → ``("ok", fn())``. Any ``Exception`` → warning log on the
+            subclass module logger, then ``("error", FallbackPayload)`` with
+            ``tier="call_error"`` and the ``llm_error_*`` class attrs (lists
+            copied).
+        """
+        try:
+            return ("ok", fn())
+        except Exception as e:
+            label = log_label or type(self).__name__
+            logging.getLogger(type(self).__module__).warning("%s LLM call failed: %s", label, e)
+            return (
+                "error",
+                FallbackPayload(
+                    tier="call_error",
+                    recommendations=list(type(self).llm_error_recommendations),
+                    summary=type(self).llm_error_summary,
+                ),
+            )
+
+    def _call_partial_tolerant(
+        self,
+        items: Iterable[Any],
+        fn: Callable[[Any], Any],
+        *,
+        log_label: str = "",
+    ) -> List[Any]:
+        """Map ``fn`` over ``items``, skipping items that raise ``Exception``.
+
+        Preconditions:
+            ``items`` is iterable; ``fn`` accepts one item.
+
+        Postconditions:
+            Returns a list of successful ``fn(item)`` results in encounter order.
+            Failures are logged at warning and omitted. Does not build a
+            ``FallbackPayload``.
+        """
+        label = log_label or type(self).__name__
+        logger = logging.getLogger(type(self).__module__)
+        successes: List[Any] = []
+        for item in items:
+            try:
+                successes.append(fn(item))
+            except Exception as e:
+                context = str(item)
+                if len(context) > 50:
+                    context = context[:50]
+                logger.warning("%s item failed (%s): %s", label, context, e)
+        return successes
+
+    def _fallback_empty_parse(
+        self,
+        *,
+        recommendations: Optional[Sequence[str]] = None,
+        summary: Optional[str] = None,
+    ) -> FallbackPayload:
+        """Apply empty-parse tier messages to recommendations and summary.
+
+        Preconditions:
+            ``recommendations``, when provided, is a sequence of strings.
+
+        Postconditions:
+            Returns ``tier="empty_parse"``. Empty or ``None`` recommendations
+            become a copy of ``empty_recommendations``. Summary starts as
+            ``summary`` when not ``None``, else ``default_summary``; if that
+            value is falsy and ``empty_summary_override`` is not ``None``, the
+            override is used. Does not log.
+        """
+        cls = type(self)
+        if recommendations:
+            resolved_recs = list(recommendations)
+        else:
+            resolved_recs = list(cls.empty_recommendations)
+
+        resolved_summary = cls.default_summary if summary is None else summary
+        if not resolved_summary and cls.empty_summary_override is not None:
+            resolved_summary = cls.empty_summary_override
+
+        return FallbackPayload(
+            tier="empty_parse",
+            recommendations=resolved_recs,
+            summary=resolved_summary,
+        )
