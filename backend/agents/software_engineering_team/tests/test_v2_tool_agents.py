@@ -11,6 +11,12 @@ from __future__ import annotations
 
 import json
 
+from llm_service import get_strands_model
+from software_engineering_team.frontend_code_v2_team.tool_agents._plan_base import (
+    PlanGeneratorToolAgent,
+)
+from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
+
 
 def _microtask():
     from software_engineering_team.frontend_code_v2_team.models import (
@@ -55,6 +61,23 @@ def _tool_input():
         spec_content="",
         repo_path="/tmp",
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan generator base (LlmToolAgentBase recipe)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_generator_inherits_llm_tool_agent_base() -> None:
+    assert issubclass(PlanGeneratorToolAgent, LlmToolAgentBase)
+
+
+def test_plan_generator_selects_plan_recipe() -> None:
+    assert PlanGeneratorToolAgent.resolve_models is True
+    assert PlanGeneratorToolAgent.response_format == "json"
+    assert PlanGeneratorToolAgent.get_strands_model_fn is get_strands_model
+    assert PlanGeneratorToolAgent.use_run_strands_agent is False
+    assert PlanGeneratorToolAgent.json_parse_strategy == "extract"
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +233,25 @@ def test_architecture_plan_no_model() -> None:
     agent.llm = None
     out = agent.plan(_phase_input())
     assert out.summary
+
+
+def test_architecture_plan_null_summary_uses_empty_summary_override(monkeypatch) -> None:
+    from software_engineering_team.frontend_code_v2_team.tool_agents.architecture import (
+        agent as mod,
+    )
+
+    class _NullSummaryAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"summary": None})
+
+    monkeypatch.setattr(mod, "Agent", _NullSummaryAgent)
+    agent = mod.ArchitectureToolAgent.__new__(mod.ArchitectureToolAgent)
+    agent._model = object()
+    out = agent.plan(_phase_input())
+    assert out.summary == "Architecture planning complete."
 
 
 # ---------------------------------------------------------------------------

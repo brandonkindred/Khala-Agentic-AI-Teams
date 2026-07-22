@@ -1,13 +1,18 @@
 """
 Review phase: code review, build verification, lint, QA, security.
 
+Exposes ``run_review``, ``run_microtask_review``, and the per-phase gates
+``run_code_review_phase``, ``run_qa_testing_phase``, and
+``run_security_testing_phase``.
+
 Uses passed-in quality agents when available; LLM-based review otherwise.
-No code from frontend_team is used.
+No code from the legacy ``frontend_team`` agent is used.
 """
 
 from __future__ import annotations
 
 import logging
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -21,6 +26,11 @@ from software_engineering_team.shared.agent_review import (
 )
 from software_engineering_team.shared.llm_review import LlmReviewOutput, run_team_llm_review
 from software_engineering_team.shared.models import ReviewContext, Task
+from software_engineering_team.shared.phases.review import (
+    run_code_review_phase_impl,
+    run_qa_testing_phase_impl,
+    run_security_testing_phase_impl,
+)
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -46,6 +56,7 @@ from ..models import (
     DocumentationSelfReviewResult,
     ExecutionResult,
     Microtask,
+    PhaseReviewResult,
     ReviewIssue,
     ReviewResult,
     ToolAgentKind,
@@ -215,6 +226,9 @@ def run_review(
     the external QA/security/build runners are injected as module-level callables
     so this module stays the test patch surface for ``Agent`` /
     ``resolve_text_mode_strands_model`` / ``_run_qa_agent`` / ``_run_security_agent``.
+
+    Preconditions: ``execution_result`` exposes ``.files``.
+    Postconditions: see the shared ``run_review``.
     """
     return _shared_run_review(
         config=REVIEW_CONFIG,
@@ -296,6 +310,140 @@ def run_microtask_review(
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
         agent_review_cache=cache,
+    )
+
+
+def run_code_review_phase(
+    *,
+    llm: LLMClient,
+    task: Task,
+    microtask: Microtask,
+    repo_path: Path,
+    files: Dict[str, str],
+    build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
+    code_review_agent: Any = None,
+    linting_tool_agent: Any = None,
+    detail_callback: Optional[Callable[[str], None]] = None,
+    language: str = "typescript",
+    review_context: Optional[ReviewContext] = None,
+    enable_llm_review_grounding: bool = True,
+) -> PhaseReviewResult:
+    """
+    Run code review phase only: build verification + lint + code review.
+
+    This is the first phase after coding, focusing on code quality, syntax,
+    and adherence to coding standards.
+
+    Thin wrapper over the shared parametrised implementation
+    (:func:`software_engineering_team.shared.phases.review.run_code_review_phase_impl`)
+    driven by this team's :data:`REVIEW_CONFIG`. ``_run_build_verification`` and
+    ``_run_llm_review`` are referenced here by bare module-global name (resolved
+    at call time, not captured at import time), so this module stays the test
+    patch surface for ``Agent`` / ``resolve_text_mode_strands_model`` /
+    ``_run_build_verification`` -- exactly the technique ``run_review`` /
+    ``run_microtask_review`` already use for the same reason.
+    """
+    return run_code_review_phase_impl(
+        llm=llm,
+        task=task,
+        microtask=microtask,
+        repo_path=repo_path,
+        files=files,
+        build_verifier=build_verifier,
+        code_review_agent=code_review_agent,
+        linting_tool_agent=linting_tool_agent,
+        detail_callback=detail_callback,
+        language=language,
+        review_context=review_context,
+        enable_llm_review_grounding=enable_llm_review_grounding,
+        config=REVIEW_CONFIG,
+        llm_review_fn=_run_llm_review,
+        build_verify_fn=_run_build_verification,
+        phase_review_result_cls=PhaseReviewResult,
+    )
+
+
+def run_qa_testing_phase(
+    *,
+    task: Task,
+    microtask: Microtask,
+    files: Dict[str, str],
+    qa_agent: Any = None,
+    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
+    repo_path: Optional[Path] = None,
+    detail_callback: Optional[Callable[[str], None]] = None,
+    language: str = "typescript",
+    cache: Optional[AgentReviewCache] = None,
+) -> PhaseReviewResult:
+    """
+    Run QA testing phase: bug detection, test coverage, quality assurance.
+
+    Thin wrapper over the shared parametrised implementation
+    (:func:`software_engineering_team.shared.phases.review.run_qa_testing_phase_impl`).
+    ``_run_qa_agent`` is referenced by bare module-global name inside ``partial``
+    at call time so this module stays the test patch surface.
+
+    Preconditions:
+        - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
+    Postconditions:
+        - Returns a :class:`PhaseReviewResult`; never raises (shared containment).
+    """
+    return run_qa_testing_phase_impl(
+        task=task,
+        microtask=microtask,
+        files=files,
+        review_agent=qa_agent,
+        agent_runner=partial(_run_qa_agent, qa_agent=qa_agent),
+        tool_agents=tool_agents,
+        repo_path=repo_path,
+        detail_callback=detail_callback,
+        language=language,
+        cache=cache,
+        phase_review_result_cls=PhaseReviewResult,
+        tool_phase_input_factory=REVIEW_CONFIG.tool_phase_input_factory,
+        tool_phase_includes_context=REVIEW_CONFIG.tool_phase_includes_context,
+    )
+
+
+def run_security_testing_phase(
+    *,
+    task: Task,
+    microtask: Microtask,
+    files: Dict[str, str],
+    security_agent: Any = None,
+    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
+    repo_path: Optional[Path] = None,
+    detail_callback: Optional[Callable[[str], None]] = None,
+    language: str = "typescript",
+    cache: Optional[AgentReviewCache] = None,
+) -> PhaseReviewResult:
+    """
+    Run security testing phase: vulnerability scanning, security best practices.
+
+    Thin wrapper over the shared parametrised implementation
+    (:func:`software_engineering_team.shared.phases.review.run_security_testing_phase_impl`).
+    ``_run_security_agent`` is referenced by bare module-global name inside
+    ``partial`` at call time so this module stays the test patch surface.
+
+    Preconditions:
+        - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
+    Postconditions:
+        - Returns a :class:`PhaseReviewResult`; never raises (shared containment).
+    """
+    return run_security_testing_phase_impl(
+        task=task,
+        microtask=microtask,
+        files=files,
+        review_agent=security_agent,
+        agent_runner=partial(_run_security_agent, security_agent=security_agent),
+        tool_agents=tool_agents,
+        repo_path=repo_path,
+        detail_callback=detail_callback,
+        language=language,
+        cache=cache,
+        phase_review_result_cls=PhaseReviewResult,
+        tool_phase_input_factory=REVIEW_CONFIG.tool_phase_input_factory,
+        tool_phase_includes_context=REVIEW_CONFIG.tool_phase_includes_context,
     )
 
 
