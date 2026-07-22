@@ -1,6 +1,10 @@
 """
 Review phase: code review, build verification, lint, QA, security.
 
+Exposes ``run_review``, ``run_microtask_review``, and the per-phase gates
+``run_code_review_phase``, ``run_qa_testing_phase``, and
+``run_security_testing_phase``.
+
 Uses passed-in quality agents when available; LLM-based review otherwise.
 No code from the legacy ``frontend_team`` agent is used.
 """
