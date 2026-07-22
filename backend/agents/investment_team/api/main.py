@@ -3594,11 +3594,12 @@ def _run_paper_trading_background(
         - ``backtest_record`` must contain valid backtest results for divergence analysis
 
     Postconditions:
-        - When the session entry still exists at write time, ``_paper_trading_sessions[session_id]``
-          is updated to COMPLETED or FAILED status with ``completed_at`` set
-        - Concurrent deletion of the session while this worker runs (e.g. via
-          ``DELETE /strategy-lab/records/{lab_record_id}``) is out of contract: the empty-data
-          and exception paths then leave no terminal record
+        - On the success path, ``_paper_trading_sessions[session_id]`` is always written
+          (COMPLETED or FAILED with ``completed_at`` set), which can recreate a concurrently
+          deleted session
+        - On the empty-data and exception paths, the terminal write runs only when the session
+          entry still exists at write time; concurrent deletion (e.g. via
+          ``DELETE /strategy-lab/records/{lab_record_id}``) then leaves no terminal record
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
