@@ -144,3 +144,21 @@ def test_compliance_exhausted_json_fallback(monkeypatch, brand_spec_prompt, tmp_
     report = agent.run("draft", brand_spec_prompt, work_dir=tmp_path)
     assert report.status == "FAIL"
     assert (tmp_path / "compliance_report.json").exists()
+
+
+def test_compliance_unexpected_error_fail_closed(monkeypatch, brand_spec_prompt, tmp_path) -> None:
+    """Non-transient unexpected errors fail closed via on_unexpected_error (no raise)."""
+    from agents.blogging.blog_compliance_agent import agent as comp_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise ValueError("unexpected failure")
+
+    monkeypatch.setattr(comp_mod, "Agent", _Agent)
+    agent = BlogComplianceAgent(llm_client=object())
+    report = agent.run("draft", brand_spec_prompt, work_dir=tmp_path)
+    assert report.status == "FAIL"
+    assert (tmp_path / "compliance_report.json").exists()
