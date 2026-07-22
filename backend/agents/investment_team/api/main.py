@@ -4313,6 +4313,10 @@ def _recover_orphaned_paper_trading_sessions() -> None:
         try:
             session = PaperTradingSession.parse_persisted(raw)
         except Exception:
+            logger.debug(
+                "Paper-trade recovery: skipping unparseable session record",
+                exc_info=True,
+            )
             continue
         if session.status not in _active_statuses:
             continue
