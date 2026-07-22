@@ -312,6 +312,14 @@ class TestDevOpsPipelineDebugPatchLoop:
 
         agent.infra_debug_agent.run = counting_debug_run  # type: ignore[method-assign]
 
+        phase46_details: List[str] = []
+
+        def capture_status(phase: str, detail: str = "", **_kwargs: Any) -> None:
+            if phase == "phase4.6" and detail:
+                phase46_details.append(detail)
+
+        agent._status_callback = capture_status  # type: ignore[assignment]
+
         from software_engineering_team.devops_team.models import DevOpsTaskSpec
 
         spec = DevOpsTaskSpec(
@@ -335,6 +343,9 @@ class TestDevOpsPipelineDebugPatchLoop:
             )
         assert result is not None
         assert debug_calls[0] == MAX_INFRA_FIX_ITERATIONS
+        assert len(phase46_details) == MAX_INFRA_FIX_ITERATIONS
+        for i, detail in enumerate(phase46_details, start=1):
+            assert f"iteration {i}/{MAX_INFRA_FIX_ITERATIONS}" in detail
 
     def test_loop_soft_aborts_when_debug_not_fixable(self) -> None:
         """Unfixable debug result aborts the retry loop after a single attempt."""
@@ -416,6 +427,9 @@ class TestDevOpsPipelineDebugPatchLoop:
         assert result is not None
         assert debug_calls[0] == 1
         assert patch_calls[0] == 0
+        # Soft-abort leaves unresolved exec failures in the gate map, but those
+        # are not currently folded into quality_gates — so the pipeline may still
+        # complete. Termination is verified by the single debug / zero patch counts.
 
     def test_loop_converges_on_fixable_error(self) -> None:
         """Execution fails once, patch fixes it, second execution succeeds."""
@@ -480,6 +494,15 @@ class TestDevOpsPipelineDebugPatchLoop:
 
         agent._run_execution_tools = exec_tools  # type: ignore[assignment]
 
+        debug_calls = [0]
+        original_debug_run = agent.infra_debug_agent.run
+
+        def counting_debug_run(*args: Any, **kwargs: Any) -> Any:
+            debug_calls[0] += 1
+            return original_debug_run(*args, **kwargs)
+
+        agent.infra_debug_agent.run = counting_debug_run  # type: ignore[method-assign]
+
         from software_engineering_team.devops_team.models import DevOpsTaskSpec
 
         spec = DevOpsTaskSpec(
@@ -502,6 +525,8 @@ class TestDevOpsPipelineDebugPatchLoop:
                 write_changes=False,
             )
         assert result.success
+        assert debug_calls[0] >= 1
+        assert call_count[0] >= 2
 
 
 # ---------------------------------------------------------------------------
