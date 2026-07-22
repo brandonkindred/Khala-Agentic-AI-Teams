@@ -937,6 +937,33 @@ class TestRunDeliverAndFinalize:
         assert result.success is False
         assert "Deliver failed: push failed" in caplog.text
 
+    def test_soft_deliver_failure_marks_unsuccessful_without_exception(
+        self, tmp_path: Path, monkeypatch
+    ):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 107.0)
+        update_calls = []
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            update_job=lambda **kw: update_calls.append(kw),
+            run_deliver=lambda **kw: _FakeDeliverResult(
+                merged=False, branch_ready=False, summary="deliver failed"
+            ),
+        )
+
+        assert failure is None
+        assert result.failure_reason is None
+        assert result.success is False
+        assert result.summary == "exec done deliver failed"
+        assert result.needs_followup is False
+        assert update_calls[-1] == {
+            "current_phase": "deliver",
+            "progress": 95,
+            "status_text": "Backend task completed with issues",
+        }
+
     def test_workflow_timing_log_on_success(self, tmp_path: Path, monkeypatch, caplog):
         import time
 

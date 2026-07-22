@@ -333,14 +333,18 @@ class BaseV2DevelopmentAgent:
           ``deliver_result``, ``success``, ``summary``, ``needs_followup``, and
           ``failure_reason`` attributes. ``start_time`` was captured via
           ``time.monotonic()`` before this helper runs.
-        Postconditions: on deliver success, mutates ``result`` (sets
-          ``deliver_result``, ``success``, ``summary``, and optionally
+        Postconditions: on a non-raising ``run_deliver`` result (including soft
+          failure where ``merged``/``branch_ready`` is false), mutates ``result``
+          (sets ``deliver_result``, ``success``, ``summary``, and optionally
           ``needs_followup``), emits the final job update, logs workflow timing,
-          and returns ``None``. On deliver exception, sets
-          ``result.failure_reason``, logs the error, and returns the
-          failure-reason string so the caller can ``return result`` immediately.
-          In-progress status text is ``deliver_in_progress_status``; final status
-          is ``"{team_label} task complete"`` or
+          and returns ``None``. Soft deliver failure leaves ``result.success``
+          false and finalizes with the ``"{team_label} task completed with
+          issues"`` status. On deliver exception, sets ``result.failure_reason``,
+          logs the error, and returns the failure-reason string; callers may
+          ignore that return value and always ``return result``, since the
+          failure is already on ``result.failure_reason``. In-progress status
+          text is ``deliver_in_progress_status``; final status is
+          ``"{team_label} task complete"`` or
           ``"{team_label} task completed with issues"``. Never raises on its own.
         """
         logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
