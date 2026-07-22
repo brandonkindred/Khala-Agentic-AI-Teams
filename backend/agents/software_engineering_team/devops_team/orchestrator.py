@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -129,6 +130,21 @@ from .tool_agents import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _DebugPatchState:
+    """Mutable bag for one Phase 4.6 debug-patch retry session.
+
+    Invariants: ``exec_failures`` is always derived from ``exec_results``
+    (entries where ``success`` is falsy); ``exec_gate_map`` / ``exec_findings``
+    mirror the latest execution-tool aggregation.
+    """
+
+    exec_results: List[Dict[str, Any]]
+    exec_failures: List[Dict[str, Any]]
+    exec_gate_map: Dict[str, str]
+    exec_findings: List[str]
 
 
 class DevOpsTeamLeadAgent(TeamLeadSharedState):
@@ -420,6 +436,94 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
 
         return results
 
+    def _debug_patch_once(
+        self,
+        fix_iter: int,
+        *,
+        state: _DebugPatchState,
+        aggregated_artifacts: Dict[str, str],
+        repo_path: Path,
+        repo_str: str,
+        write_changes: bool,
+        subdir: str,
+        max_iterations: int,
+    ) -> Optional[_DebugPatchState]:
+        """Run one infra debug → patch → re-exec iteration.
+
+        Preconditions:
+          - ``fix_iter`` is a 0-based index from the bounded-retry helper
+          - ``max_iterations >= 1``
+          - ``state.exec_failures`` is non-empty when invoked by the helper
+        Postconditions:
+          - Soft abort (debug/patch exception, not fixable, empty patches) →
+            log and return ``None``
+          - Otherwise update ``aggregated_artifacts`` and ``state`` from the
+            patch + re-exec, then return ``state``
+        """
+        assert max_iterations >= 1, "max_iterations must be >= 1"
+        if not state.exec_failures:
+            return state
+
+        self._report_status(
+            "phase4.6",
+            detail=(
+                "DevOps team pipeline: phase 4.6 - debug-patch iteration "
+                f"{fix_iter + 1}/{max_iterations} ({len(state.exec_failures)} failures)"
+            ),
+        )
+        combined_output = "\n---\n".join(
+            "\n".join(ef.get("findings", [])) for ef in state.exec_failures
+        )
+        first_tool = state.exec_failures[0].get("tool", "unknown")
+        first_cmd = state.exec_failures[0].get("command", "unknown")
+        try:
+            debug_out = self.infra_debug_agent.run(
+                IaCDebugInput(
+                    execution_output=combined_output,
+                    tool_name=first_tool,
+                    command=first_cmd,
+                    artifacts=aggregated_artifacts,
+                )
+            )
+        except Exception as dbg_err:
+            logger.warning("DevOps debug agent failed: %s", dbg_err)
+            return None
+        if not debug_out.fixable:
+            logger.info("DevOps debug agent: errors are not fixable via code changes")
+            return None
+        try:
+            patch_out = self.infra_patch_agent.run(
+                IaCPatchInput(
+                    debug_output=debug_out,
+                    original_artifacts=aggregated_artifacts,
+                    repo_path=repo_str,
+                )
+            )
+        except Exception as patch_err:
+            logger.warning("DevOps patch agent failed: %s", patch_err)
+            return None
+        if not patch_out.patched_artifacts:
+            logger.info("DevOps patch agent returned no patches")
+            return None
+        aggregated_artifacts.update(patch_out.patched_artifacts)
+        if write_changes:
+            write_agent_output(
+                repo_path=repo_path,
+                output={
+                    "files": patch_out.patched_artifacts,
+                    "commit_message": f"fix(devops): patch iteration {fix_iter + 1}",
+                },
+                subdir=subdir,
+            )
+        state.exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
+        state.exec_failures = [er for er in state.exec_results if not er.get("success", True)]
+        state.exec_gate_map = {}
+        state.exec_findings = []
+        for er in state.exec_results:
+            state.exec_gate_map.update(er.get("checks", {}))
+            state.exec_findings.extend(er.get("findings", []))
+        return state
+
     @staticmethod
     def _enforce_env_policy(task_spec: DevOpsTaskSpec) -> Optional[str]:
         """Return a blocking reason if environment policy is violated, else None."""
@@ -621,72 +725,35 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                     fc,
                 )
 
-        # Phase 4.6: Debug-patch loop for fixable execution failures
+        # Phase 4.6: Debug-patch loop for fixable execution failures.
+        # Consume BaseTeamLead's bounded retry helper without inheriting the
+        # code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
         MAX_INFRA_FIX_ITERATIONS = 3
         exec_failures = [er for er in exec_results if not er.get("success", True)]
-        for fix_iter in range(MAX_INFRA_FIX_ITERATIONS):
-            if not exec_failures:
-                break
-            self._report_status(
-                "phase4.6",
-                detail=(
-                    "DevOps team pipeline: phase 4.6 - debug-patch iteration "
-                    f"{fix_iter + 1}/{MAX_INFRA_FIX_ITERATIONS} ({len(exec_failures)} failures)"
-                ),
-            )
-            combined_output = "\n---\n".join(
-                "\n".join(ef.get("findings", [])) for ef in exec_failures
-            )
-            first_tool = exec_failures[0].get("tool", "unknown")
-            first_cmd = exec_failures[0].get("command", "unknown")
-            try:
-                debug_out = self.infra_debug_agent.run(
-                    IaCDebugInput(
-                        execution_output=combined_output,
-                        tool_name=first_tool,
-                        command=first_cmd,
-                        artifacts=aggregated_artifacts,
-                    )
-                )
-            except Exception as dbg_err:
-                logger.warning("DevOps debug agent failed: %s", dbg_err)
-                break
-            if not debug_out.fixable:
-                logger.info("DevOps debug agent: errors are not fixable via code changes")
-                break
-            try:
-                patch_out = self.infra_patch_agent.run(
-                    IaCPatchInput(
-                        debug_output=debug_out,
-                        original_artifacts=aggregated_artifacts,
-                        repo_path=repo_str,
-                    )
-                )
-            except Exception as patch_err:
-                logger.warning("DevOps patch agent failed: %s", patch_err)
-                break
-            if not patch_out.patched_artifacts:
-                logger.info("DevOps patch agent returned no patches")
-                break
-            aggregated_artifacts.update(patch_out.patched_artifacts)
-            if write_changes:
-                write_agent_output(
+        state = _DebugPatchState(
+            exec_results=exec_results,
+            exec_failures=exec_failures,
+            exec_gate_map=exec_gate_map,
+            exec_findings=exec_findings,
+        )
+        if state.exec_failures:
+            BaseTeamLead._run_bounded_retry_loop(
+                self,
+                max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                attempt=lambda i: self._debug_patch_once(
+                    i,
+                    state=state,
+                    aggregated_artifacts=aggregated_artifacts,
                     repo_path=repo_path,
-                    output={
-                        "files": patch_out.patched_artifacts,
-                        "commit_message": f"fix(devops): patch iteration {fix_iter + 1}",
-                    },
+                    repo_str=repo_str,
+                    write_changes=write_changes,
                     subdir=subdir,
-                )
-            exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-            exec_failures = [er for er in exec_results if not er.get("success", True)]
-            exec_gate_map = {}
-            exec_findings = []
-            for er in exec_results:
-                exec_gate_map.update(er.get("checks", {}))
-                exec_findings.extend(er.get("findings", []))
+                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                ),
+                is_success=lambda s: not s.exec_failures,
+            )
 
-        tool_gate_map.update(exec_gate_map)
+        tool_gate_map.update(state.exec_gate_map)
 
         devsec = self.devsecops_review_agent.run(
             DevSecOpsReviewInput(
