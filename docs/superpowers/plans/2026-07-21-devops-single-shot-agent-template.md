@@ -14,7 +14,7 @@
 
 - Do not edit any of the seven existing devops agent files (`iac_agent`, `cicd_pipeline_agent`, `deployment_strategy_agent`, `doc_runbook_agent`, `infra_patch_agent`, `infra_debug_agent`, `devsecops_review_agent`).
 - Do not change `complete_json_with_continuation`'s signature or behavior.
-- Call `complete_json_with_continuation` via a direct import from `software_engineering_team.shared.llm` (no per-subclass-module lookup). Document the monkeypatch retarget implication in the module docstring.
+- Call `complete_json_with_continuation` via a direct import from `software_engineering_team.shared.llm` (no per-subclass-module lookup). Document that migrations must patch `_agent_template.complete_json_with_continuation` (module binding).
 - Include the canonical-helper decision record (`complete_json_with_continuation` vs `run_structured_persona`) in the module docstring.
 - No GitHub issue numbers in code, comments, commit messages, or docs (PR body only).
 - DbC: every public method gets `Preconditions:` / `Postconditions:` (and `Invariants:` on the class) in its docstring.
@@ -264,7 +264,7 @@ This module imports and calls ``complete_json_with_continuation`` from
 lookup). When a consumer agent is migrated onto this base, any test that
 monkeypatches ``…devops_team.<agent>.agent.complete_json_with_continuation``
 must retarget the patch to
-``software_engineering_team.shared.llm.complete_json_with_continuation``
+``software_engineering_team.devops_team._agent_template.complete_json_with_continuation``
 (or continue patching ``shared.llm.Agent``, which fence-recovery helpers
 already do via ``_patch_fenced_response``).
 """

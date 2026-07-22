@@ -627,6 +627,32 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
     assert body["error"] == "boom"
 
 
+def test_get_strategy_lab_run_status_logs_reconciliation_failure(
+    monkeypatch: pytest.MonkeyPatch, api_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    from investment_team.api import main as api_main
+
+    api_main._active_runs["run-broken"] = {
+        "run_id": "run-broken",
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 3,
+    }
+
+    class _Broken:
+        def get_job(self, *a, **k):
+            raise RuntimeError("backend down")
+
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: _Broken())
+
+    with caplog.at_level("DEBUG", logger=api_main.logger.name):
+        resp = api_client.get("/strategy-lab/runs/run-broken/status")
+
+    body = resp.json()
+    assert body["status"] == "running"
+    assert any("run-broken" in record.getMessage() for record in caplog.records)
+
+
 def test_get_strategy_lab_run_status_loads_from_job_service_when_absent(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

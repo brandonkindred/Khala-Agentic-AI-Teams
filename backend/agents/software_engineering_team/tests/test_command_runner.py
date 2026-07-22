@@ -5,23 +5,26 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from shared.command_runner.runner import (
-    CommandResult,
+from shared.command_runner.angular_repair import (
     _ensure_angular_common_in_package_json,
     _ensure_angular_material_in_package_json,
     _ensure_app_config_di_token_imports,
     _ensure_material_theme_in_styles,
     _ensure_provide_animations_in_config,
     _ensure_tsconfig_module_resolution,
-    _get_nvm_script_prefix,
     ensure_frontend_dependencies_installed,
-    ensure_frontend_project_initialized,
+)
+from shared.command_runner.nvm import _get_nvm_script_prefix
+from shared.command_runner.runner import (
+    CommandResult,
+    detect_frontend_framework,
     is_ng_build_environment_failure,
     patch_json_file,
     patch_text_file,
     run_command,
-    run_ng_serve_smoke_test,
 )
+from shared.command_runner.scaffolding import ensure_frontend_project_initialized
+from shared.command_runner.smoke_test import run_ng_serve_smoke_test
 
 
 def test_patch_json_file_rewrites_only_when_changed(tmp_path) -> None:
@@ -148,6 +151,50 @@ def test_is_ng_build_environment_failure_code_error_returns_false() -> None:
     assert is_ng_build_environment_failure(r) is False
 
 
+def test_detect_frontend_framework_angular_json(tmp_path: Path) -> None:
+    """An angular.json file alone is sufficient to detect Angular."""
+    (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "angular"
+
+
+def test_detect_frontend_framework_angular_via_package_json(tmp_path: Path) -> None:
+    """@angular/core in dependencies detects Angular even without angular.json."""
+    pkg = {"dependencies": {"@angular/core": "^19.0.0"}}
+    (tmp_path / "package.json").write_text(_json.dumps(pkg), encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "angular"
+
+
+def test_detect_frontend_framework_react_via_package_json(tmp_path: Path) -> None:
+    """react in devDependencies detects React."""
+    pkg = {"devDependencies": {"react": "^18.0.0"}}
+    (tmp_path / "package.json").write_text(_json.dumps(pkg), encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "react"
+
+
+def test_detect_frontend_framework_vue_via_package_json(tmp_path: Path) -> None:
+    """vue in dependencies detects Vue."""
+    pkg = {"dependencies": {"vue": "^3.0.0"}}
+    (tmp_path / "package.json").write_text(_json.dumps(pkg), encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "vue"
+
+
+def test_detect_frontend_framework_vue_config_file(tmp_path: Path) -> None:
+    """A vue.config.js file detects Vue when package.json is absent."""
+    (tmp_path / "vue.config.js").write_text("", encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "vue"
+
+
+def test_detect_frontend_framework_malformed_package_json_ignored(tmp_path: Path) -> None:
+    """Unparseable package.json is swallowed, falling through to unknown."""
+    (tmp_path / "package.json").write_text("{not json", encoding="utf-8")
+    assert detect_frontend_framework(tmp_path) == "unknown"
+
+
+def test_detect_frontend_framework_unknown(tmp_path: Path) -> None:
+    """An empty project directory detects as unknown."""
+    assert detect_frontend_framework(tmp_path) == "unknown"
+
+
 @patch("shared.command_runner.runner.subprocess.run")
 def test_run_command_success(mock_run: object, tmp_path: Path) -> None:
     """run_command returns success when subprocess succeeds."""
@@ -207,7 +254,7 @@ def test_run_command_env_override(mock_run: object, tmp_path: Path) -> None:
     assert call_kwargs["env"].get("CUSTOM") == "value"
 
 
-@patch("shared.command_runner.runner.subprocess.Popen")
+@patch("shared.command_runner.smoke_test.subprocess.Popen")
 def test_run_ng_serve_smoke_test_success_when_timeout(mock_popen: object, tmp_path: Path) -> None:
     """run_ng_serve_smoke_test returns success when process runs past timeout (server started)."""
     import subprocess
@@ -224,7 +271,7 @@ def test_run_ng_serve_smoke_test_success_when_timeout(mock_popen: object, tmp_pa
     assert r.success
 
 
-@patch("shared.command_runner.runner.subprocess.Popen")
+@patch("shared.command_runner.smoke_test.subprocess.Popen")
 def test_run_ng_serve_smoke_test_fail_when_exits_early(mock_popen: object, tmp_path: Path) -> None:
     """run_ng_serve_smoke_test returns failure when process exits within timeout."""
     mock_proc = MagicMock()
@@ -458,10 +505,10 @@ def test_ensure_frontend_dependencies_installed_noop_when_no_package_json(tmp_pa
 
 
 @patch(
-    "shared.command_runner.runner.run_command",
+    "shared.command_runner.angular_repair.run_command",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
-@patch("shared.command_runner.runner._get_nvm_script_prefix", return_value=None)
+@patch("shared.command_runner.angular_repair._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_dependencies_uses_run_command_when_no_nvm(
     _mock_nvm: object, mock_run: object, tmp_path: Path
 ) -> None:
@@ -481,11 +528,11 @@ def test_ensure_frontend_dependencies_uses_run_command_when_no_nvm(
 
 
 @patch(
-    "shared.command_runner.runner.run_command_with_nvm",
+    "shared.command_runner.angular_repair.run_command_with_nvm",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
 @patch(
-    "shared.command_runner.runner._get_nvm_script_prefix",
+    "shared.command_runner.angular_repair._get_nvm_script_prefix",
     return_value="source ~/.nvm/nvm.sh",
 )
 def test_ensure_frontend_dependencies_calls_repairs(
@@ -537,10 +584,10 @@ def test_ensure_frontend_project_initialized_noop_when_package_json_exists(tmp_p
 
 
 @patch(
-    "shared.command_runner.runner.run_command",
+    "shared.command_runner.scaffolding.run_command",
     return_value=CommandResult(success=False, exit_code=1, stdout="", stderr="npm init failed"),
 )
-@patch("shared.command_runner.runner._get_nvm_script_prefix", return_value=None)
+@patch("shared.command_runner.scaffolding._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_returns_on_npm_init_failure(
     _mock_nvm: object, _mock_run: object, tmp_path: Path
 ) -> None:
@@ -551,14 +598,14 @@ def test_ensure_frontend_project_initialized_returns_on_npm_init_failure(
 
 
 @patch(
-    "shared.command_runner.runner.run_command",
+    "shared.command_runner.scaffolding.run_command",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
 @patch(
-    "shared.command_runner.runner.run_command_with_nvm",
+    "shared.command_runner.scaffolding.run_command_with_nvm",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
-@patch("shared.command_runner.runner._get_nvm_script_prefix", return_value=None)
+@patch("shared.command_runner.scaffolding._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_creates_environment_files(
     _mock_nvm: object, _mock_nvm_run: object, mock_run: object, tmp_path: Path
 ) -> None:
@@ -576,14 +623,14 @@ def test_ensure_frontend_project_initialized_creates_environment_files(
 
 
 @patch(
-    "shared.command_runner.runner.run_command",
+    "shared.command_runner.scaffolding.run_command",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
 @patch(
-    "shared.command_runner.runner.run_command_with_nvm",
+    "shared.command_runner.scaffolding.run_command_with_nvm",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
-@patch("shared.command_runner.runner._get_nvm_script_prefix", return_value=None)
+@patch("shared.command_runner.scaffolding._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_produces_material_theme_fonts_provide_animations(
     _mock_nvm: object, _mock_nvm_run: object, mock_run: object, tmp_path: Path
 ) -> None:

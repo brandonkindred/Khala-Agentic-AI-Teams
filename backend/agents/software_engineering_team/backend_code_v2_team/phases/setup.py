@@ -3,7 +3,8 @@ Setup phase: ensure repo exists, README, main branch, development branch,
 and linting/testing are configured.
 
 Runs as the first phase of the Backend Tech Lead Agent.
-Uses shared.git_utils only (plus lightweight file checks for lint/test config).
+Uses shared.git_utils and shared.command_runner.scaffolding (for the minimal
+pyproject.toml template), plus lightweight file checks for lint/test config.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
 
     # No linting config found — create minimal ruff config in pyproject.toml
     logger.info("Setup: no linting configuration found; creating pyproject.toml with ruff config")
-    from shared.command_runner.runner import _MINIMAL_PYPROJECT_TOML
+    from shared.command_runner.scaffolding import _MINIMAL_PYPROJECT_TOML
 
     if pyproject.exists():
         # Append ruff config to existing pyproject.toml
@@ -88,9 +89,10 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
 def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
     """Verify that a Python test framework is configured in the project.
 
-    Checks for pytest.ini, [tool.pytest] in pyproject.toml, or a tests/
-    directory. If missing, creates a minimal pytest configuration and test
-    directory so tests never silently skip.
+    Checks for both a pytest config (pytest.ini or [tool.pytest] in
+    pyproject.toml) AND a tests/ directory — both must be present to count as
+    "already configured". Creates whichever is missing so tests never
+    silently skip.
 
     Side effect: every repo-relative path this call creates or modifies is added
     to ``written`` so the caller can commit exactly what setup touched.

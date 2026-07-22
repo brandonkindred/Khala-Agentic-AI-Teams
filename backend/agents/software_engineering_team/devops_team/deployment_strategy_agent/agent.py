@@ -2,37 +2,49 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient, get_strands_model
-from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
+from typing import Any, Dict
+
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
 
 from .models import DeploymentStrategyAgentInput, DeploymentStrategyAgentOutput
 from .prompts import DEPLOYMENT_STRATEGY_PROMPT
 
 
-class DeploymentStrategyAgent:
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
-        self._model = resolve_strands_model(
-            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
-        )
+class DeploymentStrategyAgent(DevOpsSingleShotAgent):
+    """Produce deployment strategy artifacts via a single structured LLM call.
 
-    def run(self, input_data: DeploymentStrategyAgentInput) -> DeploymentStrategyAgentOutput:
+    Invariants: instance state is limited to ``llm`` and ``_model`` from the
+    base; ``run`` is stateless across calls.
+    """
+
+    PROMPT = DEPLOYMENT_STRATEGY_PROMPT
+
+    def build_context(self, input_data: DeploymentStrategyAgentInput) -> str:
+        """Build the deployment prompt context from the task spec.
+
+        Preconditions: ``input_data`` is a valid ``DeploymentStrategyAgentInput``.
+        Postconditions: returns the same context string shape the pre-migration
+        agent appended after the prompt separator.
+        """
         spec = input_data.task_spec
-        context = (
+        return (
             f"task_id={spec.task_id}\n"
             f"constraints={spec.constraints.model_dump()}\n"
             f"environments={spec.platform_scope.environments}\n"
             f"acceptance_criteria={spec.acceptance_criteria}\n"
             f"nfr={spec.non_functional_requirements}\n"
         )
-        data = complete_json_with_continuation(
-            self._model,
-            DEPLOYMENT_STRATEGY_PROMPT + "\n\n---\n\n" + context,
-            temperature=0.1,
-            think=True,
-        )
+
+    def build_output(
+        self, input_data: DeploymentStrategyAgentInput, data: Dict[str, Any]
+    ) -> DeploymentStrategyAgentOutput:
+        """Map the LLM JSON dict onto ``DeploymentStrategyAgentOutput``.
+
+        Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
+        Postconditions: returns ``DeploymentStrategyAgentOutput`` with the same
+        field defaults as the pre-migration agent, including
+        ``rollout_timeout_minutes=int(data.get(..., 15) or 15)``.
+        """
         return DeploymentStrategyAgentOutput(
             artifacts=data.get("artifacts") or {},
             strategy=data.get("strategy", ""),

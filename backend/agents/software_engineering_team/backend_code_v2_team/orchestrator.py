@@ -89,13 +89,17 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     """
-    Backend Development Agent: runs the 4-phase cycle (Planning → Execution →
-    Documentation → Deliver) with per-microtask review gates embedded in the
-    Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
+    Backend Development Agent: runs the 5-phase lifecycle (Pre-flight → Planning →
+    Execution → Documentation → Deliver) with per-microtask review gates embedded
+    in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
-    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
+    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
+    ``_run_preflight`` / ``_run_planning_and_branch_setup`` from
     :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
-    repo-briefing sets, progress callback, and the integration-only ``run_workflow``.
+    repo-briefing sets, progress callback, and the integration-only ``run_workflow``,
+    which calls the base class's ``_run_preflight`` and
+    ``_run_planning_and_branch_setup`` for its branch-checkout/tooling-verification
+    and planning/feature-branch-creation steps respectively.
     """
 
     @staticmethod
@@ -210,112 +214,52 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id
         )
 
-        # ── Check out the review feature branch FIRST, then ensure tooling ──
+        # ── Check out the review feature branch, then ensure tooling ───
         # Setup commits lint/test scaffolding to ``development``, but a handoff
         # feature branch created before setup does not inherit it. Configure the
         # tooling on the branch we will actually edit so the pre-flight check and
         # later quality gates see the config (idempotent when already present).
         feature_branch_name = (task.feature_branch_name or "").strip() or None
-        if feature_branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
-            if not ok:
-                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] %s", task_id, result.failure_reason)
-                return result
-            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
-            configure_quality_tooling(repo_path)
-            _update_job(
-                current_phase="planning",
-                progress=4,
-                status_text=f"Branch {feature_branch_name} ready",
-            )
-
-        # ── Pre-flight: verify linting & testing are configured ───────
-        # Runs after the feature-branch checkout so it validates the branch that
-        # will actually be edited, not whatever branch setup last left checked out.
-        has_lint, has_test = self._detect_tooling(repo_path)
-        if not has_lint or not has_test:
-            missing = []
-            if not has_lint:
-                missing.append("linting")
-            if not has_test:
-                missing.append("testing")
-            logger.error(
-                "[%s] Pre-flight check failed: %s not configured at %s",
-                task_id,
-                " and ".join(missing),
-                repo_path,
-            )
-            result.failure_reason = (
-                f"Pre-flight check failed: {' and '.join(missing)} not configured. "
-                "The build process requires linting and testing to be set up before coding tasks begin."
-            )
+        preflight_failure = self._run_preflight(
+            task_id=task_id,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            detect_tooling=self._detect_tooling,
+            checkout_branch=checkout_branch,
+            configure_quality_tooling=configure_quality_tooling,
+            update_job=_update_job,
+            logger=logger,
+            emit_branch_ready_progress=True,
+        )
+        if preflight_failure is not None:
+            result.failure_reason = preflight_failure
             return result
-        logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
         existing_code = self._read_existing_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
         tool_runners = self._build_tool_runners(tool_agents)
-
-        # ── Phase 1: Planning ──────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase 1: Planning", task_id)
-        result.current_phase = Phase.PLANNING
-        _update_job(
-            current_phase="planning",
-            progress=5,
-            status_text="Analyzing task and creating implementation plan",
-        )
-
-        try:
-            planning_result = run_planning(
-                llm=self.llm,
-                task=task,
-                repo_path=repo_path,
-                architecture=architecture,
-                existing_code=existing_code,
-                tool_agents=tool_agents,
-            )
-            result.planning_result = planning_result
-        except Exception as exc:
-            result.failure_reason = f"Planning failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-
-        total_microtasks = len(planning_result.microtasks)
-        _update_job(
-            current_phase="planning",
-            progress=10,
-            microtasks_total=total_microtasks,
-            microtasks_completed=0,
-            status_text=f"Plan created with {total_microtasks} microtasks",
-        )
-
-        # ── Create feature branch (Git agent) before first execution ───
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-        create_feature_branch_fn = (
-            getattr(git_agent, "create_feature_branch", None) if git_agent is not None else None
+
+        # ── Phase 1: Planning + feature branch creation ─────────────────
+        result.current_phase = Phase.PLANNING
+        planning_result, feature_branch_name, failure_reason = self._run_planning_and_branch_setup(
+            task_id=task_id,
+            task=task,
+            repo_path=repo_path,
+            architecture=architecture,
+            existing_code=existing_code,
+            tool_agents=tool_agents,
+            git_agent=git_agent,
+            feature_branch_name=feature_branch_name,
+            llm=self.llm,
+            run_planning=run_planning,
+            update_job=_update_job,
+            logger=logger,
         )
-        if not feature_branch_name and callable(create_feature_branch_fn):
-            _update_job(
-                current_phase="planning", progress=12, status_text="Creating feature branch..."
-            )
-            try:
-                ok, branch_name = create_feature_branch_fn(repo_path, task_id, task.title or "")
-                if ok and branch_name:
-                    feature_branch_name = branch_name
-                    logger.info("[%s] Created feature branch: %s", task_id, feature_branch_name)
-                    _update_job(
-                        current_phase="planning",
-                        progress=14,
-                        status_text=f"Branch {feature_branch_name} ready",
-                    )
-                else:
-                    logger.warning(
-                        "[%s] Git agent create_feature_branch failed, deliver will create branch",
-                        task_id,
-                    )
-            except Exception as exc:
-                logger.warning("[%s] Git agent create_feature_branch raised: %s", task_id, exc)
+        if failure_reason is not None:
+            result.failure_reason = failure_reason
+            return result
+        result.planning_result = planning_result
 
         # ── Phase 2: Execution with per-microtask review gates ─────────
         logger.info("[%s] Next step -> Starting Phase 2: Execution", task_id)

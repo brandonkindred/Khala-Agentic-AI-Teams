@@ -31,7 +31,7 @@ Four of the seven add genuine special-case logic beyond name/prompt/output-model
 |---|---|
 | Shape | Base class with template-method overrides |
 | Canonical LLM helper | `complete_json_with_continuation` |
-| Monkeypatch strategy | Call `shared.llm.complete_json_with_continuation` directly; migration work retargets patches |
+| Monkeypatch strategy | Import helper into `_agent_template`; migrations patch `_agent_template.complete_json_with_continuation` |
 | Special-case hooks | `pre_call` (optional early return) + `build_output` (all post-call logic) |
 | Generics / ABC ceremony | No `Generic[InputT, OutputT]`; plain class with methods that raise `NotImplementedError` if not overridden |
 | Scope this change | New module + unit tests only; zero edits to the seven agent files |
@@ -48,7 +48,7 @@ This decision record must appear in the new module's docstring so future readers
 
 The base imports and invokes `complete_json_with_continuation` from `software_engineering_team.shared.llm` directly (no per-subclass-module lookup).
 
-**Implication for migration work:** any test that monkeypatches `…devops_team.<agent>.agent.complete_json_with_continuation` must be retargeted to `software_engineering_team.shared.llm.complete_json_with_continuation` (or continue patching `shared.llm.Agent`, which the existing fence-recovery helpers already do via `_patch_fenced_response`).
+**Implication for migration work:** any test that monkeypatches `…devops_team.<agent>.agent.complete_json_with_continuation` must be retargeted to `software_engineering_team.devops_team._agent_template.complete_json_with_continuation` (the name bound by the template's direct import), or continue patching `shared.llm.Agent` via `_patch_fenced_response`.
 
 This design documents that choice; it does not change existing tests.
 
@@ -144,7 +144,7 @@ Additional coverage for the omit-kwargs path and the `llm_client is None` precon
 | Criterion | How this design satisfies it |
 |---|---|
 | Shared definition parameterized by name/prompt/output/context/hooks | Base class + `PROMPT` + template methods; public agent names stay on subclasses at migration time |
-| Monkeypatch strategy stated | Documented: call `shared.llm` directly; migrations retarget patches |
+| Monkeypatch strategy stated | Documented: patch `_agent_template.complete_json_with_continuation` (or `shared.llm.Agent`) |
 | Unit tests: boilerplate, pre-call, post-call | `test_devops_agent_template.py` cases 1–3 |
 | No changes to the seven agents | Explicit out of scope |
 | `make test` / `make lint`; 90% on new file | Implementation plan must verify |
