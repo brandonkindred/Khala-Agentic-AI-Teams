@@ -95,10 +95,11 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
     ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
-    ``_run_deliver_and_finalize`` from :class:`BaseV2DevelopmentAgent`; supplies
-    the backend tooling detection, repo-briefing sets, progress callback, and the
-    integration-only ``run_workflow``, which calls the base helpers for
-    preflight, planning/branch setup, and deliver/finalize.
+    ``_run_documentation_phase`` / ``_run_deliver_and_finalize`` from
+    :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
+    repo-briefing sets, progress callback, and the integration-only
+    ``run_workflow``, which calls the base helpers for preflight,
+    planning/branch setup, documentation, and deliver/finalize.
     """
 
     _TEAM_LABEL = "Backend"
@@ -340,36 +341,23 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
         result.final_files = current_files
 
         # ── Phase: Documentation ────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
-        result.current_phase = Phase.DOCUMENTATION
-        _update_job(
-            current_phase="documentation",
-            progress=80,
-            status_text="Generating documentation and API specs",
-        )
-
         from .phases.documentation import run_documentation_phase
 
-        try:
-            doc_result = run_documentation_phase(
-                llm=self.llm,
-                task=task,
-                repo_path=repo_path,
-                execution_result=exec_result,
-                planning_result=planning_result,
-                tool_agents=tool_agents,
-            )
-            result.documentation_result = doc_result
-            if doc_result.files:
-                current_files.update(doc_result.files)
-                result.final_files = current_files
-            logger.info("[%s] Documentation phase complete: %s", task_id, doc_result.summary)
-        except Exception as exc:
-            logger.warning(
-                "[%s] Documentation phase failed: %s. Next step -> Continuing to Deliver phase",
-                task_id,
-                exc,
-            )
+        current_files = self._run_documentation_phase(
+            task_id=task_id,
+            task=task,
+            repo_path=repo_path,
+            llm=self.llm,
+            exec_result=exec_result,
+            planning_result=planning_result,
+            tool_agents=tool_agents,
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=run_documentation_phase,
+            update_job=_update_job,
+            logger=logger,
+            status_text="Generating documentation and API specs",
+        )
 
         # ── Phase: Deliver ───────────────────────────────────────────
         self._run_deliver_and_finalize(

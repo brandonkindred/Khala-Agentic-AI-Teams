@@ -5,13 +5,13 @@ Shared base for the code-v2 Development Agents (backend + frontend).
 constructor, their repo-briefing read (including the incremental
 :class:`~software_engineering_team.shared.repo_context_cache.RepoContextCache`
 fast path), their tool-runner construction, their planning + feature-branch
-setup (``_run_planning_and_branch_setup``), and their deliver + final
-status/logging (``_run_deliver_and_finalize``) verbatim; only the per-team
-tool-agent roster, tooling detection, repo extension/exclude sets, and the
-remainder of the integration-only ``run_workflow`` (execution, documentation)
-differ. This base holds the shared members; each team subclasses it and
-supplies the divergent parts via class attributes (``_TEAM_LABEL``,
-``_DELIVER_IN_PROGRESS_STATUS``) and overrides.
+setup (``_run_planning_and_branch_setup``), their documentation phase
+(``_run_documentation_phase``), and their deliver + final status/logging
+(``_run_deliver_and_finalize``) verbatim; only the per-team tool-agent roster,
+tooling detection, repo extension/exclude sets, and the remainder of the
+integration-only ``run_workflow`` (execution) differ. This base holds the
+shared members; each team subclasses it and supplies the divergent parts via
+class attributes (``_TEAM_LABEL``, ``_DELIVER_IN_PROGRESS_STATUS``) and overrides.
 
 The still-divergent parts of ``run_workflow`` deliberately stay per-team: they
 are ``# pragma: no cover`` integration code carrying team-specific
@@ -294,6 +294,76 @@ class BaseV2DevelopmentAgent:
                 logger.warning("[%s] Git agent create_feature_branch raised: %s", task_id, exc)
 
         return planning_result, feature_branch_name, None
+
+    @staticmethod
+    def _run_documentation_phase(
+        *,
+        task_id: str,
+        task: Any,
+        repo_path: Path,
+        llm: LLMClient,
+        exec_result: Any,
+        planning_result: Any,
+        tool_agents: Dict[Any, Any],
+        result: Any,
+        current_files: Dict[str, str],
+        run_documentation_phase: Callable[..., Any],
+        update_job: Callable[..., None],
+        logger: logging.Logger,
+        status_text: str,
+    ) -> Dict[str, str]:
+        """Run the documentation phase and merge any new files into ``current_files``.
+
+        Extracted from ``run_workflow`` so the documentation status update +
+        phase invocation + file-merge + exception-swallow block is defined once;
+        ``run_documentation_phase`` is injected (the caller's late-imported
+        module-level name) so tests that monkeypatch
+        ``phases.documentation.run_documentation_phase`` keep working.
+        ``status_text`` is parameterized because backend and frontend differ
+        (``"Generating documentation and API specs"`` vs.
+        ``"Generating documentation and API docs..."``).
+
+        Preconditions: ``status_text`` is the team-specific job status string.
+          ``result`` exposes ``current_phase``, ``documentation_result``, and
+          ``final_files`` attributes. ``current_files`` is the mutable
+          post-execution file map.
+        Postconditions: ``result.current_phase`` is ``Phase.DOCUMENTATION``.
+          On success, ``result.documentation_result`` is set and any
+          ``doc_result.files`` are merged into ``current_files`` /
+          ``result.final_files``. On failure, logs a warning and leaves
+          ``documentation_result`` unset. Never raises; returns the (possibly
+          updated) ``current_files`` dict.
+        """
+        logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
+        result.current_phase = Phase.DOCUMENTATION
+        update_job(
+            current_phase="documentation",
+            progress=80,
+            status_text=status_text,
+        )
+
+        try:
+            doc_result = run_documentation_phase(
+                llm=llm,
+                task=task,
+                repo_path=repo_path,
+                execution_result=exec_result,
+                planning_result=planning_result,
+                tool_agents=tool_agents,
+            )
+            result.documentation_result = doc_result
+            if doc_result.files:
+                current_files.update(doc_result.files)
+                result.final_files = current_files
+            logger.info("[%s] Documentation phase complete: %s", task_id, doc_result.summary)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Documentation phase failed: %s. Next step -> Continuing to Deliver phase",
+                task_id,
+                exc,
+            )
+
+        return current_files
 
     @staticmethod
     def _run_deliver_and_finalize(
