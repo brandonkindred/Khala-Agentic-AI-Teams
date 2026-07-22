@@ -21,7 +21,6 @@ dispatch table and the module list passed to ``install_fake_postgres``.
 from __future__ import annotations
 
 import sys
-from datetime import datetime
 from typing import Any
 
 from shared.postgres.fake import (
@@ -610,5 +609,4 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
     )
 
 
-# Suppress unused-import warnings in downstream test files
-__all__ = ["install_fake_postgres", "datetime"]
+__all__ = ["install_fake_postgres"]
