@@ -76,6 +76,23 @@ class BlogFactCheckAgent:
 
         Returns:
             FactCheckReport with claims_status and risk_status.
+
+        Preconditions:
+            - ``self._model`` is a usable LLM client (enforced in ``__init__``).
+            - ``draft`` is a string (empty is tolerated but low-signal — an empty draft
+              yields an uninformative report).
+        Postconditions:
+            - Always returns a ``FactCheckReport`` (never ``None``) on success and
+              exhausted-JSON fallback paths; ``claims_status`` and ``risk_status`` are
+              normalized to ``"PASS"`` or ``"FAIL"``.
+            - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``)
+              propagates unwrapped so the caller (or Temporal) can retry.
+            - Any other unexpected error is logged at exception level and raised as
+              ``FactCheckError``.
+            - When JSON parsing is exhausted after retries, returns a fallback report with
+              ``claims_status="FAIL"`` and ``risk_status="FAIL"`` rather than raising.
+            - When ``work_dir`` is set and ``write_artifact`` is available, the report is
+              persisted as ``fact_check_report.json``.
         """
         require_disclaimer_for = require_disclaimer_for or ["medical", "legal", "financial"]
         claims_list = (allowed_claims or {}).get("claims") or []
