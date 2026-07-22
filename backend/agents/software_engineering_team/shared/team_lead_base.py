@@ -21,6 +21,11 @@ passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
 subclass orchestrator module at call time so tests can monkeypatch
 ``orchestrator.run_setup`` / ``orchestrator.*DevelopmentAgent`` as module-level
 attributes (see ``test_team_lead_propagates_development_handoff_fields``).
+
+Shared failure-envelope helpers (:func:`build_team_failure_result`,
+:func:`apply_team_failure`) construct or mutate team results with
+``success=False`` and a ``failure_reason``, usable by phase-sequential and
+swarm orchestrators alike.
 """
 
 from __future__ import annotations
@@ -71,6 +76,62 @@ def copy_development_result_fields(dst: Any, src: Any) -> None:
     """
     for field in _DEVELOPMENT_RESULT_FIELDS:
         setattr(dst, field, getattr(src, field))
+
+
+def build_team_failure_result(
+    result_cls: Callable[..., T],
+    *failure_reason: str,
+    **partial_state: Any,
+) -> T:
+    """Construct a failure envelope: success=False + failure_reason + optional partial state.
+
+    Preconditions: ``result_cls`` is callable as
+      ``result_cls(success=False, failure_reason=..., **partial_state)``;
+      exactly one positional ``failure_reason`` str is given; ``partial_state`` must
+      not include ``success`` or ``failure_reason``.
+    Postconditions: returns an instance with ``success is False`` and
+      ``failure_reason`` equal to the given string; each ``partial_state`` key is
+      forwarded to the constructor.
+    """
+    assert len(failure_reason) == 1, "failure_reason is required"
+    reason = failure_reason[0]
+    assert callable(result_cls), "result_cls must be callable"
+    assert isinstance(reason, str), "failure_reason must be a str"
+    assert "success" not in partial_state, "success is fixed to False"
+    assert "failure_reason" not in partial_state, (
+        "pass failure_reason as the dedicated argument, not in kwargs"
+    )
+    return result_cls(success=False, failure_reason=reason, **partial_state)
+
+
+def apply_team_failure(
+    result: Any,
+    *failure_reason: str,
+    **partial_fields: Any,
+) -> Any:
+    """Mutate an existing result into the failure envelope; return the same object.
+
+    Preconditions: ``result`` is not None and exposes assignable ``success`` /
+      ``failure_reason`` attributes (and any keys in ``partial_fields``);
+      exactly one positional ``failure_reason`` str is given; ``partial_fields``
+      must not include ``success`` or ``failure_reason``.
+    Postconditions: ``result.success is False``; ``result.failure_reason`` equals
+      the given string; each ``partial_fields`` key is set via ``setattr``;
+      returns ``result`` (same identity). Unrelated attributes are left untouched.
+    """
+    assert len(failure_reason) == 1, "failure_reason is required"
+    reason = failure_reason[0]
+    assert result is not None, "result is required"
+    assert isinstance(reason, str), "failure_reason must be a str"
+    assert "success" not in partial_fields, "success is fixed to False"
+    assert "failure_reason" not in partial_fields, (
+        "pass failure_reason as the dedicated argument, not in kwargs"
+    )
+    result.success = False
+    result.failure_reason = reason
+    for key, value in partial_fields.items():
+        setattr(result, key, value)
+    return result
 
 
 class TeamLeadSharedState:
