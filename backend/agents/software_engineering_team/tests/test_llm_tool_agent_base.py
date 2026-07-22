@@ -158,6 +158,33 @@ def test_review_like_uses_json_model_resolves_second_json_model(monkeypatch):
     assert "get_strands_model_fn" not in calls[1][1]
 
 
+def test_get_strands_model_fn_class_attr_forwards_unbound_function(monkeypatch):
+    """Class-level function attrs must not be bound via self access."""
+    calls = []
+
+    def fake_get_strands_model(llm, *, response_format):
+        return object()
+
+    def fake_resolve(llm, **kwargs):
+        calls.append((llm, dict(kwargs)))
+        return object()
+
+    _patch_resolve(monkeypatch, fake_resolve)
+
+    class PlanJsonLike(LlmToolAgentBase):
+        resolve_models = True
+        response_format = "json"
+        get_strands_model_fn = fake_get_strands_model
+
+    llm = object()
+    PlanJsonLike(llm=llm)
+
+    assert len(calls) == 1
+    forwarded = calls[0][1]["get_strands_model_fn"]
+    assert forwarded is fake_get_strands_model
+    assert not hasattr(forwarded, "__self__")
+
+
 def test_plan_json_like_resolves_with_get_strands_model_fn(monkeypatch):
     calls = []
     json_model = object()

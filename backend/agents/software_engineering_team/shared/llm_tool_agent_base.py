@@ -65,16 +65,17 @@ class LlmToolAgentBase:
 
         from llm_service.strands_model import resolve_strands_model
 
+        get_strands_model_fn = type(self).get_strands_model_fn
         resolve_kwargs: dict[str, Any] = {"response_format": self.response_format}
-        if self.get_strands_model_fn is not None:
-            resolve_kwargs["get_strands_model_fn"] = self.get_strands_model_fn
+        if get_strands_model_fn is not None:
+            resolve_kwargs["get_strands_model_fn"] = get_strands_model_fn
 
         self._model = resolve_strands_model(llm, **resolve_kwargs)
 
         if self.uses_json_model:
             json_kwargs: dict[str, Any] = {"response_format": "json"}
-            if self.get_strands_model_fn is not None:
-                json_kwargs["get_strands_model_fn"] = self.get_strands_model_fn
+            if get_strands_model_fn is not None:
+                json_kwargs["get_strands_model_fn"] = get_strands_model_fn
             self._model_json = resolve_strands_model(llm, **json_kwargs)
 
     def _agent_factory(self):
