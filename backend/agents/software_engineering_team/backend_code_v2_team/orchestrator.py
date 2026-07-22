@@ -17,10 +17,7 @@ from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.team_lead_base import (
-    BaseTeamLead,
-    copy_development_result_fields,
-)
+from software_engineering_team.shared.team_lead_base import BaseTeamLead
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
@@ -28,7 +25,6 @@ from .models import (
     BackendCodeV2WorkflowResult,
     MicrotaskReviewConfig,
     MicrotaskReviewFailedError,
-    MicrotaskStatus,
     Phase,
     ToolAgentKind,
 )
@@ -89,14 +85,22 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     """
-    Backend Development Agent: runs the 4-phase cycle (Planning → Execution →
-    Documentation → Deliver) with per-microtask review gates embedded in the
-    Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
+    Backend Development Agent: runs the 5-phase lifecycle (Pre-flight → Planning →
+    Execution → Documentation → Deliver) with per-microtask review gates embedded
+    in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
-    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` from
-    :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
-    repo-briefing sets, progress callback, and the integration-only ``run_workflow``.
+    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
+    ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
+    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
+    ``_run_deliver_and_finalize`` from :class:`BaseV2DevelopmentAgent`; supplies
+    the backend tooling detection, repo-briefing sets, progress callback, and
+    the integration-only ``run_workflow``, which calls the base helpers for
+    preflight, planning/branch setup, bookkeeping, documentation, and
+    deliver/finalize.
     """
+
+    _TEAM_LABEL = "Backend"
+    _DELIVER_IN_PROGRESS_STATUS = "Committing changes and preparing delivery"
 
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = _BACKEND_REPO_BRIEFING_MAX_CHARS) -> str:
@@ -210,112 +214,52 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id
         )
 
-        # ── Check out the review feature branch FIRST, then ensure tooling ──
+        # ── Check out the review feature branch, then ensure tooling ───
         # Setup commits lint/test scaffolding to ``development``, but a handoff
         # feature branch created before setup does not inherit it. Configure the
         # tooling on the branch we will actually edit so the pre-flight check and
         # later quality gates see the config (idempotent when already present).
         feature_branch_name = (task.feature_branch_name or "").strip() or None
-        if feature_branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
-            if not ok:
-                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] %s", task_id, result.failure_reason)
-                return result
-            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
-            configure_quality_tooling(repo_path)
-            _update_job(
-                current_phase="planning",
-                progress=4,
-                status_text=f"Branch {feature_branch_name} ready",
-            )
-
-        # ── Pre-flight: verify linting & testing are configured ───────
-        # Runs after the feature-branch checkout so it validates the branch that
-        # will actually be edited, not whatever branch setup last left checked out.
-        has_lint, has_test = self._detect_tooling(repo_path)
-        if not has_lint or not has_test:
-            missing = []
-            if not has_lint:
-                missing.append("linting")
-            if not has_test:
-                missing.append("testing")
-            logger.error(
-                "[%s] Pre-flight check failed: %s not configured at %s",
-                task_id,
-                " and ".join(missing),
-                repo_path,
-            )
-            result.failure_reason = (
-                f"Pre-flight check failed: {' and '.join(missing)} not configured. "
-                "The build process requires linting and testing to be set up before coding tasks begin."
-            )
+        preflight_failure = self._run_preflight(
+            task_id=task_id,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            detect_tooling=self._detect_tooling,
+            checkout_branch=checkout_branch,
+            configure_quality_tooling=configure_quality_tooling,
+            update_job=_update_job,
+            logger=logger,
+            emit_branch_ready_progress=True,
+        )
+        if preflight_failure is not None:
+            result.failure_reason = preflight_failure
             return result
-        logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
         existing_code = self._read_existing_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
         tool_runners = self._build_tool_runners(tool_agents)
-
-        # ── Phase 1: Planning ──────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase 1: Planning", task_id)
-        result.current_phase = Phase.PLANNING
-        _update_job(
-            current_phase="planning",
-            progress=5,
-            status_text="Analyzing task and creating implementation plan",
-        )
-
-        try:
-            planning_result = run_planning(
-                llm=self.llm,
-                task=task,
-                repo_path=repo_path,
-                architecture=architecture,
-                existing_code=existing_code,
-                tool_agents=tool_agents,
-            )
-            result.planning_result = planning_result
-        except Exception as exc:
-            result.failure_reason = f"Planning failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-
-        total_microtasks = len(planning_result.microtasks)
-        _update_job(
-            current_phase="planning",
-            progress=10,
-            microtasks_total=total_microtasks,
-            microtasks_completed=0,
-            status_text=f"Plan created with {total_microtasks} microtasks",
-        )
-
-        # ── Create feature branch (Git agent) before first execution ───
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-        create_feature_branch_fn = (
-            getattr(git_agent, "create_feature_branch", None) if git_agent is not None else None
+
+        # ── Phase 1: Planning + feature branch creation ─────────────────
+        result.current_phase = Phase.PLANNING
+        planning_result, feature_branch_name, failure_reason = self._run_planning_and_branch_setup(
+            task_id=task_id,
+            task=task,
+            repo_path=repo_path,
+            architecture=architecture,
+            existing_code=existing_code,
+            tool_agents=tool_agents,
+            git_agent=git_agent,
+            feature_branch_name=feature_branch_name,
+            llm=self.llm,
+            run_planning=run_planning,
+            update_job=_update_job,
+            logger=logger,
         )
-        if not feature_branch_name and callable(create_feature_branch_fn):
-            _update_job(
-                current_phase="planning", progress=12, status_text="Creating feature branch..."
-            )
-            try:
-                ok, branch_name = create_feature_branch_fn(repo_path, task_id, task.title or "")
-                if ok and branch_name:
-                    feature_branch_name = branch_name
-                    logger.info("[%s] Created feature branch: %s", task_id, feature_branch_name)
-                    _update_job(
-                        current_phase="planning",
-                        progress=14,
-                        status_text=f"Branch {feature_branch_name} ready",
-                    )
-                else:
-                    logger.warning(
-                        "[%s] Git agent create_feature_branch failed, deliver will create branch",
-                        task_id,
-                    )
-            except Exception as exc:
-                logger.warning("[%s] Git agent create_feature_branch raised: %s", task_id, exc)
+        if failure_reason is not None:
+            result.failure_reason = failure_reason
+            return result
+        result.planning_result = planning_result
 
         # ── Phase 2: Execution with per-microtask review gates ─────────
         logger.info("[%s] Next step -> Starting Phase 2: Execution", task_id)
@@ -371,111 +315,57 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             result.failure_reason = "Execution produced no files."
             return result
 
-        completed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.COMPLETED
+        completed_count, failed_count = self._record_execution_bookkeeping(
+            task_id=task_id,
+            result=result,
+            exec_result=exec_result,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            git_agent=git_agent,
+            logger=logger,
         )
-        failed_count = sum(
-            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.REVIEW_FAILED
-        )
-        result.iterations_used = completed_count
-
-        if (
-            feature_branch_name
-            and git_agent is not None
-            and hasattr(git_agent, "commit_current_changes")
-        ):
-            try:
-                git_agent.commit_current_changes(
-                    repo_path, f"feat: {completed_count} microtasks completed"
-                )
-            except Exception as exc:
-                logger.warning("[%s] Git agent commit_current_changes raised: %s", task_id, exc)
 
         result.final_files = current_files
 
         # ── Phase: Documentation ────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
-        result.current_phase = Phase.DOCUMENTATION
-        _update_job(
-            current_phase="documentation",
-            progress=80,
+        from .phases.documentation import run_documentation_phase
+
+        current_files = self._run_documentation_phase(
+            task_id=task_id,
+            task=task,
+            repo_path=repo_path,
+            llm=self.llm,
+            exec_result=exec_result,
+            planning_result=planning_result,
+            tool_agents=tool_agents,
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=run_documentation_phase,
+            update_job=_update_job,
+            logger=logger,
             status_text="Generating documentation and API specs",
         )
 
-        from .phases.documentation import run_documentation_phase
-
-        try:
-            doc_result = run_documentation_phase(
-                llm=self.llm,
-                task=task,
-                repo_path=repo_path,
-                execution_result=exec_result,
-                planning_result=planning_result,
-                tool_agents=tool_agents,
-            )
-            result.documentation_result = doc_result
-            if doc_result.files:
-                current_files.update(doc_result.files)
-                result.final_files = current_files
-            logger.info("[%s] Documentation phase complete: %s", task_id, doc_result.summary)
-        except Exception as exc:
-            logger.warning(
-                "[%s] Documentation phase failed: %s. Next step -> Continuing to Deliver phase",
-                task_id,
-                exc,
-            )
-
         # ── Phase: Deliver ───────────────────────────────────────────
-        logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
-        result.current_phase = Phase.DELIVER
-        _update_job(
-            current_phase="deliver",
-            progress=90,
-            status_text="Committing changes and preparing delivery",
-        )
-
-        try:
-            deliver_result = run_deliver(
-                task_id=task_id,
-                repo_path=repo_path,
-                files=current_files,
-                summary=exec_result.summary,
-                task_title=task.title or "",
-                tool_agents=tool_agents,
-                task_description=task.description or "",
-                feature_branch_name=feature_branch_name,
-                merge_to_development=merge_to_development,
-            )
-            result.deliver_result = deliver_result
-            delivered = (
-                deliver_result.merged if merge_to_development else deliver_result.branch_ready
-            )
-            result.success = delivered and failed_count == 0
-            result.summary = f"{exec_result.summary} {deliver_result.summary}"
-            if failed_count > 0:
-                result.needs_followup = True
-                result.summary += f" ({failed_count} microtask(s) failed review)"
-        except Exception as exc:
-            result.failure_reason = f"Deliver failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-
-        elapsed = time.monotonic() - start_time
-        final_status = (
-            "Backend task complete" if result.success else "Backend task completed with issues"
-        )
-        _update_job(
-            current_phase="deliver",
-            progress=100 if result.success else 95,
-            status_text=final_status,
-        )
-        logger.info(
-            "[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
-            task_id,
-            "SUCCEEDED" if result.success else "PARTIAL",
-            elapsed,
-            completed_count,
-            failed_count,
+        self._run_deliver_and_finalize(
+            task_id=task_id,
+            repo_path=repo_path,
+            current_files=current_files,
+            exec_summary=exec_result.summary,
+            task_title=task.title or "",
+            task_description=task.description or "",
+            tool_agents=tool_agents,
+            feature_branch_name=feature_branch_name,
+            merge_to_development=merge_to_development,
+            failed_count=failed_count,
+            completed_count=completed_count,
+            start_time=start_time,
+            result=result,
+            run_deliver=run_deliver,
+            update_job=_update_job,
+            logger=logger,
+            team_label=self._TEAM_LABEL,
+            deliver_in_progress_status=self._DELIVER_IN_PROGRESS_STATUS,
         )
         return result
 
@@ -511,73 +401,17 @@ class BackendCodeV2TeamLead(BaseTeamLead):
         review_config: Optional[MicrotaskReviewConfig] = None,
         merge_to_development: bool = True,
     ) -> BackendCodeV2WorkflowResult:
-        """
-        Run setup, verify lint/test readiness, then execute the backend 5-phase workflow.
+        """Run setup, verify lint/test readiness, then execute the backend 5-phase workflow.
 
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.
         """
-        task_id = task.id
-        result = BackendCodeV2WorkflowResult(task_id=task_id)
-
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as exc:
-                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
-
-        # ── Setup phase (Backend Tech Lead) ─────────────────────────────
-        result.current_phase = Phase.SETUP
-        _update_job(
-            current_phase="setup",
-            progress=2,
-            status_text="Setting up repository and development environment",
-        )
-        try:
-            setup_result = run_setup(repo_path=repo_path, task_title=task.title or "")
-            result.setup_result = setup_result
-        except Exception as exc:
-            result.failure_reason = f"Setup failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-        _update_job(current_phase="setup", progress=3, status_text="Repository setup complete")
-
-        # ── Verify linting and testing are configured ─────────────────
-        if not getattr(setup_result, "linting_configured", False):
-            logger.warning(
-                "[%s] Linting not configured after setup — coding cannot proceed without linting",
-                task_id,
-            )
-            result.failure_reason = (
-                "Setup completed but linting is not configured. "
-                "Linting must be set up before any coding tasks can begin."
-            )
-            return result
-
-        if not getattr(setup_result, "testing_configured", False):
-            logger.warning(
-                "[%s] Testing not configured after setup — coding cannot proceed without testing",
-                task_id,
-            )
-            result.failure_reason = (
-                "Setup completed but testing is not configured. "
-                "Testing must be set up before any coding tasks can begin."
-            )
-            return result
-
-        logger.info("[%s] Linting and testing verified — proceeding to coding phase", task_id)
-        _update_job(
-            current_phase="setup",
-            progress=5,
-            status_text="Linting and testing verified; ready for development",
-        )
-
-        # ── Delegate to Backend Development Agent ──────────────────────
-        dev_agent = BackendDevelopmentAgent(self.llm)
-        inner = dev_agent.run_workflow(
+        return self._run_setup_and_delegate(
             repo_path=repo_path,
             task=task,
+            result_cls=BackendCodeV2WorkflowResult,
+            run_setup_fn=run_setup,
+            development_agent_cls=BackendDevelopmentAgent,
             architecture=architecture,
             spec_content=spec_content,
             qa_agent=qa_agent,
@@ -589,7 +423,4 @@ class BackendCodeV2TeamLead(BaseTeamLead):
             job_updater=job_updater,
             review_config=review_config,
             merge_to_development=merge_to_development,
-            repo_context_cache=self._repo_context_cache_for(repo_path),
         )
-        copy_development_result_fields(result, inner)
-        return result

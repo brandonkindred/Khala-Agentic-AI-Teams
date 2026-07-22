@@ -5,11 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from shared.command_runner.runner import (
-    _get_nvm_script_prefix,
-    ensure_frontend_project_initialized,
-    run_ng_build_with_nvm_fallback,
-)
+from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
+from shared.command_runner.nvm import _get_nvm_script_prefix
+from shared.command_runner.scaffolding import ensure_frontend_project_initialized
 
 # This test scaffolds a real Angular project (Angular CLI + `npm install`) and
 # runs `ng build`. It needs nvm/Node *and* a reachable npm registry, so it is

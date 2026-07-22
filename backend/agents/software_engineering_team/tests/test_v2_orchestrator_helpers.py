@@ -424,3 +424,784 @@ def test_be_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp
     (tmp_path / "pytest.ini").write_text("[pytest]")
     has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
     assert not has_lint and has_test
+
+
+class TestRunPreflight:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_preflight`` helper.
+
+    No current ``run_workflow`` test drives the dev-agent pre-flight's failure
+    paths directly (they only unit-test ``_detect_tooling`` in isolation), so
+    these exercise ``_run_preflight`` on its own with fake callables.
+    """
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_preflight")
+
+    def test_no_branch_skips_checkout(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        checkout_calls = []
+        configure_calls = []
+        update_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name=None,
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda *a: checkout_calls.append(a) or (True, "ok"),
+            configure_quality_tooling=lambda p: configure_calls.append(p),
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+        )
+        assert result is None
+        assert checkout_calls == []
+        assert configure_calls == []
+        assert update_calls == []
+
+    def test_checkout_failure_returns_message_and_skips_tooling(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        detect_calls = []
+        configure_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda p: detect_calls.append(p) or (True, True),
+            checkout_branch=lambda _p, _b: (False, "conflict"),
+            configure_quality_tooling=lambda p: configure_calls.append(p),
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+        )
+        assert result == "Feature branch checkout failed: conflict"
+        assert detect_calls == []
+        assert configure_calls == []
+
+    @pytest.mark.parametrize(
+        "tooling, expected_missing",
+        [
+            ((False, True), "linting"),
+            ((True, False), "testing"),
+            ((False, False), "linting and testing"),
+        ],
+    )
+    def test_missing_tooling_returns_combined_message(
+        self, tmp_path: Path, tooling, expected_missing
+    ):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name=None,
+            detect_tooling=lambda _p: tooling,
+            checkout_branch=lambda *a: (True, "ok"),
+            configure_quality_tooling=lambda p: None,
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+        )
+        assert result == (
+            f"Pre-flight check failed: {expected_missing} not configured. "
+            "The build process requires linting and testing to be set up before coding tasks begin."
+        )
+
+    def test_successful_checkout_configures_tooling(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        configure_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda _p, _b: (True, "checked out"),
+            configure_quality_tooling=lambda p: configure_calls.append(p),
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+        )
+        assert result is None
+        assert configure_calls == [tmp_path]
+
+    def test_emit_branch_ready_progress_true_updates_job(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        update_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda *a: (True, "ok"),
+            configure_quality_tooling=lambda p: None,
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+            emit_branch_ready_progress=True,
+        )
+        assert result is None
+        assert update_calls == [
+            {
+                "current_phase": "planning",
+                "progress": 4,
+                "status_text": "Branch feature/x ready",
+            }
+        ]
+
+    def test_emit_branch_ready_progress_false_by_default(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        update_calls = []
+
+        result = BaseV2DevelopmentAgent._run_preflight(
+            task_id="t1",
+            repo_path=tmp_path,
+            feature_branch_name="feature/x",
+            detect_tooling=lambda _p: (True, True),
+            checkout_branch=lambda *a: (True, "ok"),
+            configure_quality_tooling=lambda p: None,
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+        )
+        assert result is None
+        assert update_calls == []
+
+
+class _FakePlanningResult:
+    def __init__(self, microtask_count: int = 2):
+        self.microtasks = list(range(microtask_count))
+
+
+class _FakeTask:
+    def __init__(self, task_id: str = "t1", title: str = "Do the thing"):
+        self.id = task_id
+        self.title = title
+
+
+class TestRunPlanningAndBranchSetup:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_planning_and_branch_setup`` helper.
+
+    Mirrors ``TestRunPreflight``'s style: fake callables/agents injected so the
+    planning-invocation + job-status-update + feature-branch-creation sequence
+    is unit-isolated from either team's ``run_workflow``.
+    """
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_planning_and_branch_setup")
+
+    def test_planning_failure_short_circuits_without_branch_creation(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+
+        def _raise_run_planning(**kwargs):
+            raise ValueError("boom")
+
+        planning_result, feature_branch_name, failure_reason = (
+            BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                task_id="t1",
+                task=_FakeTask(),
+                repo_path=tmp_path,
+                architecture=None,
+                existing_code="",
+                tool_agents={},
+                git_agent=git_agent,
+                feature_branch_name=None,
+                llm=MagicMock(),
+                run_planning=_raise_run_planning,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+            )
+        )
+        assert planning_result is None
+        assert feature_branch_name is None
+        assert failure_reason == "Planning failed: boom"
+        git_agent.create_feature_branch.assert_not_called()
+
+    def test_existing_branch_name_skips_branch_creation(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        fake_result = _FakePlanningResult()
+
+        planning_result, feature_branch_name, failure_reason = (
+            BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                task_id="t1",
+                task=_FakeTask(),
+                repo_path=tmp_path,
+                architecture=None,
+                existing_code="",
+                tool_agents={},
+                git_agent=git_agent,
+                feature_branch_name="feature/already-set",
+                llm=MagicMock(),
+                run_planning=lambda **kw: fake_result,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+            )
+        )
+        assert planning_result is fake_result
+        assert feature_branch_name == "feature/already-set"
+        assert failure_reason is None
+        git_agent.create_feature_branch.assert_not_called()
+
+    def test_successful_branch_creation_emits_progress_and_logs(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.create_feature_branch.return_value = (True, "feature/new-branch")
+        fake_result = _FakePlanningResult(microtask_count=3)
+        update_calls = []
+
+        with caplog.at_level("INFO", logger="test_run_planning_and_branch_setup"):
+            planning_result, feature_branch_name, failure_reason = (
+                BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                    task_id="t1",
+                    task=_FakeTask(),
+                    repo_path=tmp_path,
+                    architecture=None,
+                    existing_code="",
+                    tool_agents={},
+                    git_agent=git_agent,
+                    feature_branch_name=None,
+                    llm=MagicMock(),
+                    run_planning=lambda **kw: fake_result,
+                    update_job=lambda **kw: update_calls.append(kw),
+                    logger=self._logger(),
+                )
+            )
+
+        assert planning_result is fake_result
+        assert feature_branch_name == "feature/new-branch"
+        assert failure_reason is None
+        assert update_calls == [
+            {
+                "current_phase": "planning",
+                "progress": 5,
+                "status_text": "Analyzing task and creating implementation plan...",
+            },
+            {
+                "current_phase": "planning",
+                "progress": 10,
+                "microtasks_total": 3,
+                "microtasks_completed": 0,
+                "status_text": "Plan created with 3 microtask(s)",
+            },
+            {
+                "current_phase": "planning",
+                "progress": 12,
+                "status_text": "Creating feature branch...",
+            },
+            {
+                "current_phase": "planning",
+                "progress": 14,
+                "status_text": "Branch feature/new-branch ready",
+            },
+        ]
+        assert "Created feature branch: feature/new-branch" in caplog.text
+
+    def test_failed_branch_creation_logs_warning_without_failure_reason(
+        self, tmp_path: Path, caplog
+    ):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.create_feature_branch.return_value = (False, None)
+        fake_result = _FakePlanningResult()
+
+        with caplog.at_level("WARNING", logger="test_run_planning_and_branch_setup"):
+            planning_result, feature_branch_name, failure_reason = (
+                BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                    task_id="t1",
+                    task=_FakeTask(),
+                    repo_path=tmp_path,
+                    architecture=None,
+                    existing_code="",
+                    tool_agents={},
+                    git_agent=git_agent,
+                    feature_branch_name=None,
+                    llm=MagicMock(),
+                    run_planning=lambda **kw: fake_result,
+                    update_job=lambda **kw: None,
+                    logger=self._logger(),
+                )
+            )
+
+        assert planning_result is fake_result
+        assert feature_branch_name is None
+        assert failure_reason is None
+        assert "Git agent create_feature_branch failed, deliver will create branch" in caplog.text
+
+    def test_branch_creation_exception_is_swallowed_and_logged(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.create_feature_branch.side_effect = RuntimeError("git exploded")
+        fake_result = _FakePlanningResult()
+
+        with caplog.at_level("WARNING", logger="test_run_planning_and_branch_setup"):
+            planning_result, feature_branch_name, failure_reason = (
+                BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                    task_id="t1",
+                    task=_FakeTask(),
+                    repo_path=tmp_path,
+                    architecture=None,
+                    existing_code="",
+                    tool_agents={},
+                    git_agent=git_agent,
+                    feature_branch_name=None,
+                    llm=MagicMock(),
+                    run_planning=lambda **kw: fake_result,
+                    update_job=lambda **kw: None,
+                    logger=self._logger(),
+                )
+            )
+
+        assert planning_result is fake_result
+        assert feature_branch_name is None
+        assert failure_reason is None
+        assert "Git agent create_feature_branch raised: git exploded" in caplog.text
+
+    def test_no_git_agent_skips_branch_creation(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        fake_result = _FakePlanningResult()
+
+        planning_result, feature_branch_name, failure_reason = (
+            BaseV2DevelopmentAgent._run_planning_and_branch_setup(
+                task_id="t1",
+                task=_FakeTask(),
+                repo_path=tmp_path,
+                architecture=None,
+                existing_code="",
+                tool_agents={},
+                git_agent=None,
+                feature_branch_name=None,
+                llm=MagicMock(),
+                run_planning=lambda **kw: fake_result,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+            )
+        )
+        assert planning_result is fake_result
+        assert feature_branch_name is None
+        assert failure_reason is None
+
+
+
+class _FakeMicrotask:
+    def __init__(self, status: str):
+        self.status = status
+
+
+class _FakeExecResult:
+    def __init__(self, statuses: list[str]):
+        self.microtasks = [_FakeMicrotask(s) for s in statuses]
+
+
+class _FakeDocResult:
+    def __init__(self, files=None, summary="ok"):
+        self.files = files or {}
+        self.summary = summary
+
+
+class _FakeDeliverResult:
+    def __init__(
+        self,
+        *,
+        merged: bool = False,
+        branch_ready: bool = False,
+        summary: str = "delivered",
+    ):
+        self.merged = merged
+        self.branch_ready = branch_ready
+        self.summary = summary
+
+
+class _FakeWorkflowResult:
+    def __init__(self):
+        self.iterations_used = 0
+        self.current_phase = None
+        self.documentation_result = None
+        self.final_files = None
+        self.deliver_result = None
+        self.success = False
+        self.summary = ""
+        self.needs_followup = False
+        self.failure_reason = None
+
+
+class TestRecordExecutionBookkeeping:
+    """Tests for ``BaseV2DevelopmentAgent._record_execution_bookkeeping``."""
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_record_execution_bookkeeping")
+
+    def test_counts_sets_iterations_and_commits(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        result = _FakeWorkflowResult()
+        exec_result = _FakeExecResult(["completed", "completed", "review_failed", "pending"])
+
+        completed_count, failed_count = BaseV2DevelopmentAgent._record_execution_bookkeeping(
+            task_id="t1",
+            result=result,
+            exec_result=exec_result,
+            repo_path=tmp_path,
+            feature_branch_name="feature/t1",
+            git_agent=git_agent,
+            logger=self._logger(),
+        )
+
+        assert completed_count == 2
+        assert failed_count == 1
+        assert result.iterations_used == 2
+        git_agent.commit_current_changes.assert_called_once_with(
+            tmp_path, "feat: 2 microtasks completed"
+        )
+
+    def test_skips_commit_without_branch_or_method(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = _FakeWorkflowResult()
+        exec_result = _FakeExecResult(["completed"])
+
+        completed_count, failed_count = BaseV2DevelopmentAgent._record_execution_bookkeeping(
+            task_id="t1",
+            result=result,
+            exec_result=exec_result,
+            repo_path=tmp_path,
+            feature_branch_name=None,
+            git_agent=MagicMock(),
+            logger=self._logger(),
+        )
+        assert (completed_count, failed_count) == (1, 0)
+        assert result.iterations_used == 1
+
+        class _NoCommitAgent:
+            pass
+
+        result2 = _FakeWorkflowResult()
+        BaseV2DevelopmentAgent._record_execution_bookkeeping(
+            task_id="t1",
+            result=result2,
+            exec_result=exec_result,
+            repo_path=tmp_path,
+            feature_branch_name="feature/t1",
+            git_agent=_NoCommitAgent(),
+            logger=self._logger(),
+        )
+        assert result2.iterations_used == 1
+
+    def test_commit_exception_is_logged_and_swallowed(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        git_agent = MagicMock()
+        git_agent.commit_current_changes.side_effect = RuntimeError("git boom")
+        result = _FakeWorkflowResult()
+        exec_result = _FakeExecResult(["completed", "review_failed"])
+
+        with caplog.at_level("WARNING", logger="test_record_execution_bookkeeping"):
+            completed_count, failed_count = BaseV2DevelopmentAgent._record_execution_bookkeeping(
+                task_id="t1",
+                result=result,
+                exec_result=exec_result,
+                repo_path=tmp_path,
+                feature_branch_name="feature/t1",
+                git_agent=git_agent,
+                logger=self._logger(),
+            )
+
+        assert (completed_count, failed_count) == (1, 1)
+        assert result.iterations_used == 1
+        assert any("Git agent commit_current_changes raised" in r.message for r in caplog.records)
+
+
+class TestRunDocumentationPhase:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_documentation_phase`` helper.
+
+    Mirrors ``TestRunPreflight`` / ``TestRunPlanningAndBranchSetup``: fake
+    callables injected so the documentation status update + phase invocation +
+    file-merge + exception-swallow sequence is unit-isolated from either team's
+    ``run_workflow``.
+    """
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_documentation_phase")
+
+    def test_success_merges_files_and_updates_job(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_models import Phase
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        update_calls = []
+        result = _FakeWorkflowResult()
+        current_files = {"a.py": "a"}
+        doc = _FakeDocResult(files={"docs/readme.md": "# hi"}, summary="docs done")
+
+        out = BaseV2DevelopmentAgent._run_documentation_phase(
+            task_id="t1",
+            task=MagicMock(),
+            repo_path=tmp_path,
+            llm=MagicMock(),
+            exec_result=MagicMock(),
+            planning_result=MagicMock(),
+            tool_agents={},
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=lambda **kw: doc,
+            update_job=lambda **kw: update_calls.append(kw),
+            logger=self._logger(),
+            status_text="Generating documentation and API specs",
+        )
+
+        assert result.current_phase == Phase.DOCUMENTATION
+        assert result.documentation_result is doc
+        assert out == {"a.py": "a", "docs/readme.md": "# hi"}
+        assert result.final_files == out
+        assert update_calls == [
+            {
+                "current_phase": "documentation",
+                "progress": 80,
+                "status_text": "Generating documentation and API specs",
+            }
+        ]
+
+    def test_success_without_files_leaves_current_files_unchanged(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = _FakeWorkflowResult()
+        current_files = {"a.py": "a"}
+        doc = _FakeDocResult(files={}, summary="nothing")
+
+        out = BaseV2DevelopmentAgent._run_documentation_phase(
+            task_id="t1",
+            task=MagicMock(),
+            repo_path=tmp_path,
+            llm=MagicMock(),
+            exec_result=MagicMock(),
+            planning_result=MagicMock(),
+            tool_agents={},
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=lambda **kw: doc,
+            update_job=lambda **kw: None,
+            logger=self._logger(),
+            status_text="Generating documentation and API docs...",
+        )
+
+        assert result.documentation_result is doc
+        assert out is current_files
+        assert out == {"a.py": "a"}
+        assert result.final_files is None
+
+    def test_exception_is_swallowed_and_logged(self, tmp_path: Path, caplog):
+        from software_engineering_team.shared.v2_models import Phase
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = _FakeWorkflowResult()
+        current_files = {"a.py": "a"}
+
+        def _raise(**kwargs):
+            raise RuntimeError("doc boom")
+
+        with caplog.at_level("WARNING", logger="test_run_documentation_phase"):
+            out = BaseV2DevelopmentAgent._run_documentation_phase(
+                task_id="t1",
+                task=MagicMock(),
+                repo_path=tmp_path,
+                llm=MagicMock(),
+                exec_result=MagicMock(),
+                planning_result=MagicMock(),
+                tool_agents={},
+                result=result,
+                current_files=current_files,
+                run_documentation_phase=_raise,
+                update_job=lambda **kw: None,
+                logger=self._logger(),
+                status_text="Generating documentation and API specs",
+            )
+
+        assert result.current_phase == Phase.DOCUMENTATION
+        assert result.documentation_result is None
+        assert out is current_files
+        assert "Documentation phase failed: doc boom" in caplog.text
+        assert "Continuing to Deliver phase" in caplog.text
+
+
+class TestRunDeliverAndFinalize:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_deliver_and_finalize`` helper."""
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_deliver_and_finalize")
+
+    @staticmethod
+    def _call(**overrides):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = overrides.pop("result", _FakeWorkflowResult())
+        kwargs = {
+            "task_id": "t1",
+            "repo_path": overrides.pop("repo_path"),
+            "current_files": {"a.py"},
+            "exec_summary": "exec done",
+            "task_title": "Do the thing",
+            "task_description": "desc",
+            "tool_agents": {},
+            "feature_branch_name": "feature/t1",
+            "merge_to_development": True,
+            "failed_count": 0,
+            "completed_count": 2,
+            "start_time": 100.0,
+            "result": result,
+            "run_deliver": lambda **kw: _FakeDeliverResult(merged=True),
+            "update_job": lambda **kw: None,
+            "logger": TestRunDeliverAndFinalize._logger(),
+            "team_label": "Backend",
+            "deliver_in_progress_status": "Committing changes and preparing delivery",
+        }
+        kwargs.update(overrides)
+        failure = BaseV2DevelopmentAgent._run_deliver_and_finalize(**kwargs)
+        return failure, result
+
+    def test_success_merge_emits_complete_status(self, tmp_path: Path, monkeypatch):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 105.0)
+        update_calls = []
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            update_job=lambda **kw: update_calls.append(kw),
+            run_deliver=lambda **kw: _FakeDeliverResult(merged=True, summary="merged ok"),
+        )
+
+        assert failure is None
+        assert result.success is True
+        assert result.summary == "exec done merged ok"
+        assert result.needs_followup is False
+        assert update_calls[0] == {
+            "current_phase": "deliver",
+            "progress": 90,
+            "status_text": "Committing changes and preparing delivery",
+        }
+        assert update_calls[-1] == {
+            "current_phase": "deliver",
+            "progress": 100,
+            "status_text": "Backend task complete",
+        }
+
+    def test_failed_microtasks_mark_partial_and_followup(self, tmp_path: Path, monkeypatch):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 110.0)
+        update_calls = []
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            failed_count=1,
+            team_label="Frontend",
+            deliver_in_progress_status="Committing changes and preparing delivery...",
+            update_job=lambda **kw: update_calls.append(kw),
+            run_deliver=lambda **kw: _FakeDeliverResult(merged=True, summary="merged"),
+        )
+
+        assert failure is None
+        assert result.success is False
+        assert result.needs_followup is True
+        assert "(1 microtask(s) failed review)" in result.summary
+        assert update_calls[0]["status_text"] == "Committing changes and preparing delivery..."
+        assert update_calls[-1] == {
+            "current_phase": "deliver",
+            "progress": 95,
+            "status_text": "Frontend task completed with issues",
+        }
+
+    def test_branch_ready_path_when_not_merging(self, tmp_path: Path, monkeypatch):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 102.0)
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            merge_to_development=False,
+            run_deliver=lambda **kw: _FakeDeliverResult(branch_ready=True, summary="branch ready"),
+        )
+
+        assert failure is None
+        assert result.success is True
+        assert result.summary == "exec done branch ready"
+
+    def test_deliver_exception_returns_failure_reason(self, tmp_path: Path, caplog):
+        def _boom(**kwargs):
+            raise RuntimeError("push failed")
+
+        with caplog.at_level("ERROR", logger="test_run_deliver_and_finalize"):
+            failure, result = self._call(repo_path=tmp_path, run_deliver=_boom)
+
+        assert failure == "Deliver failed: push failed"
+        assert result.failure_reason == failure
+        assert result.success is False
+        assert "Deliver failed: push failed" in caplog.text
+
+    def test_soft_deliver_failure_marks_unsuccessful_without_exception(
+        self, tmp_path: Path, monkeypatch
+    ):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 107.0)
+        update_calls = []
+
+        failure, result = self._call(
+            repo_path=tmp_path,
+            update_job=lambda **kw: update_calls.append(kw),
+            run_deliver=lambda **kw: _FakeDeliverResult(
+                merged=False, branch_ready=False, summary="deliver failed"
+            ),
+        )
+
+        assert failure is None
+        assert result.failure_reason is None
+        assert result.success is False
+        assert result.summary == "exec done deliver failed"
+        assert result.needs_followup is False
+        assert update_calls[-1] == {
+            "current_phase": "deliver",
+            "progress": 95,
+            "status_text": "Backend task completed with issues",
+        }
+
+    def test_workflow_timing_log_on_success(self, tmp_path: Path, monkeypatch, caplog):
+        import time
+
+        monkeypatch.setattr(time, "monotonic", lambda: 112.5)
+
+        with caplog.at_level("INFO", logger="test_run_deliver_and_finalize"):
+            failure, _result = self._call(
+                repo_path=tmp_path,
+                completed_count=3,
+                failed_count=0,
+                start_time=100.0,
+            )
+
+        assert failure is None
+        assert (
+            "WORKFLOW SUCCEEDED in 12.5s (3 microtasks completed, 0 failed review)" in caplog.text
+        )
