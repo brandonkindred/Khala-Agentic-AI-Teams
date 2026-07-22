@@ -15,12 +15,7 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from strands import Agent
 
-from llm_service import (
-    LLMJsonParseError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    extract_json_from_response,
-)
+from agents.blogging.shared.json_retry import call_json_with_retry
 
 from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT
@@ -46,6 +41,8 @@ _JSON_RETRY_SUFFIX = (
     "\n\nRespond with a single JSON object only (no markdown, no code fences). "
     'Keys: "status", "violations", "required_fixes", "notes".'
 )
+
+_ALWAYS_ON_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
 
 
 def _fallback_compliance_report(exc: Exception) -> ComplianceReport:
@@ -133,70 +130,26 @@ class BlogComplianceAgent:
         if on_llm_request:
             on_llm_request("Checking compliance with brand guidelines...")
 
-        agent = Agent(model=self._model, system_prompt="You are a brand compliance evaluator.")
-        data: Optional[Dict[str, Any]] = None
-        base_prompt = prompt
-        working_prompt = prompt
-        # The LLM client already exhausts its own 429 / transient-transport retry budgets
-        # before raising, so this agent adds no second blocking retry: a transient error
-        # re-raises for the Temporal activity funnel to retry the whole stage (thread mode
-        # fails the job); a non-transient failure falls back to a fail-closed report. Only
-        # JSON-parse failures are retried here — one cheap, local strict re-prompt.
-        for json_attempt in range(2):
-            try:
-                result = agent(
-                    working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
-                )
-                data = extract_json_from_response(str(result).strip())
-                break
-            except LLMJsonParseError as e:
-                if json_attempt == 0:
-                    logger.warning(
-                        "Compliance JSON parse failed (attempt 1), retrying with strict instruction: %s",
-                        e,
-                    )
-                    working_prompt = base_prompt + _JSON_RETRY_SUFFIX
-                else:
-                    logger.warning(
-                        "Compliance JSON parse failed after retry; using fallback report: %s",
-                        e,
-                    )
-                    report = _fallback_compliance_report(e)
-                    if work_dir and write_artifact:
-                        write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                        logger.info(
-                            "Wrote compliance_report.json (fallback): status=%s", report.status
-                        )
-                    return report
-            except (LLMRateLimitError, LLMTemporaryError) as e:
-                # Transient transport error after the client's own retries: re-raise so
-                # Temporal (or the caller) owns the retry instead of a blocking sleep here.
-                # Log at the agent boundary so the transient failure is visible in thread
-                # mode too (outside Temporal, which would otherwise be the only logger).
-                logger.warning("Compliance agent hit a transient LLM error, re-raising: %s", e)
-                raise
-            except Exception as e:
-                # logger.exception captures the full traceback at ERROR level so an
-                # unexpected/programming error (AttributeError, TypeError, …) is visible
-                # in logs even though we fail closed with a fallback report below.
-                logger.exception(
-                    "Compliance LLM failed after agent retries; using fallback report: %s",
-                    e,
-                )
-                report = _fallback_compliance_report(e)
-                if work_dir and write_artifact:
-                    write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                    logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
-                return report
-
-        if not data:  # pragma: no cover - unreachable: every loop exit sets data or returns; kept as a defensive backstop.
-            report = _fallback_compliance_report(
-                RuntimeError("No compliance JSON after retries"),
+        def _agent_factory():
+            return Agent(
+                model=self._model,
+                system_prompt="You are a brand compliance evaluator.",
             )
-            if work_dir and write_artifact:
-                write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
-            return report
+
+        prompt_for_helper = prompt + _ALWAYS_ON_JSON_INSTRUCTION
+
+        def _fallback_dict(exc: Exception) -> Dict[str, Any]:
+            return _fallback_compliance_report(exc).to_dict()
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt_for_helper,
+            max_attempts=2,
+            strict_json_suffix=_JSON_RETRY_SUFFIX,
+            on_exhausted=_fallback_dict,
+            on_unexpected_error=_fallback_dict,
+            logger=logger,
+        )
 
         status = (data.get("status") or "FAIL").upper()
         if status not in ("PASS", "FAIL"):
