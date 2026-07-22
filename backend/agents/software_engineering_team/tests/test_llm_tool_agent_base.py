@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
+from software_engineering_team.shared.llm_tool_agent_base import FallbackPayload, LlmToolAgentBase
 
 # Mirrors pytest.ini's `pythonpath = agents .` so the subprocess below can
 # import `software_engineering_team` the same way the test runner does.
@@ -212,3 +212,132 @@ def test_plan_json_like_resolves_with_get_strands_model_fn(monkeypatch):
         "response_format": "json",
         "get_strands_model_fn": sentinel_fn,
     }
+
+
+# ---------------------------------------------------------------------------
+# fallback taxonomy (opt-in helpers; not wired into consumer bases yet)
+# ---------------------------------------------------------------------------
+
+
+class _FallbackAgent(LlmToolAgentBase):
+    no_model_recommendations = ["no-model-rec"]
+    no_model_summary = "no-model-summary"
+    llm_error_recommendations = ["llm-error-rec"]
+    llm_error_summary = "llm-error-summary"
+    empty_recommendations = ["empty-rec"]
+    default_summary = "default-summary"
+    empty_summary_override = "empty-override"
+
+
+def test_fallback_no_model_returns_payload_when_model_falsy():
+    agent = _FallbackAgent()
+    payload = agent._fallback_no_model(None)
+
+    assert payload == FallbackPayload(
+        tier="no_model",
+        recommendations=["no-model-rec"],
+        summary="no-model-summary",
+    )
+    # Returned list is a copy of the class attr, not the same object.
+    assert payload.recommendations is not _FallbackAgent.no_model_recommendations
+
+
+def test_fallback_no_model_returns_none_when_model_truthy():
+    agent = _FallbackAgent()
+    assert agent._fallback_no_model(object()) is None
+
+
+def test_call_with_single_fallback_success():
+    agent = _FallbackAgent()
+    status, value = agent._call_with_single_fallback(lambda: "ok-value", log_label="demo")
+
+    assert status == "ok"
+    assert value == "ok-value"
+
+
+def test_call_with_single_fallback_exception_returns_call_error(caplog):
+    import logging
+
+    agent = _FallbackAgent()
+
+    with caplog.at_level(logging.WARNING):
+        status, payload = agent._call_with_single_fallback(
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+            log_label="demo-call",
+        )
+
+    assert status == "error"
+    assert payload == FallbackPayload(
+        tier="call_error",
+        recommendations=["llm-error-rec"],
+        summary="llm-error-summary",
+    )
+    assert payload.recommendations is not _FallbackAgent.llm_error_recommendations
+    assert any("demo-call" in r.message and "boom" in r.message for r in caplog.records)
+
+
+def test_call_partial_tolerant_keeps_successes_skips_failures(caplog):
+    import logging
+
+    agent = _FallbackAgent()
+
+    def flaky(item):
+        if item == "bad":
+            raise ValueError("nope")
+        return f"ok:{item}"
+
+    with caplog.at_level(logging.WARNING):
+        results = agent._call_partial_tolerant(["a", "bad", "c"], flaky, log_label="partial")
+
+    assert results == ["ok:a", "ok:c"]
+    assert any("partial" in r.message and "nope" in r.message for r in caplog.records)
+
+
+def test_call_partial_tolerant_truncates_long_item_context(caplog):
+    import logging
+
+    agent = _FallbackAgent()
+    long_item = "x" * 80
+
+    with caplog.at_level(logging.WARNING):
+        results = agent._call_partial_tolerant(
+            [long_item],
+            lambda _item: (_ for _ in ()).throw(RuntimeError("fail")),
+            log_label="trunc",
+        )
+
+    assert results == []
+    assert any("trunc" in r.message and ("x" * 50) in r.message for r in caplog.records)
+    assert not any(("x" * 80) in r.message for r in caplog.records)
+
+
+def test_fallback_empty_parse_uses_empty_recommendations_when_missing():
+    agent = _FallbackAgent()
+    payload = agent._fallback_empty_parse()
+
+    assert payload.tier == "empty_parse"
+    assert payload.recommendations == ["empty-rec"]
+    assert payload.summary == "default-summary"
+
+
+def test_fallback_empty_parse_applies_empty_summary_override():
+    agent = _FallbackAgent()
+    payload = agent._fallback_empty_parse(recommendations=["kept"], summary="")
+
+    assert payload.recommendations == ["kept"]
+    assert payload.summary == "empty-override"
+
+
+def test_fallback_empty_parse_preserves_explicit_nonempty_summary():
+    agent = _FallbackAgent()
+    payload = agent._fallback_empty_parse(summary="from-model")
+
+    assert payload.recommendations == ["empty-rec"]
+    assert payload.summary == "from-model"
+
+
+def test_fallback_empty_parse_empty_recommendations_sequence_uses_class_attr():
+    agent = _FallbackAgent()
+    payload = agent._fallback_empty_parse(recommendations=[])
+
+    assert payload.recommendations == ["empty-rec"]
