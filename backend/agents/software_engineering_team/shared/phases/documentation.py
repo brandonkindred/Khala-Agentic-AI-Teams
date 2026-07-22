@@ -5,13 +5,17 @@ The backend and frontend documentation phases were byte-for-byte identical; the
 only team-local dependencies are the ``DocumentationPhaseResult`` /
 ``ToolAgentPhaseInput`` models and the ``Phase`` / ``ToolAgentKind`` enums,
 which are injected via the team's ``models`` module.
+
+``make_run_documentation_phase`` binds those models into the team-facing
+``run_documentation_phase`` entry point so each team module stays a thin
+re-export / patch surface.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
@@ -159,3 +163,47 @@ def run_documentation_phase_impl(
         issues_fixed=total_issues_fixed,
         summary=summary,
     )
+
+
+def make_run_documentation_phase(*, models: PhaseModels) -> Callable[..., Any]:
+    """Bind a team-module ``run_documentation_phase`` that injects ``models``.
+
+    Preconditions:
+        ``models`` satisfies ``PhaseModels`` (exposes ``DocumentationPhaseResult``,
+        ``Phase``, ``ToolAgentKind``, and ``ToolAgentPhaseInput``).
+    Postconditions:
+        Returns a ``run_documentation_phase`` matching the code-v2 team public
+        signature. Each call delegates entirely to ``run_documentation_phase_impl``
+        with the bound ``models``.
+    """
+
+    def run_documentation_phase(
+        llm: LLMClient,
+        task: Task,
+        repo_path: Path,
+        execution_result: Any,
+        planning_result: Any,
+        tool_agents: Dict[Any, Any],
+        max_iterations: int = MAX_DOCUMENTATION_ITERATIONS,
+    ) -> Any:
+        """Review all documentation and iterate until no issues remain.
+
+        Preconditions:
+            ``max_iterations`` >= 1; ``tool_agents`` may or may not contain a
+            documentation agent.
+        Postconditions:
+            Returns a ``DocumentationPhaseResult``; delegates the loop to
+            ``run_documentation_phase_impl`` with the bound team's models.
+        """
+        return run_documentation_phase_impl(
+            llm,
+            task,
+            repo_path,
+            execution_result,
+            planning_result,
+            tool_agents,
+            max_iterations,
+            models=models,
+        )
+
+    return run_documentation_phase
