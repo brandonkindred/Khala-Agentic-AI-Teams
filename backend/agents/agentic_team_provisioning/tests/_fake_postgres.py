@@ -777,18 +777,13 @@ def _dispatch() -> DispatchTable:
             row["heartbeat_at"] = heartbeat_at
 
     # update_pipeline_run: dynamic SET of arbitrary columns, WHERE run_id last.
-    # Handlers do not receive normalized SQL, so the matcher captures ``norm``
-    # for the paired handler (column names live only in the SET clause text).
-    _generic_update_norm: dict[str, str] = {"norm": ""}
-
+    # Column names live only in the SET clause text; read them from
+    # ``cur.last_norm`` (set by ``FakeCursor.execute`` for this invocation).
     def match_update_pipeline_generic(norm: str) -> bool:
-        if norm.startswith("update agentic_test_pipeline_runs set"):
-            _generic_update_norm["norm"] = norm
-            return True
-        return False
+        return norm.startswith("update agentic_test_pipeline_runs set")
 
     def handle_update_pipeline_generic(cur: FakeCursor, params: tuple) -> None:
-        norm = _generic_update_norm["norm"]
+        norm = cur.last_norm or ""
         set_clause = norm.split(" set ", 1)[1].split(" where run_id", 1)[0]
         cols = [c.split("=")[0].strip() for c in set_clause.split(",")]
         run_id = params[-1]

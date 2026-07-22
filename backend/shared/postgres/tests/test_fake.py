@@ -82,6 +82,27 @@ def test_fetchall_and_whitespace_normalization():
         """
     )
     assert cur.fetchall() == [{"payload": 1}, {"payload": 2}]
+    assert cur.last_norm == "select payload from items"
+
+
+def test_last_norm_is_per_cursor_and_updated_each_execute():
+    """Handlers that need SQL text read ``last_norm`` from the executing cursor.
+
+    Preconditions:
+        Two cursors share a dispatch table but not cursor state.
+    Postconditions:
+        Each cursor's ``last_norm`` reflects only its own last ``execute``.
+    """
+    dispatch = _sample_dispatch()
+    cur_a = FakeCursor({}, dispatch)
+    cur_b = FakeCursor({}, dispatch)
+    assert cur_a.last_norm is None
+
+    cur_a.execute("INSERT INTO notes VALUES (%s)", ("one",))
+    cur_b.execute("SELECT payload FROM items WHERE id = %s", ("missing",))
+
+    assert cur_a.last_norm == "insert into notes values (%s)"
+    assert cur_b.last_norm == "select payload from items where id = %s"
 
 
 def test_unmatched_sql_raises_with_original_string():
@@ -89,6 +110,9 @@ def test_unmatched_sql_raises_with_original_string():
     sql = "DELETE FROM items WHERE id = %s"
     with pytest.raises(AssertionError, match=r"unexpected SQL in fake cursor"):
         cur.execute(sql, ("a",))
+    # Still recorded so a handler that peeks after a failed match attempt (or a
+    # future debug path) sees the SQL that was attempted.
+    assert cur.last_norm == "delete from items where id = %s"
 
 
 def test_shared_ids_across_executes():
