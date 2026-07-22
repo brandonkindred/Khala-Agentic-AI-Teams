@@ -2,7 +2,6 @@
 
 **Date:** 2026-07-22  
 **Status:** Approved for implementation planning  
-**Issue:** #2001 (parent #1982 devops track)
 
 ## Goal
 
@@ -10,7 +9,7 @@ Give `BaseTeamLead` an optional per-run status/progress hook that subclasses can
 
 ## Motivation
 
-`devops_team/orchestrator.py`'s `_run_pipeline` today reports status only via interleaved `logger.info` calls, with no structured status/progress callback. `BaseTeamLead` currently provides constructor/state-sharing and repo-briefing cache plumbing only. A shared hook lets a later sub-issue replace those log lines (and eventually bind a job updater) without inventing a one-off pattern.
+`devops_team/orchestrator.py`'s `_run_pipeline` today reports status only via interleaved `logger.info` calls, with no structured status/progress callback. `BaseTeamLead` currently provides constructor/state-sharing and repo-briefing cache plumbing only. A shared hook lets a later devops migration replace those log lines (and eventually bind a job updater) without inventing a one-off pattern.
 
 ## Decisions (locked)
 
@@ -65,7 +64,7 @@ class BaseTeamLead:
         """
 ```
 
-Subclass usage (future; not in this issue):
+Subclass usage (future; not in this change):
 
 ```python
 self._status_callback = update_job  # or a thin adapter
