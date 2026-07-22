@@ -11,6 +11,7 @@ import pytest
 from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
+    TeamLeadSharedState,
     copy_development_result_fields,
 )
 from software_engineering_team.shared.v2_models import Phase, SetupResult
@@ -37,6 +38,63 @@ def test_init_stores_llm_and_starts_with_empty_cache_dict():
     assert lead.llm is llm
     assert lead._repo_context_caches == {}
     assert lead._status_callback is None
+
+
+def test_shared_state_defaults_and_stores_getter():
+    llm = MagicMock(name="llm")
+    getter = MagicMock(return_value=llm)
+    state = TeamLeadSharedState(getter)
+    assert state.llm_getter is getter
+    assert state.shared_config == {}
+    assert state._status_callback is None
+    assert state._llm_for("worker-a") is llm
+    getter.assert_called_once_with("worker-a")
+
+
+def test_shared_state_shallow_copies_shared_config():
+    original = {"mode": "swarm", "nested": {"k": 1}}
+    state = TeamLeadSharedState(lambda _aid: None, shared_config=original)
+    assert state.shared_config == original
+    assert state.shared_config is not original
+    original["mode"] = "mutated"
+    original["nested"]["k"] = 99
+    assert state.shared_config["mode"] == "swarm"
+    # Shallow copy only: nested object is shared by design (YAGNI — no deep copy).
+    assert state.shared_config["nested"]["k"] == 99
+    state.shared_config["mode"] = "instance"
+    assert original["mode"] == "mutated"
+
+
+def test_shared_state_rejects_non_callable_getter():
+    with pytest.raises(AssertionError):
+        TeamLeadSharedState(None)  # type: ignore[arg-type]
+
+
+def test_shared_state_rejects_non_mapping_config():
+    with pytest.raises(AssertionError):
+        TeamLeadSharedState(lambda _aid: None, shared_config=["bad"])  # type: ignore[arg-type]
+
+
+def test_shared_state_llm_for_rejects_non_str_agent_id():
+    state = TeamLeadSharedState(lambda _aid: None)
+    with pytest.raises(AssertionError):
+        state._llm_for(123)  # type: ignore[arg-type]
+
+
+def test_base_team_lead_adapts_llm_client_to_getter():
+    llm = MagicMock(name="lead-llm")
+    lead = BaseTeamLead(
+        llm,
+        extensions=frozenset({".py"}),
+        exclude_dirs=frozenset({".git"}),
+        max_chars=100,
+    )
+    assert isinstance(lead, TeamLeadSharedState)
+    assert lead.llm is llm
+    assert lead.shared_config == {}
+    assert lead._status_callback is None
+    assert lead._llm_for("ignored") is llm
+    assert lead._llm_for("") is llm
 
 
 def test_repo_context_cache_for_is_lazy_and_reused(tmp_path: Path):
