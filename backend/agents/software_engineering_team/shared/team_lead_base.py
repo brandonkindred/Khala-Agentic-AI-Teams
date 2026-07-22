@@ -138,7 +138,8 @@ class BaseTeamLead:
         """Run setup, verify lint/test readiness, then delegate to the development agent.
 
         Preconditions:
-          - ``repo_path`` is a directory the setup phase can operate on.
+          - ``repo_path`` is a filesystem path the setup phase can operate on (created
+            if missing — matching ``run_setup_impl``).
           - ``task`` has a non-empty ``id``.
           - ``result_cls`` is callable as ``result_cls(task_id=...)`` and returns an
             object exposing the development-handoff fields plus ``setup_result`` /
@@ -149,13 +150,13 @@ class BaseTeamLead:
         Postconditions:
           - On setup failure or missing lint/test config: returns a result with
             ``failure_reason`` set and without calling the development agent.
-          - On success: returns the team-lead result with ``setup_result`` preserved
-            and the 13 development-handoff fields copied from the inner agent result.
+          - On success: ``repo_path`` is a directory; returns the team-lead result with
+            ``setup_result`` preserved and the 13 development-handoff fields copied from
+            the inner agent result.
           - Progress 2/3/5 ``job_updater`` calls include the canonical ``status_text``
             strings when ``job_updater`` is provided; updater exceptions are logged
             at DEBUG and do not abort the workflow.
         """
-        assert repo_path.is_dir(), "repo_path must be a directory"
         assert task.id, "task.id is required"
 
         task_id = task.id
@@ -181,8 +182,8 @@ class BaseTeamLead:
             result.failure_reason = f"Setup failed: {exc}"
             logger.error("[%s] %s", task_id, result.failure_reason)
             return result
+        assert repo_path.is_dir(), "repo_path must be a directory after setup"
         _update_job(current_phase="setup", progress=3, status_text="Repository setup complete")
-
         if not getattr(setup_result, "linting_configured", False):
             logger.warning(
                 "[%s] Linting not configured after setup — coding cannot proceed without linting",

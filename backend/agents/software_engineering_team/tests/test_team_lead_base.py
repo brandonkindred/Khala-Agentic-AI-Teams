@@ -193,6 +193,41 @@ def test_run_setup_and_delegate_happy_path_copies_fields(tmp_path):
     assert any(c.get("progress") == 5 for c in job_calls)
 
 
+def test_run_setup_and_delegate_allows_missing_repo_path(tmp_path):
+    """Setup may create a nonexistent repo path (parity with run_setup_impl)."""
+    missing = tmp_path / "new-repo"
+    assert not missing.exists()
+    lead = _make_lead()
+    task = _make_task()
+    seen: dict[str, Path] = {}
+
+    def fake_setup(*, repo_path: Path, task_title: str = ""):
+        seen["repo_path"] = repo_path
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+        return SetupResult(linting_configured=True, testing_configured=True)
+
+    class _DevAgent:
+        def __init__(self, _llm):
+            pass
+
+        def run_workflow(self, **_kwargs):
+            inner = _fake_result_cls(task_id=task.id)
+            inner.success = True
+            return inner
+
+    result = lead._run_setup_and_delegate(
+        repo_path=missing,
+        task=task,
+        result_cls=_fake_result_cls,
+        run_setup_fn=fake_setup,
+        development_agent_cls=_DevAgent,
+    )
+
+    assert seen["repo_path"] == missing
+    assert missing.is_dir()
+    assert result.success is True
+
+
 def test_run_setup_and_delegate_setup_exception_returns_early(tmp_path):
     lead = _make_lead()
 
