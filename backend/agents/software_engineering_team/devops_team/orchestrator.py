@@ -453,8 +453,10 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         Preconditions:
           - ``fix_iter`` is a 0-based index from the bounded-retry helper
           - ``max_iterations >= 1``
-          - ``state.exec_failures`` is non-empty when invoked by the helper
+          - ``state.exec_failures`` is expected to be non-empty when invoked by
+            the helper; if empty, returns ``state`` unchanged
         Postconditions:
+          - Empty ``state.exec_failures`` → return ``state`` unchanged
           - Soft abort (debug/patch exception, not fixable, empty patches) →
             log and return ``None``
           - Otherwise update ``aggregated_artifacts`` and ``state`` from the
