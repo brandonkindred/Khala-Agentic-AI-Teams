@@ -1,7 +1,7 @@
 # Design: Migrate `ReviewToolAgent` onto `LlmToolAgentBase`
 
 Date: 2026-07-22  
-Status: approved  
+Status: implemented  
 Module: `backend/agents/software_engineering_team/shared/tool_agent_base.py`  
 Depends on: closed work in `llm_tool_agent_base.py` (skeleton, resolver, invocation, JSON salvage, fallback taxonomy)
 

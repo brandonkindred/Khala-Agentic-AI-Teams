@@ -21,9 +21,9 @@ differing values as class attributes.
 Two behaviors are load-bearing and must be preserved by every subclass:
 
 * The concrete ``agent.py`` keeps a top-level ``from strands import Agent`` so
-  tests can ``monkeypatch.setattr(<agent_module>, "Agent", ...)``. The base
-  resolves ``Agent`` from the *subclass* module (:meth:`_agent_factory`) so the
-  patch is honored.
+  tests can ``monkeypatch.setattr(<agent_module>, "Agent", ...)``. ``Agent`` is
+  resolved from the *subclass* module via :meth:`LlmToolAgentBase._agent_factory`
+  (inherited) so the patch is honored.
 * Model resolution is opted in via :class:`~software_engineering_team.shared.llm_tool_agent_base.LlmToolAgentBase`
   (``resolve_models = True``), which lazy-imports
   ``llm_service.strands_model.resolve_strands_model``.

@@ -363,7 +363,10 @@ def test_engine_review_degrades_on_unavailable(monkeypatch: pytest.MonkeyPatch) 
 
 def test_engine_review_propagates_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
-    monkeypatch.setattr("software_engineering_team.code_review_agent.CodeReviewAgent", _RaisingEngine(TypeError("boom")))
+    monkeypatch.setattr(
+        "software_engineering_team.code_review_agent.CodeReviewAgent",
+        _RaisingEngine(TypeError("boom")),
+    )
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = None
