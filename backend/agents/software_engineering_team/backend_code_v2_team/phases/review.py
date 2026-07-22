@@ -378,6 +378,7 @@ def run_qa_testing_phase(
         cache=cache,
         phase_review_result_cls=PhaseReviewResult,
         tool_phase_input_factory=REVIEW_CONFIG.tool_phase_input_factory,
+        tool_phase_includes_context=REVIEW_CONFIG.tool_phase_includes_context,
     )
 
 
@@ -419,6 +420,7 @@ def run_security_testing_phase(
         cache=cache,
         phase_review_result_cls=PhaseReviewResult,
         tool_phase_input_factory=REVIEW_CONFIG.tool_phase_input_factory,
+        tool_phase_includes_context=REVIEW_CONFIG.tool_phase_includes_context,
     )
 
 
