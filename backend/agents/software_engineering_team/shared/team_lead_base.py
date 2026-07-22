@@ -8,7 +8,8 @@ overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
 (:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides an
 optional per-run status/progress callback via
-:meth:`BaseTeamLead._report_status`.
+:meth:`BaseTeamLead._report_status`. This base also provides a bounded
+retry/patch-loop via :meth:`BaseTeamLead._run_bounded_retry_loop`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
 passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
@@ -22,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple, TypeVar
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
@@ -30,6 +31,8 @@ from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.v2_models import Phase
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # The 13 fields a code-v2 development-agent result hands off to its team
 # lead's own result object. ``setup_result`` is deliberately excluded: it is
@@ -76,6 +79,7 @@ class BaseTeamLead:
     Invariants: instance state is limited to ``llm``, the injected
     extensions/exclude_dirs/max_chars, ``_repo_context_caches``, and
     ``_status_callback`` (optional per-run status hook; default None).
+    Also exposes :meth:`_run_bounded_retry_loop` as a reusable helper.
     """
 
     def __init__(
@@ -148,6 +152,37 @@ class BaseTeamLead:
             callback(**payload)
         except Exception as e:
             logger.warning("team lead status callback failed (ignored): %s", e)
+
+    def _run_bounded_retry_loop(
+        self,
+        *,
+        max_iterations: int,
+        attempt: Callable[[int], Optional[T]],
+        is_success: Callable[[T], bool],
+    ) -> Tuple[bool, Optional[T]]:
+        """Run ``attempt`` up to ``max_iterations`` times until success or abort.
+
+        Preconditions: ``max_iterations >= 1``; ``attempt`` and ``is_success`` are callable.
+        Postconditions:
+          - On success: returns ``(True, result)`` where ``is_success(result)`` is True.
+          - On abort (``attempt`` returns ``None``): returns ``(False, None)`` and does
+            not call further iterations.
+          - On exhausted retries: returns ``(False, last_non_none_result)``.
+          - Exceptions from ``attempt`` / ``is_success`` propagate unchanged.
+        """
+        assert max_iterations >= 1, "max_iterations must be >= 1"
+        assert callable(attempt), "attempt must be callable"
+        assert callable(is_success), "is_success must be callable"
+
+        last: Optional[T] = None
+        for i in range(max_iterations):
+            result = attempt(i)
+            if result is None:
+                return False, None
+            if is_success(result):
+                return True, result
+            last = result
+        return False, last
 
     def _run_setup_and_delegate(
         self,
