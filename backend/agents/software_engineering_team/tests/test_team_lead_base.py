@@ -383,3 +383,87 @@ def test_report_status_rejects_empty_phase():
     lead = _make_lead()
     with pytest.raises(AssertionError):
         lead._report_status("")
+
+
+def test_bounded_retry_loop_success_on_first_attempt():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        return {"ok": True, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=3,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is True
+    assert result == {"ok": True, "n": 0}
+    assert calls == [0]
+
+
+def test_bounded_retry_loop_success_after_n_attempts():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        return {"ok": i >= 2, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=5,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is True
+    assert result == {"ok": True, "n": 2}
+    assert calls == [0, 1, 2]
+
+
+def test_bounded_retry_loop_exhausted_retries():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        return {"ok": False, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=3,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is False
+    assert result == {"ok": False, "n": 2}
+    assert calls == [0, 1, 2]
+
+
+def test_bounded_retry_loop_abort_on_none():
+    lead = _make_lead()
+    calls: list[int] = []
+
+    def attempt(i: int):
+        calls.append(i)
+        if i == 1:
+            return None
+        return {"ok": False, "n": i}
+
+    succeeded, result = lead._run_bounded_retry_loop(
+        max_iterations=5,
+        attempt=attempt,
+        is_success=lambda r: r["ok"] is True,
+    )
+    assert succeeded is False
+    assert result is None
+    assert calls == [0, 1]
+
+
+def test_bounded_retry_loop_rejects_non_positive_max_iterations():
+    lead = _make_lead()
+    with pytest.raises(AssertionError):
+        lead._run_bounded_retry_loop(
+            max_iterations=0,
+            attempt=lambda _i: {"ok": True},
+            is_success=lambda _r: True,
+        )
