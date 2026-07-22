@@ -282,8 +282,9 @@ class _PersistentDict:
         Preconditions:
             - ``key`` is a ``str``.
         Postconditions:
-            - Returns the job's ``data`` payload when present; otherwise
-              ``default``.
+            - When a job exists: returns its ``data`` payload (or the job
+              mapping if ``data`` is absent).
+            - When no job exists: returns ``default``.
         """
         job = self._client.get_job(key)
         if job is None:
@@ -318,7 +319,8 @@ class _PersistentDict:
             - ``key`` is a ``str``.
             - If the job is missing and ``args`` is empty, raises ``KeyError``.
         Postconditions:
-            - When present: deletes the job and returns its ``data`` payload.
+            - When present: deletes the job and returns its ``data`` payload
+              (or the job mapping if ``data`` is absent).
             - When missing and a default is provided in ``args``: returns that
               default without deleting.
         """
@@ -336,8 +338,8 @@ class _PersistentDict:
         Preconditions:
             - None.
         Postconditions:
-            - Returns a list of each job's ``data`` payload (empty list when
-              there are no jobs).
+            - Returns a list of each job's ``data`` payload (or the job mapping
+              if ``data`` is absent); empty list when there are no jobs.
         """
         jobs = self._client.list_jobs() or []
         return [j.get("data", j) for j in jobs]
