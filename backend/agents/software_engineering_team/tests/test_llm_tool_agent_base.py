@@ -212,3 +212,99 @@ def test_plan_json_like_resolves_with_get_strands_model_fn(monkeypatch):
         "response_format": "json",
         "get_strands_model_fn": sentinel_fn,
     }
+
+
+# ---------------------------------------------------------------------------
+# opt-in LLM invocation (inline vs run_strands_agent wrapper)
+# ---------------------------------------------------------------------------
+
+
+def test_invoke_llm_inline_path_strips_agent_output(monkeypatch):
+    """Default path: str(agent_factory()(model=model)(prompt)).strip()."""
+    calls = []
+
+    class _FakeAgent:
+        def __init__(self, *, model):
+            calls.append(("construct", model))
+
+        def __call__(self, prompt):
+            calls.append(("call", prompt))
+            return "  hello world  \n"
+
+    class InlineLike(LlmToolAgentBase):
+        pass
+
+    agent = InlineLike()
+    monkeypatch.setattr(
+        type(agent),
+        "_agent_factory",
+        lambda self: _FakeAgent,
+    )
+
+    model = object()
+    result = agent._invoke_llm(model, "do the thing")
+
+    assert result == "hello world"
+    assert calls == [("construct", model), ("call", "do the thing")]
+
+
+def test_invoke_llm_inline_path_does_not_call_run_strands_agent(monkeypatch):
+    """Inline path must not touch run_strands_agent."""
+    wrapper_calls = []
+
+    def fake_run_strands_agent(agent_factory, model, prompt):
+        wrapper_calls.append((agent_factory, model, prompt))
+        return "from-wrapper"
+
+    monkeypatch.setattr(
+        "llm_service.strands_model.run_strands_agent", fake_run_strands_agent
+    )
+
+    class _FakeAgent:
+        def __init__(self, *, model):
+            pass
+
+        def __call__(self, prompt):
+            return "from-inline"
+
+    class InlineLike(LlmToolAgentBase):
+        pass
+
+    agent = InlineLike()
+    monkeypatch.setattr(type(agent), "_agent_factory", lambda self: _FakeAgent)
+
+    result = agent._invoke_llm(object(), "prompt")
+
+    assert result == "from-inline"
+    assert wrapper_calls == []
+
+
+def test_invoke_llm_wrapped_path_delegates_to_run_strands_agent(monkeypatch):
+    """When use_run_strands_agent is True, delegate to run_strands_agent."""
+    wrapper_calls = []
+    sentinel_factory = object()
+
+    def fake_run_strands_agent(agent_factory, model, prompt):
+        wrapper_calls.append((agent_factory, model, prompt))
+        return "wrapped-result"
+
+    monkeypatch.setattr(
+        "llm_service.strands_model.run_strands_agent", fake_run_strands_agent
+    )
+
+    class WrappedLike(LlmToolAgentBase):
+        use_run_strands_agent = True
+
+    agent = WrappedLike()
+    monkeypatch.setattr(
+        type(agent), "_agent_factory", lambda self: sentinel_factory
+    )
+
+    model = object()
+    result = agent._invoke_llm(model, "the prompt")
+
+    assert result == "wrapped-result"
+    assert len(wrapper_calls) == 1
+    assert wrapper_calls[0][0] is sentinel_factory
+    assert wrapper_calls[0][1] is model
+    assert wrapper_calls[0][2] == "the prompt"
