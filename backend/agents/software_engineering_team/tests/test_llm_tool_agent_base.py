@@ -305,6 +305,101 @@ def test_invoke_llm_wrapped_path_delegates_to_run_strands_agent(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# parameterized JSON parsing (lenient vs extract; text mode)
+# ---------------------------------------------------------------------------
+
+
+def test_lenient_json_success_parses_object():
+    class ReviewJsonLike(LlmToolAgentBase):
+        json_parse_strategy = "lenient"
+        review_parse_mode = "json"
+        parse_context = "unit-test"
+        parse_on_fail_msg = "reporting empty."
+
+    agent = ReviewJsonLike()
+    assert agent._parse_llm_json('{"ok": true, "n": 1}') == {"ok": True, "n": 1}
+
+
+def test_lenient_json_failure_returns_empty_dict_not_none():
+    """Real engine sentinel: unparseable input must yield {} (not None)."""
+
+    class ReviewJsonLike(LlmToolAgentBase):
+        json_parse_strategy = "lenient"
+        review_parse_mode = "json"
+        parse_context = "unit-test"
+        parse_on_fail_msg = "reporting empty."
+
+    agent = ReviewJsonLike()
+    result = agent._parse_llm_json("no json object here at all")
+    assert result == {}
+    assert result is not None
+
+
+def test_lenient_text_mode_calls_parse_review_hook(monkeypatch):
+    calls = []
+    engine_calls = []
+
+    def fake_parse_review(raw: str):
+        calls.append(raw)
+        return {"issues": [{"description": "from-hook"}]}
+
+    def boom_lenient(*args, **kwargs):
+        engine_calls.append(("lenient", args, kwargs))
+        raise AssertionError("lenient_json_object must not be called in text mode")
+
+    def boom_extract(*args, **kwargs):
+        engine_calls.append(("extract", args, kwargs))
+        raise AssertionError("extract_json_object must not be called in text mode")
+
+    monkeypatch.setattr(
+        "software_engineering_team.shared.tool_agent_base.lenient_json_object",
+        boom_lenient,
+    )
+    monkeypatch.setattr(
+        "shared.llm_recovery.extract_json_object",
+        boom_extract,
+        raising=False,
+    )
+
+    class ReviewTextLike(LlmToolAgentBase):
+        json_parse_strategy = "lenient"
+        review_parse_mode = "text"
+        _parse_review = staticmethod(fake_parse_review)
+
+    agent = ReviewTextLike()
+    result = agent._parse_llm_json("TEMPLATE OUTPUT")
+
+    assert result == {"issues": [{"description": "from-hook"}]}
+    assert calls == ["TEMPLATE OUTPUT"]
+    assert engine_calls == []
+
+
+def test_extract_success_returns_dict(monkeypatch):
+    def fake_extract(raw: str):
+        assert raw == '{"a": 1}'
+        return {"a": 1}
+
+    monkeypatch.setattr("shared.llm_recovery.extract_json_object", fake_extract)
+
+    class PlanJsonLike(LlmToolAgentBase):
+        json_parse_strategy = "extract"
+
+    agent = PlanJsonLike()
+    assert agent._parse_llm_json('{"a": 1}') == {"a": 1}
+
+
+def test_extract_failure_returns_none_not_empty_dict():
+    """Real engine sentinel: unparseable input must yield None (not {})."""
+
+    class PlanJsonLike(LlmToolAgentBase):
+        json_parse_strategy = "extract"
+
+    agent = PlanJsonLike()
+    result = agent._parse_llm_json("no json object here at all")
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
 # fallback taxonomy (opt-in helpers; not wired into consumer bases yet)
 # ---------------------------------------------------------------------------
 
