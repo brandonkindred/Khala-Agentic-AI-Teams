@@ -235,6 +235,25 @@ def test_architecture_plan_no_model() -> None:
     assert out.summary
 
 
+def test_architecture_plan_null_summary_uses_empty_summary_override(monkeypatch) -> None:
+    from software_engineering_team.frontend_code_v2_team.tool_agents.architecture import (
+        agent as mod,
+    )
+
+    class _NullSummaryAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"summary": None})
+
+    monkeypatch.setattr(mod, "Agent", _NullSummaryAgent)
+    agent = mod.ArchitectureToolAgent.__new__(mod.ArchitectureToolAgent)
+    agent._model = object()
+    out = agent.plan(_phase_input())
+    assert out.summary == "Architecture planning complete."
+
+
 # ---------------------------------------------------------------------------
 # Trivial alias tool agents (Linter, Auth, ApiOpenapi, StateManagement) all
 # share a constructor + 1-2 stub methods.

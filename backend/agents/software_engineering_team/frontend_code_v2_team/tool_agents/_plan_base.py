@@ -154,9 +154,12 @@ class PlanGeneratorToolAgent(LlmToolAgentBase):
         recommendations = [
             f"{label}: {data[key]}" for key, label in self.field_labels if data.get(key)
         ]
+        summary = data.get("summary", self.default_summary)
+        if summary is None:
+            summary = ""
         payload = self._fallback_empty_parse(
             recommendations=recommendations,
-            summary=data.get("summary", self.default_summary),
+            summary=summary,
         )
         return ToolAgentPhaseOutput(
             recommendations=payload.recommendations,
