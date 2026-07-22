@@ -3,7 +3,8 @@ Fact-Checker and Risk Officer agent.
 
 Verifies claims are supported, flags hazards, and identifies required disclaimers.
 
-All errors are raised explicitly - no silent failures.
+Transient LLM errors propagate unwrapped for retry; exhausted JSON parse fails closed
+with a FAIL report; other unexpected errors raise FactCheckError.
 """
 
 from __future__ import annotations

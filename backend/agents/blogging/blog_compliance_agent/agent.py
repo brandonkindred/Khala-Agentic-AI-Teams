@@ -4,7 +4,8 @@ Blog compliance agent: Brand and Style Enforcer with veto power.
 Evaluates drafts against the brand spec prompt and produces compliance_report.json.
 FAIL status blocks publication and triggers the rewrite loop.
 
-All errors are raised explicitly - no silent failures.
+Transient LLM errors propagate unwrapped for retry; non-transient errors fail closed
+with a FAIL compliance report.
 """
 
 from __future__ import annotations
