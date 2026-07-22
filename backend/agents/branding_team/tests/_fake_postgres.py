@@ -465,12 +465,14 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
     import branding_team.assistant.store as assistant_store_mod
     import branding_team.store as store_mod
 
-    # ``branding_team.store`` now routes all Postgres access through
-    # ``branding_team._db`` (see ``PostgresHelperMixin``) rather than importing
-    # ``get_conn`` itself, so only patch it there when still present.
+    # ``BrandingStore`` and ``BrandingConversationStore`` route Postgres access
+    # through ``branding_team._db`` (see ``PostgresHelperMixin``) rather than
+    # importing ``get_conn`` themselves, so only patch those modules when the
+    # attribute is still present (e.g. mid-migration).
     if hasattr(store_mod, "get_conn"):
         monkeypatch.setattr(store_mod, "get_conn", _fake_get_conn)
-    monkeypatch.setattr(assistant_store_mod, "get_conn", _fake_get_conn)
+    if hasattr(assistant_store_mod, "get_conn"):
+        monkeypatch.setattr(assistant_store_mod, "get_conn", _fake_get_conn)
     monkeypatch.setattr(db_mod, "get_conn", _fake_get_conn)
 
     # ``branding_team.api.state`` imports ``get_conn`` at module scope for the

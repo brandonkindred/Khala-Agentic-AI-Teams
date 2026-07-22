@@ -1,10 +1,10 @@
 """Shared Postgres access helpers for branding_team's store classes.
 
-Consumed by ``store.py`` (``BrandingStore``); ``assistant/store.py`` and
-``api/state.py`` still hand-write their own scaffolding (tracked separately).
-This module reproduces the exact ``get_conn()`` / ``cursor(row_factory=dict_row)``
-semantics those stores hand-write in every method, so adopting it is a
-drop-in replacement.
+Consumed by ``store.py`` (``BrandingStore``) and ``assistant/store.py``
+(``BrandingConversationStore``); ``api/state.py`` still hand-writes its own
+scaffolding (tracked separately). This module reproduces the exact
+``get_conn()`` / ``cursor(row_factory=dict_row)`` semantics those stores
+hand-write in every method, so adopting it is a drop-in replacement.
 """
 
 from __future__ import annotations
