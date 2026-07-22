@@ -135,6 +135,38 @@ from shared.postgres import (
 from shared.postgres.testing import truncate_team_tables, truncate_all_teams
 ```
 
+## In-memory fake (unit tests)
+
+For store unit tests that must not hit live Postgres, use the dispatch-table
+scaffold in `shared.postgres.fake` (also re-exported from
+`shared.postgres.testing`):
+
+````python
+from shared.postgres.fake import FakeCursor, install_fake_postgres, unwrap_json
+
+def _dispatch():
+    return [
+        (
+            lambda n: n.startswith("insert into my_table"),
+            lambda cur, params: cur.db.setdefault("rows", {}).update(...),
+        ),
+    ]
+
+def test_store(monkeypatch):
+    import my_team.store as store_mod
+    db = install_fake_postgres(
+        monkeypatch,
+        modules=[store_mod],
+        dispatch=_dispatch(),
+        db={"rows": {}},
+    )
+    # exercise store_mod against db ...
+````
+
+Teams keep their SQL handler tables locally; this module only owns cursor/conn
+install boilerplate. Live-Postgres truncate helpers (`truncate_team_tables`)
+remain separate.
+
 ## `TeamSchema.table_names`
 
 When a team owns tables that tests need to reset between runs, populate
