@@ -36,6 +36,7 @@ def test_init_stores_llm_and_starts_with_empty_cache_dict():
     lead = BaseTeamLead(llm, extensions=frozenset({".py"}), exclude_dirs=frozenset(), max_chars=100)
     assert lead.llm is llm
     assert lead._repo_context_caches == {}
+    assert lead._status_callback is None
 
 
 def test_repo_context_cache_for_is_lazy_and_reused(tmp_path: Path):
@@ -327,3 +328,58 @@ def test_run_setup_and_delegate_emits_canonical_status_text(tmp_path):
     assert by_progress[2]["status_text"] == "Setting up repository and development environment"
     assert by_progress[3]["status_text"] == "Repository setup complete"
     assert by_progress[5]["status_text"] == "Linting and testing verified; ready for development"
+
+
+def test_report_status_noop_when_callback_unset():
+    lead = _make_lead()
+    assert lead._status_callback is None
+    lead._report_status("phase1", detail="starting")  # must not raise
+
+
+def test_report_status_forwards_hybrid_payload():
+    lead = _make_lead()
+    calls = []
+
+    def _cb(**kwargs):
+        calls.append(kwargs)
+
+    lead._status_callback = _cb
+    lead._report_status(
+        "phase2",
+        detail="change design",
+        progress=0.4,
+        status_text="DevOps phase 2",
+    )
+    assert calls == [
+        {
+            "phase": "phase2",
+            "detail": "change design",
+            "progress": 0.4,
+            "status_text": "DevOps phase 2",
+        }
+    ]
+
+
+def test_report_status_omits_none_progress():
+    lead = _make_lead()
+    calls = []
+    lead._status_callback = lambda **kwargs: calls.append(kwargs)
+    lead._report_status("phase3", detail="validation")
+    assert calls == [{"phase": "phase3", "detail": "validation"}]
+    assert "progress" not in calls[0]
+
+
+def test_report_status_swallows_callback_errors():
+    lead = _make_lead()
+
+    def _boom(**_kwargs):
+        raise RuntimeError("callback exploded")
+
+    lead._status_callback = _boom
+    lead._report_status("phase4", detail="review")  # must not raise
+
+
+def test_report_status_rejects_empty_phase():
+    lead = _make_lead()
+    with pytest.raises(AssertionError):
+        lead._report_status("")

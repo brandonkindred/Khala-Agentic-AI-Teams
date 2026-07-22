@@ -6,7 +6,9 @@ constructor, their per-repo incremental briefing cache lookup
 (:meth:`BaseTeamLead._repo_context_cache_for`), the field-copy tail that
 overlays their inner ``*DevelopmentAgent`` result onto their own result
 object, and the setup → lint/test-gate → delegate sequence
-(:meth:`BaseTeamLead._run_setup_and_delegate`).
+(:meth:`BaseTeamLead._run_setup_and_delegate`). This base also provides an
+optional per-run status/progress callback via
+:meth:`BaseTeamLead._report_status`.
 
 Each team subclasses this base and supplies a thin ``run_workflow`` that
 passes its module-level ``run_setup``, ``*DevelopmentAgent``, and
@@ -72,7 +74,8 @@ class BaseTeamLead:
     :meth:`_run_setup_and_delegate` with late-bound module globals.
 
     Invariants: instance state is limited to ``llm``, the injected
-    extensions/exclude_dirs/max_chars, and ``_repo_context_caches``.
+    extensions/exclude_dirs/max_chars, ``_repo_context_caches``, and
+    ``_status_callback`` (optional per-run status hook; default None).
     """
 
     def __init__(
@@ -93,6 +96,10 @@ class BaseTeamLead:
         # tasks in a job), so the N tasks of a job re-read only the files each
         # merge touched instead of re-walking the whole repo N times.
         self._repo_context_caches: Dict[Path, RepoContextCache] = {}
+        # Optional per-run status/progress callback. Subclasses assign this at the
+        # start of run_workflow (and clear it when the run ends); BaseTeamLead does
+        # not accept it via the constructor.
+        self._status_callback: Optional[Callable[..., None]] = None
 
     def _repo_context_cache_for(self, repo_path: Path) -> RepoContextCache:
         """Return the incremental briefing cache for ``repo_path``, creating it lazily.
@@ -114,6 +121,33 @@ class BaseTeamLead:
             )
             self._repo_context_caches[key] = cache
         return cache
+
+    def _report_status(
+        self,
+        phase: str,
+        detail: str = "",
+        progress: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Report phase progress via the optional per-run status callback.
+
+        Preconditions: ``phase`` is a non-empty str.
+        Postconditions: if ``_status_callback`` is set, it is invoked once with
+          kwargs ``phase``, ``detail``, optional ``progress`` (omitted when
+          None), and ``**extra``; callback exceptions are logged and swallowed;
+          if the callback is None, this is a no-op. Never raises into the caller.
+        """
+        assert isinstance(phase, str) and phase, "phase must be a non-empty str"
+        callback = self._status_callback
+        if callback is None:
+            return
+        payload: Dict[str, Any] = {"phase": phase, "detail": detail, **extra}
+        if progress is not None:
+            payload["progress"] = progress
+        try:
+            callback(**payload)
+        except Exception as e:
+            logger.warning("team lead status callback failed (ignored): %s", e)
 
     def _run_setup_and_delegate(
         self,
