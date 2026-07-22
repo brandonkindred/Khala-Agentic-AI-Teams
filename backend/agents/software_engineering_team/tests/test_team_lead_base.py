@@ -235,8 +235,11 @@ def test_run_setup_and_delegate_rejects_missing_testing(tmp_path):
     assert "testing is not configured" in result.failure_reason.lower()
 
 
-def test_run_setup_and_delegate_job_updater_failure_is_debug_logged(tmp_path, caplog):
-    import logging
+def test_run_setup_and_delegate_job_updater_failure_is_debug_logged(tmp_path, monkeypatch):
+    import software_engineering_team.shared.team_lead_base as team_lead_base
+
+    mock_debug = MagicMock()
+    monkeypatch.setattr(team_lead_base.logger, "debug", mock_debug)
 
     lead = _make_lead()
 
@@ -250,18 +253,19 @@ def test_run_setup_and_delegate_job_updater_failure_is_debug_logged(tmp_path, ca
     def bad_updater(**_kwargs):
         raise RuntimeError("job service down")
 
-    with caplog.at_level(logging.DEBUG):
-        result = lead._run_setup_and_delegate(
-            repo_path=tmp_path,
-            task=_make_task(),
-            result_cls=_fake_result_cls,
-            run_setup_fn=lambda **_k: SetupResult(linting_configured=True, testing_configured=True),
-            development_agent_cls=_DevAgent,
-            job_updater=bad_updater,
-        )
+    result = lead._run_setup_and_delegate(
+        repo_path=tmp_path,
+        task=_make_task(),
+        result_cls=_fake_result_cls,
+        run_setup_fn=lambda **_k: SetupResult(linting_configured=True, testing_configured=True),
+        development_agent_cls=_DevAgent,
+        job_updater=bad_updater,
+    )
 
     assert result is not None
-    assert any("job_updater failed" in r.message for r in caplog.records)
+    assert mock_debug.called
+    logged = " ".join(str(arg) for call in mock_debug.call_args_list for arg in call[0])
+    assert "job_updater failed" in logged
 
 
 def test_run_setup_and_delegate_emits_canonical_status_text(tmp_path):
