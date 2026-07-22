@@ -88,6 +88,7 @@ class BlogComplianceAgent:
             brand_spec_prompt: Full brand spec prompt text (e.g. from brand_spec_prompt.md).
             validator_report: Optional validator_report.json content.
             work_dir: If provided, write compliance_report.json here.
+            on_llm_request: Optional callback invoked before the LLM call with a status message.
 
         Returns:
             ComplianceReport with status PASS or FAIL.
@@ -104,7 +105,8 @@ class BlogComplianceAgent:
               LLM failure fails closed with a ``status="FAIL"`` fallback report rather than
               raising.
             - When ``work_dir`` is set and ``write_artifact`` is available, the report is
-              persisted as ``compliance_report.json``.
+              persisted as ``compliance_report.json`` on both success and fail-closed
+              fallback paths (exhausted JSON parse and unexpected non-transient errors).
         """
         brand_summary = (brand_spec_prompt or "").strip()
 
@@ -196,7 +198,18 @@ def run_compliance_from_work_dir(
     brand_spec_path: Optional[Union[str, Path]] = None,
 ) -> ComplianceReport:
     """
-    Run compliance agent using artifacts from work_dir.
+    Run the compliance agent using artifacts already present under ``work_dir``.
+
+    Args:
+        work_dir: Job workspace directory containing draft / validator / brand artifacts.
+        llm_client: LLM client passed through to ``BlogComplianceAgent``.
+        draft_artifact: Preferred draft filename (default ``final.md``); falls back to
+            ``draft_v2.md`` then ``draft_v1.md`` when the preferred file is empty/missing.
+        brand_spec_path: Optional explicit brand-spec path; otherwise uses
+            ``work_dir/brand_spec_prompt.md``, then the team default under ``docs/``.
+
+    Returns:
+        ``ComplianceReport`` from ``BlogComplianceAgent.run``.
     """
     try:
         from agents.blogging.shared.artifacts import read_artifact

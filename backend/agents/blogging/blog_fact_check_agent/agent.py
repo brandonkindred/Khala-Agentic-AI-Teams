@@ -73,6 +73,7 @@ class BlogFactCheckAgent:
             allowed_claims: allowed_claims.json content.
             require_disclaimer_for: Categories requiring disclaimers (from brand_spec).
             work_dir: If provided, write fact_check_report.json (or merge into compliance_report).
+            on_llm_request: Optional callback invoked before the LLM call with a status message.
 
         Returns:
             FactCheckReport with claims_status and risk_status.
@@ -92,7 +93,8 @@ class BlogFactCheckAgent:
             - When JSON parsing is exhausted after retries, returns a fallback report with
               ``claims_status="FAIL"`` and ``risk_status="FAIL"`` rather than raising.
             - When ``work_dir`` is set and ``write_artifact`` is available, the report is
-              persisted as ``fact_check_report.json``.
+              persisted as ``fact_check_report.json`` on both success and exhausted-JSON
+              fallback paths.
         """
         require_disclaimer_for = require_disclaimer_for or ["medical", "legal", "financial"]
         claims_list = (allowed_claims or {}).get("claims") or []
@@ -177,7 +179,19 @@ def run_fact_check_from_work_dir(
     *,
     draft_artifact: str = "final.md",
 ) -> FactCheckReport:
-    """Run fact-check using artifacts from work_dir."""
+    """
+    Run the fact-check agent using artifacts already present under ``work_dir``.
+
+    Args:
+        work_dir: Job workspace directory containing draft / allowed-claims artifacts.
+        llm_client: LLM client passed through to ``BlogFactCheckAgent``.
+        draft_artifact: Preferred draft filename (default ``final.md``); falls back to
+            ``draft_v2.md`` then ``draft_v1.md`` when the preferred file is empty/missing.
+
+    Returns:
+        ``FactCheckReport`` from ``BlogFactCheckAgent.run``. Disclaimer categories are
+        currently hardcoded to medical / legal / financial.
+    """
     try:
         from agents.blogging.shared.artifacts import read_artifact
     except ImportError:  # pragma: no cover - defensive ImportError fallback; not exercised because conftest guarantees the import path resolves.
