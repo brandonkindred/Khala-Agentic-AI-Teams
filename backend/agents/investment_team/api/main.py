@@ -3587,8 +3587,15 @@ def _run_paper_trading_background(
 
     Long-running (market data fetch + sandbox execution + LLM divergence analysis can
     take 2-3 minutes), so this runs off the request thread to avoid proxy timeouts.
-    The caller has already stored an initial "running" session under ``session_id``;
-    this worker replaces it with the completed session when done.
+
+    Preconditions:
+        - ``session_id`` must already exist in ``_paper_trading_sessions`` with status RUNNING
+        - ``strategy`` must be a valid StrategySpec with resolvable symbols
+        - ``backtest_record`` must contain valid backtest results for divergence analysis
+
+    Postconditions:
+        - ``_paper_trading_sessions[session_id]`` is updated to COMPLETED or FAILED status
+        - ``completed_at`` timestamp is set on the session record
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
