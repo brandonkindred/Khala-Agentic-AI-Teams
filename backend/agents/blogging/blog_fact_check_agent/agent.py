@@ -85,7 +85,8 @@ class BlogFactCheckAgent:
         Postconditions:
             - Always returns a ``FactCheckReport`` (never ``None``) on success and
               exhausted-JSON fallback paths; ``claims_status`` and ``risk_status`` are
-              normalized to ``"PASS"`` or ``"FAIL"``.
+              normalized to ``"PASS"`` or ``"FAIL"`` (unknown / missing values fail closed
+              as ``"FAIL"``).
             - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``)
               propagates unwrapped so the caller (or Temporal) can retry.
             - Any other unexpected error is logged at exception level and raised as
@@ -147,12 +148,12 @@ class BlogFactCheckAgent:
             logger.exception("Fact-check failed: %s", e)
             raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
 
-        claims_status = (data.get("claims_status") or "PASS").upper()
+        claims_status = (data.get("claims_status") or "FAIL").upper()
         if claims_status not in ("PASS", "FAIL"):
-            claims_status = "PASS"
-        risk_status = (data.get("risk_status") or "PASS").upper()
+            claims_status = "FAIL"
+        risk_status = (data.get("risk_status") or "FAIL").upper()
         if risk_status not in ("PASS", "FAIL"):
-            risk_status = "PASS"
+            risk_status = "FAIL"
 
         report = FactCheckReport(
             claims_status=claims_status,

@@ -113,3 +113,42 @@ def test_fact_check_unexpected_error_raises_fact_check_error(monkeypatch) -> Non
     agent = BlogFactCheckAgent(llm_client=object())
     with pytest.raises(FactCheckError):
         agent.run("draft")
+
+
+def test_fact_check_normalizes_invalid_status_fail_closed(monkeypatch) -> None:
+    """Unrecognized claims/risk status values fail closed as FAIL."""
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"claims_status": "UNCLEAR", "risk_status": "REVIEW"})
+
+    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    agent = BlogFactCheckAgent(llm_client=object())
+    report = agent.run("draft")
+    assert report.claims_status == "FAIL"
+    assert report.risk_status == "FAIL"
+
+
+def test_run_fact_check_from_work_dir(monkeypatch, tmp_path) -> None:
+    """Public work_dir entrypoint reads draft + allowed_claims and returns a report."""
+    from agents.blogging.blog_fact_check_agent import agent as fc_mod
+    from agents.blogging.blog_fact_check_agent import run_fact_check_from_work_dir
+
+    (tmp_path / "final.md").write_text("Test draft content.")
+    (tmp_path / "allowed_claims.json").write_text('{"claims": []}')
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"claims_status": "PASS", "risk_status": "PASS"})
+
+    monkeypatch.setattr(fc_mod, "Agent", _Agent)
+    report = run_fact_check_from_work_dir(tmp_path, llm_client=object())
+    assert report.claims_status in ("PASS", "FAIL")
+    assert report.risk_status in ("PASS", "FAIL")

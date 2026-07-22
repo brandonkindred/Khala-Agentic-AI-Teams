@@ -66,3 +66,23 @@ def test_compliance_report_has_required_fields(brand_spec_prompt):
     assert hasattr(report, "violations")
     assert hasattr(report, "required_fixes")
     assert hasattr(report, "notes")
+
+
+def test_run_compliance_from_work_dir(monkeypatch, tmp_path):
+    """Public work_dir entrypoint reads draft + brand spec and returns a report."""
+    from agents.blogging.blog_compliance_agent import agent as agent_mod
+    from agents.blogging.blog_compliance_agent import run_compliance_from_work_dir
+
+    (tmp_path / "final.md").write_text("Test draft.")
+    (tmp_path / "brand_spec_prompt.md").write_text("Brand spec content.")
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return '{"status": "PASS", "violations": [], "required_fixes": [], "notes": "ok"}'
+
+    monkeypatch.setattr(agent_mod, "Agent", _Agent)
+    report = run_compliance_from_work_dir(tmp_path, llm_client=object())
+    assert report.status in ("PASS", "FAIL")

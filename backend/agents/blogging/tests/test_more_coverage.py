@@ -63,8 +63,8 @@ def test_fact_check_run_normalizes_invalid_status(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(fc_mod, "Agent", _Agent)
     a = BlogFactCheckAgent(llm_client=object())
     report = a.run("draft", work_dir=tmp_path)
-    assert report.claims_status == "PASS"
-    assert report.risk_status == "PASS"
+    assert report.claims_status == "FAIL"
+    assert report.risk_status == "FAIL"
 
 
 def test_fact_check_run_json_retry_then_fallback(monkeypatch, tmp_path: Path) -> None:
