@@ -212,15 +212,48 @@ _workflow_state = WorkflowState()
 # Persistent storage backed by JobServiceClient (survives server restarts)
 # ---------------------------------------------------------------------------
 class _PersistentDict:
-    """Dict-like wrapper around JobServiceClient for restart-safe entity storage."""
+    """Dict-like wrapper around JobServiceClient for restart-safe entity storage.
+
+    Usage:
+        store = _PersistentDict('profiles')
+        store['key'] = some_model_instance  # persists via JobServiceClient
+        value = store.get('key', default)   # returns stored data dict, not the original object
+
+    Invariants:
+        - Keys are strings.
+        - Values with ``model_dump`` are persisted via ``model_dump(mode="json")``;
+          other values are wrapped as ``{"value": value}`` before persistence.
+        - Reads (``__getitem__``, ``get``, ``pop``, ``values``) return the
+          persisted data dict, not a reconstructed model instance.
+        - Storage is namespaced under JobServiceClient team
+          ``investment_{entity_type}``.
+    """
 
     def __init__(self, entity_type: str) -> None:
+        """Bind a JobServiceClient namespaced to this entity store.
+
+        Preconditions:
+            - ``entity_type`` is a ``str`` used as the store namespace suffix.
+        Postconditions:
+            - ``self._client`` targets team ``investment_{entity_type}``.
+            - ``self._entity_type`` equals ``entity_type``.
+        """
         from job_service_client import JobServiceClient
 
         self._client = JobServiceClient(team=f"investment_{entity_type}")
         self._entity_type = entity_type
 
     def __setitem__(self, key: str, value: Any) -> None:
+        """Persist ``value`` under ``key`` (create or update).
+
+        Preconditions:
+            - ``key`` is a ``str``.
+        Postconditions:
+            - Values with ``model_dump`` are stored via ``model_dump(mode="json")``;
+              other values are stored as ``{"value": value}``.
+            - An existing job for ``key`` is updated; otherwise a new job is
+              created with status ``"stored"``.
+        """
         data = value.model_dump(mode="json") if hasattr(value, "model_dump") else {"value": value}
         existing = self._client.get_job(key)
         if existing:
@@ -229,24 +262,66 @@ class _PersistentDict:
             self._client.create_job(key, status="stored", data=data)
 
     def __getitem__(self, key: str) -> Any:
+        """Return the persisted data dict for ``key``.
+
+        Preconditions:
+            - ``key`` is a ``str``.
+        Postconditions:
+            - Returns the job's ``data`` payload (or the job mapping if ``data``
+              is absent).
+            - Raises ``KeyError`` when no job exists for ``key``.
+        """
         job = self._client.get_job(key)
         if job is None:
             raise KeyError(key)
         return job.get("data", job)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Return the persisted data dict for ``key``, or ``default`` if missing.
+
+        Preconditions:
+            - ``key`` is a ``str``.
+        Postconditions:
+            - Returns the job's ``data`` payload when present; otherwise
+              ``default``.
+        """
         job = self._client.get_job(key)
         if job is None:
             return default
         return job.get("data", job)
 
     def __contains__(self, key: str) -> bool:
+        """Return whether a job exists for ``key``.
+
+        Preconditions:
+            - ``key`` is a ``str``.
+        Postconditions:
+            - Returns ``True`` iff ``get_job(key)`` is not ``None``.
+        """
         return self._client.get_job(key) is not None
 
     def __delitem__(self, key: str) -> None:
+        """Delete the job for ``key``.
+
+        Preconditions:
+            - ``key`` is a ``str``.
+        Postconditions:
+            - Delegates deletion to ``JobServiceClient.delete_job`` (missing-key
+              behavior is defined by that client).
+        """
         self._client.delete_job(key)
 
     def pop(self, key: str, *args: Any) -> Any:
+        """Remove ``key`` and return its persisted data dict.
+
+        Preconditions:
+            - ``key`` is a ``str``.
+            - If the job is missing and ``args`` is empty, raises ``KeyError``.
+        Postconditions:
+            - When present: deletes the job and returns its ``data`` payload.
+            - When missing and a default is provided in ``args``: returns that
+              default without deleting.
+        """
         job = self._client.get_job(key)
         if job is None:
             if args:
@@ -256,6 +331,14 @@ class _PersistentDict:
         return job.get("data", job)
 
     def values(self) -> List[Any]:
+        """Return persisted data dicts for all jobs in this store.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - Returns a list of each job's ``data`` payload (empty list when
+              there are no jobs).
+        """
         jobs = self._client.list_jobs() or []
         return [j.get("data", j) for j in jobs]
 
