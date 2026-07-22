@@ -363,7 +363,10 @@ def test_call_with_single_fallback_exception_returns_call_error(caplog):
         summary="llm-error-summary",
     )
     assert payload.recommendations is not _FallbackAgent.llm_error_recommendations
-    assert any("demo-call" in r.message and "boom" in r.message for r in caplog.records)
+    assert any(
+        r.name == _FallbackAgent.__module__ and "demo-call" in r.message and "boom" in r.message
+        for r in caplog.records
+    )
 
 
 def test_call_partial_tolerant_keeps_successes_skips_failures(caplog):
@@ -380,7 +383,10 @@ def test_call_partial_tolerant_keeps_successes_skips_failures(caplog):
         results = agent._call_partial_tolerant(["a", "bad", "c"], flaky, log_label="partial")
 
     assert results == ["ok:a", "ok:c"]
-    assert any("partial" in r.message and "nope" in r.message for r in caplog.records)
+    assert any(
+        r.name == _FallbackAgent.__module__ and "partial" in r.message and "nope" in r.message
+        for r in caplog.records
+    )
 
 
 def test_call_partial_tolerant_truncates_long_item_context(caplog):
@@ -397,7 +403,10 @@ def test_call_partial_tolerant_truncates_long_item_context(caplog):
         )
 
     assert results == []
-    assert any("trunc" in r.message and ("x" * 50) in r.message for r in caplog.records)
+    assert any(
+        r.name == _FallbackAgent.__module__ and "trunc" in r.message and ("x" * 50) in r.message
+        for r in caplog.records
+    )
     assert not any(("x" * 80) in r.message for r in caplog.records)
 
 
@@ -445,7 +454,12 @@ def test_call_with_single_fallback_default_log_label(caplog):
 
     assert status == "error"
     assert payload.tier == "call_error"
-    assert any(_FallbackAgent.__name__ in r.message and "boom" in r.message for r in caplog.records)
+    assert any(
+        r.name == _FallbackAgent.__module__
+        and _FallbackAgent.__name__ in r.message
+        and "boom" in r.message
+        for r in caplog.records
+    )
 
 
 def test_call_partial_tolerant_default_log_label(caplog):
@@ -460,7 +474,12 @@ def test_call_partial_tolerant_default_log_label(caplog):
         )
 
     assert results == []
-    assert any(_FallbackAgent.__name__ in r.message and "nope" in r.message for r in caplog.records)
+    assert any(
+        r.name == _FallbackAgent.__module__
+        and _FallbackAgent.__name__ in r.message
+        and "nope" in r.message
+        for r in caplog.records
+    )
 
 
 def test_fallback_empty_parse_preserves_falsy_summary_when_override_is_none():
