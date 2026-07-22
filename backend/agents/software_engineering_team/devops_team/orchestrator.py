@@ -135,13 +135,14 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     """Coordinates specialized DevOps agents with hard gates.
 
     Inherits ``TeamLeadSharedState`` for the optional per-run status hook
-    (``_report_status`` / ``_status_callback``). A default logging callback is
-    installed at construction so phase-status reports still emit INFO logs when
-    no external consumer has replaced ``_status_callback``.
+    (``_report_status`` / ``_status_callback``). Pipeline phase status always
+    emits INFO logs via :meth:`_log_pipeline_status`; the optional callback is
+    a separate forward channel and may be set/cleared per run without losing
+    historical log output.
 
     Invariants: ``self.llm`` is the client passed to ``__init__``; specialist
     agents and tools are constructed once; ``_status_callback`` defaults to
-    :meth:`_log_pipeline_status`.
+    None (mixin default) and is independent of fallback logging.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
@@ -152,9 +153,6 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             shared_config={},
         )
         self.llm = llm_client
-        # Default consumer: preserve historical INFO log lines via the shared hook.
-        # Callers may replace ``_status_callback`` for a run; they then own logging.
-        self._status_callback = self._log_pipeline_status
         self.task_clarifier = DevOpsTaskClarifierAgent(llm_client)
         self.iac_agent = InfrastructureAsCodeAgent(llm_client)
         self.cicd_agent = CICDPipelineAgent(llm_client)
@@ -185,7 +183,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         progress: Optional[float] = None,
         **extra: Any,
     ) -> None:
-        """Default status callback: emit ``detail`` (or ``phase``) at INFO.
+        """Emit the historical pipeline status line at INFO.
 
         Preconditions: ``phase`` is a non-empty str (enforced by ``_report_status``
           before invocation).
@@ -197,6 +195,29 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             logger.info("%s", detail)
         else:
             logger.info("DevOps team pipeline: %s", phase)
+
+    def _report_status(
+        self,
+        phase: str,
+        detail: str = "",
+        progress: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        """Log phase status, then forward to the optional ``_status_callback``.
+
+        Fallback INFO logging is independent of ``_status_callback`` so clearing
+        the callback after an instrumented run (the shared per-run contract) does
+        not silence later pipeline status on a reused lead.
+
+        Preconditions: ``phase`` is a non-empty str.
+        Postconditions: emits the historical INFO line via ``_log_pipeline_status``;
+          then invokes ``TeamLeadSharedState._report_status`` (no-op when callback
+          is None; forwards kwargs when set; swallows callback errors). Never
+          raises into the caller.
+        """
+        assert isinstance(phase, str) and phase, "phase must be a non-empty str"
+        self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
+        TeamLeadSharedState._report_status(self, phase, detail=detail, progress=progress, **extra)
 
     @staticmethod
     def _build_legacy_spec(
