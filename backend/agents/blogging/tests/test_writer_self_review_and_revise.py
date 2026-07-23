@@ -335,3 +335,44 @@ def test_writer_llm_self_review_soft_fails_json_decode(monkeypatch, caplog) -> N
         out = a._llm_self_review("orig")
     assert out == "orig"
     assert any("LLM self-review failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
+
+
+def test_writer_fix_deterministic_violations_unwraps_wrapped_rate_limit(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent_with_guidelines()
+    wrapped = LLMRateLimitError("rate limited")
+
+    def boom(self, prompt, system_prompt=""):
+        raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError) as excinfo:
+        a._fix_deterministic_violations("orig", ["x"])
+    assert excinfo.value is wrapped
+    assert not isinstance(excinfo.value, EventLoopException)
+
+
+def test_writer_llm_self_review_unwraps_wrapped_permanent_error(monkeypatch, caplog) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMPermanentError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise EventLoopException(LLMPermanentError("permanent"))
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with caplog.at_level(logging.ERROR):
+        out = a._llm_self_review("orig")
+    assert out == "orig"
+    assert any("LLM self-review failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
