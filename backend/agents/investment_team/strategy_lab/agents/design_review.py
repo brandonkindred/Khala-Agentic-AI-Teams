@@ -29,13 +29,13 @@ from llm_service.interface import LLMSemanticExhaustionError
 from ...models import StrategySpec
 from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
+from . import _structured_output as so
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
 from ._prompt_context import spec_prompt_fields
 from ._response_schemas import CRITIQUE_SCHEMA
-from . import _structured_output as so
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)

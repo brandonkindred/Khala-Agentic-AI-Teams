@@ -19,7 +19,6 @@ import pytest
 
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.agents import _structured_output as so_mod
-from investment_team.strategy_lab.agents import design as design_mod
 from investment_team.strategy_lab.agents._llm_budget import (
     DesignBudgetExhausted,
     LLMCallBudget,

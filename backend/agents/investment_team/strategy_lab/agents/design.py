@@ -40,6 +40,7 @@ from ...strategy_lab_context import (
 )
 from ..exceptions import StrategyLabLLMError
 from ..market_regime import RegimeSummary, regime_to_prompt_block
+from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import run_structured_agent
@@ -51,7 +52,6 @@ from ._parse_helpers import (
     validate_structured_rules,
 )
 from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
-from . import _structured_output as so
 from .design_review import (
     _coerce_critique,
     _sizing_owned_by_gate,

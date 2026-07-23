@@ -11,6 +11,7 @@ from llm_service.interface import LLMSemanticExhaustionError
 
 from ...models import BacktestResult, StrategySpec
 from ..exceptions import StrategyLabLLMError
+from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
 from ._parse_helpers import (
     build_json_correction_prompt,
@@ -18,7 +19,6 @@ from ._parse_helpers import (
 )
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import REFINEMENT_SCHEMA
-from . import _structured_output as so
 
 logger = logging.getLogger(__name__)
 

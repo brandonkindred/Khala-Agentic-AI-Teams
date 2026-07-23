@@ -336,8 +336,8 @@ validation (e.g. a bar-field literal wrapped incorrectly). That DSL-validation c
 internal audit call sharing `CRITIQUE_SCHEMA` semantics with `DesignReviewAgent`) is wired
 independently, since it does not share `_invoke_and_parse` with the generate/revise path — but it does
 share the structured-decoding plumbing: both it and `DesignReviewAgent.run` route through
-`design_review._invoke_structured_critique(agent_key, system_prompt, user_prompt, phase, charge)`, so
-the `complete_json(schema=CRITIQUE_SCHEMA)` call and starvation handling is written once rather than
+`_structured_output.invoke_structured_with_schema(agent_key, system_prompt, user_prompt, phase, charge, schema=CRITIQUE_SCHEMA)`,
+so the `complete_json(schema=CRITIQUE_SCHEMA)` call and starvation handling is written once rather than
 duplicated per caller. The remaining spec-authoring/reviewing agents (zero-trade repair, alignment
 fix-proposer) are unchanged and still rely solely on the prompt-embedded-schema + `json_object` contract
 described above.

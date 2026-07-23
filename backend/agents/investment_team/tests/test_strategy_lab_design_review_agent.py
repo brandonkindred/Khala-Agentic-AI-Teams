@@ -18,7 +18,6 @@ import pytest
 
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.agents import _structured_output as so_mod
-from investment_team.strategy_lab.agents import design_review as design_review_mod
 from investment_team.strategy_lab.agents._response_schemas import CRITIQUE_SCHEMA
 from investment_team.strategy_lab.agents.design_review import (
     _CRITIQUE_SCHEMA_JSON,
