@@ -164,6 +164,10 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     None (mixin default) and is independent of fallback logging.
     """
 
+    # Unbound BaseTeamLead._run_phase_gates delegates to self._run_gated_phases;
+    # alias the helper so TeamLeadSharedState consumers can invoke both hooks.
+    _run_gated_phases = BaseTeamLead._run_gated_phases
+
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
         TeamLeadSharedState.__init__(
@@ -565,6 +569,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         cicd_result: Any = None
         deploy_result: Any = None
         aggregated_artifacts: Dict[str, str] = {}
+        quality_gates: Dict[str, str] = {}
 
         def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
             """Phase 1: environment policy + task clarification gates.
@@ -682,137 +687,184 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             )
             return None
 
+        def _phase4_validation_review() -> Optional[DevOpsTeamResult]:
+            """Phase 4: tool validation, reviews, and early-exit gates.
+
+            Preconditions: Phases 1–3 returned ``None`` (``aggregated_artifacts``
+              may be empty).
+            Postconditions: runs tool validation, execution verification, the
+              debug-patch loop, and independent reviews; sets nonlocal
+              ``quality_gates``. Returns a failed ``DevOpsTeamResult`` on quality-
+              gate or build-verifier failure via ``_run_phase_gates``; otherwise
+              returns ``None`` so Phase 5 runs.
+            """
+            nonlocal aggregated_artifacts, quality_gates
+
+            # Phase 4: tool validation + independent reviews
+            self._report_status(
+                "phase4",
+                detail="DevOps team pipeline: phase 4 - validation and review",
+            )
+            iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
+            policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
+            cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
+            dry_run_checks = self.deploy_dry_run_tool.run(
+                DeploymentDryRunInput(repo_path=str(repo_path))
+            )
+
+            tool_gate_map: Dict[str, str] = {}
+            tool_gate_map.update(iac_checks.checks)
+            tool_gate_map.update(policy_checks.checks)
+            tool_gate_map.update(cicd_checks.checks)
+            tool_gate_map.update(dry_run_checks.checks)
+
+            # Phase 4.5: Execution verification
+            self._report_status(
+                "phase4.5",
+                detail="DevOps team pipeline: phase 4.5 - execution verification",
+            )
+            repo_str = str(repo_path)
+            exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
+            exec_gate_map: Dict[str, str] = {}
+            exec_findings: List[str] = []
+            for er in exec_results:
+                exec_gate_map.update(er.get("checks", {}))
+                exec_findings.extend(er.get("findings", []))
+                fc = er.get("failure_class", "")
+                if fc:
+                    logger.info(
+                        "DevOps execution [%s %s]: failure_class=%s",
+                        er.get("tool", "?"),
+                        er.get("command", "?"),
+                        fc,
+                    )
+
+            # Phase 4.6: Debug-patch loop for fixable execution failures.
+            # Consume BaseTeamLead's bounded retry helper without inheriting the
+            # code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
+            exec_failures = [er for er in exec_results if not er.get("success", True)]
+            state = _DebugPatchState(
+                exec_results=exec_results,
+                exec_failures=exec_failures,
+                exec_gate_map=exec_gate_map,
+                exec_findings=exec_findings,
+            )
+            if state.exec_failures:
+                BaseTeamLead._run_bounded_retry_loop(
+                    self,
+                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                    attempt=lambda i: self._debug_patch_once(
+                        i,
+                        state=state,
+                        aggregated_artifacts=aggregated_artifacts,
+                        repo_path=repo_path,
+                        repo_str=repo_str,
+                        write_changes=write_changes,
+                        subdir=subdir,
+                        max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                    ),
+                    is_success=lambda s: not s.exec_failures,
+                )
+
+            tool_gate_map.update(state.exec_gate_map)
+
+            devsec = self.devsecops_review_agent.run(
+                DevSecOpsReviewInput(
+                    task_description=task_spec.title,
+                    requirements=task_spec.goal.summary,
+                    artifacts=aggregated_artifacts,
+                )
+            )
+            change_review = self.change_review_agent.run(
+                ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
+            )
+
+            val = self.test_validation_agent.run(
+                DevOpsTestValidationInput(
+                    acceptance_criteria=task_spec.acceptance_criteria,
+                    tool_results={
+                        "iac": iac_checks.checks,
+                        "policy": policy_checks.checks,
+                        "cicd": cicd_checks.checks,
+                        "deploy_dry_run": dry_run_checks.checks,
+                    },
+                )
+            )
+
+            quality_gates = dict(val.quality_gates)
+            # The infra security gate routes both the DevSecOps LLM review and the
+            # policy-as-code (checkov) scan through the unified infra decision. This
+            # is force-assigned (not setdefault) so the authoritative DevSecOps +
+            # policy result always wins — a validation-agent-supplied "pass" must
+            # never mask a failing review or checkov scan.
+            quality_gates["security_review"] = (
+                "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail"
+            )
+            quality_gates.setdefault("change_review", "pass" if change_review.approved else "fail")
+
+            def _quality_gates_check() -> Optional[DevOpsTeamResult]:
+                """Fail the phase when any assembled quality gate is ``fail``.
+
+                Preconditions: ``quality_gates``, ``devsec``, ``change_review``,
+                  and ``val`` are set by Phase 4 setup above.
+                Postconditions: returns the blocked ``DevOpsTeamResult`` with the
+                  existing completion-package shape when any gate fails; otherwise
+                  ``None``.
+                """
+                if any(v == "fail" for v in quality_gates.values()):
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason="Quality gates failed",
+                        completion_package=DevOpsCompletionPackage(
+                            task_id=task_spec.task_id,
+                            status="blocked",
+                            files_changed=sorted(aggregated_artifacts.keys()),
+                            quality_gates=quality_gates,
+                            notes=[devsec.summary, change_review.summary, val.summary],
+                            risks_remaining=[f.issue for f in devsec.findings if f.blocking],
+                        ),
+                    )
+                return None
+
+            def _build_verifier_check() -> Optional[DevOpsTeamResult]:
+                """Fail the phase when an injected build verifier rejects the repo.
+
+                Preconditions: quality gates already passed (prior gate returned
+                  ``None``); ``build_verifier`` may be ``None``.
+                Postconditions: when ``build_verifier`` is set and returns a
+                  failing result, returns ``DevOpsTeamResult(success=False, …)``
+                  with the verifier error (or the default failure string);
+                  otherwise ``None`` (including when verifier is absent).
+                """
+                if build_verifier is not None:
+                    verify_ok, verify_err = build_verifier(repo_path, "devops", task_spec.task_id)
+                    if not verify_ok:
+                        return DevOpsTeamResult(
+                            success=False,
+                            failure_reason=verify_err or "Build verification failed",
+                        )
+                return None
+
+            # Consume BaseTeamLead's intra-phase multi-gate hook without inheriting
+            # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
+            return BaseTeamLead._run_phase_gates(
+                self,
+                [_quality_gates_check, _build_verifier_check],
+            )
+
         # Consume BaseTeamLead's gate-based phase sequencer without inheriting
         # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
         early_exit = BaseTeamLead._run_gated_phases(
             self,
-            [_phase1_intake_clarify, _phase2_parallel_design, _phase3_branch_write],
+            [
+                _phase1_intake_clarify,
+                _phase2_parallel_design,
+                _phase3_branch_write,
+                _phase4_validation_review,
+            ],
         )
         if early_exit is not None:
             return early_exit
-
-        # Phase 4: tool validation + independent reviews
-        self._report_status(
-            "phase4",
-            detail="DevOps team pipeline: phase 4 - validation and review",
-        )
-        iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
-        policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
-        cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
-        dry_run_checks = self.deploy_dry_run_tool.run(
-            DeploymentDryRunInput(repo_path=str(repo_path))
-        )
-
-        tool_gate_map: Dict[str, str] = {}
-        tool_gate_map.update(iac_checks.checks)
-        tool_gate_map.update(policy_checks.checks)
-        tool_gate_map.update(cicd_checks.checks)
-        tool_gate_map.update(dry_run_checks.checks)
-
-        # Phase 4.5: Execution verification
-        self._report_status(
-            "phase4.5",
-            detail="DevOps team pipeline: phase 4.5 - execution verification",
-        )
-        repo_str = str(repo_path)
-        exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-        exec_gate_map: Dict[str, str] = {}
-        exec_findings: List[str] = []
-        for er in exec_results:
-            exec_gate_map.update(er.get("checks", {}))
-            exec_findings.extend(er.get("findings", []))
-            fc = er.get("failure_class", "")
-            if fc:
-                logger.info(
-                    "DevOps execution [%s %s]: failure_class=%s",
-                    er.get("tool", "?"),
-                    er.get("command", "?"),
-                    fc,
-                )
-
-        # Phase 4.6: Debug-patch loop for fixable execution failures.
-        # Consume BaseTeamLead's bounded retry helper without inheriting the
-        # code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-        exec_failures = [er for er in exec_results if not er.get("success", True)]
-        state = _DebugPatchState(
-            exec_results=exec_results,
-            exec_failures=exec_failures,
-            exec_gate_map=exec_gate_map,
-            exec_findings=exec_findings,
-        )
-        if state.exec_failures:
-            BaseTeamLead._run_bounded_retry_loop(
-                self,
-                max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                attempt=lambda i: self._debug_patch_once(
-                    i,
-                    state=state,
-                    aggregated_artifacts=aggregated_artifacts,
-                    repo_path=repo_path,
-                    repo_str=repo_str,
-                    write_changes=write_changes,
-                    subdir=subdir,
-                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                ),
-                is_success=lambda s: not s.exec_failures,
-            )
-
-        tool_gate_map.update(state.exec_gate_map)
-
-        devsec = self.devsecops_review_agent.run(
-            DevSecOpsReviewInput(
-                task_description=task_spec.title,
-                requirements=task_spec.goal.summary,
-                artifacts=aggregated_artifacts,
-            )
-        )
-        change_review = self.change_review_agent.run(
-            ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
-        )
-
-        val = self.test_validation_agent.run(
-            DevOpsTestValidationInput(
-                acceptance_criteria=task_spec.acceptance_criteria,
-                tool_results={
-                    "iac": iac_checks.checks,
-                    "policy": policy_checks.checks,
-                    "cicd": cicd_checks.checks,
-                    "deploy_dry_run": dry_run_checks.checks,
-                },
-            )
-        )
-
-        quality_gates = dict(val.quality_gates)
-        # The infra security gate routes both the DevSecOps LLM review and the
-        # policy-as-code (checkov) scan through the unified infra decision. This
-        # is force-assigned (not setdefault) so the authoritative DevSecOps +
-        # policy result always wins — a validation-agent-supplied "pass" must
-        # never mask a failing review or checkov scan.
-        quality_gates["security_review"] = (
-            "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail"
-        )
-        quality_gates.setdefault("change_review", "pass" if change_review.approved else "fail")
-
-        if any(v == "fail" for v in quality_gates.values()):
-            return DevOpsTeamResult(
-                success=False,
-                failure_reason="Quality gates failed",
-                completion_package=DevOpsCompletionPackage(
-                    task_id=task_spec.task_id,
-                    status="blocked",
-                    files_changed=sorted(aggregated_artifacts.keys()),
-                    quality_gates=quality_gates,
-                    notes=[devsec.summary, change_review.summary, val.summary],
-                    risks_remaining=[f.issue for f in devsec.findings if f.blocking],
-                ),
-            )
-
-        if build_verifier is not None:
-            verify_ok, verify_err = build_verifier(repo_path, "devops", task_spec.task_id)
-            if not verify_ok:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=verify_err or "Build verification failed"
-                )
 
         # Phase 5: commit, merge, release readiness
         self._report_status(

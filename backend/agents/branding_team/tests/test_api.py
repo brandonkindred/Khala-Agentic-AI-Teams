@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from branding_team.api.main import app, branding_store
-from branding_team.models import BrandingMission
+from branding_team.tests.conftest import make_mission
 
 # Hits the team API which calls the real job service.  Marked integration
 # pending follow-up.
@@ -503,7 +503,7 @@ def test_post_conversations_with_initial_message_calls_assistant() -> None:
     with patch("branding_team.api.main.assistant_agent") as mock_agent:
         mock_agent.respond.return_value = (
             "Got it, Acme it is!",
-            BrandingMission(
+            make_mission(
                 company_name="Acme",
                 company_description="We build software.",
                 target_audience="Developers",
@@ -529,7 +529,7 @@ def test_post_conversation_messages_updates_state_and_returns_reply() -> None:
     with patch("branding_team.api.main.assistant_agent") as mock_agent:
         mock_agent.respond.return_value = (
             "Thanks, I've noted that.",
-            BrandingMission(
+            make_mission(
                 company_name="TestCo",
                 company_description="To be discussed.",
                 target_audience="TBD",
@@ -628,7 +628,7 @@ def test_attach_conversation_to_brand_succeeds() -> None:
     workspace = branding_store.create_client("Attach Client")
     brand = branding_store.create_brand(
         workspace.id,
-        BrandingMission(
+        make_mission(
             company_name="AttachCo",
             company_description="Company for attach test",
             target_audience="users",
@@ -660,7 +660,7 @@ def test_attach_conversation_unknown_conversation_404() -> None:
     workspace = branding_store.create_client("Attach 404 Client")
     brand = branding_store.create_brand(
         workspace.id,
-        BrandingMission(
+        make_mission(
             company_name="Attach404Co",
             company_description="Company for attach 404 test",
             target_audience="users",
@@ -672,7 +672,9 @@ def test_attach_conversation_unknown_conversation_404() -> None:
 
 def test_list_clients_pagination_query_params() -> None:
     """GET /clients honors limit/offset and returns non-overlapping pages."""
-    created = {client.post("/clients", json={"name": f"Page Client {i}"}).json()["id"] for i in range(4)}
+    created = {
+        client.post("/clients", json={"name": f"Page Client {i}"}).json()["id"] for i in range(4)
+    }
     first = client.get("/clients", params={"limit": 2, "offset": 0})
     second = client.get("/clients", params={"limit": 2, "offset": 2})
     assert first.status_code == 200 and second.status_code == 200
