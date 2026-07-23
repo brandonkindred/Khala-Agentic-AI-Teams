@@ -216,3 +216,59 @@ def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
     )
     data = a._call_agent_json("prompt")
     assert data == {"a": 1}
+
+
+def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a._fix_deterministic_violations("orig", ["x"])
+
+
+def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMTemporaryError("temporary")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMTemporaryError, match="temporary"):
+        a._fix_deterministic_violations("orig", ["x"])
+
+
+def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a._llm_self_review("orig")
+
+
+def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMTemporaryError("temporary")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMTemporaryError, match="temporary"):
+        a._llm_self_review("orig")
