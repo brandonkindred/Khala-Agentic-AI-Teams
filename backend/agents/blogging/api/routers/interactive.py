@@ -4,7 +4,9 @@ elicitation, Q&A answers, and draft feedback."""
 from __future__ import annotations
 
 import logging
+from typing import Any, Dict
 
+from agents.blogging.api.dependencies import get_job
 from agents.blogging.api.models import (
     BlogAnswersRequest,
     BlogJobStatusResponse,
@@ -14,7 +16,7 @@ from agents.blogging.api.models import (
     StoryResponseRequest,
     _blog_job_dict_to_status_response,
 )
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +32,22 @@ router = APIRouter()
         "Sets waiting_for_title_selection=False and records the chosen title."
     ),
 )
-def select_title(job_id: str, request: SelectTitleRequest) -> BlogJobStatusResponse:
+def select_title(
+    job_id: str,
+    request: SelectTitleRequest,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "submit_title_selection",
+            waiting_for=(
+                "waiting_for_title_selection",
+                "Job is not currently waiting for title selection",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Author submits their chosen title, resuming the pipeline."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.submit_title_selection is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if not job.get("waiting_for_title_selection"):
-        raise HTTPException(
-            status_code=400, detail="Job is not currently waiting for title selection"
-        )
     if not request.title.strip():
         raise HTTPException(status_code=422, detail="title must not be empty")
     _main.submit_title_selection(job_id, request.title.strip())
@@ -64,19 +69,22 @@ def select_title(job_id: str, request: SelectTitleRequest) -> BlogJobStatusRespo
         "Otherwise the pipeline generates new candidates based on the feedback."
     ),
 )
-def rate_titles(job_id: str, request: RateTitlesRequest) -> BlogJobStatusResponse:
+def rate_titles(
+    job_id: str,
+    request: RateTitlesRequest,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "submit_title_ratings",
+            waiting_for=(
+                "waiting_for_title_selection",
+                "Job is not currently waiting for title selection",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Submit title ratings. Love = select that title. Like/Dislike = generate more."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.submit_title_ratings is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if not job.get("waiting_for_title_selection"):
-        raise HTTPException(
-            status_code=400, detail="Job is not currently waiting for title selection"
-        )
     if not request.ratings:
         raise HTTPException(status_code=422, detail="At least one rating is required")
     for r in request.ratings:
@@ -103,19 +111,22 @@ def rate_titles(job_id: str, request: RateTitlesRequest) -> BlogJobStatusRespons
         "Clears waiting_for_story_input and appends the message to story_chat_history."
     ),
 )
-def story_response(job_id: str, request: StoryResponseRequest) -> BlogJobStatusResponse:
+def story_response(
+    job_id: str,
+    request: StoryResponseRequest,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "submit_story_user_message",
+            waiting_for=(
+                "waiting_for_story_input",
+                "Job is not currently waiting for a story response",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Author submits a message in the story elicitation chat."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.submit_story_user_message is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if not job.get("waiting_for_story_input"):
-        raise HTTPException(
-            status_code=400, detail="Job is not currently waiting for a story response"
-        )
     if not request.message.strip():
         raise HTTPException(status_code=422, detail="message must not be empty")
     _main.submit_story_user_message(job_id, request.message.strip())
@@ -143,15 +154,21 @@ def story_response(job_id: str, request: StoryResponseRequest) -> BlogJobStatusR
         "Increments current_story_gap_index and clears waiting_for_story_input."
     ),
 )
-def skip_story_gap(job_id: str) -> BlogJobStatusResponse:
+def skip_story_gap(
+    job_id: str,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "skip_current_story_gap",
+            waiting_for=(
+                "waiting_for_story_input",
+                "Job is not currently waiting for a story response",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Author skips the current story gap."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.skip_current_story_gap is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     logger.info("Skipping current story gap for job %s", job_id)
     _main.skip_current_story_gap(job_id)
     # Notify the ghost writer's event subscription so it wakes immediately
@@ -178,17 +195,22 @@ def skip_story_gap(job_id: str) -> BlogJobStatusResponse:
         "and sets waiting_for_answers=False."
     ),
 )
-def submit_answers(job_id: str, request: BlogAnswersRequest) -> BlogJobStatusResponse:
+def submit_answers(
+    job_id: str,
+    request: BlogAnswersRequest,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "submit_blog_answers",
+            waiting_for=(
+                "waiting_for_answers",
+                "Job is not currently waiting for answers",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Author submits answers to pipeline Q&A questions."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.submit_blog_answers is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if not job.get("waiting_for_answers"):
-        raise HTTPException(status_code=400, detail="Job is not currently waiting for answers")
     _main.submit_blog_answers(job_id, request.answers)
     updated = _main.get_blog_job(job_id)
     if (
@@ -208,19 +230,22 @@ def submit_answers(job_id: str, request: BlogAnswersRequest) -> BlogJobStatusRes
         "When approved=true, the draft proceeds without further revision."
     ),
 )
-def draft_feedback(job_id: str, request: DraftFeedbackRequest) -> BlogJobStatusResponse:
+def draft_feedback(
+    job_id: str,
+    request: DraftFeedbackRequest,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "submit_draft_feedback",
+            waiting_for=(
+                "waiting_for_draft_feedback",
+                "Job is not currently waiting for draft feedback",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Editor submits feedback on a draft or approves it."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.submit_draft_feedback is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if not job.get("waiting_for_draft_feedback"):
-        raise HTTPException(
-            status_code=400, detail="Job is not currently waiting for draft feedback"
-        )
     _main.submit_draft_feedback(job_id, request.feedback, request.approved)
     updated = _main.get_blog_job(job_id)
     if (

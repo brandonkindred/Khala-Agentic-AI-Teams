@@ -134,9 +134,9 @@ def _pool_sizes() -> tuple[int, int]:
 def _connect(database: Optional[str] = None):
     """Open a fresh (unpooled) ``psycopg`` connection.
 
-    Used for the initial DDL ``ensure_team_schema`` path and as a test
-    seam. Raises ``RuntimeError`` when Postgres is disabled or psycopg
-    is not installed, so callers fail loudly instead of silently
+    Test seam and escape hatch for callers that need a direct connection
+    outside the pool. Raises ``RuntimeError`` when Postgres is disabled or
+    psycopg is not installed, so callers fail loudly instead of silently
     skipping writes.
     """
     if not is_postgres_enabled():
