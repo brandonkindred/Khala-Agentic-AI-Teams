@@ -325,6 +325,40 @@ def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
     assert result.feedback_items == []
 
 
+def test_copy_editor_run_empty_json_object_defaults_summary_and_not_approved(monkeypatch) -> None:
+    """A parseable but empty ({}) model response is not treated as a tooling fallback.
+
+    run() supplies the summary default and treats missing approved as False — unlike
+    JSON-parse exhaustion, which returns an advisory approved=True fallback.
+    """
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return "{}"
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(
+        CopyEditorInput(
+            draft="# d\n\nsome body text here",
+            target_word_count=1000,
+            soft_min_words=750,
+            soft_max_words=1300,
+        )
+    )
+
+    assert result.summary == "No summary generated."
+    assert result.approved is False
+    assert result.feedback_items == []
+
+
 def test_copy_editor_json_parse_failure_degrades_to_fallback(monkeypatch) -> None:
     """When the model never returns parseable JSON, the fallback approves (no no-op rewrite)."""
     from agents.blogging.blog_copy_editor_agent import agent as ce_mod

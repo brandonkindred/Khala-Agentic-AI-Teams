@@ -233,8 +233,11 @@ class BlogCopyEditorAgent:
         Preconditions:
             - prompt is the fully assembled per-request editor context.
         Postconditions:
-            - Returns a dict with at least "summary" and "feedback_items"; on JSON-parse
-              exhaustion or an unexpected error it returns a ``_fallback_editor_data`` dict.
+            - Returns a non-None ``dict``. On a successful JSON parse the dict may be empty
+              (``{}``) or omit keys; callers in :meth:`run` supply defaults for missing
+              ``summary`` / ``feedback_items``. On JSON-parse exhaustion or an unexpected
+              error, returns a ``_fallback_editor_data`` dict (includes ``approved``,
+              ``summary``, and ``feedback_items``).
             - Re-raises only genuinely transient LLM errors (unwrapped from
               ``EventLoopException``); never returns None.
         """
