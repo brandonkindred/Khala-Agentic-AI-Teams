@@ -115,9 +115,9 @@ def _build_truthy_subcond(
 
     - ``bool(<Compare>)`` — delegates to :func:`_build_subcond` so e.g.
       ``bool(close > 100)`` produces the same row as ``close > 100``.
-    - ``bool(<Name>)`` and bare ``<Name>`` — resolves the name to a
-      previously-bound indicator evaluator (see
-      :class:`~investment_team.strategy_lab.coverage_probe.subcondition_visitor.SubconditionVisitor`)
+    - ``bool(<Name>)`` and bare ``<Name>`` — resolves the name via the
+      ``name_evaluators`` parameter (populated flow-sensitively by
+      :meth:`~investment_team.strategy_lab.coverage_probe.subcondition_visitor.SubconditionVisitor._apply_assign_inplace`)
       and treats the resulting series as truthy where it is non-NaN and
       non-zero.
 
@@ -941,10 +941,11 @@ def _resolve_series_input(
        ``df['close']``, or ``[b.X for b in history]`` — pinned via
        :func:`_column_from`.
     3. **Bound local Name** — when the strategy did
-       ``closes = [b.close for b in history]`` (or any other shape that
-       :class:`~investment_team.strategy_lab.coverage_probe.subcondition_visitor.SubconditionVisitor`
-       already understood) and then passed the local into the
-       indicator, look up the binding and use its callable directly.
+       ``closes = [b.close for b in history]`` (or any other shape already
+       bound in ``name_evaluators`` by
+       :meth:`~investment_team.strategy_lab.coverage_probe.subcondition_visitor.SubconditionVisitor._apply_assign_inplace`)
+       and then passed the local into the indicator, look up the binding
+       and use its callable directly.
     4. **Bare call** (``sma()``) — defaults to the close column. Rare
        in practice but harmless since no other column is implied.
 
