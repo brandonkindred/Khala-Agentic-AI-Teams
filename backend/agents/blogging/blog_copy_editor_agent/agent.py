@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from strands import Agent
 from strands.types.exceptions import EventLoopException
 
@@ -49,7 +50,7 @@ def _fallback_editor_data(summary: str) -> Dict[str, Any]:
     return {"approved": True, "summary": summary, "feedback_items": []}
 
 
-class BlogCopyEditorAgent:
+class BlogCopyEditorAgent(_BlogAgentBase):
     """
     Expert agent that provides copy editing feedback on a blog draft,
     evaluating it against a brand and writing style guide.
@@ -67,8 +68,7 @@ class BlogCopyEditorAgent:
             - llm_client is not None.
         Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
-        assert llm_client is not None, "llm_client is required"
-        self._model = llm_client
+        super().__init__(llm_client)
         writing = (writing_style_guide_content or "").strip()
         brand = (brand_spec_content or "").strip()
         parts: list[str] = []
