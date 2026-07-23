@@ -12,11 +12,11 @@ from agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 @pytest.fixture(autouse=True)
 def _isolate_agent_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
-    # Reset module-level cache so each test gets fresh state
+    # Reset process-local cache so each test gets fresh state
     import agentic_team_provisioning.infrastructure as infra_mod
 
     infra_mod._AGENT_CACHE = str(tmp_path)
-    infra_mod._infra_cache.clear()
+    infra_mod._clear_infra_cache_for_testing()
 
 
 @pytest.fixture

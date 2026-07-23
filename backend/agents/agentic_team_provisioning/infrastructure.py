@@ -158,12 +158,29 @@ class TeamInfrastructure:
 # Provisioning functions
 # ---------------------------------------------------------------------------
 
+# Process-local handle cache. Intentionally not shared across uvicorn workers:
+# TeamInfrastructure only holds path handles, a JobServiceClient, and a
+# TeamFormStore. Durable state lives in Postgres (forms), the filesystem
+# (dirs), and the job service (HTTP). Sibling workers rebuilding equivalent
+# handles is correct and requires no distributed cache or cross-process
+# invalidation.
 _infra_cache: Dict[str, TeamInfrastructure] = {}
 _infra_lock = threading.Lock()
 
 
 def provision_team(team_id: str) -> TeamInfrastructure:
-    """Create per-team directories and handles. Idempotent."""
+    """Create per-team directories and handles. Idempotent.
+
+    Preconditions:
+        - ``team_id`` is a non-empty string.
+    Postconditions:
+        - ``assets_dir`` and ``runs_dir`` exist under the team base directory.
+        - The returned ``TeamInfrastructure`` is stored in the process-local
+          ``_infra_cache`` under ``team_id`` (replacing any prior entry).
+        - Form records and job state remain in Postgres / the job service;
+          this function only materializes local handles and directories.
+    """
+    assert team_id, "team_id must be a non-empty string"
     base = Path(_AGENT_CACHE) / "provisioned_teams" / team_id
     assets_dir = base / "assets"
     runs_dir = base / "runs"
@@ -191,8 +208,27 @@ def provision_team(team_id: str) -> TeamInfrastructure:
 
 
 def get_team_infrastructure(team_id: str) -> TeamInfrastructure:
-    """Return cached infrastructure for a team, provisioning lazily if needed."""
+    """Return process-local infrastructure for a team, provisioning lazily if needed.
+
+    Preconditions:
+        - ``team_id`` is a non-empty string.
+    Postconditions:
+        - Returns a ``TeamInfrastructure`` for ``team_id``.
+        - Within a single process, repeated calls for the same ``team_id``
+          return the same instance after the first successful provision
+          (unless the process-local cache is cleared for tests).
+        - Cache misses call ``provision_team``, which is idempotent for
+          directories and external stores; multi-worker divergence of the
+          in-memory map is therefore safe.
+    """
+    assert team_id, "team_id must be a non-empty string"
     with _infra_lock:
         if team_id in _infra_cache:
             return _infra_cache[team_id]
     return provision_team(team_id)
+
+
+def _clear_infra_cache_for_testing() -> None:
+    """Drop all cached team infrastructure handles. Test-only isolation seam."""
+    with _infra_lock:
+        _infra_cache.clear()
