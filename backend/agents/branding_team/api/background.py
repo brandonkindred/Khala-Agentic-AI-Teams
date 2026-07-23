@@ -229,7 +229,12 @@ def _submit_brand_run(
             # Temporal client/worker not ready — fail the job row and return 503
             # rather than surfacing the dispatch error as a 500.
             logger.exception("Branding job %s Temporal dispatch failed", job_id)
-            mark_failed(job_id, "temporal dispatch failed")
+            try:
+                mark_failed(job_id, "temporal dispatch failed")
+            except Exception:
+                # Bookkeeping failure must not replace the intended 503 — the
+                # client should see "unavailable", not a leaked 500.
+                logger.exception("Branding job %s: mark_failed itself failed", job_id)
             raise HTTPException(status_code=503, detail="Service temporarily unavailable")
         return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
@@ -253,7 +258,12 @@ def _submit_brand_run(
     except RuntimeError:
         # Executor was shut down (e.g. app teardown) — fail the job row and
         # return 503 rather than letting the RuntimeError surface as a 500.
-        mark_failed(job_id, "run executor unavailable")
+        try:
+            mark_failed(job_id, "run executor unavailable")
+        except Exception:
+            # Bookkeeping failure must not replace the intended 503 — the
+            # client should see "unavailable", not a leaked 500.
+            logger.exception("Branding job %s: mark_failed itself failed", job_id)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
