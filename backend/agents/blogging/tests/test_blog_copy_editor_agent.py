@@ -326,11 +326,11 @@ def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
     assert result.feedback_items == []
 
 
-def test_copy_editor_run_empty_json_object_defaults_summary_and_not_approved(monkeypatch) -> None:
-    """A parseable but empty ({}) model response is not treated as a tooling fallback.
+def test_copy_editor_run_empty_json_object_uses_advisory_fallback(monkeypatch) -> None:
+    """A parseable but empty ({}) model response is normalized to the advisory fallback.
 
-    run() supplies the summary default and treats missing approved as False — unlike
-    JSON-parse exhaustion, which returns an advisory approved=True fallback.
+    That keeps approved=True with no feedback so callers do not loop on a false
+    rejection with zero actionable items (unlike a real must_fix response).
     """
     from agents.blogging.blog_copy_editor_agent import agent as ce_mod
 
@@ -355,8 +355,8 @@ def test_copy_editor_run_empty_json_object_defaults_summary_and_not_approved(mon
         )
     )
 
-    assert result.summary == "No summary generated."
-    assert result.approved is False
+    assert "manually" in result.summary.lower()
+    assert result.approved is True
     assert result.feedback_items == []
 
 

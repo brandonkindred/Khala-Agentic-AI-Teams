@@ -241,10 +241,11 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         Postconditions:
             - Returns a non-None ``dict`` on successful parse or on a fallback path
               (JSON-parse exhaustion / unexpected error via ``on_exhausted`` /
-              ``on_unexpected_error``). A successful parse may be empty (``{}``) or
-              omit keys; callers in :meth:`run` supply defaults for missing
-              ``summary`` / ``feedback_items``. Fallback dicts include ``approved``,
-              ``summary``, and ``feedback_items``.
+              ``on_unexpected_error``, or a parseable but empty ``{}`` normalized to
+              ``_fallback_editor_data``). A non-empty successful parse may omit keys;
+              callers in :meth:`run` supply defaults for missing ``summary`` /
+              ``feedback_items``. Fallback dicts include ``approved``, ``summary``,
+              and ``feedback_items``.
             - Does **not** always return: transient LLM errors
               (``LLMRateLimitError`` / ``LLMTemporaryError``, including when strands
               wraps them in ``EventLoopException``) are re-raised by
@@ -265,7 +266,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         def _unwrap(exc: Exception) -> Exception:
             return exc.original_exception if isinstance(exc, EventLoopException) else exc
 
-        return call_json_with_retry(
+        data = call_json_with_retry(
             _agent_factory,
             prompt + COPY_EDITOR_SOFT_JSON_INSTRUCTION,
             max_attempts=2,
@@ -279,6 +280,14 @@ class BlogCopyEditorAgent(_BlogAgentBase):
             ),
             logger=logger,
         )
+        # A parseable but empty dict ({}) is treated like tooling failure: the advisory
+        # fallback approves with no feedback so callers do not loop on approved=False
+        # with zero actionable items.
+        if not data:
+            return _fallback_editor_data(
+                "Copy editor could not parse the model response. Please review the draft manually."
+            )
+        return data
 
     def _parse_feedback_items(self, feedback_data: Any) -> list[FeedbackItem]:
         """

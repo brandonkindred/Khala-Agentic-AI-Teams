@@ -59,11 +59,11 @@ def test_approve(agent, temp_blog_root) -> None:
 
 
 def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
-    """Reject collects feedback; revision loop exits when there is nothing to revise.
+    """Reject collects feedback; empty structured conversion still drives one revise.
 
-    With ``DummyLLMClient``, the convert-to-editor-feedback step and the copy editor
-    both yield no structured ``feedback_items``, so the loop must stop immediately
-    instead of no-op ``revise()`` calls for ``max_revision_loops`` iterations.
+    When the LLM cannot convert rejection text into structured items, the loop
+    synthesizes a deterministic must_fix from the raw rejection so the draft is
+    actually revised instead of clearing the rejection with zero iterations.
     """
     from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
     from agents.blogging.blog_writer_agent import BlogWriterAgent
@@ -96,12 +96,20 @@ def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
     )
 
     assert revision.submission_id == result.submission_id
-    assert revision.iterations_completed == 0
-    assert revision.revised_draft == "# Rejected Post\n\nNeeds work."
+    assert revision.iterations_completed >= 1
+    assert "revised" in revision.message.lower() or revision.iterations_completed >= 1
 
     draft_path = temp_blog_root / "pending" / f"{result.submission_id}.md"
     assert draft_path.exists()
     assert draft_path.read_text() == revision.revised_draft
+
+    # Rejection feedback was consumed after a successful revise.
+    meta_path = temp_blog_root / "pending" / f"{result.submission_id}_meta.json"
+    import json
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["rejection_feedback"] == []
+    assert meta["state"] == "awaiting_approval"
 
 
 def test_revision_loop_stops_after_editor_approval(agent, temp_blog_root, monkeypatch) -> None:
