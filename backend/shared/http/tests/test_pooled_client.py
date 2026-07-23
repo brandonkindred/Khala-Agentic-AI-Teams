@@ -246,7 +246,8 @@ def test_async_close_pool_swallows_client_close_errors(monkeypatch):
     monkeypatch.setattr(shared.http, "_sync_close_async_client", _boom)
     close_async_pool()  # must not raise
     # Client could not be closed; remains in pool (not falsely cleared).
-    assert shared.http._async_clients == {(15.0, 0): client}  # noqa: SLF001
+    assert list(shared.http._async_clients.keys()) == [(15.0, 0)]  # noqa: SLF001
+    assert shared.http._async_clients[(15.0, 0)].client is client  # noqa: SLF001
     assert not client.is_closed
 
 
@@ -258,7 +259,10 @@ def test_async_close_pool_leaves_clients_open_when_loop_running(caplog):
             close_async_pool()
 
     asyncio.run(_close_from_running_loop())
-    assert client in shared.http._async_clients.values()  # noqa: SLF001
+    assert any(
+        entry.client is client
+        for entry in shared.http._async_clients.values()  # noqa: SLF001
+    )
     assert not client.is_closed
     assert any("event loop is running" in record.message.lower() for record in caplog.records)
 
@@ -272,8 +276,26 @@ def test_async_clients_isolated_across_sequential_event_loops():
     first = asyncio.run(_grab())
     second = asyncio.run(_grab())
     assert first is not second
-    assert not first.is_closed
-    assert not second.is_closed
+    # Prior loop's entry should have been purged (closed loop / finalize).
+    assert first.is_closed or first not in [
+        e.client
+        for e in shared.http._async_clients.values()  # noqa: SLF001
+    ]
+
+
+def test_async_pool_does_not_accumulate_across_many_asyncio_runs():
+    """Repeated asyncio.run must not leak one pool entry per invocation."""
+
+    async def _grab() -> httpx.AsyncClient:
+        return get_pooled_async_client(30.0)
+
+    for _ in range(8):
+        asyncio.run(_grab())
+
+    # Purge-on-access drops closed-loop entries from prior runs.
+    get_pooled_async_client(30.0)
+    loop_scoped = [k for k in shared.http._async_clients if k[0] == 30.0 and k[1] != 0]  # noqa: SLF001
+    assert loop_scoped == []
 
 
 def test_async_same_loop_reuses_client():

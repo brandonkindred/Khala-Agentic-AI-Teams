@@ -436,6 +436,23 @@ async def test_async_poll_times_out_when_status_fn_stalls():
     assert result == {"status": "failed", "error": "Timed out waiting for stalled job"}
 
 
+@pytest.mark.asyncio
+async def test_async_poll_short_circuits_on_on_poll_exception(monkeypatch):
+    async def _must_not_sleep(*_):
+        raise AssertionError("must not sleep")
+
+    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _must_not_sleep)
+
+    async def _status():
+        return {"status": "running"}
+
+    async def _on_poll(_status: dict) -> None:
+        raise RuntimeError("progress sink failed")
+
+    result = await async_poll_until_terminal(_status, on_poll=_on_poll, poll_interval=0.01, total_timeout=10)
+    assert result == {"status": "failed", "error": "Failed to get status"}
+
+
 def test_default_terminal_statuses_shared_singleton_for_async_default():
     """Async poll default must be the same frozenset object as the module constant."""
     import inspect
