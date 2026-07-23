@@ -54,9 +54,7 @@ def test_corrupted_record_non_dict_500(bad_entry):
     # A non-dict pending entry is a corrupted record: it must hit the controlled 500 path, not raise
     # a bare TypeError from `"id" not in <non-dict>`.
     with pytest.raises(HTTPException) as ei:
-        validate_answers(
-            _job([bad_entry, _Q1]), _req([{"question_id": "q1", "selected_option_id": "strict"}])
-        )
+        validate_answers(_job([bad_entry, _Q1]), _req([{"question_id": "q1", "selected_option_id": "strict"}]))
     assert ei.value.status_code == 500
     assert "Corrupted job record" in ei.value.detail
 
@@ -147,9 +145,7 @@ def test_blank_answer_only_question_id_400():
 
 
 def test_success_valid_option_carries_question_text():
-    out = validate_answers(
-        _job([_Q1]), _req([{"question_id": "q1", "selected_option_id": "strict"}])
-    )
+    out = validate_answers(_job([_Q1]), _req([{"question_id": "q1", "selected_option_id": "strict"}]))
     assert out == [
         {
             "question_id": "q1",

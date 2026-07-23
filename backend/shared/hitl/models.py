@@ -1,12 +1,14 @@
 """Shared human-in-the-loop (HITL) request/response schemas.
 
 The "pending question / answer" contract used when a team pauses a job to ask
-the user a product/design decision. Historically each team (coding_team,
-software_engineering_team) defined its own near-identical copy; these are the
-reconciled **superset** models — every field either team carried is present, and
-the fields unique to one team (``recommendation``/``allow_multiple`` on
-:class:`PendingQuestion`, ``rationale``/``confidence`` on :class:`QuestionOption`)
-are optional-with-default so they are safe for the team that never set them.
+the user a product/design decision, plus the shared gate-review model
+(:class:`HumanReview`) for approve/reject decisions with optional feedback.
+Historically each team (coding_team, software_engineering_team) defined its own
+near-identical copy; these are the reconciled **superset** models — every field
+either team carried is present, and the fields unique to one team
+(``recommendation``/``allow_multiple`` on :class:`PendingQuestion`,
+``rationale``/``confidence`` on :class:`QuestionOption`) are optional-with-default
+so they are safe for the team that never set them.
 
 Pure data schemas; no runtime logic, no I/O.
 
@@ -33,9 +35,7 @@ class QuestionOption(BaseModel):
 
     id: str = Field(..., description="Unique identifier for this option.")
     label: str = Field(..., description="Display text for this option.")
-    is_default: bool = Field(
-        default=False, description="Whether this option is the suggested default."
-    )
+    is_default: bool = Field(default=False, description="Whether this option is the suggested default.")
     rationale: Optional[str] = Field(None, description="Why this option is suggested.")
     confidence: Optional[float] = Field(None, description="Agent confidence in this option (0-1).")
 
@@ -81,3 +81,16 @@ class SubmitAnswersRequest(BaseModel):
     """Request body for submitting answers to a job's pending questions."""
 
     answers: List[AnswerSubmission] = Field(..., description="List of answers to submit.")
+
+
+class HumanReview(BaseModel):
+    """Human gate decision for a team run (approve / reject + optional feedback).
+
+    Preconditions:
+        - Callers must supply ``approved`` explicitly (no default).
+    Postconditions:
+        - Instance carries a boolean gate and a string ``feedback`` (empty if omitted).
+    """
+
+    approved: bool
+    feedback: str = ""

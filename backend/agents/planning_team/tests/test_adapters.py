@@ -1,13 +1,7 @@
 """Tests for Planning adapters (mocked post_json/get_json)."""
 
 import os
-import sys
-from pathlib import Path
 from unittest.mock import patch
-
-_agents_dir = Path(__file__).resolve().parent.parent.parent
-if str(_agents_dir) not in sys.path:
-    sys.path.insert(0, str(_agents_dir))
 
 
 def test_product_analysis_run_returns_job_id():
