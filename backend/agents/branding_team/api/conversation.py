@@ -163,7 +163,8 @@ def _create_branding_conversation_impl(
         reply, updated_mission, suggested_questions = _main._get_assistant_agent().respond(
             [], _default_mission(), initial_message
         )
-        conversation_store.update_mission(conversation_id, updated_mission)
+        if not conversation_store.update_mission(conversation_id, updated_mission):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         if not conversation_store.append_message(conversation_id, "assistant", reply):
             logger.warning("Assistant reply not persisted for conversation %s", conversation_id)
         messages.append(_local_message("assistant", reply))
@@ -174,7 +175,9 @@ def _create_branding_conversation_impl(
         # background._run_branding_background calling _main._run_branding_core.
         output = _main._run_orchestrator_if_ready(updated_mission)
         if output is not None:
-            conversation_store.update_output(conversation_id, output)
+            if not conversation_store.update_output(conversation_id, output):
+                logger.warning("Pipeline output not persisted for conversation %s", conversation_id)
+                output = None
         mission, latest_output = updated_mission, output
 
         # Auto-create a brand when the user provided enough info in the initial message.
@@ -267,10 +270,22 @@ def _auto_create_brand_from_conversation(
     # the inconsistency is recoverable, then re-raise — the steps are not atomic
     # (see the Note above), so we surface the failure rather than hide it.
     try:
-        conversation_store.set_brand(conversation_id, brand.id)
-        branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
-        if output:
-            branding_store.append_brand_version(client_id, brand.id, output)
+        if not conversation_store.set_brand(conversation_id, brand.id):
+            raise RuntimeError(
+                f"conversation {conversation_id} vanished before brand {brand.id} attach"
+            )
+        if (
+            branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
+            is None
+        ):
+            raise RuntimeError(
+                f"brand {brand.id} vanished before conversation {conversation_id} link"
+            )
+        if output and branding_store.append_brand_version(client_id, brand.id, output) is None:
+            raise RuntimeError(
+                f"brand {brand.id} vanished before appending first version from "
+                f"conversation {conversation_id}"
+            )
     except Exception:
         logger.warning(
             "Brand %s was created but linking it to conversation %s failed; "
@@ -311,7 +326,8 @@ def _send_branding_conversation_message_impl(
     reply, updated_mission, suggested_questions = _main._get_assistant_agent().respond(
         history_pairs, state.mission, payload.message
     )
-    conversation_store.update_mission(conversation_id, updated_mission)
+    if not conversation_store.update_mission(conversation_id, updated_mission):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     # The reply is already computed and returned to the caller; if this write
     # doesn't land (conversation vanished mid-turn) log it rather than fail the
     # response, so the inconsistency is at least visible in the logs.
@@ -324,7 +340,9 @@ def _send_branding_conversation_message_impl(
     # _create_branding_conversation_impl above.
     output = _main._run_orchestrator_if_ready(updated_mission, state.mission, state.latest_output)
     if output is not None and output is not state.latest_output:
-        conversation_store.update_output(conversation_id, output)
+        if not conversation_store.update_output(conversation_id, output):
+            logger.warning("Pipeline output not persisted for conversation %s", conversation_id)
+            output = state.latest_output
 
     # Auto-create a brand when the user has provided at least a company name and conversation is unattached.
     if not brand_id and not payload.skip_save and _mission_has_brand_name(updated_mission):

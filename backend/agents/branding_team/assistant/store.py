@@ -66,6 +66,13 @@ class ConversationState:
 
 @dataclass
 class ConversationSummary:
+    """Summary view of a branding conversation for list endpoints.
+
+    Invariants:
+        ``message_count`` is >= 0; ``brand_id`` is None when the conversation
+        is not attached to a brand; timestamps are ISO-formatted strings.
+    """
+
     conversation_id: str
     brand_id: Optional[str]
     created_at: str
@@ -138,9 +145,10 @@ class BrandingConversationStore(PostgresHelperMixin):
             ``mission`` / ``latest_output`` if provided are valid models.
         Postconditions:
             A row is inserted into ``branding_conversations``. Returns the
-            provided ``conversation_id``, or a newly generated UUID4 when
-            none was given. Uses ``_default_mission()`` when ``mission`` is
-            None; stores ``latest_output`` as JSONB or NULL.
+            provided ``conversation_id`` when it is a non-empty string;
+            otherwise generates a new UUID4 (``None`` and ``""`` both count
+            as absent). Uses ``_default_mission()`` when ``mission`` is None;
+            stores ``latest_output`` as JSONB or NULL.
         """
         cid = conversation_id or str(uuid4())
         m = mission or _default_mission()
@@ -336,6 +344,16 @@ class BrandingConversationStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="list_conversations")
     def list_conversations(self, brand_id: Optional[str] = None) -> List[ConversationSummary]:
+        """List conversations, optionally filtered by brand.
+
+        Preconditions:
+            ``brand_id`` is None or a brand id string.
+        Postconditions:
+            Returns summaries ordered by most recently updated first (empty
+            when none match). When ``brand_id`` is set, only conversations
+            attached to that brand are included; ``message_count`` is the
+            number of rows in ``branding_conv_messages`` for each conversation.
+        """
         params: list[Any] = []
         where_clause = ""
         if brand_id:
@@ -366,6 +384,14 @@ class BrandingConversationStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="get_conversation_brand_id")
     def get_conversation_brand_id(self, conversation_id: str) -> Optional[str]:
+        """Return the brand id associated with a conversation, if any.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string.
+        Postconditions:
+            Returns the associated brand id as a string, or None when the
+            conversation does not exist or has no brand attached.
+        """
         row = self._fetch_one(
             "SELECT brand_id FROM branding_conversations WHERE conversation_id = %s",
             (conversation_id,),
