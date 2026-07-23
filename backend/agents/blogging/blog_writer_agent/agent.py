@@ -582,7 +582,10 @@ class BlogWriterAgent:
             raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             draft = _extract_draft_after_marker(raw_response)
         except (LLMJsonParseError, TypeError, ValueError) as e:
-            logger.warning("Draft complete() failed: %s; trying complete_json fallback.", e)
+            logger.warning(
+                "Draft text completion failed: %s; trying JSON fallback.",
+                e,
+            )
             try:
                 data = self._call_agent_json(prompt)
                 raw_draft = data.get("draft")
@@ -967,7 +970,8 @@ class BlogWriterAgent:
         Steps:
             1. **Analyse** — review all feedback items at once.
             2. **Plan** — produce a ``RevisionPlan`` (summary, ordered changes, risks).
-               Persisted as ``revision_plan_{iteration}.json`` in *work_dir*.
+               Persisted in *work_dir* as ``revision_plan_{iteration}.json`` when
+               *iteration* is a positive int, otherwise ``revision_plan.json``.
             3. **Execute** — apply the plan to produce the revised draft.
                Persisted as *draft_output_path* (e.g. ``draft_v{iteration}.md``).
         """
@@ -1076,11 +1080,10 @@ class BlogWriterAgent:
             draft=draft,
         )
         try:
-            # NOTE: text mode (the ``_call_agent`` default). The prompt asks
-            # for a top-level JSON *array* but Ollama's JSON mode constrains
-            # output to ``json_object`` (object-shaped), so forcing
-            # ``expect_json=True`` here can produce wrapped/empty results.
-            # The slicer below extracts ``[...]`` from prose regardless.
+            # NOTE: use ``_call_text`` (not ``_call_agent_json``). The prompt asks
+            # for a top-level JSON *array*, but JSON-mode adapters constrain
+            # output to a single object, so a JSON-mode call can wrap or empty
+            # the array. The slicer below extracts ``[...]`` from prose.
             raw = self._call_text(
                 prompt,
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
