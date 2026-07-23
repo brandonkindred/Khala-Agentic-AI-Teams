@@ -232,12 +232,14 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     ) -> None:
         """Emit the historical pipeline status line at INFO.
 
-        Preconditions: ``phase`` is a non-empty str (enforced by ``_report_status``
-          before invocation).
+        Preconditions: ``phase`` is a non-empty str (caller's responsibility;
+          :meth:`_report_status` asserts this before delegating; direct callers
+          of this staticmethod must satisfy it too — enforced below).
         Postconditions: logs ``detail`` when non-empty, otherwise logs
           ``DevOps team pipeline: {phase}``; ``progress`` and ``extra`` are ignored
-          (reserved for external consumers). Never raises.
+          (reserved for external consumers). Never raises when preconditions hold.
         """
+        assert isinstance(phase, str) and phase, "phase must be a non-empty str"
         if detail:
             logger.info("%s", detail)
         else:
