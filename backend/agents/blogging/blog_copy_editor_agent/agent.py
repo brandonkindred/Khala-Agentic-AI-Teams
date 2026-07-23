@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # For technical deep dives, a draft below this fraction of soft_min_words is flagged as thin.
 _THIN_DRAFT_RATIO = 0.88
 
+# Soft JSON instruction baked into the base prompt for call_json_with_retry (attempt 0).
+COPY_EDITOR_SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
+
 
 def _fallback_editor_data(summary: str) -> Dict[str, Any]:
     """Editor output for a copy-edit tooling failure (unparseable JSON or unexpected error).
@@ -243,7 +246,6 @@ class BlogCopyEditorAgent:
         """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
-        soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
         strict_json_suffix = (
             "\n\nRespond with a single JSON object only (no markdown, no code fence). "
             "Keys: approved (boolean), summary (string), feedback_items (array of objects with "
@@ -258,7 +260,7 @@ class BlogCopyEditorAgent:
 
         return call_json_with_retry(
             _agent_factory,
-            prompt + soft_json_instruction,
+            prompt + COPY_EDITOR_SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
             unwrap_exception=_unwrap,
@@ -318,7 +320,8 @@ class BlogCopyEditorAgent:
         target for must_fix / should_fix. Thin technical deep dives get a 'consider' hint.
 
         Preconditions:
-            - actual_word_count == len(draft.split()) for the reviewed draft.
+            - ``actual_word_count`` equals the word count of the reviewed draft
+              (e.g. computed as ``len(draft.split())`` by the caller).
         Postconditions:
             - Returns the same list object passed in, mutated with 0..2 length items:
               an over-length item (must_fix inserted at the front, else should_fix

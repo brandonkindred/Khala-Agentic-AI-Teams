@@ -46,7 +46,7 @@ from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
 from temporalio.exceptions import CancelledError
 
 from llm_service import LLMClientModel, with_model_override
-from llm_service.interface import LLMClient
+from llm_service.interface import LLMClient, LLMRateLimitError, LLMTemporaryError
 
 from .constants import (
     BRAND_SPEC_PROMPT_PATH,
@@ -258,6 +258,10 @@ def run_planning(
           sections, requirements analysis, and planning telemetry).
     Raises:
         PlanningError: If content planning fails.
+        LLMRateLimitError / LLMTemporaryError: transient LLM-transport failures
+            (including from the plan critic) propagate unwrapped so Temporal's
+            activity funnel can retry the stage instead of treating them as a
+            terminal PlanningError.
     """
     # Deferred import: see module docstring.
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
@@ -323,7 +327,9 @@ def run_planning(
             work_dir=work_dir,
             max_iterations=planning_max_iter,
         )
-    except BloggingError:
+    except (BloggingError, LLMRateLimitError, LLMTemporaryError):
+        # Transient LLM-transport errors (e.g. from the plan critic) must stay
+        # unwrapped so temporal.activities._run_stage can retry the stage.
         raise
     except Exception as e:
         if _is_external_cancellation(e):

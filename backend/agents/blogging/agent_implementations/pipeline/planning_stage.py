@@ -56,6 +56,9 @@ def run_planning_stage(
         PlanningError: when content planning fails (e.g. max parse retries).
         BloggingError: any other blogging-domain failure from the planning agent
             propagates unchanged.
+        LLMRateLimitError / LLMTemporaryError: transient LLM-transport failures
+            from ``run_planning`` (including the plan critic) propagate unwrapped
+            for Temporal retry.
         CancelledError: a Temporal-native cancellation propagates (never swallowed);
             a cancellation surfaced *while awaiting outline approval* instead
             short-circuits to the FAIL tuple above.
