@@ -37,6 +37,17 @@ class BrandingSessionStore(PostgresHelperMixin):
     def create(
         self, mission: BrandingMission, latest_output: TeamOutput
     ) -> tuple[str, BrandingSession]:
+        """Create a new branding session and persist it to Postgres.
+
+        Preconditions:
+            ``mission`` and ``latest_output`` are valid model instances.
+        Postconditions:
+            Inserts a row into ``branding_sessions`` with a generated UUID,
+            the serialized session JSON (including open questions derived from
+            ``mission``), and the current UTC timestamp. Returns
+            ``(session_id, session)`` where ``session_id`` is the persisted
+            UUID and ``session`` is the in-memory session object.
+        """
         questions = _build_open_questions(mission)
         session_id = str(uuid4())
         session = BrandingSession(mission=mission, questions=questions, latest_output=latest_output)
@@ -50,6 +61,15 @@ class BrandingSessionStore(PostgresHelperMixin):
 
     @timed_query(store="branding_sessions", op="get")
     def get(self, session_id: str) -> Optional[BrandingSession]:
+        """Load a branding session from Postgres by its session id.
+
+        Preconditions:
+            ``session_id`` is a non-empty string.
+        Postconditions:
+            Returns the deserialized ``BrandingSession`` if a matching row
+            exists; returns ``None`` if no row matches. Raises a Pydantic
+            validation error if the stored JSON cannot be parsed as a session.
+        """
         row = self._fetch_one(
             "SELECT session_json FROM branding_sessions WHERE session_id = %s",
             (session_id,),
@@ -60,7 +80,15 @@ class BrandingSessionStore(PostgresHelperMixin):
 
     @timed_query(store="branding_sessions", op="save")
     def save(self, session_id: str, session: BrandingSession) -> None:
-        """Persist mutations to an existing session."""
+        """Persist mutations to an existing session.
+
+        Preconditions:
+            ``session_id`` is a non-empty string; ``session`` is a valid
+            ``BrandingSession``.
+        Postconditions:
+            Updates ``session_json`` and ``updated_at`` for the matching row.
+            No-op (zero rows affected) when ``session_id`` is unknown.
+        """
         now = datetime.now(tz=timezone.utc)
         self._execute(
             "UPDATE branding_sessions SET session_json = %s, updated_at = %s WHERE session_id = %s",
@@ -77,7 +105,17 @@ session_store = BrandingSessionStore()
 
 
 def _parse_target_phase(raw: Optional[str]) -> Optional[BrandPhase]:
-    """Parse a target_phase string into a BrandPhase enum, or None."""
+    """Parse a target_phase string into a BrandPhase enum, or None.
+
+    Preconditions:
+        ``raw`` is a string or None.
+    Postconditions:
+        Returns ``None`` when ``raw`` is None or empty/falsy (optional phase).
+        Returns the matching ``BrandPhase`` when ``raw`` is a valid enum value.
+        Raises ``HTTPException(400)`` with detail
+        ``Invalid target_phase: {raw}`` when ``raw`` is non-empty but not a
+        valid ``BrandPhase`` value.
+    """
     if not raw:
         return None
     try:
