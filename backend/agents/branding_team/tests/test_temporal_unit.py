@@ -12,8 +12,8 @@ These tests do not need a live Temporal server. They mock at the ``temporalio`` 
 * ``BrandingWorkflow.run`` sequences the activities correctly — phase order,
   ``prior_outputs`` threading, integration gating, cancel, and failure handling
   (driven by monkeypatching ``workflow.execute_activity``); and
-* ``_submit_brand_run`` still routes through Temporal when enabled and falls back
-  to the in-process thread pool when not.
+* ``_submit_brand_run`` still routes through Temporal when enabled (and
+  surfaces a dispatch failure without falling through to the thread pool).
 """
 
 from __future__ import annotations
@@ -114,8 +114,8 @@ def test_start_worker_thread_no_op_when_disabled() -> None:
 
 
 def test_start_worker_thread_delegates_to_start_team_worker() -> None:
-    """The entrypoint contract (TEAM_TEMPORAL_WORKER_FUNC) resolves to a real,
-    idempotent function that boots the worker via shared.temporal."""
+    """The entrypoint contract (TEAM_TEMPORAL_WORKER_FUNC) resolves to a real
+    function that boots the worker via shared.temporal."""
     import shared.temporal
     from branding_team.temporal import worker as worker_mod
 
