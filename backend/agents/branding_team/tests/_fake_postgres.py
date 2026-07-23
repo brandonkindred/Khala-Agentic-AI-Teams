@@ -21,6 +21,7 @@ dispatch table and the module list passed to ``install_fake_postgres``.
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from typing import Any
 
 from shared.postgres.fake import (
@@ -252,6 +253,12 @@ def _dispatch() -> DispatchTable:
         )
 
     def handle_join_conv_by_id(cur: FakeCursor, params: tuple) -> None:
+        """Emulate get_state LEFT JOIN (conversation + messages by conversation_id).
+
+        Params: ``(conversation_id,)``.
+        Returns dict rows with brand/mission/output plus message fields
+        (null-role placeholder when the conversation has no messages).
+        """
         (cid,) = params
         conv = cur.db["conversations"].get(cid)
         if conv is None:
@@ -288,6 +295,12 @@ def _dispatch() -> DispatchTable:
         )
 
     def handle_join_conv_by_brand(cur: FakeCursor, params: tuple) -> None:
+        """Emulate get_by_brand_id LEFT JOIN (conversation + messages by brand_id).
+
+        Params: ``(brand_id,)``.
+        Returns dict rows with conversation_id/mission/output plus message fields
+        (null-role placeholder when empty); empty list when no conversation matches.
+        """
         (brand_id,) = params
         conv = next(
             (c for c in cur.db["conversations"].values() if c["brand_id"] == brand_id),
@@ -349,6 +362,12 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("with conv as") and "insert into branding_conv_messages" in norm
 
     def handle_cte_insert_message(cur: FakeCursor, params: tuple) -> None:
+        """Emulate append_message CTE (bump updated_at + insert message).
+
+        Params: ``(updated_at, conversation_id, role, content, message_timestamp)``.
+        Returns ``{'id': new_message_id}`` on success, or None/rowcount 0 if the
+        conversation does not exist.
+        """
         ts, cid, role, content, ts2 = params
         conv = cur.db["conversations"].get(cid)
         if conv is None:
@@ -373,6 +392,11 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("update branding_conversations set mission_json")
 
     def handle_update_conv_mission(cur: FakeCursor, params: tuple) -> None:
+        """Emulate update_mission SET mission_json + updated_at.
+
+        Params: ``(mission_json, updated_at, conversation_id)``.
+        Sets ``rowcount`` to 1 on match, else 0.
+        """
         mission, ts, cid = params
         conv = cur.db["conversations"].get(cid)
         if conv:
@@ -386,6 +410,11 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("update branding_conversations set latest_output_json")
 
     def handle_update_conv_output(cur: FakeCursor, params: tuple) -> None:
+        """Emulate update_output SET latest_output_json + updated_at.
+
+        Params: ``(latest_output_json, updated_at, conversation_id)``.
+        Sets ``rowcount`` to 1 on match, else 0.
+        """
         output, ts, cid = params
         conv = cur.db["conversations"].get(cid)
         if conv:
@@ -399,6 +428,11 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("update branding_conversations set brand_id")
 
     def handle_update_conv_brand(cur: FakeCursor, params: tuple) -> None:
+        """Emulate set_brand SET brand_id + updated_at.
+
+        Params: ``(brand_id, updated_at, conversation_id)``.
+        Sets ``rowcount`` to 1 on match, else 0.
+        """
         brand_id, ts, cid = params
         conv = cur.db["conversations"].get(cid)
         if conv:
@@ -409,9 +443,22 @@ def _dispatch() -> DispatchTable:
             cur.rowcount = 0
 
     def match_list_conversations(norm: str) -> bool:
-        return "from branding_conversations c" in norm and "order by c.updated_at desc" in norm
+        return (
+            norm.startswith(
+                "select c.conversation_id, c.brand_id, c.created_at, c.updated_at,"
+                " count(m.id) as message_count"
+            )
+            and "from branding_conversations c" in norm
+            and "order by c.updated_at desc" in norm
+        )
 
     def handle_list_conversations(cur: FakeCursor, params: tuple) -> None:
+        """Emulate list_conversations GROUP BY summary query.
+
+        Params: ``(brand_id,)`` when filtered, else ``()``.
+        Returns summary dict rows ordered by ``updated_at`` descending, each
+        with ``message_count`` from ``conv_messages``.
+        """
         target_brand = params[0] if params else None
         convs = sorted(
             cur.db["conversations"].values(),
@@ -420,26 +467,28 @@ def _dispatch() -> DispatchTable:
         )
         if target_brand is not None:
             convs = [c for c in convs if c["brand_id"] == target_brand]
-        rows = []
-        for c in convs:
-            count = sum(
-                1 for m in cur.db["conv_messages"] if m["conversation_id"] == c["conversation_id"]
-            )
-            rows.append(
-                {
-                    "conversation_id": c["conversation_id"],
-                    "brand_id": c["brand_id"],
-                    "created_at": c["created_at"],
-                    "updated_at": c["updated_at"],
-                    "message_count": count,
-                }
-            )
+        msg_counts = Counter(m["conversation_id"] for m in cur.db["conv_messages"])
+        rows = [
+            {
+                "conversation_id": c["conversation_id"],
+                "brand_id": c["brand_id"],
+                "created_at": c["created_at"],
+                "updated_at": c["updated_at"],
+                "message_count": msg_counts[c["conversation_id"]],
+            }
+            for c in convs
+        ]
         cur.set_all(rows)
 
     def match_select_conv_brand_id(norm: str) -> bool:
         return norm.startswith("select brand_id from branding_conversations where conversation_id")
 
     def handle_select_conv_brand_id(cur: FakeCursor, params: tuple) -> None:
+        """Emulate get_conversation_brand_id SELECT.
+
+        Params: ``(conversation_id,)``.
+        Returns ``{'brand_id': ...}`` when the conversation exists, else None.
+        """
         (cid,) = params
         conv = cur.db["conversations"].get(cid)
         # Match ``dict_row``: a row dict when the conversation exists, else None.
@@ -516,11 +565,11 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
 
     Preconditions:
         ``monkeypatch`` is a pytest ``MonkeyPatch`` (or compatible).
+        All store classes reach Postgres only through ``PostgresHelperMixin``
+        in ``branding_team._db`` (their modules are not patched here).
     Postconditions:
         ``branding_team._db.get_conn`` is patched to yield a shared ``FakeConn``
         backed by the returned default db and branding's SQL dispatch table.
-        All three store classes reach Postgres only through
-        ``PostgresHelperMixin`` in ``_db``, so their modules are not patched.
         ``api.state`` is patched only if it still exposes ``get_conn``.
     """
     import branding_team._db as db_mod
