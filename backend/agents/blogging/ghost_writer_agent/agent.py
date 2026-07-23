@@ -206,8 +206,9 @@ def _default_sufficiency_fallback(_exc: Exception) -> Dict[str, Any]:
     Preconditions:
         - ``_exc`` is the failure that exhausted retries or was unexpected.
     Postconditions:
-        - Returns a fresh default-dict with ``sufficient``/``no_experience`` false
-          and ``story_context``/``missing`` null (never ``None``).
+        - Returns a fresh default result dictionary with ``sufficient``/
+          ``no_experience`` false and ``story_context``/``missing`` null
+          (never ``None``). Plain ``dict``, not ``collections.defaultdict``.
     """
     return {
         "sufficient": False,
@@ -327,7 +328,19 @@ class GhostWriterElicitationAgent:
         ]
 
     def _find_gaps_via_llm(self, content_plan: ContentPlan) -> List[StoryGap]:
-        """Fallback: use LLM to identify story gaps when plan lacks story_opportunity fields."""
+        """
+        Fallback: use LLM to identify story gaps when plan lacks story_opportunity fields.
+
+        Preconditions:
+            - ``content_plan`` is a populated ``ContentPlan``.
+        Postconditions:
+            - Returns at most 3 ``StoryGap`` objects.
+            - Uses ``call_json_with_retry`` with ``max_attempts=2``.
+            - On parse exhaustion, unexpected helper errors, or transient LLM
+              transport errors, returns ``[]`` via ``_empty_list_fallback``.
+            - Non-object array items are skipped; missing/blank ``seed_question``
+              values get a generic seed. Field values are coerced to ``str``.
+        """
         outline_text = self._plan_to_text(content_plan)
         prompt = f"Content plan:\n\n{outline_text}\n\nIdentify story gaps."
 
@@ -358,13 +371,13 @@ class GhostWriterElicitationAgent:
             if not isinstance(item, dict):
                 logger.warning("Ghost writer: skipping non-object gap item: %r", item)
                 continue
-            ctx = item.get("section_context", "")
-            seed = (item.get("seed_question") or "").strip()
+            ctx = str(item.get("section_context") or "")
+            seed = str(item.get("seed_question") or "").strip()
             if not seed:
                 seed = f"I'd love to hear about a time you dealt with {ctx.lower().rstrip('.')}. What comes to mind?"
             gaps.append(
                 StoryGap(
-                    section_title=item.get("section_title", ""),
+                    section_title=str(item.get("section_title") or ""),
                     section_context=ctx,
                     seed_question=seed,
                 )
@@ -534,7 +547,20 @@ class GhostWriterElicitationAgent:
         gap: StoryGap,
         conversation: List[Dict[str, str]],
     ) -> Dict[str, Any]:
-        """Use the LLM evaluator to assess whether the conversation has enough material."""
+        """
+        Use the LLM evaluator to assess whether the conversation has enough material.
+
+        Preconditions:
+            - ``gap`` identifies the section under discussion.
+            - ``conversation`` is a list of ``{"role", "content"}`` turns.
+        Postconditions:
+            - Returns a dict with keys ``sufficient``, ``no_experience``,
+              ``story_context``, and ``missing``.
+            - Uses ``call_json_with_retry``; on parse exhaustion, unexpected
+              helper errors, transient LLM transport errors, or a non-dict
+              payload, returns ``_default_sufficiency_fallback`` so the
+              interview loop can continue safely.
+        """
         system = (
             _EVALUATE_SUFFICIENCY_SYSTEM
             + f"\n\nSection: {gap.section_title}\nContext: {gap.section_context}"

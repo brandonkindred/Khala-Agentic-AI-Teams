@@ -401,6 +401,33 @@ def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
     assert out[0].seed_question == "Got a moment?"
 
 
+def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch) -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    _patch_agent(
+        monkeypatch,
+        [
+            json.dumps(
+                [
+                    {
+                        "section_title": None,
+                        "section_context": 42,
+                        "seed_question": None,
+                    }
+                ]
+            )
+        ],
+    )
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    out = agent._find_gaps_via_llm(_content_plan())
+    assert len(out) == 1
+    assert out[0].section_title == ""
+    assert out[0].section_context == "42"
+    assert "42" in out[0].seed_question
+
+
 def test_ghost_find_gaps_via_llm_rate_limit_falls_back_empty(monkeypatch) -> None:
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
