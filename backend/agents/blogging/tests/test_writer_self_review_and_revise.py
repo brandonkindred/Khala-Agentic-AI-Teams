@@ -272,3 +272,60 @@ def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     with pytest.raises(LLMTemporaryError, match="temporary"):
         a._llm_self_review("orig")
+
+
+def test_writer_fix_deterministic_violations_soft_fails_permanent_error(
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMPermanentError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMPermanentError("permanent")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with caplog.at_level(logging.ERROR):
+        out = a._fix_deterministic_violations("orig", ["x"])
+    assert out == "orig"
+    assert any("Deterministic fix LLM call failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
+
+
+def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMPermanentError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMPermanentError("permanent")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with caplog.at_level(logging.ERROR):
+        out = a._llm_self_review("orig")
+    assert out == "orig"
+    assert any("LLM self-review failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
+
+
+def test_writer_llm_self_review_soft_fails_json_decode(monkeypatch, caplog) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, prompt, system_prompt="": "[not-valid-json",
+    )
+    with caplog.at_level(logging.ERROR):
+        out = a._llm_self_review("orig")
+    assert out == "orig"
+    assert any("LLM self-review failed" in r.message for r in caplog.records)
