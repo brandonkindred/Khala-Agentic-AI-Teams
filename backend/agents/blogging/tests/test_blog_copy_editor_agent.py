@@ -271,6 +271,33 @@ def test_copy_editor_transient_error_reraises(monkeypatch, kind) -> None:
         agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
 
 
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_copy_editor_event_loop_exception_unwraps_transient(monkeypatch, kind) -> None:
+    """strands EventLoopException must re-raise the unwrapped transient cause."""
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+    cause = err_cls("transient outage")
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise EventLoopException(cause)
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+    with pytest.raises(err_cls) as exc_info:
+        agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+    assert exc_info.value is cause
+
+
 def test_copy_editor_unexpected_error_degrades_to_fallback(monkeypatch) -> None:
     """A non-transient, non-JSON LLM/programming error degrades to a manual-review
     fallback (approved, no feedback) instead of crashing the draft stage."""

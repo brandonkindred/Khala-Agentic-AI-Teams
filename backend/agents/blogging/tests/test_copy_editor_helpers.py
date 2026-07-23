@@ -369,16 +369,14 @@ def test_invoke_llm_wrapped_non_transient_error_degrades_to_fallback(monkeypatch
     assert data["approved"] is True
 
 
-def test_invoke_llm_empty_json_object_uses_final_fallback(monkeypatch) -> None:
-    """A parseable but empty ({}) response falls through to the final fallback dict."""
+def test_invoke_llm_empty_json_object_returns_parsed_dict(monkeypatch) -> None:
+    """A parseable but empty ({}) response is returned as-is; run() supplies summary defaults."""
     agent = _make_agent()
     _patch_agent(monkeypatch, lambda p: "{}")
 
     data = agent._invoke_editor_llm("base")
 
-    assert "could not parse" in data["summary"].lower()
-    assert data["approved"] is True
-    assert data["feedback_items"] == []
+    assert data == {}
 
 
 # --------------------------------------------------------------------------- #
