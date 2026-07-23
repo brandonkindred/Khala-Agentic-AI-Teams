@@ -25,7 +25,7 @@ from agents.blogging.shared.content_plan import ContentPlan
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
-from llm_service import LLMJsonParseError, extract_json_from_response
+from llm_service import extract_json_from_response
 
 from .models import StoryElicitationResult, StoryGap
 
@@ -298,43 +298,39 @@ class GhostWriterElicitationAgent:
         outline_text = self._plan_to_text(content_plan)
         prompt = f"Content plan:\n\n{outline_text}\n\nIdentify story gaps."
 
-        agent = Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
-        for attempt in range(2):
-            try:
-                working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
-                result = agent(working_prompt)
-                data = extract_json_from_response(str(result).strip())
-                if not isinstance(data, list):
-                    logger.warning("Ghost writer: no JSON array in gap-finding response")
-                    return []
-                gaps = []
-                for item in data[:3]:
-                    ctx = item.get("section_context", "")
-                    seed = (item.get("seed_question") or "").strip()
-                    if not seed:
-                        seed = f"I'd love to hear about a time you dealt with {ctx.lower().rstrip('.')}. What comes to mind?"
-                    gaps.append(
-                        StoryGap(
-                            section_title=item.get("section_title", ""),
-                            section_context=ctx,
-                            seed_question=seed,
-                        )
-                    )
-                logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
-                return gaps
-            except LLMJsonParseError as e:  # pragma: no cover - JSON parse retry/exit branch in gap-finder; covered by integration tests with a flaky model.
-                if attempt == 0:
-                    logger.warning("Ghost writer gap-finding JSON parse failed, retrying: %s", e)
-                    continue
-                logger.warning("Ghost writer gap-finding JSON parse failed after retry: %s", e)
-                return []
-            except Exception as e:  # pragma: no cover - generic LLM-failure retry/exit branch; covered by integration tests with a flaky model.
-                logger.warning("Ghost writer gap-finding error: %s", e)
-                if attempt == 0:
-                    time.sleep(2.0)
-                    continue
-                return []
-        return []
+        def _agent_factory():
+            return Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
+
+        def _fallback(_exc: Exception) -> list:
+            return []
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt,
+            max_attempts=2,
+            strict_json_suffix=_JSON_RETRY_SUFFIX,
+            on_exhausted=_fallback,
+            on_unexpected_error=_fallback,
+            logger=logger,
+        )
+        if not isinstance(data, list):
+            logger.warning("Ghost writer: no JSON array in gap-finding response")
+            return []
+        gaps = []
+        for item in data[:3]:
+            ctx = item.get("section_context", "")
+            seed = (item.get("seed_question") or "").strip()
+            if not seed:
+                seed = f"I'd love to hear about a time you dealt with {ctx.lower().rstrip('.')}. What comes to mind?"
+            gaps.append(
+                StoryGap(
+                    section_title=item.get("section_title", ""),
+                    section_context=ctx,
+                    seed_question=seed,
+                )
+            )
+        logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
+        return gaps
 
     # ------------------------------------------------------------------
     # Interview loop
