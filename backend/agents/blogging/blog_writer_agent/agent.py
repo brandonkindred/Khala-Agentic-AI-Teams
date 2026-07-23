@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Union
 
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
 from agents.blogging.blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import PlanningInput, PlanningPhaseResult
 from agents.blogging.shared.content_planning_loop import (
     complete_plan_json,
@@ -135,7 +136,7 @@ def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
     logger.info("Draft written to %s", p)
 
 
-class BlogWriterAgent:
+class BlogWriterAgent(_BlogAgentBase):
     """
     Expert agent that generates a blog post draft from a research document and outline,
     following a provided brand and writing style guide.
@@ -153,8 +154,7 @@ class BlogWriterAgent:
             - llm_client is not None.
         Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
-        assert llm_client is not None, "llm_client is required"
-        self._model = llm_client
+        super().__init__(llm_client)
         # ``_call_text`` produces the ``---DRAFT---`` hybrid format (JSON
         # marker line + Markdown body), which only works when the underlying
         # adapter is in text mode — JSON mode would force a single JSON object
