@@ -83,9 +83,6 @@ class BlogPlanCriticAgent:
     ) -> PlanCriticReport:
         """Evaluate ``plan`` and return a ``PlanCriticReport``.
 
-        Transient LLM errors propagate to the caller; JSON parse exhaustion and
-        other unexpected errors fall back to a FAIL report.
-
         Parameters:
             plan: the ContentPlan to evaluate.
             brand_spec_prompt: rendered brand spec text (author-owned source of truth).
@@ -94,6 +91,22 @@ class BlogPlanCriticAgent:
             on_llm_request: optional progress callback.
             work_dir: when provided, persists the report as JSON for inspection.
             artifact_name: override for the persisted filename (useful per iteration).
+
+        Preconditions:
+            - ``self._model`` is a usable LLM client (enforced in ``__init__``).
+            - ``plan`` is a ``ContentPlan``; ``brand_spec_prompt`` and
+              ``writing_guidelines`` are strings (empty is tolerated but low-signal).
+        Postconditions:
+            - Always returns a ``PlanCriticReport`` (never ``None``); ``status`` is
+              normalized to ``"PASS"`` or ``"FAIL"`` and ``approved`` is reconciled
+              with ``status`` and ``must_fix`` violations.
+            - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``)
+              propagates unwrapped so the caller (or Temporal) can retry; JSON parse
+              exhaustion and other unexpected non-transient errors fail closed via
+              ``on_exhausted`` / ``on_unexpected_error`` hooks with a ``status="FAIL"``
+              fallback report rather than raising.
+            - When ``work_dir`` is set and ``write_artifact`` is available, the report is
+              persisted as ``artifact_name`` (default ``plan_critic_report.json``).
         """
         user_prompt = PLAN_CRITIC_USER_TEMPLATE.format(
             brand_spec_prompt=(brand_spec_prompt or "").strip(),
