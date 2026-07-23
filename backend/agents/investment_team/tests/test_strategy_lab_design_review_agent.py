@@ -429,7 +429,7 @@ def test_issue_with_missing_fields_is_tolerated(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("ready_value", ["false", "False", "FALSE", "no", "", 0, 1, "yes", None])
+@pytest.mark.parametrize("ready_value", ["no", "", 0, 1, "yes", None])
 def test_ready_non_bool_values_default_to_false(
     monkeypatch: pytest.MonkeyPatch, ready_value
 ) -> None:
@@ -451,6 +451,16 @@ def test_ready_true_string_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
     critique = DesignReviewAgent().run(_spec(), readiness_results=[])
 
     assert critique.ready is True
+
+
+def test_ready_false_string_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case-insensitive literal ``"false"`` (any case) is accepted as ``False``."""
+    payload = json.dumps({"ready": "FALSE", "rationale": "ok", "issues": []})
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is False
 
 
 def test_ready_true_with_critical_issue_is_demoted(
