@@ -18,9 +18,10 @@ from uuid import uuid4
 
 from psycopg.types.json import Json
 
-from branding_team._db import PostgresHelperMixin
-from branding_team.models import BrandingMission, TeamOutput
 from shared.postgres.metrics import timed_query
+
+from .._db import PostgresHelperMixin
+from ..models import BrandingMission, TeamOutput
 
 logger = logging.getLogger(__name__)
 
@@ -291,30 +292,23 @@ class BrandingConversationStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="list_conversations")
     def list_conversations(self, brand_id: Optional[str] = None) -> List[ConversationSummary]:
+        params: list[Any] = []
+        where_clause = ""
         if brand_id:
-            rows = self._fetch_all(
-                """
-                SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at,
-                       COUNT(m.id) AS message_count
-                FROM branding_conversations c
-                LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id
-                WHERE c.brand_id = %s
-                GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
-                ORDER BY c.updated_at DESC
-                """,
-                (brand_id,),
-            )
-        else:
-            rows = self._fetch_all(
-                """
-                SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at,
-                       COUNT(m.id) AS message_count
-                FROM branding_conversations c
-                LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id
-                GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
-                ORDER BY c.updated_at DESC
-                """
-            )
+            where_clause = "WHERE c.brand_id = %s"
+            params.append(brand_id)
+        rows = self._fetch_all(
+            f"""
+            SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at,
+                   COUNT(m.id) AS message_count
+            FROM branding_conversations c
+            LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id
+            {where_clause}
+            GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
+            ORDER BY c.updated_at DESC
+            """,
+            params,
+        )
         return [
             ConversationSummary(
                 conversation_id=str(r["conversation_id"]),
