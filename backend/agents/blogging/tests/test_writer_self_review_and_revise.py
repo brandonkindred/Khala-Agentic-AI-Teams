@@ -154,6 +154,33 @@ def test_writer_format_feedback_item_line() -> None:
     assert "Suggestion:" not in line2
 
 
+def test_writer_format_feedback_item_line_missing_required_raises() -> None:
+    """Duck-typed items missing severity/category/issue raise ValueError, not AttributeError."""
+    from types import SimpleNamespace
+
+    a = _make_agent_with_guidelines()
+    incomplete = SimpleNamespace(location="para 1", suggestion="fix it")
+    with pytest.raises(ValueError, match="missing required fields"):
+        a._format_feedback_item_line(incomplete, 1)
+
+
+def test_writer_format_feedback_item_line_duck_typed() -> None:
+    """Non-FeedbackItem objects with the required attributes format successfully."""
+    from types import SimpleNamespace
+
+    a = _make_agent_with_guidelines()
+    item = SimpleNamespace(
+        severity="must_fix",
+        category="clarity",
+        issue="unclear antecedent",
+        location="para 3",
+        suggestion="name the subject",
+    )
+    line = a._format_feedback_item_line(item, 2)
+    assert line.startswith("2. [must_fix] clarity [para 3]: unclear antecedent")
+    assert "Suggestion: name the subject" in line
+
+
 def test_writer_revise_empty_draft() -> None:
     """revise() returns empty draft unchanged."""
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
