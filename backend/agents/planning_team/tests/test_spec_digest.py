@@ -360,6 +360,33 @@ def test_map_reduce_compacts_when_complete_present_without_context(monkeypatch):
     assert mapped == ["COMPACTED"]
 
 
+def test_map_reduce_complete_only_compaction_failure_preserves_full_section():
+    """Failing complete-only compaction must map the full section, never a truncate."""
+
+    class FailCompleteOnly:
+        def complete(self, *a, **k):
+            raise RuntimeError("boom")
+
+    # Large unbroken section → one oversized section; default chunk sizing + failing
+    # complete would previously return a truncated aggregate from compact_text.
+    text = "z" * 23000
+    mapped = []
+
+    def _map(section, _llm, idx, total):
+        mapped.append(len(section))
+        return {"ok": 1}
+
+    map_reduce(
+        text,
+        FailCompleteOnly(),
+        content_description="spec",
+        map_fn=_map,
+        reduce_fn=_identity_reduce,
+        fallback={},
+    )
+    assert mapped == [23000]
+
+
 def test_map_reduce_compact_failure_uses_uncompacted_section(monkeypatch):
     """A raising compact_text must not bubble out; the section is mapped uncompacted."""
     llm = MagicMock()

@@ -285,8 +285,9 @@ def _compact_uncached(
         - Returns ``(result, cacheable)``. ``cacheable`` is ``True`` only when
           ``result`` is a genuine LLM compaction of the full input; it is
           ``False`` for every fallback path (LLM failure, empty compaction, or a
-          chunked run in which any chunk fell back to a raw slice), so a degraded
-          result is retried on the next call rather than frozen in the cache.
+          chunked run in which any chunk failed or returned empty). On every
+          fallback path ``result`` is the original ``text`` so callers never
+          receive a silently truncated aggregate.
     """
     overage = len(text) - max_chars
     logger.info(
@@ -328,7 +329,6 @@ def _compact_uncached(
         )
 
         compacted_parts: List[str] = []
-        all_chunks_ok = True
         for i, chunk in enumerate(chunks):
             try:
                 part = _compact_single(
@@ -340,20 +340,24 @@ def _compact_uncached(
                 if part:
                     compacted_parts.append(part)
                 else:
-                    # Empty compaction for this chunk — fall back to a raw slice
-                    # and mark the aggregate un-cacheable so it is retried.
-                    all_chunks_ok = False
-                    compacted_parts.append(chunk[:per_chunk_target])
+                    # Empty compaction for any chunk — return the original full
+                    # text so callers never receive a silently truncated join.
+                    logger.warning(
+                        "Chunk %d/%d compaction returned empty for %s, returning original",
+                        i + 1,
+                        num_chunks,
+                        content_description,
+                    )
+                    return text, False
             except Exception:
                 logger.warning(
-                    "Chunk %d/%d compaction failed for %s, using truncated chunk",
+                    "Chunk %d/%d compaction failed for %s, returning original text",
                     i + 1,
                     num_chunks,
                     content_description,
                     exc_info=True,
                 )
-                all_chunks_ok = False
-                compacted_parts.append(chunk[:per_chunk_target])
+                return text, False
 
         result = "\n\n".join(compacted_parts)
         logger.info(
@@ -363,7 +367,7 @@ def _compact_uncached(
             num_chunks,
             max_chars,
         )
-        return result, all_chunks_ok
+        return result, True
 
     except Exception:
         logger.warning(
