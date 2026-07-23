@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
@@ -61,7 +62,7 @@ def _fallback_compliance_report(exc: Exception) -> ComplianceReport:
     )
 
 
-class BlogComplianceAgent:
+class BlogComplianceAgent(_BlogAgentBase):
     """
     Expert agent that checks a draft against the brand spec and produces a compliance report.
 
@@ -69,8 +70,7 @@ class BlogComplianceAgent:
     """
 
     def __init__(self, llm_client: Any) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self._model = llm_client
+        super().__init__(llm_client)
 
     def run(
         self,
