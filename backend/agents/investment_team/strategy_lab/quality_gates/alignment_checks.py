@@ -339,7 +339,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         finding's ``passed`` value, and whose ``findings`` /
         ``gate_results`` lists are aligned 1:1 by index.
       Invariants: no I/O; no LLM call unless a near-miss adjudicator is
-        supplied AND a check #7 predicate misses within the near-miss
+        supplied AND a check #6 predicate misses within the near-miss
         tolerance.
     """
 
@@ -359,7 +359,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         Pre: ``initial_capital > 0``; ``market_data`` is keyed by symbol
         and contains the bars used by the backtest that produced
         ``trades``. ``near_miss_adjudicator`` is consulted only when
-        :func:`_near_miss_pct` is non-zero and a check #7 predicate misses
+        :func:`_near_miss_pct` is non-zero and a check #6 predicate misses
         within tolerance.
         Post: returned :class:`AlignmentCheckResult` carries one or more
         :class:`AlignmentFinding`s per trade and matching
@@ -412,7 +412,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             pending_near_misses: List[_PendingNearMiss] = []
 
             for trade in trades:
-                # The six checks. Each yields zero-or-more findings
+                # The seven checks. Each yields zero-or-more findings
                 # (and matching gate_result rows). Critical failures
                 # drive ``aligned=False``.
                 self._check_universe(spec, trade, findings, gate_results)
@@ -1062,7 +1062,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         gate_results.append(self._emit_for_finding(finding))
 
     # ------------------------------------------------------------------
-    # Check 8 — signal-exit correlation
+    # Check 7 — signal-exit correlation
     # ------------------------------------------------------------------
     def _check_signal_exit(
         self,
