@@ -246,7 +246,7 @@ def test_async_close_pool_swallows_client_close_errors(monkeypatch):
     monkeypatch.setattr(shared.http, "_sync_close_async_client", _boom)
     close_async_pool()  # must not raise
     # Client could not be closed; remains in pool (not falsely cleared).
-    assert shared.http._async_clients == {15.0: client}  # noqa: SLF001
+    assert shared.http._async_clients == {(15.0, 0): client}  # noqa: SLF001
     assert not client.is_closed
 
 
@@ -261,6 +261,27 @@ def test_async_close_pool_leaves_clients_open_when_loop_running(caplog):
     assert client in shared.http._async_clients.values()  # noqa: SLF001
     assert not client.is_closed
     assert any("event loop is running" in record.message.lower() for record in caplog.records)
+
+
+def test_async_clients_isolated_across_sequential_event_loops():
+    """Sequential asyncio.run calls must not reuse an AsyncClient across loops."""
+
+    async def _grab() -> httpx.AsyncClient:
+        return get_pooled_async_client(30.0)
+
+    first = asyncio.run(_grab())
+    second = asyncio.run(_grab())
+    assert first is not second
+    assert not first.is_closed
+    assert not second.is_closed
+
+
+def test_async_same_loop_reuses_client():
+    async def _twice() -> tuple[httpx.AsyncClient, httpx.AsyncClient]:
+        return get_pooled_async_client(30.0), get_pooled_async_client(30.0)
+
+    a, b = asyncio.run(_twice())
+    assert a is b
 
 
 def test_async_pooled_client_applies_limits_and_timeout():

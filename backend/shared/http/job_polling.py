@@ -236,12 +236,16 @@ async def async_poll_until_terminal(
     Postconditions:
         - Returns the first status dict for which
           ``status.get(status_key)`` is in ``terminal_statuses``, unmodified.
-        - If ``status_fn()`` returns None, or raises any exception, on any
-          call, immediately returns ``{status_key: "failed", "error":
-          "Failed to get status"}`` — no further polling, no sleep.
-        - If no terminal status is observed within ``total_timeout`` seconds,
-          returns ``{status_key: "failed", "error": f"Timed out waiting for
-          {log_context}"}``.
+        - If ``status_fn()`` returns None, or raises any exception other than
+          an overall-budget ``asyncio.TimeoutError``, on any call, immediately
+          returns ``{status_key: "failed", "error": "Failed to get status"}``
+          — no further polling, no sleep.
+        - If no terminal status is observed within ``total_timeout`` seconds
+          of wall time — including time spent awaiting ``status_fn``,
+          ``on_poll``, and the inter-poll sleep — returns
+          ``{status_key: "failed", "error": f"Timed out waiting for
+          {log_context}"}``. Each await is bounded by the remaining budget via
+          ``asyncio.wait_for``.
         - Never raises; never sleeps past a terminal/None/exception
           short-circuit.
         - Uses ``asyncio.sleep`` between non-terminal polls.
@@ -249,9 +253,14 @@ async def async_poll_until_terminal(
     assert poll_interval > 0, f"poll_interval must be positive, got {poll_interval!r}"
     assert total_timeout > 0, f"total_timeout must be positive, got {total_timeout!r}"
     start = time.monotonic()
-    while (time.monotonic() - start) < total_timeout:
+    while True:
+        remaining = total_timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
         try:
-            status = await status_fn()
+            status = await asyncio.wait_for(status_fn(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
         except Exception as e:
             logger.warning("%s status_fn raised: %s", log_context, e)
             return {status_key: "failed", "error": "Failed to get status"}
@@ -260,6 +269,23 @@ async def async_poll_until_terminal(
         if status.get(status_key) in terminal_statuses:
             return status
         if on_poll is not None:
-            await on_poll(status)
-        await asyncio.sleep(poll_interval)
-    return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
+            remaining = total_timeout - (time.monotonic() - start)
+            if remaining <= 0:
+                return {
+                    status_key: "failed",
+                    "error": f"Timed out waiting for {log_context}",
+                }
+            try:
+                await asyncio.wait_for(on_poll(status), timeout=remaining)
+            except asyncio.TimeoutError:
+                return {
+                    status_key: "failed",
+                    "error": f"Timed out waiting for {log_context}",
+                }
+        remaining = total_timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
+        try:
+            await asyncio.wait_for(asyncio.sleep(poll_interval), timeout=remaining)
+        except asyncio.TimeoutError:
+            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}

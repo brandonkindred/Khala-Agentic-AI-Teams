@@ -8,15 +8,16 @@ connection churn and needless object allocation under concurrency.
 
 This module exposes a small set of process-wide, thread-safe pooled
 ``httpx.Client`` and ``httpx.AsyncClient`` instances so callers reuse keep-alive
-connections instead of re-establishing them.  Clients are bucketed by timeout so
-each call site keeps its existing timeout semantics while still sharing one
-client per bucket.  Both sync and async pools share ``DEFAULT_LIMITS`` and the
-same timeout-bucket scheme.
+connections instead of re-establishing them.  Sync clients are bucketed by
+timeout; async clients are bucketed by ``(timeout, running event loop)`` so a
+client's keep-alive transport is never reused after its owning loop is closed.
+Both pools share ``DEFAULT_LIMITS`` and the same timeout-rounding scheme.
 
 Invariants:
-    - Exactly one ``httpx.Client`` (sync) or ``httpx.AsyncClient`` (async) exists
-      per (rounded) timeout bucket for the lifetime of the process (or until
-      :func:`close_pool` / :func:`close_async_pool`).
+    - Exactly one ``httpx.Client`` exists per (rounded) timeout bucket for the
+      lifetime of the process (or until :func:`close_pool`).
+    - Exactly one ``httpx.AsyncClient`` exists per ``(timeout bucket, event
+      loop)`` for the lifetime of that loop (or until :func:`close_async_pool`).
     - All accessors are safe to call from multiple threads concurrently.
     - Idle keep-alive sockets are recycled after ``keepalive_expiry`` seconds
       (``HTTP_KEEPALIVE_EXPIRY_S``, default ``15.0``) so the client drops them
@@ -193,26 +194,44 @@ def _sync_close_async_client(client: httpx.AsyncClient) -> None:
 
 
 _async_lock = threading.Lock()
-_async_clients: dict[float, httpx.AsyncClient] = {}
+# Keyed by (timeout bucket, id(running loop) or 0 when no loop is running).
+_async_clients: dict[tuple[float, int], httpx.AsyncClient] = {}
+
+
+def _running_loop_key() -> int:
+    """Stable pool key fragment for the current asyncio event loop.
+
+    Postconditions:
+        - Returns ``id(loop)`` when a loop is running in this thread.
+        - Returns ``0`` when no loop is running (callers that open a client
+          outside a loop, then enter one, get a separate in-loop client).
+    """
+    try:
+        return id(asyncio.get_running_loop())
+    except RuntimeError:
+        return 0
 
 
 def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
     """Return a shared, connection-pooled ``httpx.AsyncClient`` for ``timeout``.
 
-    The client is created lazily on first use for a given timeout bucket and
-    reused thereafter. Callers must NOT close the returned client or use it as
-    a context manager — it is shared process-wide and closed via
-    :func:`close_async_pool` at shutdown.
+    The client is created lazily on first use for a given ``(timeout bucket,
+    running event loop)`` key and reused thereafter within that loop. Callers
+    must NOT close the returned client or use it as a context manager — it is
+    shared for that loop and closed via :func:`close_async_pool` at shutdown.
 
     Preconditions:
         - ``timeout`` is a positive, finite number of seconds.
     Postconditions:
         - Returns a live (non-closed) ``httpx.AsyncClient`` configured with
           ``DEFAULT_LIMITS`` and the requested timeout.
-        - Repeated calls with timeouts in the same bucket return the *same*
-          instance.
+        - Repeated calls with timeouts in the same bucket *on the same running
+          event loop* return the *same* instance.
+        - Calls from a different event loop (including sequential
+          ``asyncio.run`` invocations) receive a distinct client, avoiding
+          ``RuntimeError: Event loop is closed`` on keep-alive reuse.
     """
-    key = _bucket(timeout)
+    key = (_bucket(timeout), _running_loop_key())
     with _async_lock:
         client = _async_clients.get(key)
         if client is None or client.is_closed:

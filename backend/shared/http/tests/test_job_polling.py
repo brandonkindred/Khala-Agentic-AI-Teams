@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -416,6 +417,23 @@ async def test_async_poll_rejects_non_positive_total_timeout():
 
     with pytest.raises(AssertionError):
         await async_poll_until_terminal(_status, total_timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_async_poll_times_out_when_status_fn_stalls():
+    """A status_fn that never returns must still honor total_timeout via wait_for."""
+
+    async def _stall():
+        await asyncio.sleep(60.0)
+        return {"status": "running"}
+
+    result = await async_poll_until_terminal(
+        _stall,
+        poll_interval=0.01,
+        total_timeout=0.05,
+        log_context="stalled job",
+    )
+    assert result == {"status": "failed", "error": "Timed out waiting for stalled job"}
 
 
 def test_default_terminal_statuses_shared_singleton_for_async_default():
