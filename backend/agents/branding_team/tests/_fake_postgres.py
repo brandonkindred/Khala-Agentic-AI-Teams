@@ -345,21 +345,6 @@ def _dispatch() -> DispatchTable:
         # dict_row shape — callers only check presence via ``is not None``.
         cur.set_one({"1": 1} if cid in cur.db["conversations"] else None)
 
-    def match_select_messages(norm: str) -> bool:
-        return norm.startswith(
-            "select role, content, timestamp from branding_conv_messages where conversation_id"
-        )
-
-    def handle_select_messages(cur: FakeCursor, params: tuple) -> None:
-        (cid,) = params
-        cur.set_all(
-            [
-                {"role": m["role"], "content": m["content"], "timestamp": m["timestamp"]}
-                for m in cur.db["conv_messages"]
-                if m["conversation_id"] == cid
-            ]
-        )
-
     def match_cte_insert_message(norm: str) -> bool:
         return norm.startswith("with conv as") and "insert into branding_conv_messages" in norm
 
@@ -383,34 +368,6 @@ def _dispatch() -> DispatchTable:
         )
         cur.set_one({"id": new_id})
         cur.rowcount = 1
-
-    def match_insert_message(norm: str) -> bool:
-        return norm.startswith("insert into branding_conv_messages")
-
-    def handle_insert_message(cur: FakeCursor, params: tuple) -> None:
-        cid, role, content, ts = params
-        cur.db["conv_messages"].append(
-            {
-                "id": next(cur.ids),
-                "conversation_id": cid,
-                "role": role,
-                "content": content,
-                "timestamp": ts,
-            }
-        )
-        cur.rowcount = 1
-
-    def match_update_conv_updated_at(norm: str) -> bool:
-        return norm.startswith("update branding_conversations set updated_at")
-
-    def handle_update_conv_updated_at(cur: FakeCursor, params: tuple) -> None:
-        ts, cid = params
-        conv = cur.db["conversations"].get(cid)
-        if conv:
-            conv["updated_at"] = ts
-            cur.rowcount = 1
-        else:
-            cur.rowcount = 0
 
     def match_update_conv_mission(norm: str) -> bool:
         return norm.startswith("update branding_conversations set mission_json")
@@ -450,28 +407,6 @@ def _dispatch() -> DispatchTable:
             cur.rowcount = 1
         else:
             cur.rowcount = 0
-
-    def match_select_conv_by_brand(norm: str) -> bool:
-        return norm.startswith(
-            "select conversation_id, mission_json, latest_output_json from branding_conversations where brand_id"
-        )
-
-    def handle_select_conv_by_brand(cur: FakeCursor, params: tuple) -> None:
-        (brand_id,) = params
-        match = next(
-            (c for c in cur.db["conversations"].values() if c["brand_id"] == brand_id),
-            None,
-        )
-        if match:
-            cur.set_one(
-                {
-                    "conversation_id": match["conversation_id"],
-                    "mission_json": match["mission_json"],
-                    "latest_output_json": match["latest_output_json"],
-                }
-            )
-        else:
-            cur.set_one(None)
 
     def match_list_conversations(norm: str) -> bool:
         return "from branding_conversations c" in norm and "order by c.updated_at desc" in norm
@@ -564,14 +499,10 @@ def _dispatch() -> DispatchTable:
         (match_join_conv_by_brand, handle_join_conv_by_brand),
         (match_select_mission_output, handle_select_mission_output),
         (match_exists_conversation, handle_exists_conversation),
-        (match_select_messages, handle_select_messages),
         (match_cte_insert_message, handle_cte_insert_message),
-        (match_insert_message, handle_insert_message),
-        (match_update_conv_updated_at, handle_update_conv_updated_at),
         (match_update_conv_mission, handle_update_conv_mission),
         (match_update_conv_output, handle_update_conv_output),
         (match_update_conv_brand, handle_update_conv_brand),
-        (match_select_conv_by_brand, handle_select_conv_by_brand),
         (match_list_conversations, handle_list_conversations),
         (match_select_conv_brand_id, handle_select_conv_brand_id),
         (match_insert_session, handle_insert_session),

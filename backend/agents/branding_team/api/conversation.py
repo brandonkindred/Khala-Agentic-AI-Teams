@@ -130,8 +130,10 @@ def _create_branding_conversation_impl(
     Preconditions:
         ``req`` is a validated ``CreateConversationRequest``.
     Postconditions:
-        Same as the endpoint; runs entirely with blocking calls and is meant to
-        be dispatched via ``asyncio.to_thread``.
+        Same as the endpoint; runs entirely with blocking calls. The route
+        dispatches this via ``_bg._run_in_pipeline_executor`` when
+        ``initial_message`` is present (assistant/pipeline work), and via
+        ``asyncio.to_thread`` for the no-initial-message greeting path.
     """
     from branding_team.api import main as _main
 
@@ -308,8 +310,9 @@ def _send_branding_conversation_message_impl(
         ``conversation_id`` is a string; ``payload`` is a validated
         ``SendMessageRequest``.
     Postconditions:
-        Same as the endpoint; runs entirely with blocking calls and is meant to
-        be dispatched via ``asyncio.to_thread``.
+        Same as the endpoint; runs entirely with blocking calls. The route
+        always dispatches this via ``_bg._run_in_pipeline_executor`` because
+        the assistant/pipeline work is blocking.
     """
     from branding_team.api import main as _main
 
