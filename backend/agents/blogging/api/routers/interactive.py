@@ -4,7 +4,9 @@ elicitation, Q&A answers, and draft feedback."""
 from __future__ import annotations
 
 import logging
+from typing import Any, Dict
 
+from agents.blogging.api.dependencies import get_job
 from agents.blogging.api.models import (
     BlogAnswersRequest,
     BlogJobStatusResponse,
@@ -14,7 +16,7 @@ from agents.blogging.api.models import (
     StoryResponseRequest,
     _blog_job_dict_to_status_response,
 )
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -143,15 +145,21 @@ def story_response(job_id: str, request: StoryResponseRequest) -> BlogJobStatusR
         "Increments current_story_gap_index and clears waiting_for_story_input."
     ),
 )
-def skip_story_gap(job_id: str) -> BlogJobStatusResponse:
+def skip_story_gap(
+    job_id: str,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "skip_current_story_gap",
+            waiting_for=(
+                "waiting_for_story_input",
+                "Job is not currently waiting for a story response",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Author skips the current story gap."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.skip_current_story_gap is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     logger.info("Skipping current story gap for job %s", job_id)
     _main.skip_current_story_gap(job_id)
     # Notify the ghost writer's event subscription so it wakes immediately
