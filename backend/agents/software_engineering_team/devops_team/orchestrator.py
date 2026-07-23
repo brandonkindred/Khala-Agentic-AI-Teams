@@ -184,9 +184,13 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     None (mixin default) and is independent of fallback logging.
     """
 
-    # Unbound BaseTeamLead._run_phase_gates delegates to self._run_gated_phases;
-    # alias the helper so TeamLeadSharedState consumers can invoke both hooks.
+    # Reuse BaseTeamLead phase/retry helpers without inheriting its constructor
+    # (DevOps uses TeamLeadSharedState). These unbound methods only need ``self``
+    # for the call signature — they do not read BaseTeamLead instance state.
+    # ``_run_phase_gates`` delegates to ``self._run_gated_phases``, so alias that
+    # hook; alias the retry loop so call sites use ``self._run_bounded_retry_loop``.
     _run_gated_phases = BaseTeamLead._run_gated_phases
+    _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
@@ -302,7 +306,13 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         )
 
     def run(self, input_data: DevOpsTaskSpec) -> DevOpsCompletionPackage:
-        """Execute model-only run for contract-first input (no repo writes)."""
+        """Execute a contract-first model run without orchestrator artifact writes.
+
+        ``write_changes=False`` skips this team's ``write_agent_output`` / branch
+        commits. Phase 4.5 execution tools (e.g. ``terraform init``, ``cdk synth``,
+        ``helm lint``, ``docker-compose config``) may still write under the working
+        directory as validation side effects.
+        """
         result = self._run_pipeline(
             repo_path=Path("."),
             task_spec=input_data,
@@ -767,8 +777,6 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                     )
 
             # Phase 4.6: Debug-patch loop for fixable execution failures.
-            # Consume BaseTeamLead's bounded retry helper without inheriting the
-            # code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
             # Mutation contract: ``attempt`` / ``is_success`` share ``state`` and
             # ``aggregated_artifacts`` by reference (same as the former inline
             # locals). Remaining ``state.exec_failures`` after exhaustion are
@@ -776,8 +784,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             # failed ``DevOpsTeamResult`` (pre-refactor behavior preserved).
             state = _DebugPatchState(exec_results=exec_results)
             if state.exec_failures:
-                BaseTeamLead._run_bounded_retry_loop(
-                    self,
+                self._run_bounded_retry_loop(
                     max_iterations=MAX_INFRA_FIX_ITERATIONS,
                     attempt=lambda i: self._debug_patch_once(
                         i,
