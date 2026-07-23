@@ -75,14 +75,10 @@ def _keepalive_expiry_seconds() -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning(
-            "Invalid HTTP_KEEPALIVE_EXPIRY_S=%r; using %s", raw, _DEFAULT_KEEPALIVE_EXPIRY_S
-        )
+        logger.warning("Invalid HTTP_KEEPALIVE_EXPIRY_S=%r; using %s", raw, _DEFAULT_KEEPALIVE_EXPIRY_S)
         return _DEFAULT_KEEPALIVE_EXPIRY_S
     if not math.isfinite(value) or value <= 0:
-        logger.warning(
-            "HTTP_KEEPALIVE_EXPIRY_S=%r out of range; using %s", raw, _DEFAULT_KEEPALIVE_EXPIRY_S
-        )
+        logger.warning("HTTP_KEEPALIVE_EXPIRY_S=%r out of range; using %s", raw, _DEFAULT_KEEPALIVE_EXPIRY_S)
         return _DEFAULT_KEEPALIVE_EXPIRY_S
     if value < _MIN_KEEPALIVE_EXPIRY_S:
         logger.warning(
