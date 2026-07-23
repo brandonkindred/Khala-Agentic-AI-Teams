@@ -8,19 +8,22 @@ process-wide pooled client already used by ``job_service_client.py``. This
 module is the single home for those primitives.
 
 Invariants:
-    - post_json/get_json enforce their preconditions via ``assert`` (raising
-      AssertionError on violation — a caller bug, per this repo's
-      Design-by-Contract convention). Once preconditions hold, they never
-      raise on transport/HTTP/parse failure; they log a WARNING tagged with
-      ``log_context`` and return None instead. Callers decide what "could not
-      complete request" means for their operation.
+    - post_json/get_json/async_post_json/async_get_json enforce their
+      preconditions via ``assert`` (raising AssertionError on violation — a
+      caller bug, per this repo's Design-by-Contract convention). Once
+      preconditions hold, they never raise on transport/HTTP/parse failure; they
+      log a WARNING tagged with ``log_context`` and return None instead.
+      Callers decide what "could not complete request" means for their
+      operation.
     - poll_until_terminal never busy-waits past ``total_timeout`` and never
       raises; a ``status_fn()`` failure (returns None or raises) or a timeout
       both yield a dict shaped like a terminal-failure status (``{status_key:
       "failed", "error": ...}``), the same shape a real terminal status would
       have.
-    - Both functions delegate all connection reuse to
-      shared.http.get_pooled_client(); neither opens/closes an httpx.Client.
+    - Sync helpers delegate connection reuse to
+      shared.http.get_pooled_client(); async helpers delegate to
+      shared.http.get_pooled_async_client(). Neither opens/closes an httpx
+      client.
 """
 
 from __future__ import annotations
@@ -31,11 +34,18 @@ from typing import Any, Callable, Dict, FrozenSet, Optional
 
 import httpx
 
-from shared.http import get_pooled_client
+from shared.http import get_pooled_async_client, get_pooled_client
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DEFAULT_TERMINAL_STATUSES", "post_json", "get_json", "poll_until_terminal"]
+__all__ = [
+    "DEFAULT_TERMINAL_STATUSES",
+    "post_json",
+    "get_json",
+    "poll_until_terminal",
+    "async_post_json",
+    "async_get_json",
+]
 
 DEFAULT_TERMINAL_STATUSES: FrozenSet[str] = frozenset({"completed", "failed", "cancelled"})
 
@@ -91,6 +101,57 @@ def get_json(
     try:
         client = get_pooled_client(timeout)
         resp = client.get(url)
+        resp.raise_for_status()
+        return resp.json()
+    except _REQUEST_ERRORS as e:
+        logger.warning("%s failed: %s", log_context, e)
+        return None
+
+
+async def async_post_json(
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    timeout: float = 30.0,
+    log_context: str = "request",
+) -> Optional[Dict[str, Any]]:
+    """Async POST of a JSON payload; same contract as :func:`post_json`.
+
+    Preconditions:
+        - ``url`` is a non-empty absolute URL.
+        - ``timeout`` is a positive, finite number of seconds (enforced by
+          ``get_pooled_async_client``).
+    Postconditions:
+        - On a 2xx response with a JSON body, returns the parsed value.
+        - On any httpx transport error, non-2xx status, or JSON parse
+          failure, logs a WARNING prefixed with ``log_context`` and returns
+          None. Never raises for these failure modes (precondition
+          violations still raise AssertionError).
+        - Reuses the process-wide pooled async client; never opens/closes a
+          client.
+    """
+    assert url, "url must be non-empty"
+    try:
+        client = get_pooled_async_client(timeout)
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+    except _REQUEST_ERRORS as e:
+        logger.warning("%s failed: %s", log_context, e)
+        return None
+
+
+async def async_get_json(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    log_context: str = "request",
+) -> Optional[Dict[str, Any]]:
+    """Async GET; same contract as :func:`get_json` / :func:`async_post_json`."""
+    assert url, "url must be non-empty"
+    try:
+        client = get_pooled_async_client(timeout)
+        resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
     except _REQUEST_ERRORS as e:

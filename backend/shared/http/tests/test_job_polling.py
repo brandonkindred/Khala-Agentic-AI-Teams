@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from shared.http import close_pool
+from shared.http import close_async_pool, close_pool
 from shared.http.job_polling import (
     DEFAULT_TERMINAL_STATUSES,
+    async_get_json,
+    async_post_json,
     get_json,
     poll_until_terminal,
     post_json,
@@ -19,8 +21,10 @@ from shared.http.job_polling import (
 @pytest.fixture(autouse=True)
 def _clean_pool():
     close_pool()
+    close_async_pool()
     yield
     close_pool()
+    close_async_pool()
 
 
 def _mock_client(response=None, raise_for_status_error=None, request_error=None, json_error=None):
@@ -201,3 +205,90 @@ def test_poll_rejects_non_positive_total_timeout():
 
 def test_default_terminal_statuses_include_completed_failed_cancelled():
     assert DEFAULT_TERMINAL_STATUSES == frozenset({"completed", "failed", "cancelled"})
+
+
+def _mock_async_client(response=None, raise_for_status_error=None, request_error=None, json_error=None):
+    client = AsyncMock()
+    resp = MagicMock()
+    if raise_for_status_error is not None:
+        resp.raise_for_status.side_effect = raise_for_status_error
+    else:
+        resp.raise_for_status = MagicMock()
+    if json_error is not None:
+        resp.json.side_effect = json_error
+    else:
+        resp.json.return_value = response
+    if request_error is not None:
+        client.post = AsyncMock(side_effect=request_error)
+        client.get = AsyncMock(side_effect=request_error)
+    else:
+        client.post = AsyncMock(return_value=resp)
+        client.get = AsyncMock(return_value=resp)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_returns_parsed_body_on_success():
+    client = _mock_async_client(response={"job_id": "abc"})
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        out = await async_post_json("http://x/run", {"a": 1})
+    assert out == {"job_id": "abc"}
+    client.post.assert_awaited_once_with("http://x/run", json={"a": 1})
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_returns_none_on_http_status_error():
+    error = httpx.HTTPStatusError("boom", request=MagicMock(), response=MagicMock())
+    client = _mock_async_client(raise_for_status_error=error)
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        assert await async_post_json("http://x/run", {}) is None
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_returns_none_on_transport_error():
+    client = _mock_async_client(request_error=httpx.ConnectError("refused"))
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        assert await async_post_json("http://x/run", {}) is None
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_returns_none_on_json_parse_error():
+    client = _mock_async_client(json_error=ValueError("not json"))
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        assert await async_post_json("http://x/run", {}) is None
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_rejects_empty_url():
+    with pytest.raises(AssertionError):
+        await async_post_json("", {})
+
+
+@pytest.mark.asyncio
+async def test_async_get_json_returns_parsed_body_on_success():
+    client = _mock_async_client(response={"status": "running"})
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        out = await async_get_json("http://x/status/1")
+    assert out == {"status": "running"}
+    client.get.assert_awaited_once_with("http://x/status/1")
+
+
+@pytest.mark.asyncio
+async def test_async_get_json_returns_none_on_http_status_error():
+    error = httpx.HTTPStatusError("boom", request=MagicMock(), response=MagicMock())
+    client = _mock_async_client(raise_for_status_error=error)
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        assert await async_get_json("http://x/status/1") is None
+
+
+@pytest.mark.asyncio
+async def test_async_get_json_returns_none_on_transport_error():
+    client = _mock_async_client(request_error=httpx.ConnectError("refused"))
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        assert await async_get_json("http://x/status/1") is None
+
+
+@pytest.mark.asyncio
+async def test_async_get_json_rejects_empty_url():
+    with pytest.raises(AssertionError):
+        await async_get_json("")
