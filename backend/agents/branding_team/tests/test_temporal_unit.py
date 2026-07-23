@@ -1167,3 +1167,97 @@ def test_run_temporal_dispatch_failure_returns_503_and_fails_job(
     brand_jobs = [j for j in jobs if j["brand_id"] == bid]
     assert brand_jobs, "expected a job row created for the brand"
     assert brand_jobs[0]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# _submit_brand_run mark_failed bookkeeping failures (unit)
+# ---------------------------------------------------------------------------
+
+
+def _submit_args():
+    from branding_team.api.models import RunBrandRequest
+
+    return ("client-1", "brand-1", RunBrandRequest(human_approved=True), None)
+
+
+def test_submit_brand_run_temporal_mark_failed_error_still_raises_503() -> None:
+    """If Temporal dispatch fails and mark_failed itself raises, still raise
+    HTTPException(503) — do not leak the bookkeeping error as a 500."""
+    from fastapi import HTTPException
+
+    from branding_team.api import background as bg
+    from branding_team.api import main as main_mod
+    from branding_team.shared.job_store import JobNotFoundError
+
+    brand = SimpleNamespace(mission=make_mission())
+    with (
+        patch.object(main_mod.branding_store, "get_brand", return_value=brand),
+        patch.object(bg, "create_job"),
+        patch.object(
+            bg, "mark_failed", side_effect=JobNotFoundError("job-service unreachable")
+        ),
+        patch("shared.temporal.is_temporal_enabled", return_value=True),
+        patch(
+            "branding_team.temporal.start_workflow.start_branding_workflow",
+            side_effect=RuntimeError("worker down"),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            bg._submit_brand_run(*_submit_args())
+
+    assert exc_info.value.status_code == 503
+
+
+def test_submit_brand_run_executor_shutdown_marks_failed_and_raises_503() -> None:
+    from fastapi import HTTPException
+
+    from branding_team.api import background as bg
+    from branding_team.api import main as main_mod
+
+    brand = SimpleNamespace(mission=make_mission())
+    with (
+        patch.object(main_mod.branding_store, "get_brand", return_value=brand),
+        patch.object(bg, "create_job"),
+        patch.object(bg, "mark_failed") as mock_mark_failed,
+        patch("shared.temporal.is_temporal_enabled", return_value=False),
+        patch.object(
+            main_mod._run_executor,
+            "submit",
+            side_effect=RuntimeError("cannot schedule new futures after shutdown"),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            bg._submit_brand_run(*_submit_args())
+
+    assert exc_info.value.status_code == 503
+    mock_mark_failed.assert_called_once()
+    assert mock_mark_failed.call_args.args[1] == "run executor unavailable"
+
+
+def test_submit_brand_run_executor_mark_failed_error_still_raises_503() -> None:
+    """If the run executor is shut down and mark_failed itself raises, still
+    raise HTTPException(503) — do not leak the bookkeeping error as a 500."""
+    from fastapi import HTTPException
+
+    from branding_team.api import background as bg
+    from branding_team.api import main as main_mod
+    from branding_team.shared.job_store import JobNotFoundError
+
+    brand = SimpleNamespace(mission=make_mission())
+    with (
+        patch.object(main_mod.branding_store, "get_brand", return_value=brand),
+        patch.object(bg, "create_job"),
+        patch.object(
+            bg, "mark_failed", side_effect=JobNotFoundError("job-service unreachable")
+        ),
+        patch("shared.temporal.is_temporal_enabled", return_value=False),
+        patch.object(
+            main_mod._run_executor,
+            "submit",
+            side_effect=RuntimeError("cannot schedule new futures after shutdown"),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            bg._submit_brand_run(*_submit_args())
+
+    assert exc_info.value.status_code == 503
