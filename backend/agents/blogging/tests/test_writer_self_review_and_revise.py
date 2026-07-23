@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 
 def _make_agent_with_guidelines():
     from .conftest import make_writer_agent
@@ -35,17 +37,18 @@ def test_writer_fix_deterministic_violations(monkeypatch) -> None:
     assert "Fixed draft" in out
 
 
-def test_writer_fix_deterministic_violations_swallow_error(monkeypatch) -> None:
+def test_writer_fix_deterministic_violations_unexpected_error_propagates(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
 
     def boom(self, prompt, system_prompt=""):
-        raise RuntimeError("LLM down")
+        raise RuntimeError("programming bug")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
-    out = a._fix_deterministic_violations("orig", ["x"])
-    assert out == "orig"
+
+    with pytest.raises(RuntimeError, match="programming bug"):
+        a._fix_deterministic_violations("orig", ["x"])
 
 
 def test_writer_fix_deterministic_violations_empty_response(monkeypatch) -> None:
@@ -96,17 +99,18 @@ def test_writer_llm_self_review_no_array(monkeypatch) -> None:
     assert out == "draft text"
 
 
-def test_writer_llm_self_review_exception(monkeypatch) -> None:
+def test_writer_llm_self_review_unexpected_error_propagates(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
 
     def boom(self, prompt, system_prompt=""):
-        raise RuntimeError("LLM down")
+        raise RuntimeError("programming bug")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
-    out = a._llm_self_review("orig")
-    assert out == "orig"
+
+    with pytest.raises(RuntimeError, match="programming bug"):
+        a._llm_self_review("orig")
 
 
 def test_writer_self_review_combines_both(monkeypatch) -> None:
