@@ -156,7 +156,7 @@ def _patch_refinement(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
         lambda *_a, **_k: object(),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.refinement._structured_output_available",
+        "investment_team.strategy_lab.agents._structured_output.structured_output_available",
         lambda: False,
     )
 

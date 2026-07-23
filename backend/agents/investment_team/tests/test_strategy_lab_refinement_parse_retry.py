@@ -22,6 +22,7 @@ from typing import List
 import pytest
 
 from investment_team.models import RiskLimits, StrategySpec
+from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import refinement as mod
 from investment_team.strategy_lab.agents._parse_helpers import (
     build_json_correction_prompt,
@@ -45,18 +46,13 @@ def _spec() -> StrategySpec:
 def _patch_refinement(monkeypatch: pytest.MonkeyPatch, agent: object, model=None) -> None:
     """Replace the ``Agent``/``get_strands_model`` names the retry loop reads.
 
-    ``RefinementAgent._invoke_and_parse``'s unconstrained retry loop now
-    delegates to ``_agent_runner.run_json_with_parse_retry``, which builds its
-    ``Agent`` using ``_agent_runner``'s own ``Agent``/``get_strands_model``
-    names — ``refinement.py`` no longer imports ``strands.Agent`` at all, so
-    there is nothing to patch there for this path. Mirrors the pattern
-    ``test_strategy_lab_design_agent.py``'s ``_patch_design`` helper uses for
-    design's already-migrated call site. ``mod.get_strands_model`` is still
-    patched too since ``_invoke_structured``'s untouched structured-output
-    path reads it directly.
+    ``RefinementAgent._invoke_and_parse``'s unconstrained retry loop delegates
+    to ``_agent_runner.run_json_with_parse_retry``, which builds its ``Agent``
+    using ``_agent_runner``'s own ``Agent``/``get_strands_model`` names.
+    Mirrors the pattern ``test_strategy_lab_design_agent.py``'s ``_patch_design``
+    helper uses for design's already-migrated call site.
     """
     model_factory = model if model is not None else (lambda *_a, **_k: object())
-    monkeypatch.setattr(mod, "get_strands_model", model_factory)
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents._agent_runner.get_strands_model", model_factory
     )
@@ -92,10 +88,10 @@ def _force_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     Force the structured-output seam off so these tests are deterministic
     regardless of ambient ``LLM_PROVIDER`` (unset defaults to ``"ollama"``,
     whose capability flag is True) — see
-    ``refinement._structured_output_available``. The structured path itself
-    is covered by ``test_strategy_lab_refinement_structured_output.py``.
+    ``_structured_output.structured_output_available``. The structured path
+    itself is covered by ``test_strategy_lab_refinement_structured_output.py``.
     """
-    monkeypatch.setattr(mod, "_structured_output_available", lambda: False)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: False)
 
 
 def test_agent_key_is_strategy_refinement_not_ideation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -258,7 +254,6 @@ def test_happy_path_builds_agent_once(monkeypatch: pytest.MonkeyPatch) -> None:
         builds["agents"] += 1
         return _ScriptedAgent([_GOOD])
 
-    monkeypatch.setattr(mod, "get_strands_model", _model)
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents._agent_runner.get_strands_model", _model
     )
