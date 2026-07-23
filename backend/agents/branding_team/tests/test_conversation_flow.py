@@ -18,8 +18,9 @@ from __future__ import annotations
 import pytest
 
 import branding_team.api.main as main
-from branding_team.models import BrandingMission, BrandPhase, TeamOutput, WorkflowStatus
+from branding_team.models import BrandPhase, TeamOutput, WorkflowStatus
 from branding_team.tests._fake_postgres import install_fake_postgres
+from branding_team.tests.conftest import make_mission
 
 
 @pytest.fixture(autouse=True)
@@ -27,8 +28,8 @@ def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
     return install_fake_postgres(monkeypatch)
 
 
-def _ready_mission() -> BrandingMission:
-    return BrandingMission(
+def _ready_mission():
+    return make_mission(
         company_name="Acme",
         company_description="A real company description that is long enough.",
         target_audience="developers",
@@ -82,7 +83,7 @@ def test_run_orchestrator_returns_none_when_not_ready(
         return _output()
 
     monkeypatch.setattr(main.orchestrator, "run", fake_run)
-    incomplete = BrandingMission(
+    incomplete = make_mission(
         company_name="Acme", company_description="To be discussed.", target_audience="TBD"
     )
     assert main._run_orchestrator_if_ready(incomplete, None, None) is None

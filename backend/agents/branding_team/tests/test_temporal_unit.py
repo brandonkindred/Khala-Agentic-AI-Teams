@@ -27,6 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from branding_team.models import BrandPhase
+from branding_team.tests.conftest import make_mission
 
 # ---------------------------------------------------------------------------
 # constants
@@ -194,10 +195,12 @@ def test_start_branding_workflow_propagates_client_error() -> None:
 
 
 def _mission_dict() -> dict:
+    """Minimal mission payload dict derived from ``make_mission`` defaults."""
+    mission = make_mission()
     return {
-        "company_name": "Northstar Labs",
-        "company_description": "A strategic studio for enterprise product teams",
-        "target_audience": "enterprise product leaders",
+        "company_name": mission.company_name,
+        "company_description": mission.company_description,
+        "target_audience": mission.target_audience,
     }
 
 
@@ -526,7 +529,7 @@ def _canned_phase_result(node_id: str, json_str: str):
 
 def test_run_single_phase_extracts_output_and_injects_context(monkeypatch) -> None:
     from branding_team import orchestrator as orch_mod
-    from branding_team.models import BrandingMission, NarrativeMessagingOutput
+    from branding_team.models import NarrativeMessagingOutput
 
     captured: dict = {}
     canned = _canned_phase_result(
@@ -549,7 +552,7 @@ def test_run_single_phase_extracts_output_and_injects_context(monkeypatch) -> No
         (lambda: MagicMock(), "phase2_narrative", NarrativeMessagingOutput),
     )
 
-    mission = BrandingMission(**_mission_dict())
+    mission = make_mission()
     orchestrator = orch_mod.BrandingTeamOrchestrator()
     result = orchestrator.run_single_phase(
         mission,
@@ -567,22 +570,17 @@ def test_run_single_phase_extracts_output_and_injects_context(monkeypatch) -> No
 
 
 def test_run_single_phase_first_phase_has_no_prior_context() -> None:
-    from branding_team.models import BrandingMission
-
-    mission = BrandingMission(**_mission_dict())
+    mission = make_mission()
     task = orch_phase_task(mission, BrandPhase.STRATEGIC_CORE, {})
     assert "Northstar Labs" in task
     assert "upstream" not in task.lower()
 
 
 def test_run_single_phase_rejects_non_runnable_phase() -> None:
-    from branding_team.models import BrandingMission
     from branding_team.orchestrator import BrandingTeamOrchestrator
 
     with pytest.raises(ValueError, match="not a runnable"):
-        BrandingTeamOrchestrator().run_single_phase(
-            BrandingMission(**_mission_dict()), BrandPhase.COMPLETE, {}
-        )
+        BrandingTeamOrchestrator().run_single_phase(make_mission(), BrandPhase.COMPLETE, {})
 
 
 def orch_phase_task(mission, phase, prior_outputs):
@@ -971,9 +969,9 @@ def test_workflow_cancel_probe_failure_falls_through_to_failed() -> None:
 
 
 def _core_args() -> tuple:
-    from branding_team.models import BrandingMission, HumanReview
+    from branding_team.models import HumanReview
 
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="CoreCo",
         company_description="Company for core failure test",
         target_audience="users",
