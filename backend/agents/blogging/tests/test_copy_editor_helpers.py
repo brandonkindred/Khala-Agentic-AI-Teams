@@ -213,6 +213,32 @@ def test_inject_length_technical_deep_dive_thin_draft() -> None:
     assert any(f.severity == "consider" and f.category == "structure" for f in out)
 
 
+def test_inject_length_skips_when_target_word_count_non_positive() -> None:
+    """Non-positive target is a no-op — do not invent over-length feedback.
+
+    The old fallback set over_ratio=1.0 when target was 0. With a must_fix
+    ratio below 1.0 (validation bypassed), that falsely injects must_fix.
+    """
+    agent = _make_agent()
+    # Bypass Field bounds so we can exercise the defensive path.
+    inp = CopyEditorInput.model_construct(
+        draft="ignored",
+        target_word_count=0,
+        soft_max_words=None,
+        editor_must_fix_over_ratio=0.5,
+        editor_should_fix_over_ratio=0.5,
+        soft_min_words=None,
+        content_profile=None,
+    )
+    existing = [FeedbackItem(category="voice", severity="consider", issue="minor")]
+
+    out = agent._inject_length_feedback(existing, inp, actual_word_count=500)
+
+    assert out is existing
+    assert len(out) == 1
+    assert out[0].category == "voice"
+
+
 # --------------------------------------------------------------------------- #
 # _invoke_editor_llm
 # --------------------------------------------------------------------------- #
