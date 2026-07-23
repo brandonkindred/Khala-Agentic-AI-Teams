@@ -22,6 +22,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from agents.blogging.shared.content_plan import ContentPlan
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
 from llm_service import LLMJsonParseError, extract_json_from_response
@@ -503,7 +504,6 @@ class GhostWriterElicitationAgent:
             + f"\n\nSection: {gap.section_title}\nContext: {gap.section_context}"
         )
 
-        # Build a text representation of the conversation
         conv_text = ""
         for msg in conversation:
             role = "Ghost writer" if msg["role"] == "agent" else "Author"
@@ -520,29 +520,24 @@ class GhostWriterElicitationAgent:
             "story_context": None,
             "missing": None,
         }
-        agent = Agent(model=self._model, system_prompt=system)
 
-        for attempt in range(2):
-            try:
-                working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
-                result = agent(working_prompt)
-                data = extract_json_from_response(str(result).strip())
-                if isinstance(data, dict):
-                    return data
-                return default
-            except LLMJsonParseError as e:
-                if attempt == 0:
-                    logger.warning("Ghost writer evaluator JSON parse failed, retrying: %s", e)
-                    continue
-                logger.warning("Ghost writer evaluator JSON parse failed after retry: %s", e)
-                return default
-            except Exception as e:
-                if attempt == 0:
-                    logger.warning("Ghost writer evaluator error, retrying: %s", e)
-                    time.sleep(2.0)
-                    continue
-                logger.warning("Ghost writer evaluator error after retry: %s", e)
-                return default
+        def _agent_factory():
+            return Agent(model=self._model, system_prompt=system)
+
+        def _fallback(_exc: Exception) -> Dict[str, Any]:
+            return default
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt,
+            max_attempts=2,
+            strict_json_suffix=_JSON_RETRY_SUFFIX,
+            on_exhausted=_fallback,
+            on_unexpected_error=_fallback,
+            logger=logger,
+        )
+        if isinstance(data, dict):
+            return data
         return default
 
     # ------------------------------------------------------------------
