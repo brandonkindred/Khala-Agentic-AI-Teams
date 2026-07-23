@@ -28,9 +28,10 @@ Invariants:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from typing import Any, Callable, Dict, FrozenSet, Optional
+from typing import Any, Awaitable, Callable, Dict, FrozenSet, Optional
 
 import httpx
 
@@ -45,6 +46,7 @@ __all__ = [
     "poll_until_terminal",
     "async_post_json",
     "async_get_json",
+    "async_poll_until_terminal",
 ]
 
 DEFAULT_TERMINAL_STATUSES: FrozenSet[str] = frozenset({"completed", "failed", "cancelled"})
@@ -207,4 +209,57 @@ def poll_until_terminal(
         if on_poll is not None:
             on_poll(status)
         time.sleep(poll_interval)
+    return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
+
+
+async def async_poll_until_terminal(
+    status_fn: Callable[[], Awaitable[Optional[Dict[str, Any]]]],
+    *,
+    terminal_statuses: FrozenSet[str] = DEFAULT_TERMINAL_STATUSES,
+    status_key: str = "status",
+    poll_interval: float = 5.0,
+    total_timeout: float = 3600.0,
+    on_poll: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    log_context: str = "job",
+) -> Dict[str, Any]:
+    """Async poll of ``status_fn()`` until terminal status or timeout.
+
+    Preconditions:
+        - ``status_fn`` is an async callable taking no arguments and returning
+          either a status dict (expected to carry ``status_key``) or None if
+          status could not be retrieved.
+        - ``poll_interval`` and ``total_timeout`` are positive, finite
+          seconds.
+        - ``on_poll``, if given, is an async callable invoked with each
+          *non-terminal* status dict, once per poll, strictly before that
+          iteration's sleep.
+    Postconditions:
+        - Returns the first status dict for which
+          ``status.get(status_key)`` is in ``terminal_statuses``, unmodified.
+        - If ``status_fn()`` returns None, or raises any exception, on any
+          call, immediately returns ``{status_key: "failed", "error":
+          "Failed to get status"}`` — no further polling, no sleep.
+        - If no terminal status is observed within ``total_timeout`` seconds,
+          returns ``{status_key: "failed", "error": f"Timed out waiting for
+          {log_context}"}``.
+        - Never raises; never sleeps past a terminal/None/exception
+          short-circuit.
+        - Uses ``asyncio.sleep`` between non-terminal polls.
+    """
+    assert poll_interval > 0, f"poll_interval must be positive, got {poll_interval!r}"
+    assert total_timeout > 0, f"total_timeout must be positive, got {total_timeout!r}"
+    start = time.monotonic()
+    while (time.monotonic() - start) < total_timeout:
+        try:
+            status = await status_fn()
+        except Exception as e:
+            logger.warning("%s status_fn raised: %s", log_context, e)
+            return {status_key: "failed", "error": "Failed to get status"}
+        if status is None:
+            return {status_key: "failed", "error": "Failed to get status"}
+        if status.get(status_key) in terminal_statuses:
+            return status
+        if on_poll is not None:
+            await on_poll(status)
+        await asyncio.sleep(poll_interval)
     return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}

@@ -11,6 +11,7 @@ from shared.http import close_async_pool, close_pool
 from shared.http.job_polling import (
     DEFAULT_TERMINAL_STATUSES,
     async_get_json,
+    async_poll_until_terminal,
     async_post_json,
     get_json,
     poll_until_terminal,
@@ -133,12 +134,8 @@ def test_poll_terminal_after_n_polls(monkeypatch):
 def test_poll_invokes_on_poll_for_each_non_terminal_status(monkeypatch):
     monkeypatch.setattr("shared.http.job_polling.time.sleep", lambda *_: None)
     seen = []
-    statuses = iter(
-        [{"status": "running", "n": 1}, {"status": "running", "n": 2}, {"status": "completed"}]
-    )
-    poll_until_terminal(
-        lambda: next(statuses), on_poll=seen.append, poll_interval=0.01, total_timeout=10
-    )
+    statuses = iter([{"status": "running", "n": 1}, {"status": "running", "n": 2}, {"status": "completed"}])
+    poll_until_terminal(lambda: next(statuses), on_poll=seen.append, poll_interval=0.01, total_timeout=10)
     assert [s["n"] for s in seen] == [1, 2]
 
 
@@ -292,3 +289,140 @@ async def test_async_get_json_returns_none_on_transport_error():
 async def test_async_get_json_rejects_empty_url():
     with pytest.raises(AssertionError):
         await async_get_json("")
+
+
+@pytest.mark.asyncio
+async def test_async_poll_terminal_immediately_no_sleep(monkeypatch):
+    async def _must_not_sleep(*_):
+        raise AssertionError("must not sleep")
+
+    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _must_not_sleep)
+
+    async def _status():
+        return {"status": "completed", "x": 1}
+
+    result = await async_poll_until_terminal(_status)
+    assert result == {"status": "completed", "x": 1}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_terminal_after_n_polls(monkeypatch):
+    async def _nosleep(*_):
+        return None
+
+    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _nosleep)
+    statuses = iter([{"status": "running"}, {"status": "running"}, {"status": "completed"}])
+
+    async def _status():
+        return next(statuses)
+
+    result = await async_poll_until_terminal(_status, poll_interval=0.01, total_timeout=10)
+    assert result == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_invokes_on_poll_for_each_non_terminal_status(monkeypatch):
+    async def _nosleep(*_):
+        return None
+
+    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _nosleep)
+    seen: list[dict] = []
+    statuses = iter([{"status": "running", "n": 1}, {"status": "running", "n": 2}, {"status": "completed"}])
+
+    async def _status():
+        return next(statuses)
+
+    async def _on_poll(status: dict) -> None:
+        seen.append(status)
+
+    await async_poll_until_terminal(_status, on_poll=_on_poll, poll_interval=0.01, total_timeout=10)
+    assert [s["n"] for s in seen] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_async_poll_times_out():
+    async def _status():
+        return {"status": "running"}
+
+    result = await async_poll_until_terminal(
+        _status,
+        poll_interval=0.01,
+        total_timeout=0.05,
+        log_context="widget build",
+    )
+    assert result == {"status": "failed", "error": "Timed out waiting for widget build"}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_short_circuits_on_status_fn_none(monkeypatch):
+    async def _must_not_sleep(*_):
+        raise AssertionError("must not sleep")
+
+    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _must_not_sleep)
+    calls = {"n": 0}
+
+    async def _status_fn():
+        calls["n"] += 1
+        return None
+
+    result = await async_poll_until_terminal(_status_fn, total_timeout=10)
+    assert result == {"status": "failed", "error": "Failed to get status"}
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_async_poll_short_circuits_on_status_fn_exception(monkeypatch):
+    async def _must_not_sleep(*_):
+        raise AssertionError("must not sleep")
+
+    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _must_not_sleep)
+    calls = {"n": 0}
+
+    async def _status_fn():
+        calls["n"] += 1
+        raise httpx.ConnectError("refused")
+
+    result = await async_poll_until_terminal(_status_fn, total_timeout=10)
+    assert result == {"status": "failed", "error": "Failed to get status"}
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_async_poll_respects_custom_status_key_and_terminal_statuses():
+    async def _status():
+        return {"state": "cancelled"}
+
+    result = await async_poll_until_terminal(
+        _status,
+        status_key="state",
+        terminal_statuses=frozenset({"cancelled"}),
+    )
+    assert result == {"state": "cancelled"}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_rejects_non_positive_poll_interval():
+    async def _status():
+        return {"status": "completed"}
+
+    with pytest.raises(AssertionError):
+        await async_poll_until_terminal(_status, poll_interval=0)
+
+
+@pytest.mark.asyncio
+async def test_async_poll_rejects_non_positive_total_timeout():
+    async def _status():
+        return {"status": "completed"}
+
+    with pytest.raises(AssertionError):
+        await async_poll_until_terminal(_status, total_timeout=0)
+
+
+def test_default_terminal_statuses_shared_singleton_for_async_default():
+    """Async poll default must be the same frozenset object as the module constant."""
+    import inspect
+
+    from shared.http import job_polling as jp
+
+    sig = inspect.signature(jp.async_poll_until_terminal)
+    assert sig.parameters["terminal_statuses"].default is DEFAULT_TERMINAL_STATUSES
