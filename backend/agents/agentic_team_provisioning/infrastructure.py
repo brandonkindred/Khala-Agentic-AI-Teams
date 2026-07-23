@@ -1,8 +1,14 @@
 """Per-team infrastructure scaffolding: directories, form store, and job client.
 
-When a team is created via the provisioning API, ``provision_team`` creates:
-- ``$AGENT_CACHE/provisioned_teams/{team_id}/assets/``  — file artifacts
-- ``$AGENT_CACHE/provisioned_teams/{team_id}/runs/``    — job working directories
+When a team is created via the provisioning API, ``provision_team`` creates
+under the process-local cache root ``_AGENT_CACHE``:
+
+- ``.../provisioned_teams/{team_id}/assets/``  — file artifacts
+- ``.../provisioned_teams/{team_id}/runs/``    — job working directories
+
+``_AGENT_CACHE`` is initialized once at import from the ``AGENT_CACHE``
+environment variable (default ``~/.agent_cache``). Later env changes are
+ignored; tests must use ``_set_agent_cache_for_testing``.
 
 Form records are stored in the shared Khala Postgres ``agentic_form_data``
 table, scoped by a ``team_id`` column (``WHERE team_id = %s`` filtering, not
@@ -264,6 +270,20 @@ def get_team_infrastructure(team_id: str) -> TeamInfrastructure:
 
     logger.info("Provisioned infrastructure for team %s at %s", team_id, infra.base_dir)
     return infra
+
+
+def _set_agent_cache_for_testing(path: str) -> None:
+    """Set the process-local agent-cache root. Test-only isolation seam.
+
+    Preconditions:
+        - ``path`` is a non-empty filesystem path string.
+    Postconditions:
+        - Subsequent ``_build_team_infrastructure`` calls root under ``path``.
+    """
+    if not path:
+        raise ValueError("path must be a non-empty string")
+    global _AGENT_CACHE
+    _AGENT_CACHE = path
 
 
 def _clear_infra_cache_for_testing() -> None:
