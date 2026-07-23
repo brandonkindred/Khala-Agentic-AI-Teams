@@ -10,9 +10,10 @@ uses the same LLM client as the planner per the project's tenet that per-role
 model diversification is a future concern; only the role (prompt + session) is
 separate today.
 
-Transient LLM errors (``LLMRateLimitError``, ``LLMTemporaryError``) propagate
-immediately so the job runner or Temporal activity owns retry/backoff.
-Non-transient failures and JSON parse exhaustion fall back to a FAIL report.
+Transient LLM errors (``LLMRateLimitError``, ``LLMTemporaryError``) — including
+when strands wraps them in ``EventLoopException`` — propagate unwrapped so the
+job runner or Temporal activity owns retry/backoff. Non-transient failures and
+JSON parse exhaustion fall back to a FAIL report.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any, Callable, Optional, Union
 from agents.blogging.shared.content_plan import ContentPlan
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 from .models import PlanCriticReport, PlanViolation
 from .prompts import PLAN_CRITIC_SYSTEM, PLAN_CRITIC_USER_TEMPLATE
@@ -100,11 +102,12 @@ class BlogPlanCriticAgent:
             - Always returns a ``PlanCriticReport`` (never ``None``); ``status`` is
               normalized to ``"PASS"`` or ``"FAIL"`` and ``approved`` is reconciled
               with ``status`` and ``must_fix`` violations.
-            - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``)
-              propagates unwrapped so the caller (or Temporal) can retry; JSON parse
-              exhaustion and other unexpected non-transient errors fail closed via
-              ``on_exhausted`` / ``on_unexpected_error`` hooks with a ``status="FAIL"``
-              fallback report rather than raising.
+            - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``),
+              including when strands wraps it in ``EventLoopException``, propagates
+              unwrapped so the caller (or Temporal) can retry; JSON parse exhaustion
+              and other unexpected non-transient errors fail closed via ``on_exhausted`` /
+              ``on_unexpected_error`` hooks with a ``status="FAIL"`` fallback report
+              rather than raising.
             - When ``work_dir`` is set and ``write_artifact`` is available, the report is
               persisted as ``artifact_name`` (default ``plan_critic_report.json``).
         """
@@ -127,6 +130,9 @@ class BlogPlanCriticAgent:
         def _agent_factory():
             return Agent(model=self._model, system_prompt=PLAN_CRITIC_SYSTEM)
 
+        def _unwrap(exc: Exception) -> Exception:
+            return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
         def _fallback_dict(exc: Exception) -> dict[str, Any]:
             return _fallback_report(str(exc)).model_dump(mode="json")
 
@@ -136,6 +142,7 @@ class BlogPlanCriticAgent:
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
             fresh_agent_per_attempt=True,
+            unwrap_exception=_unwrap,
             on_exhausted=_fallback_dict,
             on_unexpected_error=_fallback_dict,
             logger=logger,

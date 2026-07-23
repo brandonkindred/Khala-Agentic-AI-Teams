@@ -283,6 +283,31 @@ def test_critic_transient_error_reraises(err_cls) -> None:
             )
 
 
+@pytest.mark.parametrize("err_cls", [LLMRateLimitError, LLMTemporaryError])
+def test_critic_event_loop_exception_unwraps_transient(err_cls) -> None:
+    """strands EventLoopException must re-raise the unwrapped transient cause."""
+    from strands.types.exceptions import EventLoopException
+
+    cause = err_cls("transient outage")
+
+    class _BoomAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise EventLoopException(cause)
+
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomAgent):
+        with pytest.raises(err_cls) as exc_info:
+            critic.run(
+                plan=_minimal_plan(),
+                brand_spec_prompt="b",
+                writing_guidelines="g",
+            )
+    assert exc_info.value is cause
+
+
 def test_critic_persists_report_to_work_dir(tmp_path) -> None:
     fake_agent = _FakeAgentFactory(
         responses=[
