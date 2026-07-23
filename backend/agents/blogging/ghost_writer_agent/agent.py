@@ -8,7 +8,8 @@ into first-person narrative snippets passed to the draft agent.
 
 Architecture:
   - **Evaluator** (`_evaluate_sufficiency`): Assesses whether the conversation has enough
-    material for a compelling story. Uses `chat_json_round` with native message history.
+    material for a compelling story. Builds a flat text transcript, calls a single-turn
+    strands ``Agent``, and parses JSON via ``extract_json_from_response`` (one parse retry).
   - **Interviewer** (`_generate_follow_up`): Generates a single conversational follow-up
     question when the evaluator says "insufficient".
   - **Narrator** (`_compile_narrative`): Compiles a vivid first-person narrative from
@@ -195,7 +196,8 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
     to elicit personal anecdotes from the author.
 
     Uses three specialised LLM roles:
-      - Evaluator: assesses story sufficiency via ``chat_json_round``
+      - Evaluator: assesses story sufficiency via a single-turn strands Agent over a
+        flat conversation transcript, with JSON from ``extract_json_from_response``
       - Interviewer: generates conversational follow-up questions
       - Narrator: compiles vivid first-person narratives
 
@@ -204,6 +206,10 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
     """
 
     def __init__(self, llm_client: Any) -> None:
+        """
+        Preconditions:
+            - llm_client is not None.
+        """
         super().__init__(llm_client)
 
     # ------------------------------------------------------------------

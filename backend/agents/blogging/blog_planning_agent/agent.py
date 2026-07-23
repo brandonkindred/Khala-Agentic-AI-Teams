@@ -47,6 +47,17 @@ class BlogPlanningAgent(_BlogAgentBase):
         brand_spec_prompt: str = "",
         writing_guidelines: str = "",
     ) -> None:
+        """Initialize the planning agent.
+
+        Args:
+            llm_client: Configured LLM client. Must not be None; enforced by ``_BlogAgentBase``.
+            plan_critic: Optional critic agent whose approval gates the refine loop.
+            brand_spec_prompt: Optional brand-specific instructions (stripped on store).
+            writing_guidelines: Optional writing-style guidelines (stripped on store).
+
+        Preconditions:
+            - llm_client is not None.
+        """
         super().__init__(llm_client)
         self._plan_critic = plan_critic
         self._brand_spec_prompt = (brand_spec_prompt or "").strip()
