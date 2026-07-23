@@ -139,15 +139,31 @@ MAX_INFRA_FIX_ITERATIONS = 3
 class _DebugPatchState:
     """Mutable bag for one Phase 4.6 debug-patch retry session.
 
-    Invariants: ``exec_failures`` is always derived from ``exec_results``
-    (entries where ``success`` is falsy); ``exec_gate_map`` / ``exec_findings``
-    mirror the latest execution-tool aggregation.
+    Invariants: ``exec_failures`` is derived from ``exec_results`` (entries where
+    ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` are refreshed from
+    ``exec_results`` via :meth:`refresh_aggregates` after each re-exec.
     """
 
     exec_results: List[Dict[str, Any]]
-    exec_failures: List[Dict[str, Any]]
     exec_gate_map: Dict[str, str]
     exec_findings: List[str]
+
+    @property
+    def exec_failures(self) -> List[Dict[str, Any]]:
+        """Failing execution-tool results derived from ``exec_results``."""
+        return [er for er in self.exec_results if not er.get("success", True)]
+
+    def refresh_aggregates(self) -> None:
+        """Rebuild ``exec_gate_map`` / ``exec_findings`` from ``exec_results``.
+
+        Preconditions: ``exec_results`` is the latest execution-tool output list.
+        Postconditions: ``exec_gate_map`` and ``exec_findings`` mirror that list.
+        """
+        self.exec_gate_map = {}
+        self.exec_findings = []
+        for er in self.exec_results:
+            self.exec_gate_map.update(er.get("checks", {}))
+            self.exec_findings.extend(er.get("findings", []))
 
 
 class DevOpsTeamLeadAgent(TeamLeadSharedState):
@@ -457,19 +473,32 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     ) -> Optional[_DebugPatchState]:
         """Run one infra debug → patch → re-exec iteration.
 
+        Parameters:
+          fix_iter: 0-based iteration index (status logging).
+          state: mutable debug-patch state bag; ``exec_failures`` drives the
+            iteration.
+          aggregated_artifacts: mutable artifact path → content map; updated
+            in place when a patch is applied.
+          repo_path: repository path on disk (for optional writes).
+          repo_str: string form of ``repo_path`` passed to tool agents.
+          write_changes: when True, persist patched files via
+            ``write_agent_output`` before re-exec.
+          subdir: subdirectory scope for ``write_agent_output``.
+          max_iterations: bound shown in status logs (enforced by
+            ``_run_bounded_retry_loop``, not re-asserted here).
+
         Preconditions:
           - ``fix_iter`` is a 0-based index from the bounded-retry helper
-          - ``max_iterations >= 1``
           - ``state.exec_failures`` is expected to be non-empty when invoked by
             the helper; if empty, returns ``state`` unchanged
         Postconditions:
           - Empty ``state.exec_failures`` → return ``state`` unchanged
-          - Soft abort (debug/patch exception, not fixable, empty patches) →
-            log and return ``None``
-          - Otherwise update ``aggregated_artifacts`` and ``state`` from the
-            patch + re-exec, then return ``state``
+          - Soft abort (debug/patch exception, not fixable, empty patches, or
+            failed patch write) → log and return ``None``
+          - Otherwise mutate ``aggregated_artifacts`` and ``state`` from the
+            patch + re-exec (including ``refresh_aggregates``), then return
+            ``state``
         """
-        assert max_iterations >= 1, "max_iterations must be >= 1"
         if not state.exec_failures:
             return state
 
@@ -516,7 +545,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             return None
         aggregated_artifacts.update(patch_out.patched_artifacts)
         if write_changes:
-            write_agent_output(
+            ok, msg = write_agent_output(
                 repo_path=repo_path,
                 output={
                     "files": patch_out.patched_artifacts,
@@ -524,13 +553,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 },
                 subdir=subdir,
             )
+            if not ok and msg != NO_FILES_TO_WRITE_MSG:
+                logger.warning("DevOps patch write failed: %s", msg)
+                return None
         state.exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-        state.exec_failures = [er for er in state.exec_results if not er.get("success", True)]
-        state.exec_gate_map = {}
-        state.exec_findings = []
-        for er in state.exec_results:
-            state.exec_gate_map.update(er.get("checks", {}))
-            state.exec_findings.extend(er.get("findings", []))
+        state.refresh_aggregates()
         return state
 
     @staticmethod
@@ -742,10 +769,8 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             # Phase 4.6: Debug-patch loop for fixable execution failures.
             # Consume BaseTeamLead's bounded retry helper without inheriting the
             # code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-            exec_failures = [er for er in exec_results if not er.get("success", True)]
             state = _DebugPatchState(
                 exec_results=exec_results,
-                exec_failures=exec_failures,
                 exec_gate_map=exec_gate_map,
                 exec_findings=exec_findings,
             )
