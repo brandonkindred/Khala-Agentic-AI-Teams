@@ -14,16 +14,15 @@ from typing import Any, List, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
-from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from branding_team._db import PostgresHelperMixin
 from branding_team.api.models import (
     BrandingQuestion,
     BrandingSession,
     BrandingSessionResponse,
 )
 from branding_team.models import BrandingMission, BrandPhase, TeamOutput
-from shared.postgres import get_conn
 from shared.postgres.metrics import timed_query
 
 # ---------------------------------------------------------------------------
@@ -31,7 +30,7 @@ from shared.postgres.metrics import timed_query
 # ---------------------------------------------------------------------------
 
 
-class BrandingSessionStore:
+class BrandingSessionStore(PostgresHelperMixin):
     """Postgres-backed session store — shared across worker processes."""
 
     @timed_query(store="branding_sessions", op="create")
@@ -42,22 +41,19 @@ class BrandingSessionStore:
         session_id = str(uuid4())
         session = BrandingSession(mission=mission, questions=questions, latest_output=latest_output)
         now = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
-                "VALUES (%s, %s, %s)",
-                (session_id, Json(session.model_dump(mode="json")), now),
-            )
+        self._execute(
+            "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
+            "VALUES (%s, %s, %s)",
+            (session_id, Json(session.model_dump(mode="json")), now),
+        )
         return session_id, session
 
     @timed_query(store="branding_sessions", op="get")
     def get(self, session_id: str) -> Optional[BrandingSession]:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT session_json FROM branding_sessions WHERE session_id = %s",
-                (session_id,),
-            )
-            row = cur.fetchone()
+        row = self._fetch_one(
+            "SELECT session_json FROM branding_sessions WHERE session_id = %s",
+            (session_id,),
+        )
         if row is None:
             return None
         return BrandingSession.model_validate(row["session_json"])
@@ -66,12 +62,10 @@ class BrandingSessionStore:
     def save(self, session_id: str, session: BrandingSession) -> None:
         """Persist mutations to an existing session."""
         now = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE branding_sessions SET session_json = %s, updated_at = %s "
-                "WHERE session_id = %s",
-                (Json(session.model_dump(mode="json")), now, session_id),
-            )
+        self._execute(
+            "UPDATE branding_sessions SET session_json = %s, updated_at = %s WHERE session_id = %s",
+            (Json(session.model_dump(mode="json")), now, session_id),
+        )
 
 
 session_store = BrandingSessionStore()
