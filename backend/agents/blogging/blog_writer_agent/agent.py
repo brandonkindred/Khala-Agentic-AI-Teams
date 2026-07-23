@@ -193,21 +193,26 @@ class BlogWriterAgent:
         return str(result).strip()
 
     def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
-        """Call the JSON-mode Strands Agent and return the raw assistant content
-        without parsing. Use this when a caller needs to do its own parsing
-        (e.g. the planning retry path that calls ``extract_json_from_response``)."""
+        """Invoke the injected model via Strands and return raw assistant text.
+
+        Uses ``self._model`` as supplied by the caller (typically already configured
+        for structured/JSON-oriented completions). Does not clone or force
+        ``response_format=json_object`` here — callers that need a specific wire
+        format must configure that on the injected client. Prefer this over
+        parsing when a caller needs to extract JSON itself (e.g. planning paths
+        that call ``extract_json_from_response``).
+        """
         agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
         result = agent(prompt)
         return str(result).strip()
 
     def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
-        """Call the JSON-mode Strands Agent and parse JSON from the result.
+        """Invoke the injected model via Strands and parse JSON from the result.
 
-        Used by the structured helpers (planning, gates) that parse the
-        assistant content via ``extract_json_from_response``.
-        ``response_format=json_object`` is forced on the wire for reliability
-        on Ollama; ``extract_json_from_response`` is a defensive cleanup in
-        case the model wraps the JSON anyway.
+        Appends a soft JSON-only instruction and runs ``extract_json_from_response``
+        as defensive cleanup if the model wraps the object. Relies on ``self._model``
+        already being suitable for structured replies; this method does not force
+        ``response_format=json_object`` on the wire.
         """
         raw = self._call_json_raw(
             prompt + "\n\nRespond with valid JSON only, no markdown fences.",
@@ -238,7 +243,15 @@ class BlogWriterAgent:
         )
 
         def _agent_factory():
-            return Agent(model=self._model, system_prompt=WRITING_SYSTEM_PROMPT)
+            # Construct Agent inside the invoker so TypeError/ValueError from a
+            # bad model/config land in call_json_with_retry's try block and hit
+            # on_unexpected_error (preserving the prior keep-original behavior).
+            model = self._model
+
+            def _invoke(prompt: str):
+                return Agent(model=model, system_prompt=WRITING_SYSTEM_PROMPT)(prompt)
+
+            return _invoke
 
         def _unwrap(exc: Exception) -> Exception:
             return exc.original_exception if isinstance(exc, EventLoopException) else exc
@@ -933,6 +946,8 @@ class BlogWriterAgent:
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     return revised.strip()
+            except LLMJsonParseError as e:
+                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
             except Exception:
                 logger.warning(
                     "Revise item %s/%s: transient error (attempt %s/2); retrying.",
@@ -941,8 +956,6 @@ class BlogWriterAgent:
                     attempt + 1,
                 )
                 time.sleep(2.0 + attempt)
-            except LLMJsonParseError as e:
-                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
         # Fallback
         fallback = self._fallback_draft_via_json(prompt)
         if fallback:
@@ -1034,22 +1047,24 @@ class BlogWriterAgent:
             revise_input,
         )
         current_draft = draft
+        primary_succeeded = False
         for attempt in range(3):
             try:
                 raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
+                    primary_succeeded = True
                     break
+            except LLMJsonParseError as e:
+                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
             except Exception:
                 logger.warning(
                     "Batch revise transient error (attempt %s/3); retrying.",
                     attempt + 1,
                 )
                 time.sleep(2.0 * (2**attempt))
-            except LLMJsonParseError as e:
-                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
-        if current_draft == draft:
+        if not primary_succeeded:
             fallback = self._fallback_draft_via_json(prompt)
             if fallback:
                 current_draft = fallback
@@ -1264,22 +1279,24 @@ class BlogWriterAgent:
             on_llm_request("Revising draft based on editor feedback...")
 
         current_draft = draft
+        primary_succeeded = False
         for attempt in range(3):
             try:
                 raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
+                    primary_succeeded = True
                     break
+            except LLMJsonParseError as e:
+                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
             except Exception:
                 logger.warning(
                     "User-feedback revision transient error (attempt %s/3); retrying.", attempt + 1
                 )
                 time.sleep(2.0 * (2**attempt))
-            except LLMJsonParseError as e:
-                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
 
-        if current_draft == draft:
+        if not primary_succeeded:
             fallback = self._fallback_draft_via_json(prompt)
             if fallback:
                 current_draft = fallback

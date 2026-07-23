@@ -336,6 +336,54 @@ def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
     assert "Revised" in out.draft
 
 
+def test_revise_skips_json_fallback_when_primary_returns_identical_draft(monkeypatch) -> None:
+    """Primary success that yields the same text must not waste a JSON fallback call."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    original = "# Original\nBody"
+    fallback_calls = {"n": 0}
+
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_generate_revision_plan",
+        lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": f'{{"draft": 0}}\n---DRAFT---\n{original}',
+    )
+
+    def tracking_fallback(self, prompt):
+        fallback_calls["n"] += 1
+        return "# Should not be used"
+
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", tracking_fallback)
+
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    out = a.revise(
+        ReviseWriterInput(
+            draft=original,
+            feedback_items=[FeedbackItem(category="x", severity="minor", issue="y")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert out.draft == original
+    assert fallback_calls["n"] == 0
+
+
 def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
     """If all retries fail and json fallback fails, return original draft."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem

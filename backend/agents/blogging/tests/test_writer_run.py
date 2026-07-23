@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def _agent():
     from .conftest import make_writer_agent
@@ -407,6 +409,7 @@ def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> No
     a = _agent()
 
     def fake_retry(factory, prompt, **kwargs):
+        assert kwargs.get("max_attempts") == 2
         return kwargs["on_unexpected_error"](RuntimeError("boom"))
 
     monkeypatch.setattr(
@@ -418,13 +421,12 @@ def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> No
 
 def test_fallback_draft_via_json_transient_reraises(monkeypatch) -> None:
     """Transient LLM errors from call_json_with_retry are re-raised, not converted to None."""
-    import pytest
-
     from llm_service import LLMRateLimitError
 
     a = _agent()
 
     def fake_retry(factory, prompt, **kwargs):
+        assert kwargs.get("max_attempts") == 2
         raise LLMRateLimitError("rate limited")
 
     monkeypatch.setattr(
@@ -443,7 +445,6 @@ def test_fallback_draft_via_json_unwraps_event_loop_transient(monkeypatch) -> No
     LLMTemporaryError; re-raising the wrapper would be swallowed by on_unexpected_error
     and silently keep the unrevised draft.
     """
-    import pytest
     from strands.types.exceptions import EventLoopException
 
     from llm_service import LLMRateLimitError
@@ -466,3 +467,22 @@ def test_fallback_draft_via_json_unwraps_event_loop_transient(monkeypatch) -> No
         a._fallback_draft_via_json("prompt")
     assert excinfo.value is wrapped
     assert not isinstance(excinfo.value, EventLoopException)
+
+
+def test_fallback_draft_via_json_agent_construction_error_returns_none(monkeypatch) -> None:
+    """Agent construction TypeError is caught by the helper policy and yields None."""
+
+    a = _agent()
+
+    class _BadAgent:
+        def __init__(self, *args, **kwargs):
+            raise TypeError("unsupported model config")
+
+        def __call__(self, prompt):
+            raise AssertionError("should not be called")
+
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.Agent",
+        _BadAgent,
+    )
+    assert a._fallback_draft_via_json("prompt") is None
