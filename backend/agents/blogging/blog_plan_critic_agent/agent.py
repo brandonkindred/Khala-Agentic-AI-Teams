@@ -23,6 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import ContentPlan
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
@@ -56,7 +57,7 @@ def _fallback_report(reason: str) -> PlanCriticReport:
     )
 
 
-class BlogPlanCriticAgent:
+class BlogPlanCriticAgent(_BlogAgentBase):
     """Evaluates a ContentPlan against the brand spec + writing guidelines + rubric.
 
     The agent is constructed once and reused across refine iterations. ``run`` is
@@ -65,8 +66,7 @@ class BlogPlanCriticAgent:
     """
 
     def __init__(self, llm_client: Any) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self._model = llm_client
+        super().__init__(llm_client)
 
     # ------------------------------------------------------------------
     # Public API

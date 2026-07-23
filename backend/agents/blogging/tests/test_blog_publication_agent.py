@@ -59,7 +59,12 @@ def test_approve(agent, temp_blog_root) -> None:
 
 
 def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
-    """BlogPublicationAgent reject collects feedback; run_revision_loop revises draft."""
+    """Reject collects feedback; revision loop exits when there is nothing to revise.
+
+    With ``DummyLLMClient``, the convert-to-editor-feedback step and the copy editor
+    both yield no structured ``feedback_items``, so the loop must stop immediately
+    instead of no-op ``revise()`` calls for ``max_revision_loops`` iterations.
+    """
     from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
     from agents.blogging.blog_writer_agent import BlogWriterAgent
 
@@ -91,9 +96,77 @@ def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
     )
 
     assert revision.submission_id == result.submission_id
-    assert revision.iterations_completed == 2
-    assert revision.revised_draft
+    assert revision.iterations_completed == 0
+    assert revision.revised_draft == "# Rejected Post\n\nNeeds work."
 
     draft_path = temp_blog_root / "pending" / f"{result.submission_id}.md"
     assert draft_path.exists()
     assert draft_path.read_text() == revision.revised_draft
+
+
+def test_revision_loop_stops_after_editor_approval(agent, temp_blog_root, monkeypatch) -> None:
+    """After one revise, an approved copy-editor result ends the loop early."""
+    from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorOutput
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterOutput
+
+    result = agent.submit_draft(
+        SubmitDraftInput(
+            draft="# Rejected Post\n\nNeeds work.",
+            title="Rejected Post",
+            audience="developers",
+        )
+    )
+    agent.reject(result.submission_id, "The intro is too short.", force_ready_to_revise=True)
+
+    calls = {"editor": 0, "revise": 0}
+
+    def _fake_editor_run(self, copy_editor_input, **_kw):
+        calls["editor"] += 1
+        if calls["editor"] == 1:
+            return CopyEditorOutput(
+                approved=False,
+                summary="needs a longer intro",
+                feedback_items=[
+                    FeedbackItem(
+                        category="structure",
+                        severity="must_fix",
+                        location="intro",
+                        issue="Intro is too short",
+                        suggestion="Add context",
+                    )
+                ],
+            )
+        return CopyEditorOutput(approved=True, summary="looks good", feedback_items=[])
+
+    def _fake_revise(self, revise_input):
+        calls["revise"] += 1
+        return WriterOutput(draft=revise_input.draft + "\n\nRevised.")
+
+    monkeypatch.setattr(BlogCopyEditorAgent, "run", _fake_editor_run)
+    monkeypatch.setattr(BlogWriterAgent, "revise", _fake_revise)
+    # Convert rejection → structured feedback: return empty so iteration 0 uses
+    # only the mocked editor's must_fix item (avoids DummyLLM JSON noise).
+    monkeypatch.setattr(
+        "agents.blogging.blog_publication_agent.agent.extract_json_from_response",
+        lambda _text: {"feedback_items": []},
+    )
+
+    draft_agent = BlogWriterAgent(
+        llm_client=DummyLLMClient(),
+        writing_style_guide_content="clear",
+        brand_spec_content="brand",
+    )
+    copy_editor_agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
+
+    revision = agent.run_revision_loop(
+        result.submission_id,
+        draft_agent=draft_agent,
+        copy_editor_agent=copy_editor_agent,
+        audience="developers",
+    )
+
+    assert calls["editor"] == 2
+    assert calls["revise"] == 1
+    assert revision.iterations_completed == 1
+    assert "Revised." in revision.revised_draft

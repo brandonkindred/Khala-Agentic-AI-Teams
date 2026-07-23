@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 from strands.types.exceptions import EventLoopException
@@ -44,7 +45,7 @@ def _fallback_editor_data(summary: str) -> Dict[str, Any]:
     return {"approved": True, "summary": summary, "feedback_items": []}
 
 
-class BlogCopyEditorAgent:
+class BlogCopyEditorAgent(_BlogAgentBase):
     """
     Expert agent that provides copy editing feedback on a blog draft,
     evaluating it against a brand and writing style guide.
@@ -62,8 +63,7 @@ class BlogCopyEditorAgent:
             - llm_client is not None.
         Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
-        assert llm_client is not None, "llm_client is required"
-        self._model = llm_client
+        super().__init__(llm_client)
         writing = (writing_style_guide_content or "").strip()
         brand = (brand_spec_content or "").strip()
         parts: list[str] = []
@@ -239,16 +239,17 @@ class BlogCopyEditorAgent:
         Preconditions:
             - ``prompt`` is the fully assembled per-request editor context.
         Postconditions:
-            - Returns a non-None ``dict``. On a successful parse it may be empty
-              (``{}``) or omit keys; callers in :meth:`run` supply defaults for missing
-              ``summary`` / ``feedback_items``.
-            - On JSON-parse exhaustion or an unexpected error, returns a
-              ``_fallback_editor_data`` dict (includes ``approved``, ``summary``, and
-              ``feedback_items``) via the helper's ``on_exhausted`` /
-              ``on_unexpected_error`` hooks.
-            - Transient LLM errors follow ``call_json_with_retry``'s contract (with
-              this method's unwrap hook so strands ``EventLoopException`` wrappers
-              are classified by cause).
+            - Returns a non-None ``dict`` on successful parse or on a fallback path
+              (JSON-parse exhaustion / unexpected error via ``on_exhausted`` /
+              ``on_unexpected_error``). A successful parse may be empty (``{}``) or
+              omit keys; callers in :meth:`run` supply defaults for missing
+              ``summary`` / ``feedback_items``. Fallback dicts include ``approved``,
+              ``summary``, and ``feedback_items``.
+            - Does **not** always return: transient LLM errors
+              (``LLMRateLimitError`` / ``LLMTemporaryError``, including when strands
+              wraps them in ``EventLoopException``) are re-raised by
+              ``call_json_with_retry`` after this method's unwrap hook classifies the
+              cause — they are never swallowed into a return value.
         """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")

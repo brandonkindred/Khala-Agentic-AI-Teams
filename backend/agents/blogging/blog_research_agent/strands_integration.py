@@ -20,7 +20,6 @@ def create_research_agent(llm_client: LLMClient) -> ResearchAgent:
     Postconditions:
         - Returns a ResearchAgent instance configured with the given llm_client.
     """
-    assert llm_client is not None, "llm_client is required"
     return ResearchAgent(llm_client=llm_client)
 
 
