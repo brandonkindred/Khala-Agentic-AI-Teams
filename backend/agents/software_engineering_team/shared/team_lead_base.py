@@ -25,8 +25,9 @@ attributes (see ``test_team_lead_propagates_development_handoff_fields``).
 
 Shared failure-envelope helpers (:func:`build_team_failure_result`,
 :func:`apply_team_failure`) construct or mutate team results with
-``success=False`` and a ``failure_reason``, usable by phase-sequential and
-swarm orchestrators alike.
+``success=False`` and a ``failure_reason`` for phase-sequential leads.
+``CodingTeamSwarm`` deliberately does not use that envelope (see its class
+docstring).
 """
 
 from __future__ import annotations
@@ -138,8 +139,11 @@ class TeamLeadSharedState:
     the optional per-run status callback. Intentionally excludes phase
     sequencing, setup/delegate, worktree management, and swarm locking — those
     stay on the concrete orchestrator (or on ``BaseTeamLead`` for single-pass
-    leads). Round-based swarms can adopt this mixin for state storage without
-    inheriting the single-pass phase model.
+    leads). ``CodingTeamSwarm`` is the canonical adopter: it shares this state
+    storage only and does not take ``BaseTeamLead``'s gated phase-sequencing
+    template or the ``build_team_failure_result`` / ``apply_team_failure``
+    envelope (round-based swarm loop + task-graph failures vs. single-pass
+    phase model + ``success`` / ``failure_reason`` results).
 
     Invariants: ``llm_getter`` is callable; ``shared_config`` is a dict owned by
     this instance (shallow-copied at init); ``_status_callback`` defaults to None.

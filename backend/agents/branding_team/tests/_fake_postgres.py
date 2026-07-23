@@ -587,18 +587,17 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
     import branding_team.store as store_mod
 
     modules: list[Any] = []
-    # ``branding_team.store`` now routes all Postgres access through
-    # ``branding_team._db`` (see ``PostgresHelperMixin``) rather than importing
-    # ``get_conn`` itself, so only patch it there when still present.
+    # ``branding_team.store`` and ``branding_team.api.state`` route Postgres
+    # access through ``branding_team._db`` (see ``PostgresHelperMixin``) rather
+    # than importing ``get_conn`` themselves, so only patch them when still
+    # present.
     if hasattr(store_mod, "get_conn"):
         modules.append(store_mod)
     modules.append(assistant_store_mod)
     modules.append(db_mod)
 
-    # ``branding_team.api.state`` imports ``get_conn`` at module scope for the
-    # BrandingSessionStore. Patch there too when already imported.
     api_state = sys.modules.get("branding_team.api.state")
-    if api_state is not None:
+    if api_state is not None and hasattr(api_state, "get_conn"):
         modules.append(api_state)
 
     return _install_fake_postgres(
