@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -140,13 +140,17 @@ class _DebugPatchState:
     """Mutable bag for one Phase 4.6 debug-patch retry session.
 
     Invariants: ``exec_failures`` is derived from ``exec_results`` (entries where
-    ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` are refreshed from
-    ``exec_results`` via :meth:`refresh_aggregates` after each re-exec.
+    ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` always mirror
+    ``exec_results`` — established in ``__post_init__`` and refreshed via
+    :meth:`refresh_aggregates` after each re-exec.
     """
 
     exec_results: List[Dict[str, Any]]
-    exec_gate_map: Dict[str, str]
-    exec_findings: List[str]
+    exec_gate_map: Dict[str, str] = field(init=False, default_factory=dict)
+    exec_findings: List[str] = field(init=False, default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.refresh_aggregates()
 
     @property
     def exec_failures(self) -> List[Dict[str, Any]]:
@@ -752,11 +756,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             )
             repo_str = str(repo_path)
             exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-            exec_gate_map: Dict[str, str] = {}
-            exec_findings: List[str] = []
             for er in exec_results:
-                exec_gate_map.update(er.get("checks", {}))
-                exec_findings.extend(er.get("findings", []))
                 fc = er.get("failure_class", "")
                 if fc:
                     logger.info(
@@ -769,11 +769,12 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             # Phase 4.6: Debug-patch loop for fixable execution failures.
             # Consume BaseTeamLead's bounded retry helper without inheriting the
             # code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-            state = _DebugPatchState(
-                exec_results=exec_results,
-                exec_gate_map=exec_gate_map,
-                exec_findings=exec_findings,
-            )
+            # Mutation contract: ``attempt`` / ``is_success`` share ``state`` and
+            # ``aggregated_artifacts`` by reference (same as the former inline
+            # locals). Remaining ``state.exec_failures`` after exhaustion are
+            # folded into ``tool_gate_map`` below — they do not early-return a
+            # failed ``DevOpsTeamResult`` (pre-refactor behavior preserved).
+            state = _DebugPatchState(exec_results=exec_results)
             if state.exec_failures:
                 BaseTeamLead._run_bounded_retry_loop(
                     self,

@@ -543,13 +543,18 @@ class TestDebugPatchOnce:
 
         return _DebugPatchState(
             exec_results=[
-                {"success": False, "tool": "terraform", "command": "validate", "findings": ["e"]}
+                {
+                    "success": False,
+                    "tool": "terraform",
+                    "command": "validate",
+                    "checks": {"terraform_validate": "fail"},
+                    "findings": ["e"],
+                }
             ],
-            exec_gate_map={"terraform_validate": "fail"},
-            exec_findings=["e"],
         )
 
     def test_returns_none_when_debug_not_fixable(self) -> None:
+        """Soft-aborts when debug classifies the failure as not fixable."""
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
@@ -578,6 +583,7 @@ class TestDebugPatchOnce:
         assert out is None
 
     def test_returns_none_when_debug_agent_raises(self) -> None:
+        """Soft-aborts when the debug agent raises unexpectedly."""
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
         lead = DevOpsTeamLeadAgent(llm_client=DummyLLMClient())
@@ -600,6 +606,7 @@ class TestDebugPatchOnce:
         assert out is None
 
     def test_returns_none_when_patch_agent_raises(self) -> None:
+        """Soft-aborts when the patch agent raises unexpectedly."""
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
@@ -628,6 +635,7 @@ class TestDebugPatchOnce:
         assert out is None
 
     def test_returns_none_when_patch_artifacts_empty(self) -> None:
+        """Soft-aborts when the patch agent returns no patched artifacts."""
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.infra_patch_agent import IaCPatchOutput
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
@@ -657,6 +665,7 @@ class TestDebugPatchOnce:
         assert out is None
 
     def test_returns_none_when_patch_write_fails(self, monkeypatch) -> None:
+        """Soft-aborts when write_agent_output fails; does not re-exec tools."""
         from software_engineering_team.devops_team import orchestrator as orch_mod
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.infra_patch_agent import IaCPatchOutput
@@ -701,6 +710,7 @@ class TestDebugPatchOnce:
         assert out is None
 
     def test_returns_state_unchanged_when_exec_failures_empty(self) -> None:
+        """No-op when there are no exec failures; agents are not invoked."""
         from software_engineering_team.devops_team.orchestrator import (
             DevOpsTeamLeadAgent,
             _DebugPatchState,
@@ -720,10 +730,14 @@ class TestDebugPatchOnce:
         lead.infra_patch_agent = _TripWirePatch()  # type: ignore[assignment]
         state = _DebugPatchState(
             exec_results=[
-                {"success": True, "tool": "terraform", "command": "validate", "findings": []}
+                {
+                    "success": True,
+                    "tool": "terraform",
+                    "command": "validate",
+                    "checks": {"terraform_validate": "pass"},
+                    "findings": [],
+                }
             ],
-            exec_gate_map={"terraform_validate": "pass"},
-            exec_findings=[],
         )
         out = lead._debug_patch_once(
             0,
@@ -737,8 +751,10 @@ class TestDebugPatchOnce:
         )
         assert out is state
         assert out.exec_failures == []
+        assert out.exec_gate_map.get("terraform_validate") == "pass"
 
     def test_returns_state_with_cleared_failures_on_success(self) -> None:
+        """On a successful patch + re-exec, clears failures and updates aggregates."""
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.infra_patch_agent import IaCPatchOutput
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
