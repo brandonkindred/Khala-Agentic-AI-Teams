@@ -28,3 +28,10 @@ def test_ghost_writer_rejects_none_client() -> None:
 
     with pytest.raises(AssertionError):
         GhostWriterElicitationAgent(llm_client=None)
+
+
+def test_blog_planning_rejects_none_client() -> None:
+    from agents.blogging.blog_planning_agent.agent import BlogPlanningAgent
+
+    with pytest.raises(AssertionError):
+        BlogPlanningAgent(llm_client=None)

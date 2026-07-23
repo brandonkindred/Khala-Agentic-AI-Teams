@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import PlanningInput, PlanningPhaseResult
 from agents.blogging.shared.content_planning_loop import (
     complete_plan_json,
@@ -27,12 +28,15 @@ from .prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
 logger = logging.getLogger(__name__)
 
 
-class BlogPlanningAgent:
+class BlogPlanningAgent(_BlogAgentBase):
     """Generates and refines a ContentPlan until acceptance criteria or max iterations.
 
     When constructed with ``plan_critic``, its approval gates the refine loop
     alongside the planner's own self-evaluation, and its violations drive the
     refine feedback passed back into the model.
+
+    Preconditions:
+        - llm_client is not None.
     """
 
     def __init__(
@@ -43,7 +47,7 @@ class BlogPlanningAgent:
         brand_spec_prompt: str = "",
         writing_guidelines: str = "",
     ) -> None:
-        self._model = llm_client
+        super().__init__(llm_client)
         self._plan_critic = plan_critic
         self._brand_spec_prompt = (brand_spec_prompt or "").strip()
         self._writing_guidelines = (writing_guidelines or "").strip()
