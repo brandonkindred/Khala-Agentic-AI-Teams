@@ -82,14 +82,19 @@ def test_execute_rowcount_reflects_matched_rows(fake_pg: dict) -> None:
         ("conv_1", None, Json({}), None, now, now),
     )
 
+    # Use a live store UPDATE shape (set brand_id) — the bare ``SET updated_at``
+    # form is no longer emitted by BrandingConversationStore and was dropped
+    # from the fake dispatch table.
     affected = probe._execute(
-        "UPDATE branding_conversations SET updated_at = %s WHERE conversation_id = %s",
-        (now, "conv_1"),
+        "UPDATE branding_conversations SET brand_id = %s, updated_at = %s "
+        "WHERE conversation_id = %s",
+        ("brand_1", now, "conv_1"),
     )
     assert affected == 1
 
     affected = probe._execute(
-        "UPDATE branding_conversations SET updated_at = %s WHERE conversation_id = %s",
-        (now, "does_not_exist"),
+        "UPDATE branding_conversations SET brand_id = %s, updated_at = %s "
+        "WHERE conversation_id = %s",
+        ("brand_1", now, "does_not_exist"),
     )
     assert affected == 0
