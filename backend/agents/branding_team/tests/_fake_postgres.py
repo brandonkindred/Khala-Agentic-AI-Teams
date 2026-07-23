@@ -586,22 +586,20 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
     Preconditions:
         ``monkeypatch`` is a pytest ``MonkeyPatch`` (or compatible).
     Postconditions:
-        ``branding_team._db.get_conn`` (and ``api.state`` when imported) is patched
-        to yield a shared ``FakeConn`` backed by the returned default db and
-        branding's SQL dispatch table. Migrated stores reach Postgres only
-        through ``PostgresHelperMixin`` in ``_db``, so their modules are not
-        patched.
+        ``branding_team._db.get_conn`` is patched to yield a shared ``FakeConn``
+        backed by the returned default db and branding's SQL dispatch table.
+        All three store classes reach Postgres only through
+        ``PostgresHelperMixin`` in ``_db``, so their modules are not patched.
+        ``api.state`` is patched only if it still exposes ``get_conn``.
     """
     import branding_team._db as db_mod
 
-    # BrandingStore and BrandingConversationStore both use PostgresHelperMixin
-    # from branding_team._db, so patching _db.get_conn covers them.
+    # BrandingStore, BrandingConversationStore, and BrandingSessionStore all use
+    # PostgresHelperMixin from branding_team._db, so patching _db.get_conn covers them.
     modules: list[Any] = [db_mod]
 
-    # ``branding_team.api.state`` imports ``get_conn`` at module scope for the
-    # BrandingSessionStore. Patch there too when already imported.
     api_state = sys.modules.get("branding_team.api.state")
-    if api_state is not None:
+    if api_state is not None and hasattr(api_state, "get_conn"):
         modules.append(api_state)
 
     return _install_fake_postgres(

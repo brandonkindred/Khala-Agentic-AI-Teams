@@ -1,8 +1,8 @@
 """Shared Postgres access helpers for branding_team's store classes.
 
-Consumed by ``store.py`` (``BrandingStore``) and ``assistant/store.py``
-(``BrandingConversationStore``); ``api/state.py`` still hand-writes its own
-scaffolding (tracked separately).
+Consumed by ``store.py`` (``BrandingStore``), ``assistant/store.py``
+(``BrandingConversationStore``), and ``api/state.py``
+(``BrandingSessionStore``).
 
 ``_fetch_one`` and ``_fetch_all`` use ``dict_row`` cursors (matching the
 stores' former ``cursor(row_factory=dict_row)`` scaffolding). ``_execute``

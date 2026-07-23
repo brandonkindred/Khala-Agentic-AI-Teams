@@ -14,6 +14,10 @@ describe('formatPct', () => {
     expect(formatPct(12.345, 2)).toBe('12.35%');
     expect(formatPct(12, 0)).toBe('12%');
   });
+
+  it('clamps a negative decimals count to zero', () => {
+    expect(formatPct(12.34, -1)).toBe('12%');
+  });
 });
 
 describe('formatRatio', () => {
@@ -28,6 +32,10 @@ describe('formatRatio', () => {
 
   it('honors an explicit decimals count', () => {
     expect(formatRatio(1.5, 1)).toBe('1.5');
+  });
+
+  it('clamps a negative decimals count to zero', () => {
+    expect(formatRatio(1.5, -1)).toBe('2');
   });
 });
 
