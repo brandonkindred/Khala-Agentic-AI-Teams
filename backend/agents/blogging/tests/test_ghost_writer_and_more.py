@@ -156,10 +156,34 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
             raise RuntimeError("LLM exploded")
 
     monkeypatch.setattr(gw_agent, "Agent", _Boom)
-    monkeypatch.setattr(gw_agent.time, "sleep", lambda *_: None)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out["sufficient"] is False
+
+
+def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -> None:
+    """Soft call sites map transient LLM errors to the default dict (planning_stage swallow risk)."""
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient, LLMRateLimitError
+
+    class _Boom:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(gw_agent, "Agent", _Boom)
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    out = agent._evaluate_sufficiency(_gap(), [])
+    assert out == {
+        "sufficient": False,
+        "no_experience": False,
+        "story_context": None,
+        "missing": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +344,8 @@ def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> Non
     assert agent._find_gaps_via_llm(_content_plan()) == []
 
 
-def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
+def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None:
+    """Generic invoke errors fall back immediately (shared helper, no local retry)."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -348,10 +373,81 @@ def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(gw_agent, "Agent", _Stub)
-    monkeypatch.setattr(gw_agent.time, "sleep", lambda *_: None)
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    # Old loop would recover on attempt 2; helper falls back on first unexpected error.
+    assert agent._find_gaps_via_llm(_content_plan()) == []
+
+
+def test_ghost_find_gaps_via_llm_skips_non_dict_items(monkeypatch) -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    _patch_agent(
+        monkeypatch,
+        [
+            json.dumps(
+                [
+                    "not-an-object",
+                    {
+                        "section_title": "Intro",
+                        "section_context": "Hook",
+                        "seed_question": "Got a moment?",
+                    },
+                ]
+            )
+        ],
+    )
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._find_gaps_via_llm(_content_plan())
     assert len(out) == 1
+    assert out[0].seed_question == "Got a moment?"
+
+
+def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch) -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    _patch_agent(
+        monkeypatch,
+        [
+            json.dumps(
+                [
+                    {
+                        "section_title": None,
+                        "section_context": 42,
+                        "seed_question": None,
+                    }
+                ]
+            )
+        ],
+    )
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    out = agent._find_gaps_via_llm(_content_plan())
+    assert len(out) == 1
+    assert out[0].section_title == ""
+    assert out[0].section_context == "42"
+    assert "42" in out[0].seed_question
+
+
+def test_ghost_find_gaps_via_llm_rate_limit_falls_back_empty(monkeypatch) -> None:
+    """Soft call sites map transient LLM errors to [] (planning_stage would otherwise swallow)."""
+    import agents.blogging.ghost_writer_agent.agent as gw_agent
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient, LLMRateLimitError
+
+    class _Boom:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(gw_agent, "Agent", _Boom)
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    assert agent._find_gaps_via_llm(_content_plan()) == []
 
 
 def test_ghost_find_story_gaps_uses_plan_opportunities_when_present(monkeypatch) -> None:
