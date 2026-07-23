@@ -27,6 +27,8 @@ from strands.types.exceptions import EventLoopException
 
 from llm_service import (
     LLMJsonParseError,
+    LLMRateLimitError,
+    LLMTemporaryError,
     compact_text,
     extract_json_from_response,
 )
@@ -956,10 +958,21 @@ class BlogWriterAgent(_BlogAgentBase):
                     attempt + 1,
                 )
                 time.sleep(2.0 + attempt)
-        # Fallback
-        fallback = self._fallback_draft_via_json(prompt)
-        if fallback:
-            return fallback
+        # Fallback — keep original on unexpected failure; re-raise transient LLM
+        # errors so the draft-stage retry funnel can own backoff.
+        try:
+            fallback = self._fallback_draft_via_json(prompt)
+            if fallback:
+                return fallback
+        except (LLMRateLimitError, LLMTemporaryError):
+            raise
+        except Exception as e:
+            logger.warning(
+                "Revise item %s/%s: JSON fallback failed: %s; keeping draft as-is.",
+                item_index,
+                total_items,
+                e,
+            )
         logger.warning(
             "Revise item %s/%s: could not produce revision; keeping draft as-is.",
             item_index,
@@ -1014,7 +1027,11 @@ class BlogWriterAgent(_BlogAgentBase):
 
         # Persist the plan as a JSON artifact so it's visible to the user
         if work_dir is not None:
-            plan_name = f"revision_plan_{iteration}.json" if iteration else "revision_plan.json"
+            plan_name = (
+                f"revision_plan_{iteration}.json"
+                if iteration is not None and iteration > 0
+                else "revision_plan.json"
+            )
             try:
                 from agents.blogging.shared.artifacts import write_artifact
 
@@ -1065,9 +1082,16 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
                 time.sleep(2.0 * (2**attempt))
         if not primary_succeeded:
-            fallback = self._fallback_draft_via_json(prompt)
-            if fallback:
-                current_draft = fallback
+            try:
+                fallback = self._fallback_draft_via_json(prompt)
+                if fallback:
+                    current_draft = fallback
+            except (LLMRateLimitError, LLMTemporaryError):
+                raise
+            except Exception as e:
+                logger.warning(
+                    "Batch revise JSON fallback failed: %s; keeping original draft.", e
+                )
 
         logger.info(
             "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
@@ -1297,9 +1321,17 @@ class BlogWriterAgent(_BlogAgentBase):
                 time.sleep(2.0 * (2**attempt))
 
         if not primary_succeeded:
-            fallback = self._fallback_draft_via_json(prompt)
-            if fallback:
-                current_draft = fallback
+            try:
+                fallback = self._fallback_draft_via_json(prompt)
+                if fallback:
+                    current_draft = fallback
+            except (LLMRateLimitError, LLMTemporaryError):
+                raise
+            except Exception as e:
+                logger.warning(
+                    "User-feedback JSON fallback failed after retries; keeping original draft: %s",
+                    e,
+                )
 
         logger.info("User-feedback revision complete, final length=%s", len(current_draft))
         if draft_output_path:

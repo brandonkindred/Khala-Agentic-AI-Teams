@@ -267,6 +267,94 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
     assert "Orig" in out
 
 
+def test_writer_revise_single_item_fallback_unexpected_keeps_original(monkeypatch) -> None:
+    """Unexpected JSON-fallback errors keep the original draft (not crash)."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom_text(self, p, system_prompt=""):
+        raise RuntimeError("nope")
+
+    def boom_fallback(self, p):
+        raise RuntimeError("fallback boom")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom_text)
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)
+    item = FeedbackItem(category="x", severity="minor", issue="i")
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    ri = ReviseWriterInput(
+        draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
+    )
+    out = a._revise_single_item(
+        draft="# Orig\nBody.",
+        item=item,
+        item_index=1,
+        total_items=1,
+        style_guide_text="style",
+        revise_input=ri,
+    )
+    assert "Orig" in out
+
+
+def test_writer_revise_single_item_fallback_transient_reraises(monkeypatch) -> None:
+    """Transient LLM errors from JSON fallback still propagate for stage retry."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import LLMRateLimitError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom_text(self, p, system_prompt=""):
+        raise RuntimeError("nope")
+
+    def boom_fallback(self, p):
+        raise LLMRateLimitError("429")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom_text)
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)
+    item = FeedbackItem(category="x", severity="minor", issue="i")
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    ri = ReviseWriterInput(
+        draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
+    )
+    with pytest.raises(LLMRateLimitError):
+        a._revise_single_item(
+            draft="# Orig\nBody.",
+            item=item,
+            item_index=1,
+            total_items=1,
+            style_guide_text="style",
+            revise_input=ri,
+        )
+
+
 def test_writer_build_revise_single_item_prompt(monkeypatch) -> None:
     """Smoke test the prompt building helper with title + stories + length_guidance."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
