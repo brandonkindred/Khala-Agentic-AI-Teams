@@ -131,6 +131,17 @@ class BrandingConversationStore(PostgresHelperMixin):
         mission: Optional[BrandingMission] = None,
         latest_output: Optional[TeamOutput] = None,
     ) -> str:
+        """Insert a new conversation row and return its id.
+
+        Preconditions:
+            ``conversation_id`` if provided is unique among existing rows;
+            ``mission`` / ``latest_output`` if provided are valid models.
+        Postconditions:
+            A row is inserted into ``branding_conversations``. Returns the
+            provided ``conversation_id``, or a newly generated UUID4 when
+            none was given. Uses ``_default_mission()`` when ``mission`` is
+            None; stores ``latest_output`` as JSONB or NULL.
+        """
         cid = conversation_id or str(uuid4())
         m = mission or _default_mission()
         output_dict = latest_output.model_dump(mode="json") if latest_output else None
@@ -228,6 +239,15 @@ class BrandingConversationStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="update_mission")
     def update_mission(self, conversation_id: str, mission: BrandingMission) -> bool:
+        """Replace the mission JSON for a conversation and bump ``updated_at``.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string; ``mission`` is a valid
+            :class:`BrandingMission`.
+        Postconditions:
+            Returns True iff a matching conversation row was updated; False
+            when no such conversation exists.
+        """
         ts = datetime.now(tz=timezone.utc)
         return (
             self._execute(
@@ -240,6 +260,18 @@ class BrandingConversationStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="update_output")
     def update_output(self, conversation_id: str, output: Optional[TeamOutput]) -> bool:
+        """Set or clear the latest team output for a conversation.
+
+        Passing ``output=None`` clears ``latest_output_json``.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string; ``output`` is None or a
+            valid :class:`TeamOutput`.
+        Postconditions:
+            Returns True iff a matching conversation row was updated; False
+            when no such conversation exists. ``updated_at`` is bumped on
+            success.
+        """
         output_dict = output.model_dump(mode="json") if output else None
         ts = datetime.now(tz=timezone.utc)
         return (
@@ -257,6 +289,18 @@ class BrandingConversationStore(PostgresHelperMixin):
 
     @timed_query(store=_STORE, op="set_brand")
     def set_brand(self, conversation_id: str, brand_id: Optional[str]) -> bool:
+        """Attach or detach a conversation from a brand.
+
+        Passing ``brand_id=None`` clears the association.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string; ``brand_id`` is None or
+            a brand id string.
+        Postconditions:
+            Returns True iff a matching conversation row was updated; False
+            when no such conversation exists. ``updated_at`` is bumped on
+            success.
+        """
         ts = datetime.now(tz=timezone.utc)
         return (
             self._execute(
