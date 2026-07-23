@@ -8,6 +8,7 @@ from agents.blogging.blog_copy_editor_agent import (
     BlogCopyEditorAgent,
     CopyEditorInput,
     CopyEditorOutput,
+    FeedbackItem,
 )
 
 from llm_service import DummyLLMClient
@@ -394,6 +395,142 @@ def test_write_feedback_to_path_returns_true_on_success(tmp_path: Path) -> None:
     assert agent._write_feedback_to_path(output, target) is True
     assert target.exists()
     assert json.loads(target.read_text(encoding="utf-8"))["summary"] == "ok"
+
+
+def test_init_includes_brand_spec_in_style_prompt() -> None:
+    """Brand spec content is prepended to the style prompt when provided at init."""
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        brand_spec_content="Acme voice: bold and direct.",
+        writing_style_guide_content="Use short sentences.",
+    )
+    assert "--- BRAND SPEC ---" in agent._style_prompt
+    assert "Acme voice" in agent._style_prompt
+    assert "--- WRITING STYLE GUIDE ---" in agent._style_prompt
+
+
+def test_build_editor_prompt_includes_optional_context() -> None:
+    """Optional input fields appear in the assembled editor context."""
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(),
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+    )
+    draft = "# Title\n\nBody paragraph."
+    prompt = agent._build_editor_prompt(
+        CopyEditorInput(
+            draft=draft,
+            length_guidance="Keep sections tight; avoid filler.",
+            audience="Developers",
+            tone_or_purpose="Educational",
+            human_feedback="Shorten the intro.",
+            previous_feedback_items=[
+                FeedbackItem(
+                    category="clarity",
+                    severity="should_fix",
+                    location="paragraph 1",
+                    issue="Opening is too long.",
+                    suggestion="Cut to one sentence.",
+                )
+            ],
+            content_plan_context="Section 1: hook\nSection 2: deep dive",
+            soft_min_words=750,
+            soft_max_words=1300,
+            target_word_count=1000,
+        ),
+        draft,
+        _TEST_STYLE_GUIDE,
+    )
+    assert "CONTENT PROFILE / LENGTH GUIDANCE" in prompt
+    assert "Keep sections tight" in prompt
+    assert "Audience: Developers" in prompt
+    assert "Tone/Purpose: Educational" in prompt
+    assert "AUTHOR'S REQUESTED CHANGES" in prompt
+    assert "Shorten the intro." in prompt
+    assert "PREVIOUS PASS FEEDBACK" in prompt
+    assert "Opening is too long." in prompt
+    assert "CONTENT PLAN" in prompt
+    assert "Section 1: hook" in prompt
+    assert "DRAFT TO REVIEW:" in prompt
+
+
+def test_build_editor_prompt_without_style_guide() -> None:
+    """When no style guide text is supplied, the prompt states there is nothing to evaluate."""
+    agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
+    draft = "Short draft body."
+    prompt = agent._build_editor_prompt(
+        CopyEditorInput(draft=draft, soft_min_words=None, soft_max_words=None),
+        draft,
+        "",
+    )
+    assert "No style guidelines were provided" in prompt
+
+
+def test_parse_feedback_items_skips_invalid_and_applies_defaults() -> None:
+    """Non-dict entries and empty issues are skipped; missing fields get defaults."""
+    agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
+    items = agent._parse_feedback_items(
+        [
+            "not a dict",
+            {"issue": ""},
+            {"category": "  ", "severity": "", "issue": "Needs work"},
+            {
+                "category": "voice",
+                "severity": "must_fix",
+                "location": " intro ",
+                "issue": "Too formal",
+                "suggestion": " Use contractions ",
+            },
+        ]
+    )
+    assert len(items) == 2
+    assert items[0].category == ""
+    assert items[0].severity == "consider"
+    assert items[0].issue == "Needs work"
+    assert items[1].category == "voice"
+    assert items[1].location == "intro"
+    assert items[1].suggestion == "Use contractions"
+
+
+def test_thin_technical_deep_dive_injects_consider_feedback() -> None:
+    """Technical deep dives well under soft_min get a thin-draft consider hint."""
+    llm = DummyLLMClient()
+    agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+    )
+    # soft_min=750, ratio 0.88 → threshold 660; 500 words is thin.
+    result = agent.run(
+        CopyEditorInput(
+            draft=_draft_n_words(500),
+            target_word_count=1000,
+            soft_min_words=750,
+            soft_max_words=1300,
+            content_profile="technical_deep_dive",
+        )
+    )
+    thin_items = [
+        item
+        for item in result.feedback_items
+        if item.severity == "consider" and "technical deep dive" in item.issue.lower()
+    ]
+    assert len(thin_items) == 1
+
+
+def test_on_llm_request_callback_invoked() -> None:
+    """run() forwards on_llm_request to the LLM invocation path."""
+    llm = DummyLLMClient()
+    agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+    )
+    messages: list[str] = []
+
+    agent.run(
+        CopyEditorInput(draft="# Test\n\nDraft body."),
+        on_llm_request=messages.append,
+    )
+
+    assert messages == ["Reviewing draft for style and clarity..."]
 
 
 def test_write_feedback_to_path_returns_false_on_failure(tmp_path: Path) -> None:
