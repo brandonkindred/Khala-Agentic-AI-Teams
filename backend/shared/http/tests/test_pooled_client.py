@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import httpx
 import pytest
 
@@ -207,7 +210,7 @@ def test_async_near_equal_timeouts_share_bucket():
 
 def test_async_replaces_externally_closed_client():
     a = get_pooled_async_client(7.0)
-    a.close()
+    asyncio.run(a.aclose())
     b = get_pooled_async_client(7.0)
     assert b is not a
     assert not b.is_closed
@@ -235,14 +238,29 @@ def test_async_non_finite_timeout_rejected():
 
 
 def test_async_close_pool_swallows_client_close_errors(monkeypatch):
-    get_pooled_async_client(15.0)
+    client = get_pooled_async_client(15.0)
 
-    def _boom(self):
+    def _boom(_client: httpx.AsyncClient) -> None:
         raise RuntimeError("close failed")
 
-    monkeypatch.setattr(httpx.AsyncClient, "close", _boom, raising=True)
-    close_async_pool()
-    assert shared.http._async_clients == {}  # noqa: SLF001
+    monkeypatch.setattr(shared.http, "_sync_close_async_client", _boom)
+    close_async_pool()  # must not raise
+    # Client could not be closed; remains in pool (not falsely cleared).
+    assert shared.http._async_clients == {15.0: client}  # noqa: SLF001
+    assert not client.is_closed
+
+
+def test_async_close_pool_leaves_clients_open_when_loop_running(caplog):
+    client = get_pooled_async_client(15.0)
+
+    async def _close_from_running_loop() -> None:
+        with caplog.at_level(logging.WARNING):
+            close_async_pool()
+
+    asyncio.run(_close_from_running_loop())
+    assert client in shared.http._async_clients.values()  # noqa: SLF001
+    assert not client.is_closed
+    assert any("event loop is running" in record.message.lower() for record in caplog.records)
 
 
 def test_async_pooled_client_applies_limits_and_timeout():

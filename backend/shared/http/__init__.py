@@ -171,22 +171,30 @@ def close_pool() -> None:
 
 atexit.register(close_pool)
 
-if not hasattr(httpx.AsyncClient, "close"):
 
-    def _sync_close_async_client(self: httpx.AsyncClient) -> None:
-        """Sync close shim for httpx>=0.27 where only ``aclose()`` exists."""
-        if self.is_closed:
-            return
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(self.aclose())
-        else:
-            # Cannot block on aclose from inside a running loop; callers in that
-            # situation should use await client.aclose() instead.
-            pass
+def _sync_close_async_client(client: httpx.AsyncClient) -> None:
+    """Best-effort sync teardown for a pooled ``httpx.AsyncClient``.
 
-    httpx.AsyncClient.close = _sync_close_async_client  # type: ignore[attr-defined]
+    Preconditions:
+        - ``client`` is an ``httpx.AsyncClient``.
+    Postconditions:
+        - When no event loop is running, ``client`` is closed via
+          ``asyncio.run(client.aclose())``.
+        - When an event loop is already running, logs a warning and returns
+          without closing (callers in async context must ``await client.aclose()``).
+    """
+    if client.is_closed:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(client.aclose())
+    else:
+        logger.warning(
+            "Cannot sync-close pooled AsyncClient while event loop is running; "
+            "leaving client in pool (use await client.aclose() in async context)"
+        )
+
 
 _async_lock = threading.Lock()
 _async_clients: dict[float, httpx.AsyncClient] = {}
@@ -221,20 +229,26 @@ def close_async_pool() -> None:
     """Close and drop all pooled async clients.
 
     Idempotent: safe to call when the pool is already empty. Intended for
-    process shutdown and test teardown. Uses sync ``AsyncClient.close()`` for
-    best-effort teardown (including from ``atexit``).
+    process shutdown and test teardown. Uses :func:`_sync_close_async_client`
+    for best-effort teardown (including from ``atexit``).
 
     Postconditions:
-        - The async pool is empty; subsequent :func:`get_pooled_async_client`
-          calls create fresh clients.
+        - Closed clients are removed from the pool; clients that could not be
+          sync-closed (e.g. event loop already running) remain until a later
+          close attempt or replacement via :func:`get_pooled_async_client`.
+        - When no event loop is running, the pool is empty after this call.
     """
     with _async_lock:
-        for client in _async_clients.values():
+        remaining: dict[float, httpx.AsyncClient] = {}
+        for key, client in _async_clients.items():
             try:
-                client.close()
+                _sync_close_async_client(client)
             except Exception:  # noqa: BLE001 — best-effort teardown
                 pass
+            if not client.is_closed:
+                remaining[key] = client
         _async_clients.clear()
+        _async_clients.update(remaining)
 
 
 atexit.register(close_async_pool)
