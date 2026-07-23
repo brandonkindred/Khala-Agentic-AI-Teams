@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, List
 
@@ -77,6 +76,23 @@ def test_invoke_structured_with_schema_rejects_empty_inputs(
             "user",
             phase="design_generate_structured",
             schema={"type": "object"},
+            charge=True,
+            objective="strategy design (structured)",
+            logger=logging.getLogger("test.so"),
+        )
+
+
+def test_invoke_structured_with_schema_rejects_empty_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    with pytest.raises(AssertionError, match="precondition"):
+        so_mod.invoke_structured_with_schema(
+            "strategy_design",
+            "sys",
+            "user",
+            phase="design_generate_structured",
+            schema={},
             charge=True,
             objective="strategy design (structured)",
             logger=logging.getLogger("test.so"),
