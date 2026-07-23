@@ -13,7 +13,6 @@ from pydantic import ValidationError
 
 from branding_team.models import BrandingMission, BrandingMissionFields
 
-
 SHARED_FIELD_NAMES = (
     "company_name",
     "company_description",
