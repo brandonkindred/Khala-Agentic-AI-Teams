@@ -507,11 +507,16 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             the helper; if empty, returns ``state`` unchanged
         Postconditions:
           - Empty ``state.exec_failures`` → return ``state`` unchanged
-          - Soft abort (debug/patch exception, not fixable, empty patches, or
-            failed patch write) → log and return ``None``
-          - Otherwise mutate ``aggregated_artifacts`` and ``state`` from the
-            patch + re-exec (including ``refresh_aggregates``), then return
-            ``state``
+          - Soft abort (debug/patch exception, not fixable, or empty patches)
+            → log and return ``None`` (retry helper stops; no further attempts)
+          - Failed patch write → log a warning, still re-exec against the
+            in-memory (and possibly on-disk) patch, then return ``state`` so
+            validation is not skipped after a persistence failure
+          - Successful debug/patch/re-exec that resolves all execution failures
+            → ``state.exec_failures`` is cleared and ``state`` is returned
+          - Partial success (some failures remain after re-exec) → return
+            ``state`` with updated ``exec_failures`` so the retry helper can
+            continue to the next iteration
         """
         if not state.exec_failures:
             return state
@@ -567,9 +572,15 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 },
                 subdir=subdir,
             )
+            # Persistence failure must not skip re-exec: patched content is
+            # already in ``aggregated_artifacts`` and may already be on disk
+            # (e.g. commit-hook reject after write). Soft-aborting here would
+            # let Phase 5 commit unvalidated patches.
             if not ok and msg != NO_FILES_TO_WRITE_MSG:
-                logger.warning("DevOps patch write failed: %s", msg)
-                return None
+                logger.warning(
+                    "DevOps patch write failed (%s); continuing with re-exec validation",
+                    msg,
+                )
         state.exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
         state.refresh_aggregates()
         return state
@@ -779,9 +790,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             # Phase 4.6: Debug-patch loop for fixable execution failures.
             # Mutation contract: ``attempt`` / ``is_success`` share ``state`` and
             # ``aggregated_artifacts`` by reference (same as the former inline
-            # locals). Remaining ``state.exec_failures`` after exhaustion are
-            # folded into ``tool_gate_map`` below — they do not early-return a
-            # failed ``DevOpsTeamResult`` (pre-refactor behavior preserved).
+            # locals). After the loop, ``state.exec_gate_map`` (aggregated
+            # execution-tool check statuses) is merged into local
+            # ``tool_gate_map``; remaining ``state.exec_failures`` do not
+            # early-return a failed ``DevOpsTeamResult`` (pre-refactor behavior
+            # preserved).
             state = _DebugPatchState(exec_results=exec_results)
             if state.exec_failures:
                 self._run_bounded_retry_loop(

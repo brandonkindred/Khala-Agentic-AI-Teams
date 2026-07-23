@@ -664,8 +664,8 @@ class TestDebugPatchOnce:
         )
         assert out is None
 
-    def test_returns_none_when_patch_write_fails(self, monkeypatch) -> None:
-        """Soft-aborts when write_agent_output fails; does not re-exec tools."""
+    def test_continues_reexec_when_patch_write_fails(self, monkeypatch) -> None:
+        """Write failure logs a warning but still re-execs and returns state."""
         from software_engineering_team.devops_team import orchestrator as orch_mod
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.infra_patch_agent import IaCPatchOutput
@@ -692,22 +692,38 @@ class TestDebugPatchOnce:
             "write_agent_output",
             lambda **_kwargs: (False, "disk full"),
         )
+        reexec_calls = [0]
 
-        def _boom(*_a, **_k):
-            raise AssertionError("must not re-exec after write fail")
+        def _reexec(_repo: str, _arts: Dict[str, str]) -> List[Dict[str, Any]]:
+            reexec_calls[0] += 1
+            return [
+                {
+                    "tool": "terraform",
+                    "command": "validate",
+                    "success": True,
+                    "checks": {"terraform_validate": "pass"},
+                    "findings": [],
+                    "failure_class": "",
+                }
+            ]
 
-        lead._run_execution_tools = _boom  # type: ignore[assignment]
+        lead._run_execution_tools = _reexec  # type: ignore[assignment]
+        artifacts = {"main.tf": "broken"}
         out = lead._debug_patch_once(
             0,
             state=self._failing_state(),
-            aggregated_artifacts={"main.tf": "broken"},
+            aggregated_artifacts=artifacts,
             repo_path=__import__("pathlib").Path("."),
             repo_str=".",
             write_changes=True,
             subdir="",
             max_iterations=3,
         )
-        assert out is None
+        assert out is not None
+        assert reexec_calls[0] == 1
+        assert artifacts["main.tf"] == "fixed"
+        assert out.exec_failures == []
+        assert out.exec_gate_map.get("terraform_validate") == "pass"
 
     def test_returns_state_unchanged_when_exec_failures_empty(self) -> None:
         """No-op when there are no exec failures; agents are not invoked."""
