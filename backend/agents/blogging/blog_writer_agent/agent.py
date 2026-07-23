@@ -23,7 +23,10 @@ from agents.blogging.shared.content_profile import LengthPolicy
 from strands import Agent
 
 from llm_service import (
+    LLMError,
     LLMJsonParseError,
+    LLMRateLimitError,
+    LLMTemporaryError,
     compact_text,
     extract_json_from_response,
 )
@@ -344,7 +347,19 @@ class BlogWriterAgent:
         return violations
 
     def _fix_deterministic_violations(self, draft: str, violations: list[str]) -> str:
-        """Call LLM once to fix deterministic violations. Returns cleaned draft."""
+        """Call LLM once to fix deterministic violations. Returns cleaned draft.
+
+        Preconditions:
+            - ``draft`` is a non-empty string when callers intend a real fix (empty is allowed).
+            - ``violations`` is a list of human-readable violation strings (may be empty).
+        Postconditions:
+            - On success with extractable fixed draft, returns that stripped draft.
+            - On soft-fail (``LLMError`` excluding types re-raised below, or
+              ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
+              logs with traceback via ``logger.exception`` and returns the original ``draft``.
+            - ``LLMRateLimitError`` and ``LLMTemporaryError`` propagate unchanged.
+            - Unexpected exceptions propagate unchanged.
+        """
         checklist = "\n".join(f"- {v}" for v in violations)
         prompt = (
             "Fix ONLY these specific issues in the draft below. Do not change anything else.\n\n"
@@ -360,12 +375,25 @@ class BlogWriterAgent:
             if fixed and fixed.strip():
                 logger.info("Deterministic self-check: fixed %s violations", len(violations))
                 return fixed.strip()
-        except Exception as e:
-            logger.warning("Deterministic fix LLM call failed: %s", e)
+        except (LLMRateLimitError, LLMTemporaryError):
+            raise
+        except (LLMError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            logger.exception("Deterministic fix LLM call failed")
         return draft
 
     def _llm_self_review(self, draft: str) -> str:
-        """Run a focused LLM self-review for subjective violations. Returns cleaned draft."""
+        """Run a focused LLM self-review for subjective violations. Returns cleaned draft.
+
+        Preconditions:
+            - ``draft`` is a string (may be empty).
+        Postconditions:
+            - On success, returns the reviewed/fixed draft or the original when no issues.
+            - On soft-fail (``LLMError`` excluding types re-raised below, or
+              ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
+              logs with traceback via ``logger.exception`` and returns the original ``draft``.
+            - ``LLMRateLimitError`` and ``LLMTemporaryError`` propagate unchanged.
+            - Unexpected exceptions propagate unchanged.
+        """
         try:
             raw = self._call_text(
                 f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
@@ -374,9 +402,11 @@ class BlogWriterAgent:
             # Extract JSON array
             start = cleaned.find("[")
             end = cleaned.rfind("]") + 1
-            if start == -1 or end <= start:
+            if start == -1:
                 logger.info("LLM self-review: no issues found (no JSON array)")
                 return draft
+            if end <= start:
+                end = len(cleaned)
             issues = json.loads(cleaned[start:end])
             if not issues:
                 logger.info("LLM self-review: draft passed all 5 checks")
@@ -402,8 +432,10 @@ class BlogWriterAgent:
             if fixed and fixed.strip():
                 logger.info("LLM self-review: applied fixes, new length=%s", len(fixed.strip()))
                 return fixed.strip()
-        except Exception as e:
-            logger.warning("LLM self-review failed: %s", e)
+        except (LLMRateLimitError, LLMTemporaryError):
+            raise
+        except (LLMError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
+            logger.exception("LLM self-review failed")
         return draft
 
     def _self_review(self, draft: str) -> str:
