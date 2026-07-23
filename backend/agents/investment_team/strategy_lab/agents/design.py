@@ -381,16 +381,14 @@ class DesignAgent:
         contract. This method's own contract — inputs, outputs, exceptions
         — is unchanged by the split.
         """
-        structured_attempted = so.structured_output_available()
+        structured_available = so.structured_output_available()
         prompt = user_prompt
-        if structured_attempted:
+        if structured_available:
             finalized, prompt = self._structured_preflight(system_prompt, user_prompt)
             if finalized is not None:
                 return finalized
 
-        return self._legacy_parse_retry_loop(
-            system_prompt, prompt, user_prompt, structured_attempted
-        )
+        return self._legacy_parse_retry_loop(system_prompt, prompt, user_prompt)
 
     def _structured_preflight(
         self, system_prompt: str, user_prompt: str
@@ -467,20 +465,21 @@ class DesignAgent:
         return finalized, user_prompt
 
     def _legacy_parse_retry_loop(
-        self, system_prompt: str, prompt: str, user_prompt: str, structured_attempted: bool
+        self, system_prompt: str, prompt: str, user_prompt: str
     ) -> Tuple[Dict[str, Any], str]:
         """Unconstrained JSON-and-DSL retry loop, delegated to the shared parse-retry driver.
 
         Pre: ``system_prompt`` / ``user_prompt`` are non-empty strings;
         ``prompt`` is the prompt to send on the first attempt — either
         ``user_prompt`` unchanged, or a DSL-correction prompt handed off by
-        :meth:`_structured_preflight`; ``structured_attempted`` is unused
-        here (kept for call-site symmetry with :meth:`_invoke_and_parse`).
+        :meth:`_structured_preflight`.
         Post: returns ``(parsed, rationale)`` on success. Raises
-        ``ValueError`` on malformed JSON, or
-        :class:`StrategySpecParseError` on prose/off-shape rules, once the
+        ``ValueError`` on malformed JSON,
+        :class:`StrategySpecParseError` on prose/off-shape rules once the
         retry budget (``STRATEGY_LAB_DESIGN_PARSE_RETRIES``, default 2
-        retries → 3 attempts total; ``0`` disables retry) is exhausted.
+        retries → 3 attempts total; ``0`` disables retry) is exhausted, or
+        :class:`~..exceptions.StrategyLabLLMError` when the LLM envelope
+        exhausts its transport retries / budget.
 
         On :class:`StrategySpecParseError` the agent re-prompts the LLM
         with the offending field and pydantic error as feedback (the model
@@ -503,13 +502,20 @@ class DesignAgent:
         has always done.
         """
         retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
+        # ``run_json_with_parse_retry`` only returns the validated dict; the
+        # rationale is smuggled out via this mutable box because ``_validate``
+        # must still return a plain ``Dict`` to match the driver's callback
+        # contract. Do not read ``rationale_box`` until after the driver returns.
         rationale_box: Dict[str, str] = {}
 
         def _on_parse_error(_base_prompt: str, exc: ValueError) -> str:
             return build_json_correction_prompt(user_prompt, exc)
 
         def _on_validation_error(_base_prompt: str, exc: Exception) -> str:
-            return _build_correction_prompt(user_prompt, exc)  # type: ignore[arg-type]
+            assert isinstance(exc, StrategySpecParseError), (
+                f"expected StrategySpecParseError, got {type(exc)}"
+            )
+            return _build_correction_prompt(user_prompt, exc)
 
         def _validate(parsed: Dict[str, Any]) -> Dict[str, Any]:
             finalized, rationale = _finalize_parsed(parsed)
@@ -831,7 +837,10 @@ def _finalize_parsed(parsed: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
 
     Pre: ``parsed`` is a JSON-shape-valid dict (JSON-schema-conformant via
     structured decoding, or brace-extracted via :func:`extract_json_object`).
-    Post: returns ``(parsed, rationale)`` with no ``strategy_code`` key.
+    Post: returns ``(parsed, rationale)`` where ``parsed`` is the **same dict
+    instance** mutated in place (``strategy_code`` and ``rationale`` popped)
+    and ``rationale`` defaults to ``""`` when absent. Callers that reuse the
+    input dict elsewhere will observe those keys removed.
     Raises :class:`StrategySpecParseError` when a rule-shaped field fails
     :func:`validate_structured_rules` — JSON-shape validity is a distinct
     guarantee from DSL semantic validity, and this is the one gate that

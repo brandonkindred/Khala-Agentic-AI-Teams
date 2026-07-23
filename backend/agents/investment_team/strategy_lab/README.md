@@ -310,22 +310,29 @@ former `STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle and the per-call `respons
 have been retired. The canonical wire-shape definitions still live in `agents/_response_schemas.py`
 (validated for well-formedness by the test suite).
 
-`RefinementAgent`, `DesignAgent`, and `DesignReviewAgent` are narrow, deliberate exceptions to the
-above: each requests provider-enforced schema-conformant decoding (`REFINEMENT_SCHEMA`,
-`DESIGN_SPEC_SCHEMA`, `CRITIQUE_SCHEMA` respectively) via `LLMClient.complete_json(schema=...)` —
-bypassing the strands `Agent`/`chat()` path, which does not forward a `schema` — whenever
-`llm_service.provider_supports_structured_output(resolve_provider())` is `True` (Ollama only today).
-This is a safe re-introduction of the idea behind the retired `STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED`
-toggle, not a regression of it: unlike that mechanism, it is capability-gated per call site rather than
-applied unconditionally to every agent, it is bounded to a single attempt (`run_structured_agent` never
-loops on a structured call — a schema-conformant decode either succeeds or signals starvation, with no
-"malformed JSON" middle state to re-prompt), and it degrades immediately and deterministically to the
-exact legacy `extract_json_object` + `build_json_correction_prompt` retry loop the moment the client
-raises `LLMSemanticExhaustionError(schema_forced=True)` — the same starvation signal that caused the
-original mechanism's revert, now caught on the first occurrence instead of being retried blind. On
-success it eliminates the happy-path correction resend that made these calls the most token-heavy in the
-pipeline (a full strategy program, spec, or critique re-emitted with the whole original prompt on every
-retry).
+`RefinementAgent`, `DesignAgent` (generate/revise and self-review), and
+`DesignReviewAgent` all route provider-enforced schema-conformant decoding
+through `_structured_output.invoke_structured_with_schema`, which calls
+`LLMClient.complete_json(schema=...)` (bypassing the strands `Agent`/`chat()`
+path, which does not forward a `schema`) whenever
+`_structured_output.structured_output_available()` is `True` (Ollama only
+today — that module attribute wraps
+`llm_service.provider_supports_structured_output(resolve_provider())`). This is
+a safe re-introduction of the idea behind the retired
+`STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle, not a regression of it: unlike
+that mechanism, it is capability-gated via the shared module-attribute seam
+rather than applied unconditionally to every agent, it is bounded to a single
+attempt (`_structured_output.invoke_structured_with_schema` never loops on a
+structured call — a schema-conformant decode either succeeds or signals
+starvation, with no "malformed JSON" middle state to re-prompt), and it
+degrades immediately and deterministically to the exact legacy
+`extract_json_object` + `build_json_correction_prompt` retry loop the moment
+the client raises `LLMSemanticExhaustionError(schema_forced=True)` — the same
+starvation signal that caused the original mechanism's revert, now caught on
+the first occurrence instead of being retried blind. On success it eliminates
+the happy-path correction resend that made these calls the most token-heavy in
+the pipeline (a full strategy program, spec, or critique re-emitted with the
+whole original prompt on every retry).
 
 `DesignAgent` additionally still runs `validate_structured_rules` on a structured response:
 provider-enforced decoding constrains JSON *shape*, not the DSL semantic rules a spec's
@@ -334,10 +341,10 @@ validation (e.g. a bar-field literal wrapped incorrectly). That DSL-validation c
 (`_build_correction_prompt`) stays in place regardless of structured-output availability — only the
 *unparseable-JSON* resend is eliminated on the structured happy path. `DesignAgent._self_review` (the
 internal audit call sharing `CRITIQUE_SCHEMA` semantics with `DesignReviewAgent`) is wired
-independently, since it does not share `_invoke_and_parse` with the generate/revise path — but it does
-share the structured-decoding plumbing: both it and `DesignReviewAgent.run` route through
-`_structured_output.invoke_structured_with_schema(agent_key, system_prompt, user_prompt, phase, charge, schema=CRITIQUE_SCHEMA)`,
-so the `complete_json(schema=CRITIQUE_SCHEMA)` call and starvation handling is written once rather than
+independently of generate/revise's `_invoke_and_parse`, but both it and `DesignReviewAgent.run`
+still go through the same shared helper
+(`_structured_output.invoke_structured_with_schema(..., schema=CRITIQUE_SCHEMA)`), so the
+`complete_json(schema=CRITIQUE_SCHEMA)` call and starvation handling is written once rather than
 duplicated per caller. The remaining spec-authoring/reviewing agents (zero-trade repair, alignment
 fix-proposer) are unchanged and still rely solely on the prompt-embedded-schema + `json_object` contract
 described above.
@@ -348,7 +355,7 @@ provider-enforced decode logs `INFO strategy_lab structured_output outcome=succe
 phase=<phase>_structured` — the marker that no parse-correction resend was needed. A `schema_forced`
 starvation degrade logs the existing `WARNING ... decode starved (schema_forced) ...` line before
 falling through to the legacy loop. When the legacy parse-retry loop does fire, each unparseable-JSON
-warning now carries `structured_attempted=<bool>`, distinguishing a correction retry that ran *after* a
+warning now carries `structured_available=<bool>`, distinguishing a correction retry that ran *after* a
 structured degrade (`True`) from one on a provider that never had structured output available
 (`False`, e.g. Bedrock). Grep `structured_output outcome=succeeded` to count how often the pipeline took
 the resend-free path versus fell back. This mirrors the `json_self_correction succeeded/failed` telemetry

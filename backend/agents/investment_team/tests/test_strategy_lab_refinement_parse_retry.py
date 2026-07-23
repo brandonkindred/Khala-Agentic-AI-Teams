@@ -340,6 +340,8 @@ def test_build_json_correction_prompt_quotes_error_task_and_hint() -> None:
     assert "No JSON object found in LLM response" in prompt
     assert "ORIGINAL REFINEMENT TASK" in prompt
     assert "SENTINEL_HINT_TOKEN" in prompt
-    # Empty hint (the designer path) must not leave a dangling double space.
+    # Empty hint (the designer path) must not leave a dangling double space
+    # at the keys_hint splice point after "commentary.".
     designer = build_json_correction_prompt("T", ValueError("e"))
-    assert "commentary.\nEvery brace" in designer
+    assert "commentary." in designer
+    assert "commentary.  " not in designer

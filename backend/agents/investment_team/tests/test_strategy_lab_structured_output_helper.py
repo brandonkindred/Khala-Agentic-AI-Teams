@@ -65,21 +65,25 @@ def test_invoke_structured_with_schema_requires_availability(
         )
 
 
+@pytest.mark.parametrize("field", ["agent_key", "system_prompt", "user_prompt"])
 def test_invoke_structured_with_schema_rejects_empty_inputs(
     monkeypatch: pytest.MonkeyPatch,
+    field: str,
 ) -> None:
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    kwargs: Dict[str, Any] = {
+        "agent_key": "strategy_design",
+        "system_prompt": "sys",
+        "user_prompt": "user",
+        "phase": "design_generate_structured",
+        "schema": {"type": "object"},
+        "charge": True,
+        "objective": "strategy design (structured)",
+        "logger": logging.getLogger("test.so"),
+    }
+    kwargs[field] = ""
     with pytest.raises(AssertionError, match="precondition"):
-        so_mod.invoke_structured_with_schema(
-            "",
-            "sys",
-            "user",
-            phase="design_generate_structured",
-            schema={"type": "object"},
-            charge=True,
-            objective="strategy design (structured)",
-            logger=logging.getLogger("test.so"),
-        )
+        so_mod.invoke_structured_with_schema(**kwargs)
 
 
 def test_invoke_structured_with_schema_rejects_empty_schema(

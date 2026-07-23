@@ -14,8 +14,9 @@ so tests can monkeypatch ``_structured_output.structured_output_available``
 
 Preconditions: none at module import.
 Postconditions: ``structured_output_available`` is synchronous, no network,
-never raises. ``invoke_structured_with_schema`` never retries and never falls
-back — callers own degrade decisions.
+never raises. ``invoke_structured_with_schema`` does not run a parse/validation
+retry loop of its own and never falls back to legacy Agent decoding — callers
+own degrade decisions. Transport retries still come from the shared envelope.
 """
 
 from __future__ import annotations
@@ -55,14 +56,20 @@ def invoke_structured_with_schema(
     """Bypass ``strands.Agent`` and request schema-conformant JSON via ``complete_json``.
 
     Routes through :func:`run_structured_agent` for the shared charge / invoke /
-    timeout / parse envelope. Never retries and never falls back; callers inspect
-    ``schema_forced`` starvation and decide whether to degrade.
+    timeout / parse envelope. This helper does **not** run its own
+    parse/validation retry loop and never falls back to legacy Agent decoding —
+    callers inspect ``schema_forced`` starvation and decide whether to degrade.
+    Transient *transport* retries still happen inside the envelope
+    (``invoke_agent``); only parse/validation re-prompts are out of scope here.
 
     Preconditions: :func:`structured_output_available` is True; ``agent_key`` /
     ``system_prompt`` / ``user_prompt`` / ``phase`` / ``objective`` are non-empty
     strings; ``schema`` is a non-empty mapping.
     Postconditions: returns the parsed JSON dict on success. Raises
-    :class:`~..exceptions.StrategyLabLLMError` on transport/parse failure.
+    :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
+    transport retries or hits a fatal LLM error, and ``ValueError`` when
+    :func:`extract_json_object` cannot recover a balanced JSON object from the
+    response.
     """
     assert structured_output_available(), (
         "precondition: caller must verify structured_output_available() before "

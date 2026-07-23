@@ -13,6 +13,7 @@ from ...models import BacktestResult, StrategySpec
 from ..exceptions import StrategyLabLLMError
 from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
+from ._llm_budget import charge_active_budget
 from ._parse_helpers import (
     build_json_correction_prompt,
     parse_retry_budget,
@@ -130,6 +131,16 @@ class RefinementAgent:
         optional ``"risk_limits"`` passthrough (the orchestrator applies
         tighten-only semantics). Any other top-level keys in the LLM
         response are logged and discarded.
+
+        Raises:
+            DesignBudgetExhausted: If the active per-cycle design LLM budget
+                is spent (raised by :func:`charge_active_budget` on the
+                legacy parse-retry path, or by the structured path when
+                ``charge=True``).
+            StrategyLabLLMError: If the LLM envelope exhausts transport retries
+                or hits a fatal LLM error.
+            ValueError: If the parse-retry budget is exhausted without recovering
+                a balanced JSON object.
         """
         system_prompt = _SYSTEM_PROMPT
 
@@ -224,8 +235,8 @@ class RefinementAgent:
         re-prompt must be read as "reissue the whole object correctly", not
         "continue from what you emitted".
         """
-        structured_attempted = so.structured_output_available()
-        if structured_attempted:
+        structured_available = so.structured_output_available()
+        if structured_available:
             try:
                 result = so.invoke_structured_with_schema(
                     "strategy_refinement",
@@ -262,11 +273,11 @@ class RefinementAgent:
             attempt_box["n"] += 1
             logger.warning(
                 "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
-                "for failure_phase=%s (structured_attempted=%s): %s",
+                "for failure_phase=%s (structured_available=%s): %s",
                 attempt_box["n"],
                 retries + 1,
                 failure_phase,
-                structured_attempted,
+                structured_available,
                 exc,
             )
             return build_json_correction_prompt(user_prompt, exc, keys_hint=_CORRECTION_KEYS_HINT)
@@ -278,5 +289,6 @@ class RefinementAgent:
             base_user_prompt=user_prompt,
             retry_budget=retries,
             logger=logger,
+            before_attempt=charge_active_budget,
             on_parse_error=_on_parse_error,
         )
