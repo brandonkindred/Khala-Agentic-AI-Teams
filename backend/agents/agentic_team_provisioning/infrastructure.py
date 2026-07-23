@@ -183,7 +183,8 @@ def _require_team_id(team_id: str) -> None:
         - ``team_id`` is the caller-supplied team identifier (may be empty).
     Postconditions:
         - Returns normally only when ``team_id`` is a non-empty string.
-        - Raises ``ValueError`` otherwise (enforced under ``python -O``).
+        - Raises ``ValueError`` otherwise (always enforced; not an ``assert``,
+          so not stripped by ``python -O``).
     """
     if not team_id:
         raise ValueError("team_id must be a non-empty string")
