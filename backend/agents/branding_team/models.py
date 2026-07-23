@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
+
 # ---------------------------------------------------------------------------
 # Shared models
 # ---------------------------------------------------------------------------
@@ -39,6 +41,13 @@ class BrandStatus(str, Enum):
 
 
 class WorkflowStatus(str, Enum):
+    """Branding-run lifecycle status.
+
+    Intentionally team-local (not in ``shared.hitl``): the terminal
+    ``READY_FOR_ROLLOUT`` is branding-specific. Only the string value
+    ``needs_human_decision`` overlaps other teams' enums.
+    """
+
     NEEDS_HUMAN_DECISION = "needs_human_decision"
     READY_FOR_ROLLOUT = "ready_for_rollout"
 
@@ -112,11 +121,6 @@ class BrandingMission(BrandingMissionFields):
     visual_style: str = ""  # e.g. "minimalist", "maximalist", "editorial"
     typography_preference: str = ""  # e.g. "geometric sans-serif", "humanist serif"
     interface_density: str = ""  # e.g. "spacious/minimalist", "dense/information-rich"
-
-
-class HumanReview(BaseModel):
-    approved: bool = False
-    feedback: str = ""
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Tests for shared.hitl.models — the reconciled superset schemas."""
+"""Tests for shared.hitl.models — HITL schemas including gate review."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from shared.hitl.models import (
     AnswerSubmission,
+    HumanReview,
     PendingQuestion,
     QuestionOption,
     SubmitAnswersRequest,
@@ -92,3 +93,29 @@ def test_submit_answers_request_parses_nested_answers():
 def test_submit_answers_request_requires_answers():
     with pytest.raises(ValidationError):
         SubmitAnswersRequest()
+
+
+def test_human_review_requires_approved():
+    with pytest.raises(ValidationError):
+        HumanReview()
+    with pytest.raises(ValidationError):
+        HumanReview(feedback="x")
+
+
+def test_human_review_defaults_feedback_empty():
+    review = HumanReview(approved=True)
+    assert review.approved is True
+    assert review.feedback == ""
+
+
+def test_human_review_accepts_feedback():
+    review = HumanReview(approved=False, feedback="Need stronger CTA")
+    assert review.approved is False
+    assert review.feedback == "Need stronger CTA"
+
+
+def test_human_review_json_roundtrip():
+    review = HumanReview(approved=True, feedback="ok")
+    dumped = review.model_dump()
+    assert dumped == {"approved": True, "feedback": "ok"}
+    assert HumanReview.model_validate(dumped) == review

@@ -50,9 +50,7 @@ def validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Lis
     # and carries a clear message. The isinstance guard must come first: `"id" not in q` on a
     # non-dict (str/int/None) would itself raise before the id check ran.
     if any(not isinstance(q, dict) or "id" not in q for q in pending):
-        raise HTTPException(
-            status_code=500, detail="Corrupted job record: pending question missing 'id'."
-        )
+        raise HTTPException(status_code=500, detail="Corrupted job record: pending question missing 'id'.")
     pending_ids = {q["id"] for q in pending}
     required_ids = {q["id"] for q in pending if q.get("required", True)}
     # Reject duplicate answers for the same question up front: the set below collapses them, so the
@@ -78,9 +76,7 @@ def validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Lis
         )
     unknown = answered_ids - pending_ids
     if unknown:
-        raise HTTPException(
-            status_code=400, detail=f"Unknown question IDs: {', '.join(sorted(unknown))}"
-        )
+        raise HTTPException(status_code=400, detail=f"Unknown question IDs: {', '.join(sorted(unknown))}")
     options_by_qid = {q["id"]: {o.get("id") for o in (q.get("options") or [])} for q in pending}
     for a in request.answers:
         # Whitespace-only free text is not a decision: strip before the emptiness checks so a blank
