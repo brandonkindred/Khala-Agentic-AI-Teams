@@ -1,9 +1,10 @@
 # shared.hitl
 
-Single owner of the **human-in-the-loop (HITL) "pending question / answer"** contract:
-the Pydantic schemas, answer-submission validation, progress coercion, and status
+Single owner of the **human-in-the-loop (HITL)** contract: the pending-question /
+answer Pydantic schemas, the shared `HumanReview` gate model (approve/reject +
+optional feedback), answer-submission validation, progress coercion, and status
 materialization that teams reuse when a job pauses to ask the user a product/design
-decision.
+decision or to collect a human gate decision.
 
 Previously each team defined its own near-identical copy and the copies had drifted
 into genuinely different behavior. This package reconciles them to the **strictest /
@@ -15,6 +16,7 @@ re-export these; the old helpers become thin wrappers).
 | Symbol | Module | Purpose |
 |---|---|---|
 | `QuestionOption`, `PendingQuestion`, `AnswerSubmission`, `SubmitAnswersRequest` | `models` | The four schemas, superset fields folded in as `Optional`/defaulted. |
+| `HumanReview` | `models` | Gate decision: required `approved`, optional `feedback` (default `""`). |
 | `validate_answers(data, request)` | `validation` | Validate a submission against a job's pending questions; raise `HTTPException` (400, or 500 on a corrupted record) or return answer dicts. |
 | `coerce_progress(value)` | `progress` | Coerce a stored progress value to an int clamped to `[0, 100]`, or `None`. |
 | `pending_questions_from_raw(raw)` | `status` | Materialize stored records into `PendingQuestion` models with `model_validate` (full-fidelity; skips non-dict entries). |
@@ -40,6 +42,13 @@ changes three previously-observable SE behaviors (each covered by a regression t
    rejections** — SE previously accepted two conflicting answers to one question.
 3. **`get_job_status` preserves `recommendation`/`allow_multiple`** — SE's route
    previously hand-enumerated `PendingQuestion` fields and silently dropped these two.
+
+## Non-shared: team WorkflowStatus
+
+Branding (`READY_FOR_ROLLOUT`) and market research (`DRAFT` / `READY_FOR_EXECUTION`)
+keep local `WorkflowStatus` enums because terminal semantics differ per team.
+Investment's `WorkflowStatusResponse` is an unrelated API DTO and is not part of
+this package.
 
 ## Layout & conventions
 
