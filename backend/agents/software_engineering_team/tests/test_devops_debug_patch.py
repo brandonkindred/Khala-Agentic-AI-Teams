@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_service.clients.dummy import DummyLLMClient
@@ -12,14 +13,26 @@ from software_engineering_team.devops_team.infra_debug_agent import (
     InfraDebugAgent,
 )
 from software_engineering_team.devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
+from software_engineering_team.devops_team.orchestrator import _DebugPatchState
 
 
 class _StubClient(DummyLLMClient):
-    """Returns a canned response for every ``complete_json``.
+    """Returns one canned JSON response for every LLM call.
 
-    Routes transparently through the Strands adapter path
-    (``chat_json_round`` → ``StructuredOutputTool`` detection → the
-    ``complete_json`` override below)."""
+    Usage::
+
+        client = _StubClient({
+            "errors": [...],
+            "summary": "...",
+            "fixable": True,
+        })
+
+    Constraints:
+      - Always returns the same ``response`` dict regardless of prompt/kwargs
+      - Does not validate temperature, tools, or other call parameters
+      - Routes through the Strands adapter path (``chat_json_round`` →
+        ``StructuredOutputTool`` detection → ``complete_json``)
+    """
 
     def __init__(self, response: Dict[str, Any]) -> None:
         super().__init__()
@@ -39,7 +52,21 @@ class _StubClient(DummyLLMClient):
 
 
 class _ScriptedClient(DummyLLMClient):
-    """Returns a different canned response on each ``complete_json`` call."""
+    """Returns a different canned JSON response for each LLM call (FIFO).
+
+    Usage::
+
+        client = _ScriptedClient([
+            {"errors": [...], "summary": "first"},
+            {"errors": [], "summary": "second"},
+        ])
+
+    Constraints:
+      - Responses are consumed in order from the provided list
+      - Extra calls after the list is exhausted return the last response
+        (or ``{}`` if the list was empty)
+      - Does not validate temperature, tools, or other call parameters
+    """
 
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         super().__init__()
@@ -63,13 +90,37 @@ class _ScriptedClient(DummyLLMClient):
         return self._responses[-1] if self._responses else {}
 
 
+def _failing_debug_patch_state() -> _DebugPatchState:
+    """Build a ``_DebugPatchState`` with one failing terraform validate result."""
+    return _DebugPatchState(
+        exec_results=[
+            {
+                "success": False,
+                "tool": "terraform",
+                "command": "validate",
+                "checks": {"terraform_validate": "fail"},
+                "findings": ["e"],
+            }
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Debug Agent tests
 # ---------------------------------------------------------------------------
 
 
 class TestInfraDebugAgent:
+    """Tests for InfraDebugAgent error classification and fixable-flag logic.
+
+    Covers:
+      - Classifying syntax vs unknown errors from execution output
+      - Setting ``fixable=True`` when only syntax/validation issues are present
+      - Setting ``fixable=False`` when any non-fixable (runtime) error exists
+    """
+
     def test_classifies_syntax_error(self) -> None:
+        """Classifies a terraform syntax failure as ``error_type='syntax'`` and fixable."""
         client = _StubClient(
             {
                 "errors": [
@@ -99,6 +150,7 @@ class TestInfraDebugAgent:
         assert result.fixable
 
     def test_classifies_unknown_error(self) -> None:
+        """Classifies a generic failure as ``error_type='unknown'`` and not fixable."""
         client = _StubClient(
             {
                 "errors": [{"error_type": "unknown", "error_message": "Unexpected"}],
@@ -119,6 +171,7 @@ class TestInfraDebugAgent:
         assert not result.fixable
 
     def test_sets_fixable_true_for_all_syntax_validation(self) -> None:
+        """Marks results fixable when every error is syntax or validation."""
         client = _StubClient(
             {
                 "errors": [
@@ -140,6 +193,7 @@ class TestInfraDebugAgent:
         assert result.fixable
 
     def test_sets_fixable_false_when_runtime_present(self) -> None:
+        """Marks results not fixable when any runtime error is mixed in."""
         client = _StubClient(
             {
                 "errors": [
@@ -168,7 +222,15 @@ class TestInfraDebugAgent:
 
 
 class TestInfraPatchAgent:
+    """Tests for InfraPatchAgent artifact generation and short-circuit behavior.
+
+    Covers:
+      - Producing patched artifacts when ``fixable=True``
+      - Returning empty patches without calling the LLM when ``fixable=False``
+    """
+
     def test_produces_patched_artifacts(self) -> None:
+        """Generates patched file contents when debug output is fixable."""
         client = _StubClient(
             {
                 "patched_artifacts": {
@@ -196,9 +258,7 @@ class TestInfraPatchAgent:
         assert result.edits_applied == 1
 
     def test_returns_empty_when_not_fixable(self) -> None:
-        """The patch agent short-circuits on ``fixable=False`` and never
-        calls the LLM — verified by a trip-wire client that raises if
-        ``complete_json`` is invoked."""
+        """Short-circuits on ``fixable=False`` and never calls the LLM."""
         debug_out = IaCDebugOutput(
             errors=[IaCExecutionError(error_type="permissions", error_message="Access denied")],
             summary="Not fixable",
@@ -206,6 +266,8 @@ class TestInfraPatchAgent:
         )
 
         class _TripWire(DummyLLMClient):
+            """Raises if the patch agent invokes the LLM on a non-fixable debug result."""
+
             def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
                 raise AssertionError("LLM must not be called when debug_output.fixable is False")
 
@@ -228,8 +290,14 @@ class TestInfraPatchAgent:
 
 
 class TestDevOpsPipelineDebugPatchLoop:
+    """End-to-end Phase 4.6 bounded retry coverage on ``_run_pipeline``."""
+
     def test_loop_terminates_after_max_iterations(self) -> None:
-        """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts."""
+        """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts.
+
+        Also spot-checks Phase 4.6 status details contain ``iteration N/3`` for each
+        attempt (N from 1 through ``MAX_INFRA_FIX_ITERATIONS``).
+        """
         from software_engineering_team.devops_team.orchestrator import (
             MAX_INFRA_FIX_ITERATIONS,
             DevOpsTeamLeadAgent,
@@ -332,7 +400,6 @@ class TestDevOpsPipelineDebugPatchLoop:
         )
 
         import tempfile
-        from pathlib import Path
 
         with tempfile.TemporaryDirectory() as td:
             result = agent._run_pipeline(
@@ -415,7 +482,6 @@ class TestDevOpsPipelineDebugPatchLoop:
         )
 
         import tempfile
-        from pathlib import Path
 
         with tempfile.TemporaryDirectory() as td:
             result = agent._run_pipeline(
@@ -515,7 +581,6 @@ class TestDevOpsPipelineDebugPatchLoop:
         )
 
         import tempfile
-        from pathlib import Path
 
         with tempfile.TemporaryDirectory() as td:
             result = agent._run_pipeline(
@@ -535,26 +600,10 @@ class TestDevOpsPipelineDebugPatchLoop:
 
 
 class TestDebugPatchOnce:
-    """Unit coverage for DevOpsTeamLeadAgent._debug_patch_once."""
-
-    @staticmethod
-    def _failing_state():
-        from software_engineering_team.devops_team.orchestrator import _DebugPatchState
-
-        return _DebugPatchState(
-            exec_results=[
-                {
-                    "success": False,
-                    "tool": "terraform",
-                    "command": "validate",
-                    "checks": {"terraform_validate": "fail"},
-                    "findings": ["e"],
-                }
-            ],
-        )
+    """Unit coverage for DevOpsTeamLeadAgent._debug_patch_once soft-abort and success paths."""
 
     def test_returns_none_when_debug_not_fixable(self) -> None:
-        """Soft-aborts when debug classifies the failure as not fixable."""
+        """Soft-aborts (returns None) when ``IaCDebugOutput.fixable`` is False."""
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
@@ -572,9 +621,9 @@ class TestDebugPatchOnce:
         lead.infra_patch_agent = _TripWirePatch()  # type: ignore[assignment]
         out = lead._debug_patch_once(
             0,
-            state=self._failing_state(),
+            state=_failing_debug_patch_state(),
             aggregated_artifacts={"main.tf": "x"},
-            repo_path=__import__("pathlib").Path("."),
+            repo_path=Path("."),
             repo_str=".",
             write_changes=False,
             subdir="",
@@ -595,9 +644,9 @@ class TestDebugPatchOnce:
         lead.infra_debug_agent = _Debug()  # type: ignore[assignment]
         out = lead._debug_patch_once(
             0,
-            state=self._failing_state(),
+            state=_failing_debug_patch_state(),
             aggregated_artifacts={"main.tf": "x"},
-            repo_path=__import__("pathlib").Path("."),
+            repo_path=Path("."),
             repo_str=".",
             write_changes=False,
             subdir="",
@@ -624,9 +673,9 @@ class TestDebugPatchOnce:
         lead.infra_patch_agent = _Patch()  # type: ignore[assignment]
         out = lead._debug_patch_once(
             0,
-            state=self._failing_state(),
+            state=_failing_debug_patch_state(),
             aggregated_artifacts={"main.tf": "x"},
-            repo_path=__import__("pathlib").Path("."),
+            repo_path=Path("."),
             repo_str=".",
             write_changes=False,
             subdir="",
@@ -654,9 +703,9 @@ class TestDebugPatchOnce:
         lead.infra_patch_agent = _Patch()  # type: ignore[assignment]
         out = lead._debug_patch_once(
             0,
-            state=self._failing_state(),
+            state=_failing_debug_patch_state(),
             aggregated_artifacts={"main.tf": "x"},
-            repo_path=__import__("pathlib").Path("."),
+            repo_path=Path("."),
             repo_str=".",
             write_changes=False,
             subdir="",
@@ -692,10 +741,11 @@ class TestDebugPatchOnce:
             "write_agent_output",
             lambda **_kwargs: (False, "disk full"),
         )
-        reexec_calls = [0]
+        # Mutable single-element list so the nested stub can update call count.
+        execution_tools_call_count = [0]
 
         def _reexec(_repo: str, _arts: Dict[str, str]) -> List[Dict[str, Any]]:
-            reexec_calls[0] += 1
+            execution_tools_call_count[0] += 1
             return [
                 {
                     "tool": "terraform",
@@ -711,26 +761,23 @@ class TestDebugPatchOnce:
         artifacts = {"main.tf": "broken"}
         out = lead._debug_patch_once(
             0,
-            state=self._failing_state(),
+            state=_failing_debug_patch_state(),
             aggregated_artifacts=artifacts,
-            repo_path=__import__("pathlib").Path("."),
+            repo_path=Path("."),
             repo_str=".",
             write_changes=True,
             subdir="",
             max_iterations=3,
         )
         assert out is not None
-        assert reexec_calls[0] == 1
+        assert execution_tools_call_count[0] == 1
         assert artifacts["main.tf"] == "fixed"
         assert out.exec_failures == []
         assert out.exec_gate_map.get("terraform_validate") == "pass"
 
     def test_returns_state_unchanged_when_exec_failures_empty(self) -> None:
         """No-op when there are no exec failures; agents are not invoked."""
-        from software_engineering_team.devops_team.orchestrator import (
-            DevOpsTeamLeadAgent,
-            _DebugPatchState,
-        )
+        from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
 
         lead = DevOpsTeamLeadAgent(llm_client=DummyLLMClient())
 
@@ -759,7 +806,7 @@ class TestDebugPatchOnce:
             0,
             state=state,
             aggregated_artifacts={"main.tf": "x"},
-            repo_path=__import__("pathlib").Path("."),
+            repo_path=Path("."),
             repo_str=".",
             write_changes=False,
             subdir="",
@@ -806,9 +853,9 @@ class TestDebugPatchOnce:
         artifacts = {"main.tf": "broken"}
         out = lead._debug_patch_once(
             0,
-            state=self._failing_state(),
+            state=_failing_debug_patch_state(),
             aggregated_artifacts=artifacts,
-            repo_path=__import__("pathlib").Path("."),
+            repo_path=Path("."),
             repo_str=".",
             write_changes=False,
             subdir="",
