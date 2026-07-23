@@ -769,6 +769,22 @@ class BlogWriterAgent(_BlogAgentBase):
     def _build_revision_plan_prompt(
         self, draft: str, feedback_items: list[Any], revise_input: ReviseWriterInput
     ) -> str:
+        """Build a prompt that asks the LLM for a structured revision plan.
+
+        Preconditions:
+            - ``draft`` is the current Markdown draft text.
+            - ``feedback_items`` is a sequence of items that each expose
+              ``severity``, ``category``, and ``issue`` (and optionally
+              ``location`` / ``suggestion``) for ``_format_feedback_item_line``.
+            - ``revise_input`` provides the content plan via
+              ``outline_for_prompt()``.
+        Postconditions:
+            - Returns a prompt string that instructs the model to return JSON
+              matching the ``RevisionPlan`` schema (``summary``, ordered
+              ``changes`` with ``section`` / ``feedback_ids`` / ``action`` /
+              ``rationale``, and ``risks``), with feedback referenced by
+              1-based index and ``must_fix`` severity prioritized.
+        """
         feedback_lines = [
             self._format_feedback_item_line(item, i)
             for i, item in enumerate(feedback_items, start=1)
