@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 
 from branding_team.models import (
-    BrandingMission,
     BrandPhase,
     BrandStatus,
     TeamOutput,
@@ -17,6 +16,7 @@ from branding_team.models import (
 )
 from branding_team.store import BrandingStore
 from branding_team.tests._fake_postgres import install_fake_postgres
+from branding_team.tests.conftest import make_mission
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def test_create_client_and_list(fake_pg: dict) -> None:
 def test_create_brand_and_list(fake_pg: dict) -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="Acme Inc",
         company_description="A great company",
         target_audience="everyone",
@@ -68,7 +68,7 @@ def test_create_brand_records_profile_association(
 
     store = BrandingStore()
     client = store.create_client("Acme")
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="Acme Inc",
         company_description="A great company",
         target_audience="everyone",
@@ -82,7 +82,7 @@ def test_get_brand_wrong_client_returns_none(fake_pg: dict) -> None:
     store = BrandingStore()
     c1 = store.create_client("C1")
     c2 = store.create_client("C2")
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="XY",
         company_description="A description that is long enough",
         target_audience="Everyone",
@@ -95,7 +95,7 @@ def test_get_brand_wrong_client_returns_none(fake_pg: dict) -> None:
 def test_update_brand(fake_pg: dict) -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="Acme Inc",
         company_description="A great company",
         target_audience="everyone",
@@ -114,7 +114,7 @@ def test_update_brand(fake_pg: dict) -> None:
 def test_append_brand_version(fake_pg: dict) -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="Acme Inc",
         company_description="A great company",
         target_audience="everyone",
@@ -141,7 +141,7 @@ def test_append_brand_version_persists_current_phase(fake_pg: dict) -> None:
     """Verify that current_phase on the brand record is updated from the output."""
     store = BrandingStore()
     client = store.create_client("PhaseTest")
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="PhaseTestCo",
         company_description="Company for phase persistence test",
         target_audience="testers",
@@ -172,7 +172,7 @@ def test_append_brand_version_persists_current_phase(fake_pg: dict) -> None:
 
 def test_create_brand_for_nonexistent_client_returns_none(fake_pg: dict) -> None:
     store = BrandingStore()
-    mission = BrandingMission(
+    mission = make_mission(
         company_name="XY",
         company_description="Long enough description",
         target_audience="Everyone",
@@ -181,19 +181,18 @@ def test_create_brand_for_nonexistent_client_returns_none(fake_pg: dict) -> None
     assert brand is None
 
 
-def _mission() -> BrandingMission:
-    return BrandingMission(
-        company_name="Acme Inc",
-        company_description="A great company",
-        target_audience="everyone",
-    )
-
-
 def test_brand_exists(fake_pg: dict) -> None:
     """brand_exists is True for an existing brand and False for an unknown id."""
     store = BrandingStore()
     client = store.create_client("Acme")
-    brand = store.create_brand(client.id, _mission())
+    brand = store.create_brand(
+        client.id,
+        make_mission(
+            company_name="Acme Inc",
+            company_description="A great company",
+            target_audience="everyone",
+        ),
+    )
     assert brand is not None
     assert store.brand_exists(brand.id) is True
     assert store.brand_exists("brand_does_not_exist") is False
@@ -203,7 +202,14 @@ def test_get_brand_by_id_resolves_client(fake_pg: dict) -> None:
     """get_brand_by_id returns the owning client id + brand, or None if absent."""
     store = BrandingStore()
     client = store.create_client("Acme")
-    brand = store.create_brand(client.id, _mission())
+    brand = store.create_brand(
+        client.id,
+        make_mission(
+            company_name="Acme Inc",
+            company_description="A great company",
+            target_audience="everyone",
+        ),
+    )
     assert brand is not None
     found = store.get_brand_by_id(brand.id)
     assert found is not None
@@ -217,8 +223,24 @@ def test_get_brand_names_returns_only_requested(fake_pg: dict) -> None:
     """get_brand_names maps only the requested existing ids; empty input is a no-op."""
     store = BrandingStore()
     client = store.create_client("Acme")
-    b1 = store.create_brand(client.id, _mission(), name="First")
-    b2 = store.create_brand(client.id, _mission(), name="Second")
+    b1 = store.create_brand(
+        client.id,
+        make_mission(
+            company_name="Acme Inc",
+            company_description="A great company",
+            target_audience="everyone",
+        ),
+        name="First",
+    )
+    b2 = store.create_brand(
+        client.id,
+        make_mission(
+            company_name="Acme Inc",
+            company_description="A great company",
+            target_audience="everyone",
+        ),
+        name="Second",
+    )
     assert b1 is not None and b2 is not None
 
     names = store.get_brand_names([b1.id, "brand_missing"])
@@ -260,7 +282,17 @@ def test_list_brands_for_client_pagination(fake_pg: dict) -> None:
     store = BrandingStore()
     client = store.create_client("Acme")
     for _ in range(3):
-        assert store.create_brand(client.id, _mission()) is not None
+        assert (
+            store.create_brand(
+                client.id,
+                make_mission(
+                    company_name="Acme Inc",
+                    company_description="A great company",
+                    target_audience="everyone",
+                ),
+            )
+            is not None
+        )
     assert len(store.list_brands_for_client(client.id)) == 3
     page = store.list_brands_for_client(client.id, limit=1, offset=1)
     assert len(page) == 1

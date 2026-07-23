@@ -3,7 +3,8 @@ Fact-Checker and Risk Officer agent.
 
 Verifies claims are supported, flags hazards, and identifies required disclaimers.
 
-All errors are raised explicitly - no silent failures.
+Transient LLM errors propagate unwrapped for retry; exhausted JSON parse fails closed
+with a FAIL report; other unexpected errors raise FactCheckError.
 """
 
 from __future__ import annotations
@@ -13,26 +14,22 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
-from llm_service import (
-    LLMJsonParseError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    extract_json_from_response,
-)
+from llm_service import LLMRateLimitError, LLMTemporaryError
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
 
 try:
     from agents.blogging.shared.artifacts import write_artifact
-except ImportError:
+except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared modules; not exercised because conftest guarantees the import path resolves.
     write_artifact = None
 
 try:
     from agents.blogging.shared.errors import FactCheckError, LLMError
-except ImportError:
+except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared.errors; not exercised because conftest guarantees the import path resolves.
 
     class FactCheckError(Exception):
         pass
@@ -41,9 +38,14 @@ except ImportError:
         pass
 
 
-_MAX_JSON_RETRIES = 2
-
 logger = logging.getLogger(__name__)
+
+_ALWAYS_ON_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
+
+_JSON_RETRY_SUFFIX = (
+    "\n\nCRITICAL: Your previous response contained invalid JSON. "
+    "Output ONLY a single valid JSON object. No code blocks or markdown in values."
+)
 
 
 class BlogFactCheckAgent:
@@ -72,9 +74,29 @@ class BlogFactCheckAgent:
             allowed_claims: allowed_claims.json content.
             require_disclaimer_for: Categories requiring disclaimers (from brand_spec).
             work_dir: If provided, write fact_check_report.json (or merge into compliance_report).
+            on_llm_request: Optional callback invoked before the LLM call with a status message.
 
         Returns:
             FactCheckReport with claims_status and risk_status.
+
+        Preconditions:
+            - ``self._model`` is a usable LLM client (enforced in ``__init__``).
+            - ``draft`` is a string (empty is tolerated but low-signal — an empty draft
+              yields an uninformative report).
+        Postconditions:
+            - Always returns a ``FactCheckReport`` (never ``None``) on success and
+              exhausted-JSON fallback paths; ``claims_status`` and ``risk_status`` are
+              normalized to ``"PASS"`` or ``"FAIL"`` (unknown / missing values fail closed
+              as ``"FAIL"``).
+            - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``)
+              propagates unwrapped so the caller (or Temporal) can retry.
+            - Any other unexpected error is logged at exception level and raised as
+              ``FactCheckError``.
+            - When JSON parsing is exhausted after retries, returns a fallback report with
+              ``claims_status="FAIL"`` and ``risk_status="FAIL"`` rather than raising.
+            - When ``work_dir`` is set and ``write_artifact`` is available, the report is
+              persisted as ``fact_check_report.json`` on both success and exhausted-JSON
+              fallback paths.
         """
         require_disclaimer_for = require_disclaimer_for or ["medical", "legal", "financial"]
         claims_list = (allowed_claims or {}).get("claims") or []
@@ -95,70 +117,44 @@ class BlogFactCheckAgent:
         if on_llm_request:
             on_llm_request("Checking facts and claims...")
 
-        agent = Agent(
-            model=self._model, system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip()
-        )
-
-        data = None
-        for attempt in range(_MAX_JSON_RETRIES):
-            current_prompt = prompt
-            if attempt > 0:
-                current_prompt = prompt + (
-                    "\n\nCRITICAL: Your previous response contained invalid JSON. "
-                    "Output ONLY a single valid JSON object. No code blocks or markdown in values."
-                )
-            current_prompt += "\n\nRespond with valid JSON only, no markdown fences."
-            try:
-                result = agent(current_prompt)
-                data = extract_json_from_response(str(result).strip())
-                break
-            except LLMJsonParseError as e:
-                logger.warning(
-                    "Fact-check JSON parse failed (attempt %d/%d): %s",
-                    attempt + 1,
-                    _MAX_JSON_RETRIES,
-                    e,
-                )
-                continue
-            except (LLMRateLimitError, LLMTemporaryError) as e:
-                # Transient LLM-transport errors (raised only after the client exhausts its
-                # own retries) propagate unwrapped so the Temporal activity funnel can retry
-                # the whole stage, instead of being masked as a terminal FactCheckError.
-                # Log at the agent boundary so the transient failure is visible in thread
-                # mode too (outside Temporal, which would otherwise be the only logger).
-                logger.warning("Fact-check agent hit a transient LLM error, re-raising: %s", e)
-                raise
-            except Exception as e:
-                # logger.exception captures the full traceback at ERROR level so an
-                # unexpected/programming error is visible before being wrapped in the
-                # domain FactCheckError (which the gate funnel treats as a BloggingError).
-                logger.exception("Fact-check failed: %s", e)
-                raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
-
-        if data is None:
-            logger.warning(
-                "Fact-check JSON parse failed after %d attempts; using fallback FAIL report",
-                _MAX_JSON_RETRIES,
+        def _agent_factory():
+            return Agent(
+                model=self._model,
+                system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip(),
             )
-            report = FactCheckReport(
-                claims_status="FAIL",
-                risk_status="FAIL",
-                risk_flags=["Could not parse fact-check result; re-run fact check."],
-                required_disclaimers=[],
-                notes=f"Fallback report: JSON parse failed after {_MAX_JSON_RETRIES} attempts.",
-            )
-            if work_dir and write_artifact:
-                fc_data = report.to_dict()
-                write_artifact(work_dir, "fact_check_report.json", fc_data)
-                logger.info("Wrote fact_check_report.json: claims=FAIL risk=FAIL (fallback)")
-            return report
 
-        claims_status = (data.get("claims_status") or "PASS").upper()
+        prompt_for_helper = prompt + _ALWAYS_ON_JSON_INSTRUCTION
+
+        def _on_exhausted(_exc: Exception) -> Dict[str, Any]:
+            return {
+                "claims_status": "FAIL",
+                "risk_status": "FAIL",
+                "risk_flags": ["Could not parse fact-check result; re-run fact check."],
+                "required_disclaimers": [],
+                "notes": "Fallback report: JSON parse failed after 2 attempts.",
+            }
+
+        try:
+            data = call_json_with_retry(
+                _agent_factory,
+                prompt_for_helper,
+                max_attempts=2,
+                strict_json_suffix=_JSON_RETRY_SUFFIX,
+                on_exhausted=_on_exhausted,
+                logger=logger,
+            )
+        except (LLMRateLimitError, LLMTemporaryError):
+            raise
+        except Exception as e:
+            logger.exception("Fact-check failed: %s", e)
+            raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
+
+        claims_status = (data.get("claims_status") or "FAIL").upper()
         if claims_status not in ("PASS", "FAIL"):
-            claims_status = "PASS"
-        risk_status = (data.get("risk_status") or "PASS").upper()
+            claims_status = "FAIL"
+        risk_status = (data.get("risk_status") or "FAIL").upper()
         if risk_status not in ("PASS", "FAIL"):
-            risk_status = "PASS"
+            risk_status = "FAIL"
 
         report = FactCheckReport(
             claims_status=claims_status,
@@ -185,10 +181,22 @@ def run_fact_check_from_work_dir(
     *,
     draft_artifact: str = "final.md",
 ) -> FactCheckReport:
-    """Run fact-check using artifacts from work_dir."""
+    """
+    Run the fact-check agent using artifacts already present under ``work_dir``.
+
+    Args:
+        work_dir: Job workspace directory containing draft / allowed-claims artifacts.
+        llm_client: LLM client passed through to ``BlogFactCheckAgent``.
+        draft_artifact: Preferred draft filename (default ``final.md``); falls back to
+            ``draft_v2.md`` then ``draft_v1.md`` when the preferred file is empty/missing.
+
+    Returns:
+        ``FactCheckReport`` from ``BlogFactCheckAgent.run``. Disclaimer categories are
+        currently hardcoded to medical / legal / financial.
+    """
     try:
         from agents.blogging.shared.artifacts import read_artifact
-    except ImportError:
+    except ImportError:  # pragma: no cover - defensive ImportError fallback; not exercised because conftest guarantees the import path resolves.
         raise ImportError("shared.artifacts required")
 
     draft = read_artifact(work_dir, draft_artifact, default="")

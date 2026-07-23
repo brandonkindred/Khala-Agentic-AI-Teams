@@ -9,7 +9,7 @@ enum, so they can be defined once and re-exported by each team's ``models.py``.
 Team-local (defined per team, not here): ``ToolAgentKind``, ``MicrotaskStatus``,
 ``Microtask``, ``PlanningResult``, ``ExecutionResult``, ``ToolAgentInput``,
 ``ToolAgentPhaseInput`` (all bind a team ``Microtask``/enum or a team language
-default), the per-team ``*WorkflowResult``, and backend-only ``PhaseReviewResult``.
+default), and the per-team ``*WorkflowResult``.
 ``MicrotaskReviewConfig`` subclasses ``BaseMicrotaskReviewConfig`` here.
 """
 
@@ -84,6 +84,24 @@ class ReviewResult(BaseModel):
             "Number of code-review issues the LLM fallback found before grounding "
             "filtered any out; None when the LLM fallback never ran (e.g. the external "
             "code_review_agent succeeded) or reported no count."
+        ),
+    )
+
+
+class PhaseReviewResult(BaseModel):
+    """Output of a single phase-specific review (code review, QA, security, or documentation)."""
+
+    passed: bool = Field(default=False)
+    issues: List[ReviewIssue] = Field(default_factory=list)
+    summary: str = Field(default="")
+    phase_name: str = Field(
+        default="", description="Name of the phase: code_review, qa, security, documentation"
+    )
+    raw_issue_count: Optional[int] = Field(
+        default=None,
+        description=(
+            "Number of issues found by the LLM fallback before grounding filtered "
+            "any out; None when the LLM fallback never ran or reported no count."
         ),
     )
 

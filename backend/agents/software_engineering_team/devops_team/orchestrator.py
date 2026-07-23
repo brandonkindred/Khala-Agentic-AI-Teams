@@ -23,7 +23,7 @@ from software_engineering_team.shared.git_utils import (
 )
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
-from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -144,6 +144,10 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     agents and tools are constructed once; ``_status_callback`` defaults to
     None (mixin default) and is independent of fallback logging.
     """
+
+    # Unbound BaseTeamLead._run_phase_gates delegates to self._run_gated_phases;
+    # alias the helper so TeamLeadSharedState consumers can invoke both hooks.
+    _run_gated_phases = BaseTeamLead._run_gated_phases
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
@@ -451,252 +455,346 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             detail=f"DevOps team pipeline: starting task {task_spec.task_id}",
         )
 
-        # Phase 1: intake + clarification
-        env_block = self._enforce_env_policy(task_spec)
-        if env_block:
-            return DevOpsTeamResult(
-                success=False, failure_reason=f"Environment policy violation: {env_block}"
-            )
+        # Phase outputs shared with Phase 4+ (set by the gated phase callables).
+        iac_result: Any = None
+        cicd_result: Any = None
+        deploy_result: Any = None
+        aggregated_artifacts: Dict[str, str] = {}
+        quality_gates: Dict[str, str] = {}
 
-        clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
-        if not clarifier.approved_for_execution:
-            return DevOpsTeamResult(
-                success=False,
-                failure_reason="Clarification required: "
-                + "; ".join(clarifier.clarification_requests[:3]),
-            )
+        def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
+            """Phase 1: environment policy + task clarification gates.
 
-        subtask_contracts = self._build_subtask_contracts(task_spec)
-        logger.info("DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts))
+            Preconditions: ``task_spec`` is the pipeline input for this run.
+            Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
+              clarifier rejection; otherwise builds subtask contracts, logs their
+              count, and returns ``None`` so later phases run.
+            """
+            env_block = self._enforce_env_policy(task_spec)
+            if env_block:
+                return DevOpsTeamResult(
+                    success=False, failure_reason=f"Environment policy violation: {env_block}"
+                )
 
-        # Phase 2: change design / implementation (3-way parallel fan-out)
-        self._report_status(
-            "phase2",
-            detail="DevOps team pipeline: phase 2 - change design (parallel)",
-        )
-        repo_summary = self.repo_navigator_tool.run(
-            RepoNavigatorInput(repo_path=str(repo_path))
-        ).summary
-        # Enable parallel execution unless the backing LLM client is a
-        # DummyLLMClient (or subclass) — scripted test clients use a shared
-        # sequential response list that breaks under concurrent access.
-        from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
-
-        use_parallel = not isinstance(self.llm, _Dummy)
-        phase2 = run_phase2_parallel(
-            self.iac_agent,
-            self.cicd_agent,
-            self.deployment_agent,
-            task_spec,
-            repo_summary=repo_summary,
-            parallel=use_parallel,
-        )
-        iac_result = phase2["iac_result"]
-        cicd_result = phase2["cicd_result"]
-        deploy_result = phase2["deploy_result"]
-        aggregated_artifacts: Dict[str, str] = phase2["aggregated_artifacts"]
-
-        if write_changes and aggregated_artifacts:
-            # Cut a feature branch from development up front (mirroring the code-v2
-            # teams) so every intermediate write/patch commit lands on the branch
-            # and development stays clean until the reviewed Phase 5 merge. Without
-            # this, writes would commit straight to the checked-out development
-            # branch and the later merge would be an empty no-op.
-            dev_ok, dev_msg = ensure_development_branch(repo_path)
-            if not dev_ok:
+            clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
+            if not clarifier.approved_for_execution:
                 return DevOpsTeamResult(
                     success=False,
-                    failure_reason=f"Cannot prepare {DEVELOPMENT_BRANCH} branch: {dev_msg}",
+                    failure_reason="Clarification required: "
+                    + "; ".join(clarifier.clarification_requests[:3]),
                 )
-            branch_ok, branch_msg = create_feature_branch(
-                repo_path,
-                DEVELOPMENT_BRANCH,
-                make_branch_suffix(task_spec.task_id, task_spec.title),
+
+            subtask_contracts = self._build_subtask_contracts(task_spec)
+            logger.info(
+                "DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts)
             )
-            if not branch_ok:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=f"Cannot create feature branch: {branch_msg}"
-                )
-            ok, msg = write_agent_output(
-                repo_path=repo_path,
-                output={
-                    "files": aggregated_artifacts,
-                    "commit_message": f"feat(devops): implement task [{task_spec.task_id}]",
-                },
-                subdir=subdir,
-            )
-            if not ok and msg != NO_FILES_TO_WRITE_MSG:
-                return DevOpsTeamResult(success=False, failure_reason=msg)
+            return None
 
-        # Phase 3: write changes (branch + implementation)
-        self._report_status(
-            "phase3",
-            detail=(
-                "DevOps team pipeline: phase 3 - branch + implementation "
-                f"({len(aggregated_artifacts)} artifact files)"
-            ),
-        )
+        def _phase2_parallel_design() -> Optional[DevOpsTeamResult]:
+            """Phase 2: change design / implementation (3-way parallel fan-out).
 
-        # Phase 4: tool validation + independent reviews
-        self._report_status(
-            "phase4",
-            detail="DevOps team pipeline: phase 4 - validation and review",
-        )
-        iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
-        policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
-        cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
-        dry_run_checks = self.deploy_dry_run_tool.run(
-            DeploymentDryRunInput(repo_path=str(repo_path))
-        )
-
-        tool_gate_map: Dict[str, str] = {}
-        tool_gate_map.update(iac_checks.checks)
-        tool_gate_map.update(policy_checks.checks)
-        tool_gate_map.update(cicd_checks.checks)
-        tool_gate_map.update(dry_run_checks.checks)
-
-        # Phase 4.5: Execution verification
-        self._report_status(
-            "phase4.5",
-            detail="DevOps team pipeline: phase 4.5 - execution verification",
-        )
-        repo_str = str(repo_path)
-        exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-        exec_gate_map: Dict[str, str] = {}
-        exec_findings: List[str] = []
-        for er in exec_results:
-            exec_gate_map.update(er.get("checks", {}))
-            exec_findings.extend(er.get("findings", []))
-            fc = er.get("failure_class", "")
-            if fc:
-                logger.info(
-                    "DevOps execution [%s %s]: failure_class=%s",
-                    er.get("tool", "?"),
-                    er.get("command", "?"),
-                    fc,
-                )
-
-        # Phase 4.6: Debug-patch loop for fixable execution failures
-        MAX_INFRA_FIX_ITERATIONS = 3
-        exec_failures = [er for er in exec_results if not er.get("success", True)]
-        for fix_iter in range(MAX_INFRA_FIX_ITERATIONS):
-            if not exec_failures:
-                break
+            Preconditions: Phase 1 returned ``None``.
+            Postconditions: sets ``iac_result``, ``cicd_result``, ``deploy_result``,
+              and ``aggregated_artifacts`` from the parallel fan-out; always returns
+              ``None`` (this phase has no early-exit gate today).
+            """
+            nonlocal iac_result, cicd_result, deploy_result, aggregated_artifacts
             self._report_status(
-                "phase4.6",
-                detail=(
-                    "DevOps team pipeline: phase 4.6 - debug-patch iteration "
-                    f"{fix_iter + 1}/{MAX_INFRA_FIX_ITERATIONS} ({len(exec_failures)} failures)"
-                ),
+                "phase2",
+                detail="DevOps team pipeline: phase 2 - change design (parallel)",
             )
-            combined_output = "\n---\n".join(
-                "\n".join(ef.get("findings", [])) for ef in exec_failures
+            repo_summary = self.repo_navigator_tool.run(
+                RepoNavigatorInput(repo_path=str(repo_path))
+            ).summary
+            # Enable parallel execution unless the backing LLM client is a
+            # DummyLLMClient (or subclass) — scripted test clients use a shared
+            # sequential response list that breaks under concurrent access.
+            from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
+
+            use_parallel = not isinstance(self.llm, _Dummy)
+            phase2 = run_phase2_parallel(
+                self.iac_agent,
+                self.cicd_agent,
+                self.deployment_agent,
+                task_spec,
+                repo_summary=repo_summary,
+                parallel=use_parallel,
             )
-            first_tool = exec_failures[0].get("tool", "unknown")
-            first_cmd = exec_failures[0].get("command", "unknown")
-            try:
-                debug_out = self.infra_debug_agent.run(
-                    IaCDebugInput(
-                        execution_output=combined_output,
-                        tool_name=first_tool,
-                        command=first_cmd,
-                        artifacts=aggregated_artifacts,
+            iac_result = phase2["iac_result"]
+            cicd_result = phase2["cicd_result"]
+            deploy_result = phase2["deploy_result"]
+            aggregated_artifacts = phase2["aggregated_artifacts"]
+            return None
+
+        def _phase3_branch_write() -> Optional[DevOpsTeamResult]:
+            """Phase 3: feature branch + artifact write gates.
+
+            Preconditions: Phase 2 returned ``None`` (artifacts may be empty).
+            Postconditions: when ``write_changes`` and artifacts are present, prepares
+              the development branch, cuts a feature branch, and writes artifacts —
+              returning a failed ``DevOpsTeamResult`` on any of those gates; otherwise
+              reports phase-3 status and returns ``None``.
+            """
+            if write_changes and aggregated_artifacts:
+                # Cut a feature branch from development up front (mirroring the
+                # code-v2 teams) so every intermediate write/patch commit lands
+                # on the branch and development stays clean until the reviewed
+                # Phase 5 merge. Without this, writes would commit straight to
+                # the checked-out development branch and the later merge would
+                # be an empty no-op.
+                dev_ok, dev_msg = ensure_development_branch(repo_path)
+                if not dev_ok:
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason=(f"Cannot prepare {DEVELOPMENT_BRANCH} branch: {dev_msg}"),
                     )
+                branch_ok, branch_msg = create_feature_branch(
+                    repo_path,
+                    DEVELOPMENT_BRANCH,
+                    make_branch_suffix(task_spec.task_id, task_spec.title),
                 )
-            except Exception as dbg_err:
-                logger.warning("DevOps debug agent failed: %s", dbg_err)
-                break
-            if not debug_out.fixable:
-                logger.info("DevOps debug agent: errors are not fixable via code changes")
-                break
-            try:
-                patch_out = self.infra_patch_agent.run(
-                    IaCPatchInput(
-                        debug_output=debug_out,
-                        original_artifacts=aggregated_artifacts,
-                        repo_path=repo_str,
+                if not branch_ok:
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason=f"Cannot create feature branch: {branch_msg}",
                     )
-                )
-            except Exception as patch_err:
-                logger.warning("DevOps patch agent failed: %s", patch_err)
-                break
-            if not patch_out.patched_artifacts:
-                logger.info("DevOps patch agent returned no patches")
-                break
-            aggregated_artifacts.update(patch_out.patched_artifacts)
-            if write_changes:
-                write_agent_output(
+                ok, msg = write_agent_output(
                     repo_path=repo_path,
                     output={
-                        "files": patch_out.patched_artifacts,
-                        "commit_message": f"fix(devops): patch iteration {fix_iter + 1}",
+                        "files": aggregated_artifacts,
+                        "commit_message": (f"feat(devops): implement task [{task_spec.task_id}]"),
                     },
                     subdir=subdir,
                 )
+                if not ok and msg != NO_FILES_TO_WRITE_MSG:
+                    return DevOpsTeamResult(success=False, failure_reason=msg)
+
+            self._report_status(
+                "phase3",
+                detail=(
+                    "DevOps team pipeline: phase 3 - branch + implementation "
+                    f"({len(aggregated_artifacts)} artifact files)"
+                ),
+            )
+            return None
+
+        def _phase4_validation_review() -> Optional[DevOpsTeamResult]:
+            """Phase 4: tool validation, reviews, and early-exit gates.
+
+            Preconditions: Phases 1–3 returned ``None`` (``aggregated_artifacts``
+              may be empty).
+            Postconditions: runs tool validation, execution verification, the
+              debug-patch loop, and independent reviews; sets nonlocal
+              ``quality_gates``. Returns a failed ``DevOpsTeamResult`` on quality-
+              gate or build-verifier failure via ``_run_phase_gates``; otherwise
+              returns ``None`` so Phase 5 runs.
+            """
+            nonlocal aggregated_artifacts, quality_gates
+
+            # Phase 4: tool validation + independent reviews
+            self._report_status(
+                "phase4",
+                detail="DevOps team pipeline: phase 4 - validation and review",
+            )
+            iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
+            policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
+            cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
+            dry_run_checks = self.deploy_dry_run_tool.run(
+                DeploymentDryRunInput(repo_path=str(repo_path))
+            )
+
+            tool_gate_map: Dict[str, str] = {}
+            tool_gate_map.update(iac_checks.checks)
+            tool_gate_map.update(policy_checks.checks)
+            tool_gate_map.update(cicd_checks.checks)
+            tool_gate_map.update(dry_run_checks.checks)
+
+            # Phase 4.5: Execution verification
+            self._report_status(
+                "phase4.5",
+                detail="DevOps team pipeline: phase 4.5 - execution verification",
+            )
+            repo_str = str(repo_path)
             exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-            exec_failures = [er for er in exec_results if not er.get("success", True)]
-            exec_gate_map = {}
-            exec_findings = []
+            exec_gate_map: Dict[str, str] = {}
+            exec_findings: List[str] = []
             for er in exec_results:
                 exec_gate_map.update(er.get("checks", {}))
                 exec_findings.extend(er.get("findings", []))
+                fc = er.get("failure_class", "")
+                if fc:
+                    logger.info(
+                        "DevOps execution [%s %s]: failure_class=%s",
+                        er.get("tool", "?"),
+                        er.get("command", "?"),
+                        fc,
+                    )
 
-        tool_gate_map.update(exec_gate_map)
-
-        devsec = self.devsecops_review_agent.run(
-            DevSecOpsReviewInput(
-                task_description=task_spec.title,
-                requirements=task_spec.goal.summary,
-                artifacts=aggregated_artifacts,
-            )
-        )
-        change_review = self.change_review_agent.run(
-            ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
-        )
-
-        val = self.test_validation_agent.run(
-            DevOpsTestValidationInput(
-                acceptance_criteria=task_spec.acceptance_criteria,
-                tool_results={
-                    "iac": iac_checks.checks,
-                    "policy": policy_checks.checks,
-                    "cicd": cicd_checks.checks,
-                    "deploy_dry_run": dry_run_checks.checks,
-                },
-            )
-        )
-
-        quality_gates = dict(val.quality_gates)
-        # The infra security gate routes both the DevSecOps LLM review and the
-        # policy-as-code (checkov) scan through the unified infra decision. This
-        # is force-assigned (not setdefault) so the authoritative DevSecOps +
-        # policy result always wins — a validation-agent-supplied "pass" must
-        # never mask a failing review or checkov scan.
-        quality_gates["security_review"] = (
-            "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail"
-        )
-        quality_gates.setdefault("change_review", "pass" if change_review.approved else "fail")
-
-        if any(v == "fail" for v in quality_gates.values()):
-            return DevOpsTeamResult(
-                success=False,
-                failure_reason="Quality gates failed",
-                completion_package=DevOpsCompletionPackage(
-                    task_id=task_spec.task_id,
-                    status="blocked",
-                    files_changed=sorted(aggregated_artifacts.keys()),
-                    quality_gates=quality_gates,
-                    notes=[devsec.summary, change_review.summary, val.summary],
-                    risks_remaining=[f.issue for f in devsec.findings if f.blocking],
-                ),
-            )
-
-        if build_verifier is not None:
-            verify_ok, verify_err = build_verifier(repo_path, "devops", task_spec.task_id)
-            if not verify_ok:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=verify_err or "Build verification failed"
+            # Phase 4.6: Debug-patch loop for fixable execution failures
+            MAX_INFRA_FIX_ITERATIONS = 3
+            exec_failures = [er for er in exec_results if not er.get("success", True)]
+            for fix_iter in range(MAX_INFRA_FIX_ITERATIONS):
+                if not exec_failures:
+                    break
+                self._report_status(
+                    "phase4.6",
+                    detail=(
+                        "DevOps team pipeline: phase 4.6 - debug-patch iteration "
+                        f"{fix_iter + 1}/{MAX_INFRA_FIX_ITERATIONS} "
+                        f"({len(exec_failures)} failures)"
+                    ),
                 )
+                combined_output = "\n---\n".join(
+                    "\n".join(ef.get("findings", [])) for ef in exec_failures
+                )
+                first_tool = exec_failures[0].get("tool", "unknown")
+                first_cmd = exec_failures[0].get("command", "unknown")
+                try:
+                    debug_out = self.infra_debug_agent.run(
+                        IaCDebugInput(
+                            execution_output=combined_output,
+                            tool_name=first_tool,
+                            command=first_cmd,
+                            artifacts=aggregated_artifacts,
+                        )
+                    )
+                except Exception as dbg_err:
+                    logger.warning("DevOps debug agent failed: %s", dbg_err)
+                    break
+                if not debug_out.fixable:
+                    logger.info("DevOps debug agent: errors are not fixable via code changes")
+                    break
+                try:
+                    patch_out = self.infra_patch_agent.run(
+                        IaCPatchInput(
+                            debug_output=debug_out,
+                            original_artifacts=aggregated_artifacts,
+                            repo_path=repo_str,
+                        )
+                    )
+                except Exception as patch_err:
+                    logger.warning("DevOps patch agent failed: %s", patch_err)
+                    break
+                if not patch_out.patched_artifacts:
+                    logger.info("DevOps patch agent returned no patches")
+                    break
+                aggregated_artifacts.update(patch_out.patched_artifacts)
+                if write_changes:
+                    write_agent_output(
+                        repo_path=repo_path,
+                        output={
+                            "files": patch_out.patched_artifacts,
+                            "commit_message": (f"fix(devops): patch iteration {fix_iter + 1}"),
+                        },
+                        subdir=subdir,
+                    )
+                exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
+                exec_failures = [er for er in exec_results if not er.get("success", True)]
+                exec_gate_map = {}
+                exec_findings = []
+                for er in exec_results:
+                    exec_gate_map.update(er.get("checks", {}))
+                    exec_findings.extend(er.get("findings", []))
+
+            tool_gate_map.update(exec_gate_map)
+
+            devsec = self.devsecops_review_agent.run(
+                DevSecOpsReviewInput(
+                    task_description=task_spec.title,
+                    requirements=task_spec.goal.summary,
+                    artifacts=aggregated_artifacts,
+                )
+            )
+            change_review = self.change_review_agent.run(
+                ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
+            )
+
+            val = self.test_validation_agent.run(
+                DevOpsTestValidationInput(
+                    acceptance_criteria=task_spec.acceptance_criteria,
+                    tool_results={
+                        "iac": iac_checks.checks,
+                        "policy": policy_checks.checks,
+                        "cicd": cicd_checks.checks,
+                        "deploy_dry_run": dry_run_checks.checks,
+                    },
+                )
+            )
+
+            quality_gates = dict(val.quality_gates)
+            # The infra security gate routes both the DevSecOps LLM review and the
+            # policy-as-code (checkov) scan through the unified infra decision. This
+            # is force-assigned (not setdefault) so the authoritative DevSecOps +
+            # policy result always wins — a validation-agent-supplied "pass" must
+            # never mask a failing review or checkov scan.
+            quality_gates["security_review"] = (
+                "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail"
+            )
+            quality_gates.setdefault("change_review", "pass" if change_review.approved else "fail")
+
+            def _quality_gates_check() -> Optional[DevOpsTeamResult]:
+                """Fail the phase when any assembled quality gate is ``fail``.
+
+                Preconditions: ``quality_gates``, ``devsec``, ``change_review``,
+                  and ``val`` are set by Phase 4 setup above.
+                Postconditions: returns the blocked ``DevOpsTeamResult`` with the
+                  existing completion-package shape when any gate fails; otherwise
+                  ``None``.
+                """
+                if any(v == "fail" for v in quality_gates.values()):
+                    return DevOpsTeamResult(
+                        success=False,
+                        failure_reason="Quality gates failed",
+                        completion_package=DevOpsCompletionPackage(
+                            task_id=task_spec.task_id,
+                            status="blocked",
+                            files_changed=sorted(aggregated_artifacts.keys()),
+                            quality_gates=quality_gates,
+                            notes=[devsec.summary, change_review.summary, val.summary],
+                            risks_remaining=[f.issue for f in devsec.findings if f.blocking],
+                        ),
+                    )
+                return None
+
+            def _build_verifier_check() -> Optional[DevOpsTeamResult]:
+                """Fail the phase when an injected build verifier rejects the repo.
+
+                Preconditions: quality gates already passed (prior gate returned
+                  ``None``); ``build_verifier`` may be ``None``.
+                Postconditions: when ``build_verifier`` is set and returns a
+                  failing result, returns ``DevOpsTeamResult(success=False, …)``
+                  with the verifier error (or the default failure string);
+                  otherwise ``None`` (including when verifier is absent).
+                """
+                if build_verifier is not None:
+                    verify_ok, verify_err = build_verifier(repo_path, "devops", task_spec.task_id)
+                    if not verify_ok:
+                        return DevOpsTeamResult(
+                            success=False,
+                            failure_reason=verify_err or "Build verification failed",
+                        )
+                return None
+
+            # Consume BaseTeamLead's intra-phase multi-gate hook without inheriting
+            # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
+            return BaseTeamLead._run_phase_gates(
+                self,
+                [_quality_gates_check, _build_verifier_check],
+            )
+
+        # Consume BaseTeamLead's gate-based phase sequencer without inheriting
+        # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
+        early_exit = BaseTeamLead._run_gated_phases(
+            self,
+            [
+                _phase1_intake_clarify,
+                _phase2_parallel_design,
+                _phase3_branch_write,
+                _phase4_validation_review,
+            ],
+        )
+        if early_exit is not None:
+            return early_exit
 
         # Phase 5: commit, merge, release readiness
         self._report_status(

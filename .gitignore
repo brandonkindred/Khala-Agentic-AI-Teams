@@ -61,7 +61,7 @@ typings/
 
 # Cursor
 .cursor/
-docs/superpowers/*
+docs/superpowers/
 # Kiro IDE — local per-developer workflow/spec metadata; never commit.
 .kiro/
 

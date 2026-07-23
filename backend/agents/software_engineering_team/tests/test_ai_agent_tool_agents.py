@@ -4,7 +4,8 @@ These lock in the shared :class:`JsonGeneratorToolAgent` behavior — in
 particular that model output which is *not* a clean JSON object (fenced or
 prose-wrapped) degrades to an empty result instead of raising
 :class:`json.JSONDecodeError`, which the previous per-agent bare ``json.loads``
-did not do.
+did not do. Also covers the no-model guard and call-exception fallback adopted
+from :class:`~software_engineering_team.shared.llm_tool_agent_base.LlmToolAgentBase`.
 """
 
 from __future__ import annotations
@@ -13,11 +14,16 @@ import json
 
 import pytest
 
+from llm_service import get_strands_model
 from software_engineering_team.ai_agent_development_team.models import (
     Microtask,
     ToolAgentInput,
     ToolAgentOutput,
 )
+from software_engineering_team.ai_agent_development_team.tool_agents._base import (
+    JsonGeneratorToolAgent,
+)
+from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 
 # (module import path, class name) for every concrete one-shot tool agent.
 AGENTS = [
@@ -33,7 +39,8 @@ AGENTS = [
 def _tool_input() -> ToolAgentInput:
     return ToolAgentInput(
         microtask=Microtask(id="m1", title="Wire the runtime", description="Do the thing"),
-        spec_context="spec details" * 1000,  # exercises the spec truncation
+        # Long context is passed through in full (truncation was removed intentionally).
+        spec_context="spec details" * 1000,
     )
 
 
@@ -43,6 +50,16 @@ def _load(module_name: str):
     return importlib.import_module(
         f"software_engineering_team.ai_agent_development_team.tool_agents.{module_name}.agent"
     )
+
+
+def test_json_generator_uses_llm_tool_agent_base_plan_json_recipe() -> None:
+    """JsonGeneratorToolAgent is a thin Plan/Json specialization of LlmToolAgentBase."""
+    assert issubclass(JsonGeneratorToolAgent, LlmToolAgentBase)
+    assert JsonGeneratorToolAgent.resolve_models is True
+    assert JsonGeneratorToolAgent.response_format == "json"
+    assert JsonGeneratorToolAgent.get_strands_model_fn is get_strands_model
+    assert JsonGeneratorToolAgent.use_run_strands_agent is False
+    assert JsonGeneratorToolAgent.json_parse_strategy == "extract"
 
 
 @pytest.mark.parametrize("module_name,class_name", AGENTS)
@@ -72,8 +89,10 @@ def test_run_parses_valid_json(monkeypatch, module_name: str, class_name: str) -
     assert out.files == {"a.py": "print('hi')"}
     assert out.recommendations == ["do x"]
     assert out.summary == "done"
-    # Spec context was truncated to MAX_SPEC_CHARS before prompting.
+    assert out.success is True
+    # Spec context is forwarded in full (no truncation).
     assert "spec details" in captured["prompt"]
+    assert captured["prompt"].count("spec details") == 1000
 
 
 def test_run_recovers_from_fenced_output(monkeypatch) -> None:
@@ -113,3 +132,42 @@ def test_run_degrades_on_non_json(monkeypatch) -> None:
     assert out.files == {}
     assert out.recommendations == []
     assert out.summary == ""
+    # Empty-parse keeps the historical success=True default.
+    assert out.success is True
+
+
+@pytest.mark.parametrize("module_name,class_name", AGENTS)
+def test_run_no_model_returns_empty(module_name: str, class_name: str) -> None:
+    """Missing model returns unsuccessful empty output without calling the LLM."""
+    mod = _load(module_name)
+    inst = getattr(mod, class_name).__new__(getattr(mod, class_name))
+    inst._model = None
+    out = inst.run(_tool_input())
+    assert isinstance(out, ToolAgentOutput)
+    assert out.files == {}
+    assert out.recommendations == []
+    assert out.summary == ""
+    assert out.success is False
+
+
+@pytest.mark.parametrize("module_name,class_name", AGENTS)
+def test_run_llm_exception_returns_empty(monkeypatch, module_name: str, class_name: str) -> None:
+    """An exception from the LLM call degrades to unsuccessful empty output."""
+
+    class _BoomAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, prompt):
+            raise RuntimeError("upstream LLM blew up")
+
+    mod = _load(module_name)
+    monkeypatch.setattr(mod, "Agent", _BoomAgent)
+    inst = getattr(mod, class_name).__new__(getattr(mod, class_name))
+    inst._model = object()
+    out = inst.run(_tool_input())
+    assert isinstance(out, ToolAgentOutput)
+    assert out.files == {}
+    assert out.recommendations == []
+    assert out.summary == ""
+    assert out.success is False
