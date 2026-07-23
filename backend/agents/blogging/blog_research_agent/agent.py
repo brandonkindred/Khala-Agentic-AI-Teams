@@ -10,6 +10,8 @@ from strands import Agent
 
 logger = logging.getLogger(__name__)
 
+from agents.blogging.shared.agent_base import _BlogAgentBase  # noqa: E402
+
 from llm_service import LLMJsonParseError, compact_text, extract_json_from_response  # noqa: E402
 from shared.concurrency import parallel_map  # noqa: E402
 
@@ -23,7 +25,6 @@ from .models import (  # noqa: E402
     SearchQuery,
     SourceDocument,
 )
-from agents.blogging.shared.agent_base import _BlogAgentBase  # noqa: E402
 from .prompts import (  # noqa: E402
     BRIEF_PARSING_PROMPT,
     DOC_RELEVANCE_SCORING_PROMPT,
@@ -694,10 +695,7 @@ class ResearchAgent(_BlogAgentBase):
         """
         if not references:
             return []
-        refs_preview = "\n".join(
-            f"- {ref.title}: {ref.summary}"
-            for ref in references[:5]
-        )
+        refs_preview = "\n".join(f"- {ref.title}: {ref.summary}" for ref in references[:5])
         prompt = (
             SIMILAR_TOPICS_PROMPT
             + "\n\n"
