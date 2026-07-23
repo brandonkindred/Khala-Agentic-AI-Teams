@@ -32,19 +32,22 @@ router = APIRouter()
         "Sets waiting_for_title_selection=False and records the chosen title."
     ),
 )
-def select_title(job_id: str, request: SelectTitleRequest) -> BlogJobStatusResponse:
+def select_title(
+    job_id: str,
+    request: SelectTitleRequest,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "submit_title_selection",
+            waiting_for=(
+                "waiting_for_title_selection",
+                "Job is not currently waiting for title selection",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Author submits their chosen title, resuming the pipeline."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.submit_title_selection is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if not job.get("waiting_for_title_selection"):
-        raise HTTPException(
-            status_code=400, detail="Job is not currently waiting for title selection"
-        )
     if not request.title.strip():
         raise HTTPException(status_code=422, detail="title must not be empty")
     _main.submit_title_selection(job_id, request.title.strip())
@@ -66,19 +69,22 @@ def select_title(job_id: str, request: SelectTitleRequest) -> BlogJobStatusRespo
         "Otherwise the pipeline generates new candidates based on the feedback."
     ),
 )
-def rate_titles(job_id: str, request: RateTitlesRequest) -> BlogJobStatusResponse:
+def rate_titles(
+    job_id: str,
+    request: RateTitlesRequest,
+    _job: Dict[str, Any] = Depends(
+        get_job(
+            "submit_title_ratings",
+            waiting_for=(
+                "waiting_for_title_selection",
+                "Job is not currently waiting for title selection",
+            ),
+        )
+    ),
+) -> BlogJobStatusResponse:
     """Submit title ratings. Love = select that title. Like/Dislike = generate more."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.submit_title_ratings is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    if not job.get("waiting_for_title_selection"):
-        raise HTTPException(
-            status_code=400, detail="Job is not currently waiting for title selection"
-        )
     if not request.ratings:
         raise HTTPException(status_code=422, detail="At least one rating is required")
     for r in request.ratings:
