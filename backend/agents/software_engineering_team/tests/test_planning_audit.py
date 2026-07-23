@@ -1,4 +1,4 @@
-"""Unit tests for the SE planning_runs audit helper (shared.planning_audit)."""
+"""Unit tests for the SE planning_runs audit helper (software_engineering_team.shared.planning_audit)."""
 
 from __future__ import annotations
 
