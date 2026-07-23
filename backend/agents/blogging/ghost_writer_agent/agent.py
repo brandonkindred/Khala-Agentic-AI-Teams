@@ -401,7 +401,7 @@ class GhostWriterElicitationAgent:
         Conduct a multi-turn interview for a single story gap.
 
         Uses the event bus to wait for user responses instead of polling.
-        Posts questions to the job store, waits for each user response,
+        Posts follow-up questions to the job store, waits for each user response,
         evaluates sufficiency, and compiles a first-person narrative when ready.
 
         The interview ends when one of these happens:
@@ -411,8 +411,17 @@ class GhostWriterElicitationAgent:
         4. The job is cancelled/failed.
         5. Safety cap (*max_rounds*) is reached → narrator compiles from history.
 
-        The pipeline must have already posted the seed question and set
-        ``waiting_for_story_input=True`` before calling this method.
+        Preconditions:
+            - ``gap.seed_question`` is the opening turn used for the local conversation
+              history (this method does not re-read a seed from the job store).
+        Postconditions:
+            - Returns a ``StoryElicitationResult`` for this gap.
+        Notes:
+            - Callers should post the same seed to the job store and set
+              ``waiting_for_story_input=True`` for UI consistency so the wait loop
+              can receive replies; those steps are not enforced here. If the wait
+              flag is already false, the wait loop is skipped and the last stored
+              user message (if any) is used.
         """
         from agents.blogging.shared.blog_job_store import (
             add_story_agent_message,

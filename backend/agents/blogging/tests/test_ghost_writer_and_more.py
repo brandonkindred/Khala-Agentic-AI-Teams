@@ -160,6 +160,7 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
 
 
 def test_ghost_evaluate_sufficiency_rate_limit_falls_back_default(monkeypatch) -> None:
+    """Soft call sites map transient LLM errors to the default dict (planning_stage swallow risk)."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -429,6 +430,7 @@ def test_ghost_find_gaps_via_llm_coerces_null_and_non_string_fields(monkeypatch)
 
 
 def test_ghost_find_gaps_via_llm_rate_limit_falls_back_empty(monkeypatch) -> None:
+    """Soft call sites map transient LLM errors to [] (planning_stage would otherwise swallow)."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
