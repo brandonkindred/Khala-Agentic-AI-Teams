@@ -7,6 +7,8 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
+
 
 class Platform(str, Enum):
     LINKEDIN = "linkedin"
@@ -45,11 +47,6 @@ class CampaignProposal(BaseModel):
     experiment_notes: str = ""
     consensus_score: float = 0.0
     communication_log: List[str] = Field(default_factory=list)
-
-
-class HumanReview(BaseModel):
-    approved: bool
-    feedback: str = ""
 
 
 class ConceptIdea(BaseModel):
