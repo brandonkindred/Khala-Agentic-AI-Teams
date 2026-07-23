@@ -150,7 +150,7 @@ def test_writer_format_feedback_item_line() -> None:
 
     item_no_loc = FeedbackItem(category="x", severity="minor", issue="i")
     line2 = a._format_feedback_item_line(item_no_loc, 1)
-    assert "[" in line2  # No location bracket
+    assert line2 == "1. [minor] x: i"  # severity bracket present; location omitted
     assert "Suggestion:" not in line2
 
 
