@@ -15,7 +15,7 @@
 - Do not reference GitHub issue numbers in code, comments, docs, or commit messages.
 - Design-by-Contract docstring sections required on any new/changed public functions (existing private methods keep current docstring style unless rewritten).
 - `make lint` clean; ≥90% line coverage on touched files.
-- Work only in the worktree at `.worktrees/issue-2082-migrate-ghost-writer-json-retry` on branch `refactor/2082-migrate-ghost-writer-json-retry`.
+- Work only in the existing feature worktree / branch for this migration (do not rename mid-flight).
 
 **Spec:** `docs/superpowers/specs/2026-07-23-migrate-ghost-writer-json-retry-design.md`
 

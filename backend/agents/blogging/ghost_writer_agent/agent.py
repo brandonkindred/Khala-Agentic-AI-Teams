@@ -8,7 +8,10 @@ into first-person narrative snippets passed to the draft agent.
 
 Architecture:
   - **Evaluator** (`_evaluate_sufficiency`): Assesses whether the conversation has enough
-    material for a compelling story. Uses `chat_json_round` with native message history.
+    material for a compelling story. Delegates JSON extraction/retry to
+    ``call_json_with_retry()`` and falls back to a default-dict result on exhausted
+    parse retries, unexpected errors, and transient LLM transport errors (so the
+    story-phase wrapper cannot silently abandon an in-progress interview).
   - **Interviewer** (`_generate_follow_up`): Generates a single conversational follow-up
     question when the evaluator says "insufficient".
   - **Narrator** (`_compile_narrative`): Compiles a vivid first-person narrative from
@@ -25,7 +28,7 @@ from agents.blogging.shared.content_plan import ContentPlan
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
-from llm_service import extract_json_from_response
+from llm_service import LLMRateLimitError, LLMTemporaryError, extract_json_from_response
 
 from .models import StoryElicitationResult, StoryGap
 
@@ -195,7 +198,7 @@ class GhostWriterElicitationAgent:
     to elicit personal anecdotes from the author.
 
     Uses three specialised LLM roles:
-      - Evaluator: assesses story sufficiency via ``chat_json_round``
+      - Evaluator: assesses story sufficiency via ``call_json_with_retry``
       - Interviewer: generates conversational follow-up questions
       - Narrator: compiles vivid first-person narratives
     """
@@ -304,20 +307,30 @@ class GhostWriterElicitationAgent:
         def _fallback(_exc: Exception) -> list:
             return []
 
-        data = call_json_with_retry(
-            _agent_factory,
-            prompt,
-            max_attempts=2,
-            strict_json_suffix=_JSON_RETRY_SUFFIX,
-            on_exhausted=_fallback,
-            on_unexpected_error=_fallback,
-            logger=logger,
-        )
+        # Transient LLM errors re-raise from the helper; map them to the same empty
+        # fallback here so planning_stage's broad except cannot abandon elicitation
+        # mid-flight without clearing interactive story state.
+        try:
+            data = call_json_with_retry(
+                _agent_factory,
+                prompt,
+                max_attempts=2,
+                strict_json_suffix=_JSON_RETRY_SUFFIX,
+                on_exhausted=_fallback,
+                on_unexpected_error=_fallback,
+                logger=logger,
+            )
+        except (LLMRateLimitError, LLMTemporaryError) as e:
+            logger.warning("Ghost writer gap-finding transient LLM error, falling back: %s", e)
+            return []
         if not isinstance(data, list):
             logger.warning("Ghost writer: no JSON array in gap-finding response")
             return []
         gaps = []
         for item in data[:3]:
+            if not isinstance(item, dict):
+                logger.warning("Ghost writer: skipping non-object gap item: %r", item)
+                continue
             ctx = item.get("section_context", "")
             seed = (item.get("seed_question") or "").strip()
             if not seed:
@@ -523,15 +536,21 @@ class GhostWriterElicitationAgent:
         def _fallback(_exc: Exception) -> Dict[str, Any]:
             return default
 
-        data = call_json_with_retry(
-            _agent_factory,
-            prompt,
-            max_attempts=2,
-            strict_json_suffix=_JSON_RETRY_SUFFIX,
-            on_exhausted=_fallback,
-            on_unexpected_error=_fallback,
-            logger=logger,
-        )
+        # Same rationale as ``_find_gaps_via_llm``: keep soft fallbacks at this site so
+        # transient errors do not escape into planning_stage's skip-on-Exception path.
+        try:
+            data = call_json_with_retry(
+                _agent_factory,
+                prompt,
+                max_attempts=2,
+                strict_json_suffix=_JSON_RETRY_SUFFIX,
+                on_exhausted=_fallback,
+                on_unexpected_error=_fallback,
+                logger=logger,
+            )
+        except (LLMRateLimitError, LLMTemporaryError) as e:
+            logger.warning("Ghost writer evaluator transient LLM error, falling back: %s", e)
+            return default
         if isinstance(data, dict):
             return data
         return default

@@ -38,15 +38,13 @@ Today’s ghost-writer loops duplicate that shape but also sleep+retry once on g
 | `strict_json_suffix` | Existing `_JSON_RETRY_SUFFIX` |
 | `backoff_seconds` | Omit (parse retries already had no sleep) |
 | Unexpected / exhausted errors | `on_exhausted` + `on_unexpected_error` → site-specific fallback |
-| Transient LLM errors | Propagate (`LLMRateLimitError` / `LLMTemporaryError` re-raised by helper) |
+| Transient LLM errors | Catch at call sites → site fallback (helper still re-raises; planning_stage would otherwise swallow) |
 | Array JSON for gaps | Keep post-helper `isinstance(data, list)` check; no helper typing change |
 
 ### Intentional behavior deltas vs today
 
 1. Generic non-parse exceptions no longer sleep(2) and retry locally — they fall back immediately via `on_unexpected_error`.
-2. Transient LLM errors re-raise instead of eventually returning the site fallback.
-
-These match shared-helper policy and prior blogging migrations.
+2. Transient LLM errors (`LLMRateLimitError` / `LLMTemporaryError`) are caught at these soft call sites and mapped to the same site fallbacks (`[]` / default dict). The helper still re-raises them; the call sites catch so `planning_stage`'s broad `except Exception` cannot abandon an in-progress story elicitation.
 
 ## Call-site design
 
