@@ -187,6 +187,36 @@ def _is_no_experience(message: str) -> bool:
     return any(phrase in text for phrase in _NO_EXPERIENCE_PHRASES)
 
 
+def _empty_list_fallback(_exc: Exception) -> list:
+    """
+    Shared JSON-retry fallback for gap finding.
+
+    Preconditions:
+        - ``_exc`` is the failure that exhausted retries or was unexpected.
+    Postconditions:
+        - Returns a new empty list (never ``None``).
+    """
+    return []
+
+
+def _default_sufficiency_fallback(_exc: Exception) -> Dict[str, Any]:
+    """
+    Shared JSON-retry fallback for the sufficiency evaluator.
+
+    Preconditions:
+        - ``_exc`` is the failure that exhausted retries or was unexpected.
+    Postconditions:
+        - Returns a fresh default-dict with ``sufficient``/``no_experience`` false
+          and ``story_context``/``missing`` null (never ``None``).
+    """
+    return {
+        "sufficient": False,
+        "no_experience": False,
+        "story_context": None,
+        "missing": None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Agent class
 # ---------------------------------------------------------------------------
@@ -304,9 +334,6 @@ class GhostWriterElicitationAgent:
         def _agent_factory():
             return Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
 
-        def _fallback(_exc: Exception) -> list:
-            return []
-
         # Transient LLM errors re-raise from the helper; map them to the same empty
         # fallback here so planning_stage's broad except cannot abandon elicitation
         # mid-flight without clearing interactive story state.
@@ -316,13 +343,13 @@ class GhostWriterElicitationAgent:
                 prompt,
                 max_attempts=2,
                 strict_json_suffix=_JSON_RETRY_SUFFIX,
-                on_exhausted=_fallback,
-                on_unexpected_error=_fallback,
+                on_exhausted=_empty_list_fallback,
+                on_unexpected_error=_empty_list_fallback,
                 logger=logger,
             )
         except (LLMRateLimitError, LLMTemporaryError) as e:
             logger.warning("Ghost writer gap-finding transient LLM error, falling back: %s", e)
-            return []
+            return _empty_list_fallback(e)
         if not isinstance(data, list):
             logger.warning("Ghost writer: no JSON array in gap-finding response")
             return []
@@ -523,18 +550,8 @@ class GhostWriterElicitationAgent:
             + "\nEvaluate the conversation above. Respond with the JSON object only, no markdown fences."
         )
 
-        default = {
-            "sufficient": False,
-            "no_experience": False,
-            "story_context": None,
-            "missing": None,
-        }
-
         def _agent_factory():
             return Agent(model=self._model, system_prompt=system)
-
-        def _fallback(_exc: Exception) -> Dict[str, Any]:
-            return default
 
         # Same rationale as ``_find_gaps_via_llm``: keep soft fallbacks at this site so
         # transient errors do not escape into planning_stage's skip-on-Exception path.
@@ -544,16 +561,16 @@ class GhostWriterElicitationAgent:
                 prompt,
                 max_attempts=2,
                 strict_json_suffix=_JSON_RETRY_SUFFIX,
-                on_exhausted=_fallback,
-                on_unexpected_error=_fallback,
+                on_exhausted=_default_sufficiency_fallback,
+                on_unexpected_error=_default_sufficiency_fallback,
                 logger=logger,
             )
         except (LLMRateLimitError, LLMTemporaryError) as e:
             logger.warning("Ghost writer evaluator transient LLM error, falling back: %s", e)
-            return default
+            return _default_sufficiency_fallback(e)
         if isinstance(data, dict):
             return data
-        return default
+        return _default_sufficiency_fallback(ValueError("non-dict sufficiency payload"))
 
     # ------------------------------------------------------------------
     # Interviewer: generate a conversational follow-up question

@@ -52,10 +52,27 @@ Today’s ghost-writer loops duplicate that shape but also sleep+retry once on g
 
 1. Build conversation text + prompt as today.
 2. `agent_factory` → `Agent(model=self._model, system_prompt=system)` with the existing evaluator system string.
-3. `call_json_with_retry(..., on_exhausted=lambda _: default, on_unexpected_error=lambda _: default, logger=logger)`.
-4. If result is a `dict`, return it; else return `default` (preserves today’s non-dict guard).
+3. Invoke the helper inside a transient-error catch that maps to the shared default-dict fallback:
 
-`default` remains:
+```python
+try:
+    data = call_json_with_retry(
+        _agent_factory,
+        prompt,
+        max_attempts=2,
+        strict_json_suffix=_JSON_RETRY_SUFFIX,
+        on_exhausted=_default_sufficiency_fallback,
+        on_unexpected_error=_default_sufficiency_fallback,
+        logger=logger,
+    )
+except (LLMRateLimitError, LLMTemporaryError) as e:
+    return _default_sufficiency_fallback(e)
+if isinstance(data, dict):
+    return data
+return _default_sufficiency_fallback(ValueError("non-dict sufficiency payload"))
+```
+
+`_default_sufficiency_fallback` returns:
 
 ```python
 {
@@ -70,17 +87,35 @@ Today’s ghost-writer loops duplicate that shape but also sleep+retry once on g
 
 1. Build outline prompt as today.
 2. `agent_factory` → `Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)`.
-3. `call_json_with_retry(..., on_exhausted=lambda _: [], on_unexpected_error=lambda _: [])`.
+3. Same transient-error catch pattern with the shared empty-list fallback:
+
+```python
+try:
+    data = call_json_with_retry(
+        _agent_factory,
+        prompt,
+        max_attempts=2,
+        strict_json_suffix=_JSON_RETRY_SUFFIX,
+        on_exhausted=_empty_list_fallback,
+        on_unexpected_error=_empty_list_fallback,
+        logger=logger,
+    )
+except (LLMRateLimitError, LLMTemporaryError) as e:
+    return _empty_list_fallback(e)
+```
+
 4. If result is not a `list`, log and return `[]`.
-5. Else map up to 3 items to `StoryGap`, including the empty-`seed_question` fallback string — unchanged.
+5. Else map up to 3 items to `StoryGap` (skip non-dict elements), including the empty-`seed_question` fallback string — unchanged.
 
 Array payloads continue to work through `extract_json_from_response`’s `json.loads` path; the helper’s `Dict` annotation is a type hint only.
 
 ### Imports / cleanup
 
 - Add `from agents.blogging.shared.json_retry import call_json_with_retry` (or the package re-export).
-- Drop `LLMJsonParseError` / `extract_json_from_response` imports if unused after migration.
+- Add `LLMRateLimitError` / `LLMTemporaryError` imports for the call-site transient catches.
+- Drop `LLMJsonParseError` if unused after migration; keep `extract_json_from_response` while `_generate_friendly_seeds` still needs it.
 - Keep `time` if `_compile_narrative` still uses `time.sleep`.
+- Shared module-level fallbacks: `_empty_list_fallback` and `_default_sufficiency_fallback`.
 
 ## Testing
 
