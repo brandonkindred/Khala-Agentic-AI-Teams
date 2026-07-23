@@ -9,7 +9,7 @@ it via extract-then-shim (the team's old models re-export these; the team's
 ``_validate_answers``/``_coerce_progress`` become thin wrappers).
 
 Layout:
-    - ``models``     — the four schemas (superset fields folded in as Optional).
+    - ``models``     — pending-question schemas plus :class:`HumanReview` (gate approve/feedback).
     - ``validation`` — ``validate_answers(data, request)`` (union of both rule sets).
     - ``progress``   — ``coerce_progress(value)`` (clamped to ``[0, 100]``).
     - ``status``     — ``pending_questions_from_raw(raw)`` (full-fidelity materialization).
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from shared.hitl.models import (
     AnswerSubmission,
+    HumanReview,
     PendingQuestion,
     QuestionOption,
     SubmitAnswersRequest,
@@ -37,6 +38,7 @@ __all__ = [
     "PendingQuestion",
     "AnswerSubmission",
     "SubmitAnswersRequest",
+    "HumanReview",
     "validate_answers",
     "coerce_progress",
     "pending_questions_from_raw",
