@@ -35,9 +35,7 @@ class QuestionOption(BaseModel):
 
     id: str = Field(..., description="Unique identifier for this option.")
     label: str = Field(..., description="Display text for this option.")
-    is_default: bool = Field(
-        default=False, description="Whether this option is the suggested default."
-    )
+    is_default: bool = Field(default=False, description="Whether this option is the suggested default.")
     rationale: Optional[str] = Field(None, description="Why this option is suggested.")
     confidence: Optional[float] = Field(None, description="Agent confidence in this option (0-1).")
 
