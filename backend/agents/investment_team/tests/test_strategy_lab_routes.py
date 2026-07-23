@@ -113,6 +113,25 @@ class _StubLabClient:
 
 
 # ---------------------------------------------------------------------------
+# _StubLabClient.get_job contract
+# ---------------------------------------------------------------------------
+
+
+def test_stub_lab_client_get_job_returns_none_for_unknown_id() -> None:
+    stub = _StubLabClient()
+    assert stub.get_job("missing-id") is None
+
+
+def test_stub_lab_client_get_job_returns_copy_for_known_id() -> None:
+    job = {"job_id": "run-1", "status": "completed", "data": {"total_cycles": 2}}
+    stub = _StubLabClient(jobs=[job])
+    got = stub.get_job("run-1")
+    assert got == job
+    assert got is not job
+    assert got is not stub.by_id["run-1"]
+
+
+# ---------------------------------------------------------------------------
 # run_strategy_lab
 # ---------------------------------------------------------------------------
 
