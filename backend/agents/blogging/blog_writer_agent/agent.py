@@ -22,9 +22,13 @@ from agents.blogging.shared.content_planning_loop import (
 )
 from agents.blogging.shared.content_profile import LengthPolicy
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 from llm_service import (
+    LLMError,
     LLMJsonParseError,
+    LLMRateLimitError,
+    LLMTemporaryError,
     compact_text,
     extract_json_from_response,
 )
@@ -99,6 +103,23 @@ VAGUE_CITATION_PATTERNS = [
 # The model context (e.g. 262K tokens ≈ 917K chars) is large enough that
 # compaction should rarely be needed.
 COMPACT_OUTLINE_CHARS = 200_000
+
+
+def _unwrap_llm_cause(exc: BaseException) -> BaseException:
+    """Return the underlying model error when strands wraps it in EventLoopException.
+
+    Preconditions:
+        - ``exc`` is the exception caught at an LLM call boundary.
+    Postconditions:
+        - If ``exc`` is an ``EventLoopException`` with a non-None ``original_exception``,
+          returns that original exception.
+        - Otherwise returns ``exc`` unchanged.
+    """
+    if isinstance(exc, EventLoopException):
+        original = getattr(exc, "original_exception", None)
+        if isinstance(original, BaseException):
+            return original
+    return exc
 
 
 def _extract_draft_after_marker(raw_response: str) -> str:
@@ -344,7 +365,20 @@ class BlogWriterAgent(_BlogAgentBase):
         return violations
 
     def _fix_deterministic_violations(self, draft: str, violations: list[str]) -> str:
-        """Call LLM once to fix deterministic violations. Returns cleaned draft."""
+        """Call LLM once to fix deterministic violations. Returns cleaned draft.
+
+        Preconditions:
+            - ``draft`` is a non-empty string when callers intend a real fix (empty is allowed).
+            - ``violations`` is a list of human-readable violation strings (may be empty).
+        Postconditions:
+            - On success with extractable fixed draft, returns that stripped draft.
+            - On soft-fail (``LLMError`` excluding types re-raised below, or
+              ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
+              logs with traceback via ``logger.exception`` and returns the original ``draft``.
+            - ``LLMRateLimitError`` and ``LLMTemporaryError`` (including when wrapped in
+              ``EventLoopException``) propagate as the unwrapped cause.
+            - Unexpected exceptions propagate unchanged.
+        """
         checklist = "\n".join(f"- {v}" for v in violations)
         prompt = (
             "Fix ONLY these specific issues in the draft below. Do not change anything else.\n\n"
@@ -361,11 +395,31 @@ class BlogWriterAgent(_BlogAgentBase):
                 logger.info("Deterministic self-check: fixed %s violations", len(violations))
                 return fixed.strip()
         except Exception as e:
-            logger.warning("Deterministic fix LLM call failed: %s", e)
+            cause = _unwrap_llm_cause(e)
+            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                raise cause
+            if isinstance(
+                cause, (LLMError, json.JSONDecodeError, TypeError, ValueError, AttributeError)
+            ):
+                logger.exception("Deterministic fix LLM call failed")
+            else:
+                raise
         return draft
 
     def _llm_self_review(self, draft: str) -> str:
-        """Run a focused LLM self-review for subjective violations. Returns cleaned draft."""
+        """Run a focused LLM self-review for subjective violations. Returns cleaned draft.
+
+        Preconditions:
+            - ``draft`` is a string (may be empty).
+        Postconditions:
+            - On success, returns the reviewed/fixed draft or the original when no issues.
+            - On soft-fail (``LLMError`` excluding types re-raised below, or
+              ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
+              logs with traceback via ``logger.exception`` and returns the original ``draft``.
+            - ``LLMRateLimitError`` and ``LLMTemporaryError`` (including when wrapped in
+              ``EventLoopException``) propagate as the unwrapped cause.
+            - Unexpected exceptions propagate unchanged.
+        """
         try:
             raw = self._call_text(
                 f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
@@ -374,9 +428,11 @@ class BlogWriterAgent(_BlogAgentBase):
             # Extract JSON array
             start = cleaned.find("[")
             end = cleaned.rfind("]") + 1
-            if start == -1 or end <= start:
+            if start == -1:
                 logger.info("LLM self-review: no issues found (no JSON array)")
                 return draft
+            if end <= start:
+                end = len(cleaned)
             issues = json.loads(cleaned[start:end])
             if not issues:
                 logger.info("LLM self-review: draft passed all 5 checks")
@@ -403,7 +459,15 @@ class BlogWriterAgent(_BlogAgentBase):
                 logger.info("LLM self-review: applied fixes, new length=%s", len(fixed.strip()))
                 return fixed.strip()
         except Exception as e:
-            logger.warning("LLM self-review failed: %s", e)
+            cause = _unwrap_llm_cause(e)
+            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                raise cause
+            if isinstance(
+                cause, (LLMError, json.JSONDecodeError, TypeError, ValueError, AttributeError)
+            ):
+                logger.exception("LLM self-review failed")
+            else:
+                raise
         return draft
 
     def _self_review(self, draft: str) -> str:
@@ -769,6 +833,9 @@ class BlogWriterAgent(_BlogAgentBase):
                 risks=data.get("risks") or [],
             )
         except Exception as e:
+            cause = _unwrap_llm_cause(e)
+            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                raise cause
             logger.warning(
                 "Structured revision planning failed: %s — falling back to unstructured", e
             )
@@ -776,7 +843,10 @@ class BlogWriterAgent(_BlogAgentBase):
             try:
                 plain = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 return RevisionPlan(summary=(plain or "").strip(), changes=[], risks=[])
-            except Exception:
+            except Exception as fallback_exc:
+                fallback_cause = _unwrap_llm_cause(fallback_exc)
+                if isinstance(fallback_cause, (LLMRateLimitError, LLMTemporaryError)):
+                    raise fallback_cause
                 return RevisionPlan(summary="Revision planning failed.", changes=[], risks=[])
 
     def _build_revise_single_item_prompt(
@@ -1028,8 +1098,11 @@ class BlogWriterAgent(_BlogAgentBase):
     ) -> list[UncertaintyQuestion]:
         """Scan a draft for areas of high uncertainty that need user input.
 
-        Returns a list of UncertaintyQuestion objects. An empty list means
-        the agent is confident in the draft and no user questions are needed.
+        Returns a list of UncertaintyQuestion objects. An empty list means the
+        agent is confident in the draft, the model returned no questions, or a
+        non-transient LLM/parse failure was soft-failed after logging. Transient
+        ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when wrapped in
+        ``EventLoopException``) propagate so Temporal can retry the draft stage.
         """
         prompt = UNCERTAINTY_DETECTION_PROMPT.format(
             content_plan=content_plan_text,
@@ -1069,6 +1142,9 @@ class BlogWriterAgent(_BlogAgentBase):
             logger.info("Identified %s uncertainty question(s) in draft", len(questions))
             return questions
         except Exception as e:
+            cause = _unwrap_llm_cause(e)
+            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                raise cause
             logger.warning("Uncertainty detection failed: %s", e)
             return []
 
@@ -1083,7 +1159,11 @@ class BlogWriterAgent(_BlogAgentBase):
         patterns, content structure, etc., this method extracts those as
         concrete guideline updates that can be persisted to the writing style guide.
 
-        Returns an empty list if the feedback has no guideline-relevant content.
+        Returns an empty list when the feedback has no guideline-relevant content,
+        the response is malformed / non-dict, or a non-transient LLM failure was
+        soft-failed after logging. Transient ``LLMRateLimitError`` /
+        ``LLMTemporaryError`` (including when wrapped in ``EventLoopException``)
+        propagate so Temporal can retry the draft stage.
         """
         prompt = ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT.format(
             user_feedback=user_feedback,
@@ -1111,6 +1191,9 @@ class BlogWriterAgent(_BlogAgentBase):
             logger.info("Extracted %s writing guideline update(s) from user feedback", len(updates))
             return updates
         except Exception as e:
+            cause = _unwrap_llm_cause(e)
+            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                raise cause
             logger.warning("Guideline update analysis failed: %s", e)
             return []
 
@@ -1261,6 +1344,10 @@ class BlogWriterAgent(_BlogAgentBase):
         Called when the automated editor has gone through ``revision_count`` iterations
         without approving the draft, to produce a clear explanation for the user about
         what is stuck and what guidance is needed.
+
+        Transient ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when wrapped
+        in ``EventLoopException``) propagate so Temporal can retry. Other LLM failures
+        fall back to a generic summary string.
         """
         feedback_text = "\n".join(
             f"- [{getattr(item, 'severity', 'unknown')}] {getattr(item, 'category', '')}: {getattr(item, 'issue', '')}"
@@ -1284,6 +1371,9 @@ class BlogWriterAgent(_BlogAgentBase):
             summary = self._call_text(prompt)
             return (summary or "").strip()
         except Exception as e:
+            cause = _unwrap_llm_cause(e)
+            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                raise cause
             logger.warning("Escalation summary generation failed: %s", e)
             return (
                 f"The draft has been through {revision_count} automated revision cycles "
