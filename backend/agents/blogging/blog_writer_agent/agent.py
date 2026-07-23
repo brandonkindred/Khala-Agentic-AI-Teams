@@ -934,13 +934,9 @@ class BlogWriterAgent:
             except LLMJsonParseError as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
         # Fallback
-        try:
-            data = self._call_agent_json(prompt)
-            raw_draft = data.get("draft") if data else None
-            if isinstance(raw_draft, str) and raw_draft.strip():
-                return raw_draft.strip()
-        except (LLMJsonParseError, TypeError, ValueError):
-            pass
+        fallback = self._fallback_draft_via_json(prompt)
+        if fallback:
+            return fallback
         logger.warning(
             "Revise item %s/%s: could not produce revision; keeping draft as-is.",
             item_index,
@@ -1043,13 +1039,9 @@ class BlogWriterAgent:
             except LLMJsonParseError as e:
                 logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
         if current_draft == draft:
-            try:
-                data = self._call_agent_json(prompt)
-                raw_draft = data.get("draft") if data else None
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    current_draft = raw_draft.strip()
-            except (LLMJsonParseError, TypeError, ValueError):
-                pass
+            fallback = self._fallback_draft_via_json(prompt)
+            if fallback:
+                current_draft = fallback
 
         logger.info(
             "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
@@ -1278,13 +1270,9 @@ class BlogWriterAgent:
                 logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
 
         if current_draft == draft:
-            try:
-                data = self._call_agent_json(prompt)
-                raw_draft = data.get("draft") if data else None
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    current_draft = raw_draft.strip()
-            except (LLMJsonParseError, TypeError, ValueError):
-                pass
+            fallback = self._fallback_draft_via_json(prompt)
+            if fallback:
+                current_draft = fallback
 
         logger.info("User-feedback revision complete, final length=%s", len(current_draft))
         if draft_output_path:

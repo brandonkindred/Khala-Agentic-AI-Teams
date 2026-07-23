@@ -212,19 +212,21 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
-    call_count = {"i": 0}
 
-    def fake(self, prompt, system_prompt=""):
-        call_count["i"] += 1
-        return "no marker here"
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
     monkeypatch.setattr(
-        BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {"draft": "# Fallback"}
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, prompt, system_prompt="": "no marker here",
     )
-    out = a.revise_from_user_feedback(draft="# Original", user_feedback="x", content_plan_text="cp")
-    # Should have either used fallback or kept original
-    assert out.draft  # Non-empty
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# Fallback",
+    )
+    out = a.revise_from_user_feedback(
+        draft="# Original", user_feedback="x", content_plan_text="cp"
+    )
+    assert "# Fallback" in out.draft
 
 
 # ---------------------------------------------------------------------------
@@ -346,11 +348,7 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
     monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
-
-    def fail_json(self, p, **kw):
-        raise ValueError("nope")
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", fail_json)
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
 
     plan = make_content_plan(
         overarching_topic="x",
@@ -366,8 +364,52 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
             content_plan=plan,
         ),
     )
-    # Should still return a WriterOutput; original draft preserved
     assert "Original" in out.draft
+
+
+def test_revise_batch_uses_json_fallback_when_text_fails(monkeypatch) -> None:
+    """Batch revise uses _fallback_draft_via_json when text path yields no draft."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_generate_revision_plan",
+        lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, *a, **kw: (_ for _ in ()).throw(RuntimeError("transient")),
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# Batch Recovered",
+    )
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    out = a.revise(
+        ReviseWriterInput(
+            draft="# Original\nBody",
+            feedback_items=[FeedbackItem(category="x", severity="minor", issue="y")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert "Batch Recovered" in out.draft
 
 
 def test_revise_generate_revision_plan_happy(monkeypatch) -> None:

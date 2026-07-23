@@ -182,7 +182,7 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
 
 
 def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
-    """All 2 attempts at _call_agent fail; _call_agent_json succeeds."""
+    """All text attempts fail; JSON fallback helper succeeds."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
@@ -201,8 +201,8 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     monkeypatch.setattr(
         BlogWriterAgent,
-        "_call_agent_json",
-        lambda self, p, **kw: {"draft": "# Recovered"},
+        "_fallback_draft_via_json",
+        lambda self, p: "# Recovered",
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
@@ -243,11 +243,7 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
         raise RuntimeError("nope")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
-
-    def boom_json(self, p, **kw):
-        raise ValueError("nope")
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
         overarching_topic="x",
