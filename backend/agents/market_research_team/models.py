@@ -7,6 +7,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
+
 
 class TeamTopology(str, Enum):
     """How the orchestrator should structure the research workflow."""
@@ -16,6 +18,13 @@ class TeamTopology(str, Enum):
 
 
 class WorkflowStatus(str, Enum):
+    """Market-research run lifecycle status.
+
+    Intentionally team-local (not in ``shared.hitl``): includes ``DRAFT`` and
+    terminal ``READY_FOR_EXECUTION``, which are not shared with branding's
+    ``READY_FOR_ROLLOUT``. Only ``needs_human_decision`` overlaps as a string.
+    """
+
     DRAFT = "draft"
     NEEDS_HUMAN_DECISION = "needs_human_decision"
     READY_FOR_EXECUTION = "ready_for_execution"
@@ -28,11 +37,6 @@ class ResearchMission(BaseModel):
     topology: TeamTopology = TeamTopology.UNIFIED
     transcript_folder_path: Optional[str] = None
     transcripts: List[str] = Field(default_factory=list)
-
-
-class HumanReview(BaseModel):
-    approved: bool
-    feedback: str = ""
 
 
 class RunMarketResearchRequest(BaseModel):
