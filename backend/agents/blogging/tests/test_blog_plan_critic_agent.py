@@ -28,7 +28,9 @@ from agents.blogging.shared.content_profile import (
     resolve_length_policy,
 )
 
-from llm_service import DummyLLMClient
+import pytest
+
+from llm_service import DummyLLMClient, LLMRateLimitError, LLMTemporaryError
 
 from ._content_plan_test_utils import make_content_plan
 
@@ -259,6 +261,27 @@ def test_critic_parse_failure_falls_back_to_fail() -> None:
     assert report.approved is False
     assert report.notes is not None
     assert "parseable JSON" in (report.notes or "")
+
+
+@pytest.mark.parametrize("err_cls", [LLMRateLimitError, LLMTemporaryError])
+def test_critic_transient_error_reraises(err_cls) -> None:
+    """Transient LLM errors propagate so the job runner / Temporal owns retry."""
+
+    class _BoomAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise err_cls("transient outage")
+
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomAgent):
+        with pytest.raises(err_cls):
+            critic.run(
+                plan=_minimal_plan(),
+                brand_spec_prompt="b",
+                writing_guidelines="g",
+            )
 
 
 def test_critic_persists_report_to_work_dir(tmp_path) -> None:
