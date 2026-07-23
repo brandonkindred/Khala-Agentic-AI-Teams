@@ -223,15 +223,17 @@ class BlogCopyEditorAgent:
         on_llm_request: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Run the LLM once (with a single strict-JSON re-prompt) and return the parsed dict.
+        Invoke the editor LLM via the shared JSON-retry helper (up to two attempts).
 
+        Attempt 0 uses the soft-JSON instruction baked into the base prompt; on a
+        JSON-parse failure the helper appends ``strict_json_suffix`` and retries once.
         The LLM client already exhausts its own 429 / transient-transport retry budgets
         before raising, so the copy editor adds no second blocking retry: a transient LLM
         error (LLMRateLimitError/LLMTemporaryError — including when strands wraps it in an
         EventLoopException) re-raises so the Temporal activity funnel retries the whole
-        stage (thread mode fails the job). A JSON-parse failure gets one cheap strict
-        re-prompt then a manual-review fallback; any other unexpected error also fails
-        closed with that fallback so a single bad copy-edit never crashes the draft stage.
+        stage (thread mode fails the job). After JSON-parse exhaustion or any other
+        unexpected error, returns a manual-review fallback so a single bad copy-edit
+        never crashes the draft stage.
 
         Preconditions:
             - prompt is the fully assembled per-request editor context.

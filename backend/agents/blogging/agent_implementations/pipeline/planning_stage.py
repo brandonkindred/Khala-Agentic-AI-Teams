@@ -49,9 +49,11 @@ def run_planning_stage(
         - On success sets ``ctx.planning_phase_result``/``ctx.plan``/
           ``ctx.elicited_stories_text`` and returns None.
         - Returns a terminal ``(planning_phase_result, None, "FAIL")`` tuple if the
-          job was cancelled/failed while awaiting outline approval. This tuple
-          sentinel mirrors ``run_pipeline``'s return shape so the sequencer forwards
-          it unchanged (see ``run_draft_stage`` for the rationale).
+          HITL wait ends without a human response — either the job was
+          cancelled/failed while awaiting outline approval, or the job record
+          disappeared from the store mid-wait. This tuple sentinel mirrors
+          ``run_pipeline``'s return shape so the sequencer forwards it unchanged
+          (see ``run_draft_stage`` for the rationale).
     Raises:
         PlanningError: when content planning fails (e.g. max parse retries).
         BloggingError: any other blogging-domain failure from the planning agent

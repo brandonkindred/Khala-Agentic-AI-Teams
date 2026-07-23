@@ -89,11 +89,14 @@ def _wait_for_hitl(
           (``get_blog_job`` is None). The caller aborts with its own FAIL result.
         - Returns False once ``is_waiting`` became False without a terminal state
           (a human responded) — the caller reads the response.
-        - A transient job-store read failure (``is_waiting``/``get_blog_job`` raising)
-          is ridden out: it is logged and retried on the next poll, up to
-          ``HITL_MAX_CONSECUTIVE_READ_ERRORS`` CONSECUTIVE failures, after which the
-          error propagates (a persistent outage still fails the job). ``on_poll`` errors
-          are not caught — they propagate immediately.
+        - Any exception raised by ``is_waiting`` / ``get_blog_job`` (not just
+          network/HTTP blips — also unexpected programming errors) is ridden out:
+          logged and retried on the next poll, up to
+          ``HITL_MAX_CONSECUTIVE_READ_ERRORS`` consecutive failures, after which the
+          error propagates (a persistent outage still fails the job).
+          ``CancelledError`` is re-raised immediately so Temporal cancellation is
+          not delayed by the retry budget. ``on_poll`` errors are not caught — they
+          propagate immediately.
         - Does not mutate job state; ``on_poll`` may.
     """
     # Deferred import: see module docstring — keeps monkeypatch.setattr(shim,
@@ -104,11 +107,14 @@ def _wait_for_hitl(
     while True:
         # Wrap only the job-store reads: a transient blip during a long HITL wait should
         # retry next poll, not fail the whole job. on_poll (below) stays outside so its
-        # errors surface immediately.
+        # errors surface immediately. CancelledError must escape immediately so Temporal
+        # cancellation is not delayed by the consecutive-error budget.
         try:
             if not is_waiting(job_id):
                 return False
             job_data = get_blog_job(job_id)
+        except CancelledError:
+            raise
         except Exception as e:
             consecutive_read_errors += 1
             if consecutive_read_errors > HITL_MAX_CONSECUTIVE_READ_ERRORS:
@@ -257,7 +263,9 @@ def run_planning(
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
     Raises:
-        PlanningError: If content planning fails.
+        PlanningError: If content planning fails for a non-transient reason.
+        BloggingError: Blogging-domain errors from the planner or plan critic
+            propagate unwrapped (not re-wrapped as ``PlanningError``).
         LLMRateLimitError / LLMTemporaryError: transient LLM-transport failures
             (including from the plan critic) propagate unwrapped so Temporal's
             activity funnel can retry the stage instead of treating them as a
@@ -292,9 +300,9 @@ def run_planning(
     )
 
     # Load the author's brand spec + writing guidelines so the plan critic can
-    # evaluate against the author-owned sources of truth. These are safe to load
-    # even when the critic is disabled — the BlogWriterAgent used for drafting
-    # wants them too, but planning uses an empty-style instance by design.
+    # evaluate against the author-owned sources of truth, and so the planning
+    # BlogWriterAgent receives the same brand/style context (even when the
+    # critic is disabled).
     try:
         brand_spec_for_critic = load_brand_spec_prompt(BRAND_SPEC_PROMPT_PATH)
     except Exception as e:  # pragma: no cover - defensive
@@ -328,8 +336,8 @@ def run_planning(
             max_iterations=planning_max_iter,
         )
     except (BloggingError, LLMRateLimitError, LLMTemporaryError):
-        # Transient LLM-transport errors (e.g. from the plan critic) must stay
-        # unwrapped so temporal.activities._run_stage can retry the stage.
+        # Domain errors and transient LLM-transport errors must stay unwrapped
+        # so temporal.activities._run_stage (and callers) classify them correctly.
         raise
     except Exception as e:
         if _is_external_cancellation(e):
