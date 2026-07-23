@@ -21,6 +21,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import ContentPlan
 from strands import Agent
 
@@ -188,7 +189,7 @@ def _is_no_experience(message: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class GhostWriterElicitationAgent:
+class GhostWriterElicitationAgent(_BlogAgentBase):
     """
     Identifies story gaps in a content plan and conducts conversational interviews
     to elicit personal anecdotes from the author.
@@ -197,10 +198,13 @@ class GhostWriterElicitationAgent:
       - Evaluator: assesses story sufficiency via ``chat_json_round``
       - Interviewer: generates conversational follow-up questions
       - Narrator: compiles vivid first-person narratives
+
+    Preconditions:
+        - llm_client is not None.
     """
 
     def __init__(self, llm_client: Any) -> None:
-        self._model = llm_client
+        super().__init__(llm_client)
 
     # ------------------------------------------------------------------
     # Gap finding

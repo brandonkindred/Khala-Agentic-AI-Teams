@@ -21,3 +21,10 @@ def test_blog_agent_base_stores_client() -> None:
     base = _BlogAgentBase(llm_client=client)
 
     assert base._model is client
+
+
+def test_ghost_writer_rejects_none_client() -> None:
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    with pytest.raises(AssertionError):
+        GhostWriterElicitationAgent(llm_client=None)
