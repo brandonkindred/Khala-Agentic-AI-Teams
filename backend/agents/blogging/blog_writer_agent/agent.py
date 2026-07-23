@@ -20,6 +20,7 @@ from agents.blogging.shared.content_planning_loop import (
     run_content_planning_loop,
 )
 from agents.blogging.shared.content_profile import LengthPolicy
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
 from llm_service import (
@@ -212,6 +213,46 @@ class BlogWriterAgent:
             system_prompt,
         )
         return extract_json_from_response(raw)
+
+    def _fallback_draft_via_json(self, prompt: str) -> Optional[str]:
+        """Parse a revised draft via shared JSON retry when the text path fails.
+
+        Preconditions:
+            - ``prompt`` is a non-empty string (same prompt used for the text path).
+        Postconditions:
+            - Returns a non-empty stripped draft string on success.
+            - Returns ``None`` when JSON cannot yield a usable draft (caller keeps
+              the prior draft).
+            - Transient LLM transport errors (``LLMRateLimitError`` /
+              ``LLMTemporaryError``) propagate unwrapped from ``call_json_with_retry``.
+        """
+        assert isinstance(prompt, str) and prompt.strip(), "prompt must be a non-empty string"
+
+        soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
+        strict_json_suffix = (
+            "\n\nRespond with a single JSON object only (no markdown, no code fence). "
+            'Keys: "draft" (string — the full revised blog post in Markdown).'
+        )
+
+        def _agent_factory():
+            return Agent(model=self._model, system_prompt=WRITING_SYSTEM_PROMPT)
+
+        def _empty_fallback(_exc: Exception) -> dict:
+            return {}
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt + soft_json_instruction,
+            max_attempts=2,
+            strict_json_suffix=strict_json_suffix,
+            on_exhausted=_empty_fallback,
+            on_unexpected_error=_empty_fallback,
+            logger=logger,
+        )
+        raw_draft = data.get("draft") if isinstance(data, dict) else None
+        if isinstance(raw_draft, str) and raw_draft.strip():
+            return raw_draft.strip()
+        return None
 
     def _assert_guidelines_present(self) -> None:
         """Require both brand and writing guideline inputs before drafting/revising."""

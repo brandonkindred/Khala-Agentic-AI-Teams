@@ -338,3 +338,102 @@ def test_writer_build_revise_single_item_prompt_default_length() -> None:
         revise_input=ri,
     )
     assert "TARGET LENGTH" in p
+
+
+def test_fallback_draft_via_json_success(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _agent()
+    captured: dict = {}
+
+    def fake_retry(factory, prompt, **kwargs):
+        captured["max_attempts"] = kwargs.get("max_attempts")
+        captured["prompt"] = prompt
+        captured["strict"] = kwargs.get("strict_json_suffix", "")
+        assert callable(factory)
+        assert callable(kwargs.get("on_exhausted"))
+        assert callable(kwargs.get("on_unexpected_error"))
+        return {"draft": "  # From JSON  \n"}
+
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        fake_retry,
+    )
+    out = a._fallback_draft_via_json("revise this draft")
+    assert out == "# From JSON"
+    assert captured["max_attempts"] == 2
+    assert "Respond with valid JSON only" in captured["prompt"]
+    assert "draft" in captured["strict"].lower()
+
+
+def test_fallback_draft_via_json_empty_draft_returns_none(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _agent()
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        lambda *a, **k: {"draft": "   "},
+    )
+    assert a._fallback_draft_via_json("prompt") is None
+
+
+def test_fallback_draft_via_json_missing_draft_returns_none(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _agent()
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        lambda *a, **k: {},
+    )
+    assert a._fallback_draft_via_json("prompt") is None
+
+
+def test_fallback_draft_via_json_exhausted_hook_returns_none(monkeypatch) -> None:
+    """on_exhausted returning {} must yield None (keep original draft at call sites)."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMJsonParseError
+
+    a = _agent()
+
+    def fake_retry(factory, prompt, **kwargs):
+        return kwargs["on_exhausted"](LLMJsonParseError("bad json"))
+
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        fake_retry,
+    )
+    assert a._fallback_draft_via_json("prompt") is None
+
+
+def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _agent()
+
+    def fake_retry(factory, prompt, **kwargs):
+        return kwargs["on_unexpected_error"](RuntimeError("boom"))
+
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        fake_retry,
+    )
+    assert a._fallback_draft_via_json("prompt") is None
+
+
+def test_fallback_draft_via_json_transient_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from llm_service import LLMRateLimitError
+
+    a = _agent()
+
+    def fake_retry(factory, prompt, **kwargs):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
+        fake_retry,
+    )
+    import pytest
+
+    with pytest.raises(LLMRateLimitError):
+        a._fallback_draft_via_json("prompt")
