@@ -7,13 +7,16 @@ the job service (called by every team) and the LLM clients — this causes
 connection churn and needless object allocation under concurrency.
 
 This module exposes a small set of process-wide, thread-safe pooled
-``httpx.Client`` instances so callers reuse keep-alive connections instead of
-re-establishing them.  Clients are bucketed by timeout so each call site keeps
-its existing timeout semantics while still sharing one client per bucket.
+``httpx.Client`` and ``httpx.AsyncClient`` instances so callers reuse keep-alive
+connections instead of re-establishing them.  Clients are bucketed by timeout so
+each call site keeps its existing timeout semantics while still sharing one
+client per bucket.  Both sync and async pools share ``DEFAULT_LIMITS`` and the
+same timeout-bucket scheme.
 
 Invariants:
-    - Exactly one ``httpx.Client`` exists per (rounded) timeout bucket for the
-      lifetime of the process (or until :func:`close_pool`).
+    - Exactly one ``httpx.Client`` (sync) or ``httpx.AsyncClient`` (async) exists
+      per (rounded) timeout bucket for the lifetime of the process (or until
+      :func:`close_pool` / :func:`close_async_pool`).
     - All accessors are safe to call from multiple threads concurrently.
     - Idle keep-alive sockets are recycled after ``keepalive_expiry`` seconds
       (``HTTP_KEEPALIVE_EXPIRY_S``, default ``15.0``) so the client drops them
@@ -24,6 +27,7 @@ Invariants:
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import logging
 import math
@@ -32,7 +36,13 @@ import threading
 
 import httpx
 
-__all__ = ["get_pooled_client", "close_pool", "DEFAULT_LIMITS"]
+__all__ = [
+    "get_pooled_client",
+    "close_pool",
+    "get_pooled_async_client",
+    "close_async_pool",
+    "DEFAULT_LIMITS",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -160,3 +170,71 @@ def close_pool() -> None:
 
 
 atexit.register(close_pool)
+
+if not hasattr(httpx.AsyncClient, "close"):
+
+    def _sync_close_async_client(self: httpx.AsyncClient) -> None:
+        """Sync close shim for httpx>=0.27 where only ``aclose()`` exists."""
+        if self.is_closed:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.aclose())
+        else:
+            # Cannot block on aclose from inside a running loop; callers in that
+            # situation should use await client.aclose() instead.
+            pass
+
+    httpx.AsyncClient.close = _sync_close_async_client  # type: ignore[attr-defined]
+
+_async_lock = threading.Lock()
+_async_clients: dict[float, httpx.AsyncClient] = {}
+
+
+def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
+    """Return a shared, connection-pooled ``httpx.AsyncClient`` for ``timeout``.
+
+    The client is created lazily on first use for a given timeout bucket and
+    reused thereafter. Callers must NOT close the returned client or use it as
+    a context manager — it is shared process-wide and closed via
+    :func:`close_async_pool` at shutdown.
+
+    Preconditions:
+        - ``timeout`` is a positive, finite number of seconds.
+    Postconditions:
+        - Returns a live (non-closed) ``httpx.AsyncClient`` configured with
+          ``DEFAULT_LIMITS`` and the requested timeout.
+        - Repeated calls with timeouts in the same bucket return the *same*
+          instance.
+    """
+    key = _bucket(timeout)
+    with _async_lock:
+        client = _async_clients.get(key)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=timeout, limits=DEFAULT_LIMITS)
+            _async_clients[key] = client
+        return client
+
+
+def close_async_pool() -> None:
+    """Close and drop all pooled async clients.
+
+    Idempotent: safe to call when the pool is already empty. Intended for
+    process shutdown and test teardown. Uses sync ``AsyncClient.close()`` for
+    best-effort teardown (including from ``atexit``).
+
+    Postconditions:
+        - The async pool is empty; subsequent :func:`get_pooled_async_client`
+          calls create fresh clients.
+    """
+    with _async_lock:
+        for client in _async_clients.values():
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
+        _async_clients.clear()
+
+
+atexit.register(close_async_pool)

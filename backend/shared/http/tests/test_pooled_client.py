@@ -11,7 +11,9 @@ from shared.http import (
     _MIN_KEEPALIVE_EXPIRY_S,
     DEFAULT_LIMITS,
     _keepalive_expiry_seconds,
+    close_async_pool,
     close_pool,
+    get_pooled_async_client,
     get_pooled_client,
 )
 
@@ -19,8 +21,10 @@ from shared.http import (
 @pytest.fixture(autouse=True)
 def _clean_pool():
     close_pool()
+    close_async_pool()
     yield
     close_pool()
+    close_async_pool()
 
 
 def test_same_timeout_returns_same_instance():
@@ -171,3 +175,84 @@ def test_close_pool_swallows_client_close_errors(monkeypatch):
     close_pool()  # must not raise
     # Pool was cleared despite the close error.
     assert shared.http._clients == {}  # noqa: SLF001 — verify teardown cleared state
+
+
+def test_async_same_timeout_returns_same_instance():
+    a = get_pooled_async_client(30.0)
+    b = get_pooled_async_client(30.0)
+    assert a is b
+    assert isinstance(a, httpx.AsyncClient)
+
+
+def test_async_close_terminates_and_replaces_on_next_get():
+    a = get_pooled_async_client(30.0)
+    close_async_pool()
+    assert a.is_closed
+    b = get_pooled_async_client(30.0)
+    assert b is not a
+    assert not b.is_closed
+
+
+def test_async_different_timeout_buckets_are_isolated():
+    fast = get_pooled_async_client(5.0)
+    slow = get_pooled_async_client(30.0)
+    assert fast is not slow
+
+
+def test_async_near_equal_timeouts_share_bucket():
+    a = get_pooled_async_client(30.0)
+    b = get_pooled_async_client(30.0001)
+    assert a is b
+
+
+def test_async_replaces_externally_closed_client():
+    a = get_pooled_async_client(7.0)
+    a.close()
+    b = get_pooled_async_client(7.0)
+    assert b is not a
+    assert not b.is_closed
+
+
+def test_async_close_pool_is_idempotent():
+    get_pooled_async_client(9.0)
+    close_async_pool()
+    close_async_pool()
+    assert get_pooled_async_client(9.0) is not None
+
+
+def test_async_invalid_timeout_rejected():
+    with pytest.raises(AssertionError):
+        get_pooled_async_client(0)
+    with pytest.raises(AssertionError):
+        get_pooled_async_client(-5)
+
+
+def test_async_non_finite_timeout_rejected():
+    with pytest.raises(AssertionError):
+        get_pooled_async_client(float("inf"))
+    with pytest.raises(AssertionError):
+        get_pooled_async_client(float("nan"))
+
+
+def test_async_close_pool_swallows_client_close_errors(monkeypatch):
+    get_pooled_async_client(15.0)
+
+    def _boom(self):
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(httpx.AsyncClient, "close", _boom, raising=True)
+    close_async_pool()
+    assert shared.http._async_clients == {}  # noqa: SLF001
+
+
+def test_async_pooled_client_applies_limits_and_timeout():
+    client = get_pooled_async_client(12.0)
+    assert isinstance(client, httpx.AsyncClient)
+    assert client.timeout.read == 12.0
+    pool = getattr(getattr(client, "_transport", None), "_pool", None)  # noqa: SLF001
+    if pool is not None and hasattr(pool, "_max_connections"):
+        assert pool._max_connections == DEFAULT_LIMITS.max_connections  # noqa: SLF001
+        assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections  # noqa: SLF001
+        assert pool._keepalive_expiry == DEFAULT_LIMITS.keepalive_expiry  # noqa: SLF001
+    else:  # pragma: no cover
+        pytest.skip("httpx pool internals unavailable; public timeout asserted above")
