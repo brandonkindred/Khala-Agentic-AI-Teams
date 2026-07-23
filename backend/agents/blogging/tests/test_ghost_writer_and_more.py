@@ -154,7 +154,6 @@ def test_ghost_evaluate_sufficiency_exception_then_default(monkeypatch) -> None:
             raise RuntimeError("LLM exploded")
 
     monkeypatch.setattr(gw_agent, "Agent", _Boom)
-    monkeypatch.setattr(gw_agent.time, "sleep", lambda *_: None)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     out = agent._evaluate_sufficiency(_gap(), [])
     assert out["sufficient"] is False
@@ -318,7 +317,8 @@ def test_ghost_find_gaps_via_llm_parse_error_retry_then_fail(monkeypatch) -> Non
     assert agent._find_gaps_via_llm(_content_plan()) == []
 
 
-def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
+def test_ghost_find_gaps_via_llm_exception_falls_back_empty(monkeypatch) -> None:
+    """Generic invoke errors fall back immediately (shared helper, no local retry)."""
     import agents.blogging.ghost_writer_agent.agent as gw_agent
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
@@ -346,10 +346,9 @@ def test_ghost_find_gaps_via_llm_exception_then_recover(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(gw_agent, "Agent", _Stub)
-    monkeypatch.setattr(gw_agent.time, "sleep", lambda *_: None)
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
-    out = agent._find_gaps_via_llm(_content_plan())
-    assert len(out) == 1
+    # Old loop would recover on attempt 2; helper falls back on first unexpected error.
+    assert agent._find_gaps_via_llm(_content_plan()) == []
 
 
 def test_ghost_find_story_gaps_uses_plan_opportunities_when_present(monkeypatch) -> None:
