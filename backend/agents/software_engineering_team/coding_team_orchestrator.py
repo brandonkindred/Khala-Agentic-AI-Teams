@@ -598,12 +598,17 @@ class CodingTeamSwarm(
     coordinator reviews (the swarm's sole code-review pass) and merges approved
     tasks.
 
-    Inherits ``TeamLeadSharedState`` for LLM resolution (``llm_getter``), an opaque
-    ``shared_config`` bag, and the optional per-run status callback — state storage
-    only; phase sequencing stays off this swarm. Behavior is otherwise spread across
-    four mixins by responsibility (assignment, implementation, review, revision-cap
-    bookkeeping) — see swarm_assignment.py, swarm_implementation.py, swarm_review.py,
-    swarm_revision_cap.py.
+    Shares ``TeamLeadSharedState`` (LLM getter / shared config / status callback)
+    with the code-v2 team-lead stack, but deliberately does not adopt
+    ``BaseTeamLead``'s gated phase-sequencing template or the
+    ``build_team_failure_result`` / ``apply_team_failure`` envelope. Its
+    round-based assign → implement → review → merge loop, worktree management,
+    and pause/merge locking are structurally incompatible with single-pass phase
+    sequencing; failures stay task-graph / dict-shaped rather than
+    ``success`` / ``failure_reason`` team results. Behavior is otherwise spread
+    across four mixins by responsibility (assignment, implementation, review,
+    revision-cap bookkeeping) — see swarm_assignment.py, swarm_implementation.py,
+    swarm_review.py, swarm_revision_cap.py.
     """
 
     def __init__(
