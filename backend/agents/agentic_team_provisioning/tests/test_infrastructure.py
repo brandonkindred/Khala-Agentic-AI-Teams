@@ -12,11 +12,11 @@ from agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 @pytest.fixture(autouse=True)
 def _isolate_agent_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
-    # Reset module-level cache so each test gets fresh state
+    # Reset process-local cache root + handle map so each test gets fresh state
     import agentic_team_provisioning.infrastructure as infra_mod
 
-    infra_mod._AGENT_CACHE = str(tmp_path)
-    infra_mod._infra_cache.clear()
+    infra_mod._set_agent_cache_for_testing(str(tmp_path))
+    infra_mod._clear_infra_cache_for_testing()
 
 
 @pytest.fixture
@@ -47,6 +47,33 @@ def test_get_team_infrastructure_caching(tmp_path: Path, fake_pg: dict) -> None:
     infra1 = get_team_infrastructure("test-team-4")
     infra2 = get_team_infrastructure("test-team-4")
     assert infra1 is infra2
+
+
+def test_provision_team_rejects_empty_team_id(fake_pg: dict) -> None:
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    with pytest.raises(ValueError, match="team_id must be a non-empty string"):
+        provision_team("")
+
+
+def test_get_team_infrastructure_rejects_empty_team_id(fake_pg: dict) -> None:
+    from agentic_team_provisioning.infrastructure import get_team_infrastructure
+
+    with pytest.raises(ValueError, match="team_id must be a non-empty string"):
+        get_team_infrastructure("")
+
+
+def test_provision_team_replaces_cache_entry(tmp_path: Path, fake_pg: dict) -> None:
+    from agentic_team_provisioning.infrastructure import (
+        get_team_infrastructure,
+        provision_team,
+    )
+
+    infra1 = get_team_infrastructure("test-team-7")
+    infra2 = provision_team("test-team-7")
+    infra3 = get_team_infrastructure("test-team-7")
+    assert infra1 is not infra2
+    assert infra2 is infra3
 
 
 def test_form_store_crud(tmp_path: Path, fake_pg: dict) -> None:
