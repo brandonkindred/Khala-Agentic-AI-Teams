@@ -621,11 +621,27 @@ class BlogWriterAgent(_BlogAgentBase):
         return WriterOutput(draft=draft)
 
     def _format_feedback_item_line(self, item: Any, index: int) -> str:
-        """One numbered feedback line (+ optional suggestion) for batch revise prompts."""
-        loc = f" [{item.location}]" if getattr(item, "location", None) else ""
-        line = f"{index}. [{item.severity}] {item.category}{loc}: {item.issue}"
-        if getattr(item, "suggestion", None):
-            line += f"\n   Suggestion: {item.suggestion}"
+        """One numbered feedback line (+ optional suggestion) for batch revise prompts.
+
+        Preconditions:
+            ``index`` is a positive int. ``item`` exposes ``severity``, ``category``,
+            and ``issue`` (via attribute or duck typing); empty/missing values are
+            rejected. ``location`` and ``suggestion`` are optional.
+        Postconditions:
+            Returns a numbered feedback line; includes a location bracket and a
+            suggestion sub-line when those optional fields are present.
+        """
+        severity = getattr(item, "severity", None)
+        category = getattr(item, "category", None)
+        issue = getattr(item, "issue", None)
+        if not all([severity, category, issue]):
+            raise ValueError(f"Feedback item missing required fields: {item!r}")
+        location = getattr(item, "location", None)
+        loc = f" [{location}]" if location else ""
+        line = f"{index}. [{severity}] {category}{loc}: {issue}"
+        suggestion = getattr(item, "suggestion", None)
+        if suggestion:
+            line += f"\n   Suggestion: {suggestion}"
         return line
 
     def _build_revise_all_items_prompt(
