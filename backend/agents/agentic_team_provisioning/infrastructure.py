@@ -5,7 +5,9 @@ When a team is created via the provisioning API, ``provision_team`` creates:
 - ``$AGENT_CACHE/provisioned_teams/{team_id}/runs/``    — job working directories
 
 Form records are stored in the shared Khala Postgres ``agentic_form_data``
-table partitioned by ``team_id``; all operations are idempotent.
+table, scoped by a ``team_id`` column (``WHERE team_id = %s`` filtering, not
+Postgres table partitioning). Directory creation and update/delete form
+operations are idempotent; ``create_record`` always inserts a new row.
 """
 
 from __future__ import annotations
@@ -168,8 +170,47 @@ _infra_cache: Dict[str, TeamInfrastructure] = {}
 _infra_lock = threading.Lock()
 
 
+def _require_team_id(team_id: str) -> None:
+    """Raise ``ValueError`` when ``team_id`` is empty or falsy.
+
+    Preconditions:
+        - ``team_id`` is the caller-supplied team identifier (may be empty).
+    Postconditions:
+        - Returns normally only when ``team_id`` is a non-empty string.
+        - Raises ``ValueError`` otherwise (enforced under ``python -O``).
+    """
+    if not team_id:
+        raise ValueError("team_id must be a non-empty string")
+
+
+def _build_team_infrastructure(team_id: str) -> TeamInfrastructure:
+    """Materialize directories and handles for ``team_id`` without touching the cache.
+
+    Preconditions:
+        - ``team_id`` is a non-empty string (caller-enforced).
+    Postconditions:
+        - ``assets_dir`` and ``runs_dir`` exist under the team base directory.
+        - Returns a new ``TeamInfrastructure``; does not read or write ``_infra_cache``.
+    """
+    base = Path(_AGENT_CACHE) / "provisioned_teams" / team_id
+    assets_dir = base / "assets"
+    runs_dir = base / "runs"
+
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    return TeamInfrastructure(
+        team_id=team_id,
+        base_dir=base,
+        assets_dir=assets_dir,
+        runs_dir=runs_dir,
+        job_client=JobServiceClient(team=f"provisioned_{team_id}"),
+        form_store=TeamFormStore(team_id=team_id),
+    )
+
+
 def provision_team(team_id: str) -> TeamInfrastructure:
-    """Create per-team directories and handles. Idempotent.
+    """Create per-team directories and handles. Directory creation is idempotent.
 
     Preconditions:
         - ``team_id`` is a non-empty string.
@@ -180,30 +221,13 @@ def provision_team(team_id: str) -> TeamInfrastructure:
         - Form records and job state remain in Postgres / the job service;
           this function only materializes local handles and directories.
     """
-    assert team_id, "team_id must be a non-empty string"
-    base = Path(_AGENT_CACHE) / "provisioned_teams" / team_id
-    assets_dir = base / "assets"
-    runs_dir = base / "runs"
-
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    runs_dir.mkdir(parents=True, exist_ok=True)
-
-    form_store = TeamFormStore(team_id=team_id)
-    job_client = JobServiceClient(team=f"provisioned_{team_id}")
-
-    infra = TeamInfrastructure(
-        team_id=team_id,
-        base_dir=base,
-        assets_dir=assets_dir,
-        runs_dir=runs_dir,
-        job_client=job_client,
-        form_store=form_store,
-    )
+    _require_team_id(team_id)
+    infra = _build_team_infrastructure(team_id)
 
     with _infra_lock:
         _infra_cache[team_id] = infra
 
-    logger.info("Provisioned infrastructure for team %s at %s", team_id, base)
+    logger.info("Provisioned infrastructure for team %s at %s", team_id, infra.base_dir)
     return infra
 
 
@@ -215,17 +239,31 @@ def get_team_infrastructure(team_id: str) -> TeamInfrastructure:
     Postconditions:
         - Returns a ``TeamInfrastructure`` for ``team_id``.
         - Within a single process, repeated calls for the same ``team_id``
-          return the same instance after the first successful provision
-          (unless the process-local cache is cleared for tests).
-        - Cache misses call ``provision_team``, which is idempotent for
-          directories and external stores; multi-worker divergence of the
-          in-memory map is therefore safe.
+          return the same instance after the first successful lazy provision,
+          provided no intervening ``provision_team(team_id)`` (which replaces
+          the cache entry) and the process-local cache has not been cleared
+          for tests.
+        - Concurrent cache misses double-check under ``_infra_lock`` so only
+          one instance is published; losers discard their built handles and
+          return the winner.
+        - Directory creation is idempotent; multi-worker divergence of the
+          in-memory map is safe because durable state is external.
     """
-    assert team_id, "team_id must be a non-empty string"
+    _require_team_id(team_id)
     with _infra_lock:
-        if team_id in _infra_cache:
-            return _infra_cache[team_id]
-    return provision_team(team_id)
+        cached = _infra_cache.get(team_id)
+        if cached is not None:
+            return cached
+
+    infra = _build_team_infrastructure(team_id)
+    with _infra_lock:
+        cached = _infra_cache.get(team_id)
+        if cached is not None:
+            return cached
+        _infra_cache[team_id] = infra
+
+    logger.info("Provisioned infrastructure for team %s at %s", team_id, infra.base_dir)
+    return infra
 
 
 def _clear_infra_cache_for_testing() -> None:

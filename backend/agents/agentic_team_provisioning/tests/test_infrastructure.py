@@ -49,6 +49,33 @@ def test_get_team_infrastructure_caching(tmp_path: Path, fake_pg: dict) -> None:
     assert infra1 is infra2
 
 
+def test_provision_team_rejects_empty_team_id(fake_pg: dict) -> None:
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    with pytest.raises(ValueError, match="team_id must be a non-empty string"):
+        provision_team("")
+
+
+def test_get_team_infrastructure_rejects_empty_team_id(fake_pg: dict) -> None:
+    from agentic_team_provisioning.infrastructure import get_team_infrastructure
+
+    with pytest.raises(ValueError, match="team_id must be a non-empty string"):
+        get_team_infrastructure("")
+
+
+def test_provision_team_replaces_cache_entry(tmp_path: Path, fake_pg: dict) -> None:
+    from agentic_team_provisioning.infrastructure import (
+        get_team_infrastructure,
+        provision_team,
+    )
+
+    infra1 = get_team_infrastructure("test-team-7")
+    infra2 = provision_team("test-team-7")
+    infra3 = get_team_infrastructure("test-team-7")
+    assert infra1 is not infra2
+    assert infra2 is infra3
+
+
 def test_form_store_crud(tmp_path: Path, fake_pg: dict) -> None:
     from agentic_team_provisioning.infrastructure import provision_team
 
