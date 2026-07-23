@@ -337,7 +337,6 @@ def test_writer_build_revise_single_item_prompt_default_length() -> None:
 
 
 def test_fallback_draft_via_json_success(monkeypatch) -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     captured: dict = {}
@@ -363,7 +362,6 @@ def test_fallback_draft_via_json_success(monkeypatch) -> None:
 
 
 def test_fallback_draft_via_json_empty_draft_returns_none(monkeypatch) -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     monkeypatch.setattr(
@@ -374,7 +372,6 @@ def test_fallback_draft_via_json_empty_draft_returns_none(monkeypatch) -> None:
 
 
 def test_fallback_draft_via_json_missing_draft_returns_none(monkeypatch) -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     monkeypatch.setattr(
@@ -386,7 +383,6 @@ def test_fallback_draft_via_json_missing_draft_returns_none(monkeypatch) -> None
 
 def test_fallback_draft_via_json_exhausted_hook_returns_none(monkeypatch) -> None:
     """on_exhausted returning {} must yield None (keep original draft at call sites)."""
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from llm_service import LLMJsonParseError
 
     a = _agent()
@@ -402,7 +398,6 @@ def test_fallback_draft_via_json_exhausted_hook_returns_none(monkeypatch) -> Non
 
 
 def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
 
@@ -417,7 +412,6 @@ def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> No
 
 
 def test_fallback_draft_via_json_transient_reraises(monkeypatch) -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from llm_service import LLMRateLimitError
 
     a = _agent()
