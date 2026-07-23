@@ -24,6 +24,7 @@ def _make_agent():
 
 
 def test_identify_uncertainty_questions_returns_items(monkeypatch) -> None:
+    """Parses a JSON array of uncertainty questions into model items."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -47,6 +48,7 @@ def test_identify_uncertainty_questions_returns_items(monkeypatch) -> None:
 
 
 def test_identify_uncertainty_questions_empty_array(monkeypatch) -> None:
+    """Empty JSON array → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -66,6 +68,7 @@ def test_identify_uncertainty_questions_no_array(monkeypatch) -> None:
 
 
 def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> None:
+    """Items missing `question` are skipped; missing `question_id` gets an auto id."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -84,6 +87,7 @@ def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> 
 
 
 def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
+    """LLM failure → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -101,6 +105,7 @@ def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
 
 
 def test_analyze_feedback_returns_updates(monkeypatch) -> None:
+    """Parses guideline updates from structured feedback analysis."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -118,6 +123,7 @@ def test_analyze_feedback_returns_updates(monkeypatch) -> None:
 
 
 def test_analyze_feedback_no_updates(monkeypatch) -> None:
+    """`has_guideline_updates=False` → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -130,6 +136,7 @@ def test_analyze_feedback_no_updates(monkeypatch) -> None:
 
 
 def test_analyze_feedback_non_dict(monkeypatch) -> None:
+    """Non-dict structured response → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -138,6 +145,7 @@ def test_analyze_feedback_non_dict(monkeypatch) -> None:
 
 
 def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
+    """Malformed update entries are skipped; valid ones are kept."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -157,6 +165,7 @@ def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
 
 
 def test_analyze_feedback_error(monkeypatch) -> None:
+    """LLM failure → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -174,6 +183,7 @@ def test_analyze_feedback_error(monkeypatch) -> None:
 
 
 def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
+    """Extracts revised draft after `---DRAFT---` and writes the output path."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -202,6 +212,7 @@ def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
 
 
 def test_revise_from_user_feedback_empty_draft() -> None:
+    """Whitespace-only draft is returned unchanged (no LLM call)."""
     a = _make_agent()
     out = a.revise_from_user_feedback(draft="   ", user_feedback="x", content_plan_text="cp")
     assert out.draft == "   "
@@ -233,6 +244,7 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
 
 
 def test_generate_escalation_summary_happy(monkeypatch) -> None:
+    """Returns the LLM escalation summary text."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
@@ -255,6 +267,7 @@ def test_generate_escalation_summary_happy(monkeypatch) -> None:
 
 
 def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
+    """LLM failure still returns a string (fallback or empty)."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -418,6 +431,7 @@ def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
 
 
 def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
+    """_generate_revision_plan returns a fallback summary when the structured response is empty."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
