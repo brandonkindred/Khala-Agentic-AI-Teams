@@ -50,6 +50,9 @@ class FakeCursor:
     Invariants:
         ``fetchone`` / ``fetchall`` return the values last set by handlers
         (via ``set_one`` / ``set_all`` or direct attribute writes).
+        ``last_norm`` holds the normalized SQL from the most recent ``execute``
+        call (or ``None`` before the first call), scoped to this cursor so
+        concurrent cursors do not share match metadata.
     """
 
     def __init__(
@@ -64,6 +67,7 @@ class FakeCursor:
         self.ids = ids if ids is not None else itertools.count(1)
         self.row_factory = row_factory
         self.rowcount = 0
+        self.last_norm: str | None = None
         self._one: Any = None
         self._all: list = []
 
@@ -100,10 +104,12 @@ class FakeCursor:
             ``sql`` is a non-empty str resembling a store query.
             ``params`` is a sequence (tuple/list) or empty.
         Postconditions:
+            ``self.last_norm`` is the normalized form of ``sql``.
             Exactly one handler ran, or ``AssertionError`` was raised with
             the original ``sql`` string in the message.
         """
         norm = _normalize_sql(sql)
+        self.last_norm = norm
         param_tuple = tuple(params)
         for matcher, handler in self._dispatch:
             if matcher(norm):
