@@ -75,7 +75,7 @@ def test_run_orchestrator_reuses_output_when_mission_unchanged(
 def test_run_orchestrator_returns_none_when_not_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A mission missing required fields short-circuits to None without running."""
+    """A mission with placeholder values for required fields short-circuits to None without running."""
     calls = {"n": 0}
 
     def fake_run(**kwargs):
