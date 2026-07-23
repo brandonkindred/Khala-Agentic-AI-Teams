@@ -14,6 +14,7 @@ from llm_service.compaction import (  # noqa: PLC2701 - internals are under test
     _model_fingerprint,
     clear_compaction_cache,
     compact_text,
+    supports_compaction,
 )
 
 
@@ -245,6 +246,49 @@ def test_clear_compaction_cache_forces_cold_recompute() -> None:
     clear_compaction_cache()
     compact_text(text, 50, client, "spec")
     assert client.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# supports_compaction capability check
+# ---------------------------------------------------------------------------
+
+
+def test_supports_compaction_true_with_callable_complete_only() -> None:
+    class CompleteOnly:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            return prompt
+
+    assert supports_compaction(CompleteOnly()) is True
+
+
+def test_supports_compaction_true_with_complete_and_context() -> None:
+    class Full:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            return prompt
+
+        def get_max_context_tokens(self) -> int:
+            return 16384
+
+    assert supports_compaction(Full()) is True
+
+
+def test_supports_compaction_false_when_complete_missing() -> None:
+    class CtxOnly:
+        def get_max_context_tokens(self) -> int:
+            return 16384
+
+    assert supports_compaction(CtxOnly()) is False
+
+
+def test_supports_compaction_false_when_complete_not_callable() -> None:
+    class Bad:
+        complete = "not-a-function"
+
+    assert supports_compaction(Bad()) is False
+
+
+def test_supports_compaction_false_for_none() -> None:
+    assert supports_compaction(None) is False
 
 
 # ---------------------------------------------------------------------------

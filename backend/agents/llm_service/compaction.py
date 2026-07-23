@@ -28,7 +28,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Tuple
 
 if TYPE_CHECKING:
     from .interface import LLMClient
@@ -188,6 +188,20 @@ def _compact_single(
         prompt, objective=f"compact oversized {content_description}", temperature=0.0
     )
     return result.strip()
+
+
+def supports_compaction(llm: Any) -> bool:
+    """True when ``llm`` exposes the surface ``compact_text`` requires.
+
+    Preconditions:
+        - ``llm`` may be any object (including ``None``); attribute lookup must not
+          raise for the checked name (``getattr`` with default is used).
+    Postconditions:
+        - Returns True iff ``getattr(llm, "complete", None)`` is callable.
+        - Does not require ``get_max_context_tokens`` or model fingerprint attributes
+          (those are optional inside ``compact_text``).
+    """
+    return callable(getattr(llm, "complete", None))
 
 
 def compact_text(
