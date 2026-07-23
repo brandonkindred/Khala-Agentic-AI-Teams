@@ -33,6 +33,7 @@ from llm_service import (
     extract_json_from_response,
 )
 
+from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS
 from .models import (
     ReviseWriterInput,
     RevisionPlan,
@@ -704,7 +705,9 @@ class BlogWriterAgent(_BlogAgentBase):
         )
         if revise_input.previous_feedback_items:  # pragma: no cover - prompt-assembly branch when previous_feedback_items are supplied; covered by integration tests that exercise the revise loop end-to-end.
             prev_lines = []
-            for i, item in enumerate(revise_input.previous_feedback_items[:10], 1):
+            for i, item in enumerate(
+                revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
+            ):
                 loc = f" [{item.location}]" if item.location else ""
                 prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
             prompt_parts.extend(
