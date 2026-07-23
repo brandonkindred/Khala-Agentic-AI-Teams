@@ -22,9 +22,10 @@ registration — cheap and side-effect free. All payloads cross the
 workflow/activity boundary as JSON-native dicts (``model_dump(mode="json")``)
 and are reconstructed with pydantic inside the body.
 
-Invariant: job-store status is written to the durable ``JobServiceClient`` store
-under the ``road_trip_planning_team`` slug (the same slug the API's ``create_job``
-used), so a completed run survives a worker/process restart.
+Invariant: job-store status is written via
+``road_trip_planning_team.shared.job_store`` under the
+``road_trip_planning_team`` slug — the same slug the API's
+``create_job`` used — so a completed run survives a worker/process restart.
 """
 
 from __future__ import annotations
