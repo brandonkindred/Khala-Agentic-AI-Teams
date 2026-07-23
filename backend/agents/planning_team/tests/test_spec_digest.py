@@ -293,14 +293,14 @@ def test_map_reduce_oversized_section_is_compacted(monkeypatch):
     assert mapped == ["COMPACTED"]
 
 
-def test_map_reduce_no_compact_when_client_lacks_surface():
+def test_map_reduce_no_compact_when_client_lacks_complete():
     """An llm without .complete is never asked to compact; section mapped uncompacted."""
 
     class CtxOnly:
         def get_max_context_tokens(self):
             return 1000  # floor 8000
 
-        # no .complete -> _supports_compaction False
+        # no .complete -> supports_compaction False
 
     text = "w" * 9000
     mapped = []
@@ -319,6 +319,72 @@ def test_map_reduce_no_compact_when_client_lacks_surface():
     )
     # Section passed through untruncated (no compaction, full 9000 chars in one section).
     assert mapped == [9000]
+
+
+def test_map_reduce_compacts_when_complete_present_without_context(monkeypatch):
+    """Callable complete alone is enough to enter compact_text (ctx size is optional)."""
+
+    class CompleteOnly:
+        def complete(self, *a, **k):
+            return "unused"
+
+        # no get_max_context_tokens — compute_section_chars falls back to default
+
+    compact_calls = []
+
+    def fake_compact(text, *, max_chars, llm, content_description):
+        compact_calls.append(content_description)
+        return "COMPACTED"
+
+    monkeypatch.setattr(spec_digest, "compact_text", fake_compact)
+
+    # Force an oversized section: tiny returned section budget via monkeypatch.
+    monkeypatch.setattr(spec_digest, "compute_section_chars", lambda _llm: 8000)
+
+    text = "q" * 9000
+    mapped = []
+
+    def _map(section, _llm, idx, total):
+        mapped.append(section)
+        return {"s": section}
+
+    map_reduce(
+        text,
+        CompleteOnly(),
+        content_description="spec",
+        map_fn=_map,
+        reduce_fn=_identity_reduce,
+        fallback={},
+    )
+    assert compact_calls, "compact_text should run when only complete is present"
+    assert mapped == ["COMPACTED"]
+
+
+def test_map_reduce_complete_only_compaction_failure_preserves_full_section():
+    """Failing complete-only compaction must map the full section, never a truncate."""
+
+    class FailCompleteOnly:
+        def complete(self, *a, **k):
+            raise RuntimeError("boom")
+
+    # Large unbroken section → one oversized section; default chunk sizing + failing
+    # complete would previously return a truncated aggregate from compact_text.
+    text = "z" * 23000
+    mapped = []
+
+    def _map(section, _llm, idx, total):
+        mapped.append(len(section))
+        return {"ok": 1}
+
+    map_reduce(
+        text,
+        FailCompleteOnly(),
+        content_description="spec",
+        map_fn=_map,
+        reduce_fn=_identity_reduce,
+        fallback={},
+    )
+    assert mapped == [23000]
 
 
 def test_map_reduce_compact_failure_uses_uncompacted_section(monkeypatch):

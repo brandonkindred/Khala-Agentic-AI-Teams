@@ -87,7 +87,7 @@ def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> 
 
 
 def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
-    """LLM failure → empty list."""
+    """Non-transient LLM failure → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -97,6 +97,41 @@ def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     assert a.identify_uncertainty_questions("d", "p") == []
+
+
+def test_identify_uncertainty_questions_rate_limit_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a.identify_uncertainty_questions("d", "p")
+
+
+def test_identify_uncertainty_questions_wrapped_temporary_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent()
+    wrapped = LLMTemporaryError("temporary")
+
+    def boom(self, prompt, system_prompt=""):
+        raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMTemporaryError) as excinfo:
+        a.identify_uncertainty_questions("d", "p")
+    assert excinfo.value is wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +200,7 @@ def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
 
 
 def test_analyze_feedback_error(monkeypatch) -> None:
-    """LLM failure → empty list."""
+    """Non-transient LLM failure → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -175,6 +210,22 @@ def test_analyze_feedback_error(monkeypatch) -> None:
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
     assert a.analyze_user_feedback_for_guideline_updates("fb", "g") == []
+
+
+def test_analyze_feedback_rate_limit_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent()
+
+    def boom(self, p, **kw):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a.analyze_user_feedback_for_guideline_updates("fb", "g")
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +318,7 @@ def test_generate_escalation_summary_happy(monkeypatch) -> None:
 
 
 def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
-    """LLM failure still returns a string (fallback or empty)."""
+    """Non-transient LLM failure still returns a fallback string."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -283,6 +334,26 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
     )
     # Returns a fallback string (non-empty) or empty
     assert isinstance(out, str)
+
+
+def test_generate_escalation_summary_rate_limit_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent()
+
+    def boom(self, p, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a.generate_escalation_summary(
+            revision_count=10,
+            latest_feedback_items=[],
+            persistent_issues=[],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +499,43 @@ def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
     assert out.summary == "Fix tone"
     assert len(out.changes) == 1
     assert out.risks == ["scope creep"]
+
+
+def test_revise_generate_revision_plan_rate_limit_reraises(monkeypatch) -> None:
+    """Transient LLM errors re-raise from structured planning (no unstructured fallback)."""
+    import pytest
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import LLMRateLimitError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+
+    def boom(self, p, **kw):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a._generate_revision_plan(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            revise_input=ReviseWriterInput(
+                draft="# x",
+                feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+                feedback_summary="s",
+                content_plan=plan,
+            ),
+        )
 
 
 def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
