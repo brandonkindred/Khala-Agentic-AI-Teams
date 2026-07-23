@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import ContentPlan
 from strands import Agent
+from temporalio.exceptions import CancelledError
 
 from llm_service import LLMJsonParseError, extract_json_from_response
 
@@ -183,6 +184,31 @@ def _is_no_experience(message: str) -> bool:
     if text in _NO_EXPERIENCE_PHRASES:
         return True
     return any(phrase in text for phrase in _NO_EXPERIENCE_PHRASES)
+
+
+def _notify_job_updater(
+    job_updater: Optional[Callable[..., None]],
+    **kwargs: Any,
+) -> None:
+    """Best-effort progress callback for interview milestones.
+
+    Preconditions:
+        - ``kwargs`` are acceptable to the pipeline ``job_updater`` (typically
+          ``status_text`` / ``phase`` / ``progress``).
+    Postconditions:
+        - If ``job_updater`` is None, no side effects.
+        - Otherwise ``job_updater(**kwargs)`` is invoked. ``CancelledError``
+          propagates; other exceptions are logged and swallowed so progress
+          failures cannot abort the interview.
+    """
+    if job_updater is None:
+        return
+    try:
+        job_updater(**kwargs)
+    except CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("Ghost writer job_updater failed (non-fatal): %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +399,14 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
 
         The pipeline must have already posted the seed question and set
         ``waiting_for_story_input=True`` before calling this method.
+
+        Args:
+            gap: Story gap being elicited.
+            job_id: Blog job identifier for event-bus / job-store access.
+            gap_index: Active gap index used to detect UI skips.
+            job_updater: Optional progress callback invoked at wait / evaluate /
+                follow-up / compile milestones (failures are non-fatal).
+            max_rounds: Hard cap on interview rounds.
         """
         from agents.blogging.shared.blog_job_store import (
             add_story_agent_message,
@@ -383,11 +417,17 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
 
         conversation: List[Dict[str, str]] = [{"role": "agent", "content": gap.seed_question}]
         detected_context: Optional[str] = None
+        section = gap.section_title
 
         sub = subscribe(job_id)
         try:
             for round_num in range(max_rounds):
                 # ── Wait for the user to respond (event-driven) ─────────
+                _notify_job_updater(
+                    job_updater,
+                    phase="story_elicitation",
+                    status_text=f"Waiting for your response about: {section}",
+                )
                 while is_waiting_for_story_input(job_id):
                     # Liveness signal for the event-bus reaper: this consumer
                     # may wait on human input for much longer than the idle
@@ -434,6 +474,11 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                 conversation.append({"role": "user", "content": last_user_msg})
 
                 # ── Evaluate with dedicated evaluator ────────────────────
+                _notify_job_updater(
+                    job_updater,
+                    phase="story_elicitation",
+                    status_text=f"Evaluating your story for: {section}",
+                )
                 evaluation = self._evaluate_sufficiency(gap, conversation)
 
                 # Track story context as it's detected
@@ -456,6 +501,11 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                         gap.section_title,
                         round_num + 1,
                     )
+                    _notify_job_updater(
+                        job_updater,
+                        phase="story_elicitation",
+                        status_text=f"Compiling your story for: {section}",
+                    )
                     narrative = self._compile_narrative(gap, conversation, detected_context)
                     return StoryElicitationResult(
                         gap=gap,
@@ -469,6 +519,11 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                 follow_up = self._generate_follow_up(gap, conversation, evaluation)
                 if not follow_up:
                     # Interviewer couldn't generate a question — compile from what we have
+                    _notify_job_updater(
+                        job_updater,
+                        phase="story_elicitation",
+                        status_text=f"Compiling your story for: {section}",
+                    )
                     narrative = self._compile_narrative(gap, conversation, detected_context)
                     if narrative:
                         return StoryElicitationResult(
@@ -482,12 +537,22 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
 
                 conversation.append({"role": "agent", "content": follow_up})
                 add_story_agent_message(job_id, follow_up, gap_index)
+                _notify_job_updater(
+                    job_updater,
+                    phase="story_elicitation",
+                    status_text=f"Asking a follow-up about: {section}",
+                )
         finally:
             unsubscribe(job_id, sub)
 
         # Safety cap reached — compile whatever we have
         logger.info(
             "Ghost writer: round cap reached for '%s', compiling from history", gap.section_title
+        )
+        _notify_job_updater(
+            job_updater,
+            phase="story_elicitation",
+            status_text=f"Compiling your story for: {section}",
         )
         narrative = self._compile_narrative(gap, conversation, detected_context)
         return StoryElicitationResult(
