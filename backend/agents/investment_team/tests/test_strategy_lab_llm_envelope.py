@@ -534,6 +534,7 @@ def test_design_invoke_charges_once_despite_transport_retry(
     monkeypatch: pytest.MonkeyPatch, no_sleep: List[float]
 ) -> None:
     from investment_team.strategy_lab.agents import _agent_runner as agent_runner_mod
+    from investment_team.strategy_lab.agents import _structured_output as so_mod
     from investment_team.strategy_lab.agents import design as design_mod
 
     # The test session's conftest pins LLM_MAX_RETRIES=0; enable one transport
@@ -546,7 +547,7 @@ def test_design_invoke_charges_once_despite_transport_retry(
     # The loop itself now delegates to `_agent_runner.run_json_with_parse_retry`,
     # which builds its `Agent` via that module's own `Agent`/`get_strands_model`
     # names — patch those rather than `design_mod`'s.
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: False)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: False)
     monkeypatch.setattr(agent_runner_mod, "Agent", _fake_agent_class(stub))
     monkeypatch.setattr(agent_runner_mod, "get_strands_model", lambda *_a, **_k: None)
     monkeypatch.setattr(design_mod, "validate_structured_rules", lambda _parsed: None)

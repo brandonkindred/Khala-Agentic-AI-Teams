@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 import pytest
 
 from investment_team.models import StrategySpec
+from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import design as design_mod
 from investment_team.strategy_lab.agents._llm_budget import (
     DesignBudgetExhausted,
@@ -55,10 +56,10 @@ def _force_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     Force the structured-output seam off so these tests are deterministic
     regardless of ambient ``LLM_PROVIDER`` (unset defaults to ``"ollama"``,
     whose capability flag is True) — see
-    ``design._structured_output_available``. The structured path itself is
+    ``so.structured_output_available``. The structured path itself is
     covered by ``test_strategy_lab_design_structured_output.py``.
     """
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: False)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: False)
 
 
 # ---------------------------------------------------------------------------

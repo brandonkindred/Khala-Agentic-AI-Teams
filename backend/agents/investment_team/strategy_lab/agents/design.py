@@ -50,11 +50,10 @@ from ._parse_helpers import (
     parse_retry_budget,
     validate_structured_rules,
 )
-from ._response_schemas import DESIGN_SPEC_SCHEMA
-from ._structured_output import structured_output_available as _structured_output_available
+from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
+from . import _structured_output as so
 from .design_review import (
     _coerce_critique,
-    _invoke_structured_critique,
     _sizing_owned_by_gate,
     format_prior_critiques,
 )
@@ -363,64 +362,6 @@ class DesignAgent:
             regression_notice=regression_notice,
         )
 
-    def _invoke_structured(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        """Request provider-enforced schema-conformant decoding for one design round.
-
-        Bypasses ``strands.Agent`` (whose ``stream()``/``structured_output()``
-        do not forward a ``schema`` to the backing client) and calls
-        ``LLMClient.complete_json(..., schema=DESIGN_SPEC_SCHEMA)`` directly,
-        still routed through :func:`run_structured_agent` for the same
-        charge/invoke/timeout/parse envelope every other call site uses.
-
-        Preconditions: ``_structured_output_available()`` is True (checked by
-        the caller, :meth:`_invoke_and_parse`); ``system_prompt`` /
-        ``user_prompt`` are non-empty strings.
-        Postconditions: returns the parsed JSON dict on success (JSON-shape
-        conformant; DSL semantic validity is NOT guaranteed — the caller
-        still runs :func:`validate_structured_rules`). Raises
-        :class:`~..exceptions.StrategyLabLLMError` on any transport/parse
-        failure — including a ``schema_forced`` semantic-exhaustion
-        starvation signal (``LLMSemanticExhaustionError.schema_forced``),
-        which the caller inspects to decide whether to degrade to the
-        unconstrained parse-retry loop. This method never falls back itself
-        and never retries. ``charge=True``: the legacy loop below charges the
-        design-phase budget on every real LLM call including retries, so this
-        pre-flight call must charge too for budget-accounting parity. Mirrors
-        :meth:`RefinementAgent._invoke_structured`, which also charges.
-        """
-        assert _structured_output_available(), (
-            "precondition: caller must verify _structured_output_available() before "
-            "invoking (only that path exposes an adapter with a .client)"
-        )
-        assert system_prompt and user_prompt, (
-            "precondition: system_prompt and user_prompt must be non-empty"
-        )
-        client = get_strands_model("strategy_design").client
-
-        def _call(prompt: str) -> str:
-            result = client.complete_json(
-                prompt,
-                objective="strategy design (structured)",
-                system_prompt=system_prompt,
-                schema=DESIGN_SPEC_SCHEMA,
-            )
-            # invoke_agent unconditionally does str(result) on whatever this
-            # callable returns before handing it to `parse` — a raw dict
-            # would come back as Python repr (single-quoted, True/False/None),
-            # which extract_json_object cannot parse. json.dumps re-renders
-            # it as valid JSON so the round trip is exact.
-            return json.dumps(result)
-
-        return run_structured_agent(
-            _call,
-            user_prompt,
-            agent_key="strategy_design",
-            phase="design_generate_structured",
-            parse=extract_json_object,
-            charge=True,
-            logger=logger,
-        )
-
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
 
@@ -440,7 +381,7 @@ class DesignAgent:
         contract. This method's own contract — inputs, outputs, exceptions
         — is unchanged by the split.
         """
-        structured_attempted = _structured_output_available()
+        structured_attempted = so.structured_output_available()
         prompt = user_prompt
         if structured_attempted:
             finalized, prompt = self._structured_preflight(system_prompt, user_prompt)
@@ -456,7 +397,7 @@ class DesignAgent:
     ) -> Tuple[Optional[Tuple[Dict[str, Any], str]], str]:
         """Attempt one provider-enforced schema-constrained design call.
 
-        Pre: ``_structured_output_available()`` is True (checked by the
+        Pre: :func:`so.structured_output_available` is True (checked by the
         caller, :meth:`_invoke_and_parse`); ``system_prompt`` / ``user_prompt``
         are non-empty strings.
         Post: returns ``(finalized, prompt)``.
@@ -489,7 +430,16 @@ class DesignAgent:
         structured happy path.
         """
         try:
-            parsed = self._invoke_structured(system_prompt, user_prompt)
+            parsed = so.invoke_structured_with_schema(
+                "strategy_design",
+                system_prompt,
+                user_prompt,
+                phase="design_generate_structured",
+                schema=DESIGN_SPEC_SCHEMA,
+                charge=True,
+                objective="strategy design (structured)",
+                logger=logger,
+            )
         except StrategyLabLLMError as exc:
             cause = exc.cause
             if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
@@ -740,14 +690,17 @@ class DesignAgent:
                 logger=logger,
             )
 
-        if _structured_output_available():
+        if so.structured_output_available():
             try:
-                parsed = _invoke_structured_critique(
-                    agent_key="strategy_design",
-                    system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
+                parsed = so.invoke_structured_with_schema(
+                    "strategy_design",
+                    _SELF_REVIEW_SYSTEM_PROMPT,
+                    user_prompt,
                     phase="design_self_review_structured",
+                    schema=CRITIQUE_SCHEMA,
                     charge=True,
+                    objective="strategy design review (structured)",
+                    logger=logger,
                 )
             except StrategyLabLLMError as exc:
                 cause = exc.cause

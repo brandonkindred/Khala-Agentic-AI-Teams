@@ -57,27 +57,6 @@ _SYSTEM_PROMPT = (
 _CRITIQUE_SCHEMA_JSON = json.dumps(CRITIQUE_SCHEMA, indent=2)
 
 
-def _invoke_structured_critique(
-    agent_key: str, system_prompt: str, user_prompt: str, *, phase: str, charge: bool
-) -> Dict[str, Any]:
-    """Temporary shim — deleted in the design.py migration task.
-
-    Forwards to :func:`so.invoke_structured_with_schema` with ``CRITIQUE_SCHEMA``
-    so :meth:`DesignAgent._self_review` (still importing this symbol) keeps
-    working until Task 4 migrates that call site.
-    """
-    return so.invoke_structured_with_schema(
-        agent_key,
-        system_prompt,
-        user_prompt,
-        phase=phase,
-        schema=CRITIQUE_SCHEMA,
-        charge=charge,
-        objective="strategy design review (structured)",
-        logger=logger,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -537,12 +516,15 @@ class DesignReviewAgent:
         try:
             if so.structured_output_available():
                 try:
-                    parsed = _invoke_structured_critique(
-                        agent_key="strategy_design_review",
-                        system_prompt=_SYSTEM_PROMPT,
-                        user_prompt=user_prompt,
+                    parsed = so.invoke_structured_with_schema(
+                        "strategy_design_review",
+                        _SYSTEM_PROMPT,
+                        user_prompt,
                         phase="design_review_structured",
+                        schema=CRITIQUE_SCHEMA,
                         charge=False,
+                        objective="strategy design review (structured)",
+                        logger=logger,
                     )
                 except StrategyLabLLMError as exc:
                     cause = exc.cause
