@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from typing import Any as _Any
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -69,7 +70,7 @@ def _content_plan_from_outline(outline: str) -> ContentPlan:
     )
 
 
-class BlogPublicationAgent:
+class BlogPublicationAgent(_BlogAgentBase):
     """
     Expert agent that receives final drafts, writes them to blog_posts, waits for human
     approval, and on approval creates platform-specific versions (Medium, dev.to,
@@ -88,10 +89,9 @@ class BlogPublicationAgent:
             - llm_client is not None.
             - max_revision_loops >= 1.
         """
-        assert llm_client is not None, "llm_client is required"
+        super().__init__(llm_client)
         assert max_revision_loops >= 1, "max_revision_loops must be >= 1"
 
-        self._model = llm_client
         self.blog_posts_root = Path(blog_posts_root or self._default_blog_posts_root())
         self.pending_dir = self.blog_posts_root / "pending"
         self.max_revision_loops = max_revision_loops
