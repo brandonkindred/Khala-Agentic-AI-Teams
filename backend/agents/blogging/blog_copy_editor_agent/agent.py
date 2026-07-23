@@ -474,9 +474,12 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         inject programmatic length feedback, derive approval, and return the output.
 
         Preconditions:
-            - copy_editor_input is a valid CopyEditorInput (draft non-empty).
+            - copy_editor_input is a CopyEditorInput instance.
+            - The draft may be empty; if so, a minimal output is returned without calling the LLM.
         Postconditions:
             - Returns CopyEditorOutput with summary and feedback_items.
+            - If the draft is empty (or whitespace-only), returns a minimal output with an
+              explanatory summary and no feedback items, without invoking the LLM.
             - If feedback_output_path is set, best-effort writes the same output to
               that path before returning. This write may silently fail (e.g. permission
               denied or disk-full); such failures are logged at WARNING and never raised,
