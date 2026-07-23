@@ -73,7 +73,18 @@ class ColorPalette(BaseModel):
     sentiment: str = ""  # e.g. "warm and energetic", "cool and professional"
 
 
-class BrandingMission(BaseModel):
+class BrandingMissionFields(BaseModel):
+    """Shared required/defaulted mission fields for branding domain + future API DTOs.
+
+    Preconditions:
+        - ``company_name`` length >= 2
+        - ``company_description`` length >= 10
+        - ``target_audience`` length >= 3
+    Postconditions:
+        - Instance exposes the eight shared mission fields with the defaults
+          declared below when optional inputs are omitted.
+    """
+
     company_name: str = Field(..., min_length=2)
     company_description: str = Field(..., min_length=10)
     target_audience: str = Field(..., min_length=3)
@@ -82,6 +93,18 @@ class BrandingMission(BaseModel):
     desired_voice: str = "clear, confident, human"
     existing_brand_material: List[str] = Field(default_factory=list)
     wiki_path: Optional[str] = None
+
+
+class BrandingMission(BrandingMissionFields):
+    """Full branding mission: shared fields + visual-identity inputs.
+
+    Preconditions:
+        - Same as ``BrandingMissionFields`` for the shared required strings.
+    Postconditions:
+        - Instance exposes shared mission fields plus visual-identity fields;
+          omitted visual fields use the defaults declared below.
+    """
+
     # Visual identity fields — populated during guided palette selection
     color_inspiration: List[str] = Field(default_factory=list)
     color_palettes: List[ColorPalette] = Field(default_factory=list)
