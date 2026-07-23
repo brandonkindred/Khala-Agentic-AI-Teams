@@ -23,6 +23,7 @@ from .models import (  # noqa: E402
     SearchQuery,
     SourceDocument,
 )
+from agents.blogging.shared.agent_base import _BlogAgentBase  # noqa: E402
 from .prompts import (  # noqa: E402
     BRIEF_PARSING_PROMPT,
     DOC_RELEVANCE_SCORING_PROMPT,
@@ -41,7 +42,7 @@ from .tools.web_search import OllamaWebSearch  # noqa: E402
 _DOC_PARALLEL_WORKERS = 8
 
 
-class ResearchAgent:
+class ResearchAgent(_BlogAgentBase):
     """
     Core research agent implementing the workflow defined in the plan.
 
@@ -66,9 +67,8 @@ class ResearchAgent:
             - self._model is not None.
             - self.max_fetch_documents >= 1.
         """
-        assert llm_client is not None, "llm_client is required"
+        super().__init__(llm_client)
         assert max_fetch_documents >= 1, "max_fetch_documents must be at least 1"
-        self._model = llm_client
         self.web_search = web_search or OllamaWebSearch()
         self.web_fetcher = web_fetcher or SimpleWebFetcher()
         self.max_fetch_documents = max_fetch_documents
