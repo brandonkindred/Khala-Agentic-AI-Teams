@@ -33,6 +33,7 @@ from llm_service import (
     extract_json_from_response,
 )
 
+from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS
 from .models import (
     ReviseWriterInput,
     RevisionPlan,
@@ -52,7 +53,6 @@ from .prompts import (
     USER_FEEDBACK_REVISION_INSTRUCTIONS,
     WRITING_SYSTEM_PROMPT,
 )
-from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS
 
 logger = logging.getLogger(__name__)
 
