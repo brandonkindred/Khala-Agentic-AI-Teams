@@ -348,6 +348,7 @@ def test_fallback_draft_via_json_success(monkeypatch) -> None:
         assert callable(factory)
         assert callable(kwargs.get("on_exhausted"))
         assert callable(kwargs.get("on_unexpected_error"))
+        assert callable(kwargs.get("unwrap_exception"))
         return {"draft": "  # From JSON  \n"}
 
     monkeypatch.setattr(
@@ -412,6 +413,8 @@ def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> No
 
 
 def test_fallback_draft_via_json_transient_reraises(monkeypatch) -> None:
+    import pytest
+
     from llm_service import LLMRateLimitError
 
     a = _agent()
@@ -423,7 +426,38 @@ def test_fallback_draft_via_json_transient_reraises(monkeypatch) -> None:
         "agents.blogging.blog_writer_agent.agent.call_json_with_retry",
         fake_retry,
     )
-    import pytest
 
     with pytest.raises(LLMRateLimitError):
         a._fallback_draft_via_json("prompt")
+
+
+def test_fallback_draft_via_json_unwraps_event_loop_transient(monkeypatch) -> None:
+    """Strands EventLoopException wrappers must re-raise the unwrapped transient cause.
+
+    The draft-stage Temporal funnel retries only on LLMRateLimitError /
+    LLMTemporaryError; re-raising the wrapper would be swallowed by on_unexpected_error
+    and silently keep the unrevised draft.
+    """
+    import pytest
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError
+
+    a = _agent()
+    wrapped = LLMRateLimitError("429 after client retries")
+
+    class _BoomAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __call__(self, prompt):
+            raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(
+        "agents.blogging.blog_writer_agent.agent.Agent",
+        _BoomAgent,
+    )
+    with pytest.raises(LLMRateLimitError) as excinfo:
+        a._fallback_draft_via_json("prompt")
+    assert excinfo.value is wrapped
+    assert not isinstance(excinfo.value, EventLoopException)

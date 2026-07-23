@@ -22,6 +22,7 @@ from agents.blogging.shared.content_planning_loop import (
 from agents.blogging.shared.content_profile import LengthPolicy
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 from llm_service import (
     LLMJsonParseError,
@@ -224,7 +225,9 @@ class BlogWriterAgent:
             - Returns ``None`` when JSON cannot yield a usable draft (caller keeps
               the prior draft).
             - Transient LLM transport errors (``LLMRateLimitError`` /
-              ``LLMTemporaryError``) propagate unwrapped from ``call_json_with_retry``.
+              ``LLMTemporaryError``), including when strands wraps them in
+              ``EventLoopException``, propagate unwrapped from
+              ``call_json_with_retry`` so the draft-stage retry funnel can catch them.
         """
         assert isinstance(prompt, str) and prompt.strip(), "prompt must be a non-empty string"
 
@@ -237,6 +240,9 @@ class BlogWriterAgent:
         def _agent_factory():
             return Agent(model=self._model, system_prompt=WRITING_SYSTEM_PROMPT)
 
+        def _unwrap(exc: Exception) -> Exception:
+            return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
         def _empty_fallback(_exc: Exception) -> dict:
             return {}
 
@@ -245,6 +251,7 @@ class BlogWriterAgent:
             prompt + soft_json_instruction,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
+            unwrap_exception=_unwrap,
             on_exhausted=_empty_fallback,
             on_unexpected_error=_empty_fallback,
             logger=logger,
