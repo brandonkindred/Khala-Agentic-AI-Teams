@@ -385,11 +385,11 @@ def test_revise_batch_uses_json_fallback_when_text_fails(monkeypatch) -> None:
         "_generate_revision_plan",
         lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
     )
-    monkeypatch.setattr(
-        BlogWriterAgent,
-        "_call_text",
-        lambda self, *a, **kw: (_ for _ in ()).throw(RuntimeError("transient")),
-    )
+
+    def fail(self, *a, **kw):
+        raise RuntimeError("transient")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",

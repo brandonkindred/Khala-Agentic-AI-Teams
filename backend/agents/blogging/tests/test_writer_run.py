@@ -337,6 +337,7 @@ def test_writer_build_revise_single_item_prompt_default_length() -> None:
 
 
 def test_fallback_draft_via_json_success(monkeypatch) -> None:
+    """_fallback_draft_via_json invokes call_json_with_retry correctly and returns a stripped draft."""
 
     a = _agent()
     captured: dict = {}
@@ -363,6 +364,7 @@ def test_fallback_draft_via_json_success(monkeypatch) -> None:
 
 
 def test_fallback_draft_via_json_empty_draft_returns_none(monkeypatch) -> None:
+    """Whitespace-only draft values are normalized to None so callers keep the original."""
 
     a = _agent()
     monkeypatch.setattr(
@@ -373,6 +375,7 @@ def test_fallback_draft_via_json_empty_draft_returns_none(monkeypatch) -> None:
 
 
 def test_fallback_draft_via_json_missing_draft_returns_none(monkeypatch) -> None:
+    """A JSON response with no 'draft' key yields None."""
 
     a = _agent()
     monkeypatch.setattr(
@@ -399,6 +402,7 @@ def test_fallback_draft_via_json_exhausted_hook_returns_none(monkeypatch) -> Non
 
 
 def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> None:
+    """on_unexpected_error returning {} causes _fallback_draft_via_json to return None."""
 
     a = _agent()
 
@@ -413,6 +417,7 @@ def test_fallback_draft_via_json_unexpected_hook_returns_none(monkeypatch) -> No
 
 
 def test_fallback_draft_via_json_transient_reraises(monkeypatch) -> None:
+    """Transient LLM errors from call_json_with_retry are re-raised, not converted to None."""
     import pytest
 
     from llm_service import LLMRateLimitError
