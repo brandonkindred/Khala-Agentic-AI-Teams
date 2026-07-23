@@ -220,6 +220,7 @@ def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
 
 def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     from llm_service import LLMRateLimitError
 
     a = _make_agent_with_guidelines()
@@ -234,6 +235,7 @@ def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) ->
 
 def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     from llm_service import LLMTemporaryError
 
     a = _make_agent_with_guidelines()
@@ -248,6 +250,7 @@ def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> 
 
 def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     from llm_service import LLMRateLimitError
 
     a = _make_agent_with_guidelines()
@@ -262,6 +265,7 @@ def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
 
 def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     from llm_service import LLMTemporaryError
 
     a = _make_agent_with_guidelines()
@@ -280,6 +284,7 @@ def test_writer_fix_deterministic_violations_soft_fails_permanent_error(
     import logging
 
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     from llm_service import LLMPermanentError
 
     a = _make_agent_with_guidelines()
@@ -299,6 +304,7 @@ def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) 
     import logging
 
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     from llm_service import LLMPermanentError
 
     a = _make_agent_with_guidelines()
