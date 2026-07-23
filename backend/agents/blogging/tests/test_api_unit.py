@@ -261,6 +261,10 @@ def test_skip_story_gap_paths(client: TestClient) -> None:
     r = client.post("/job/missing/skip-story-gap")
     assert r.status_code == 404
 
+    r = client.post(f"/job/{job_id}/skip-story-gap")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Job is not currently waiting for a story response"
+
     bjs.update_blog_job(job_id, waiting_for_story_input=True, current_story_gap_index=0)
     r = client.post(f"/job/{job_id}/skip-story-gap")
     assert r.status_code == 200
