@@ -225,26 +225,30 @@ class BlogCopyEditorAgent:
         """
         Invoke the editor LLM via the shared JSON-retry helper (up to two attempts).
 
-        Attempt 0 uses the soft-JSON instruction baked into the base prompt; on a
-        JSON-parse failure the helper appends ``strict_json_suffix`` and retries once.
-        The LLM client already exhausts its own 429 / transient-transport retry budgets
-        before raising, so the copy editor adds no second blocking retry: a transient LLM
-        error (LLMRateLimitError/LLMTemporaryError — including when strands wraps it in an
-        EventLoopException) re-raises so the Temporal activity funnel retries the whole
-        stage (thread mode fails the job). After JSON-parse exhaustion or any other
-        unexpected error, returns a manual-review fallback so a single bad copy-edit
-        never crashes the draft stage.
+        This method wires the agent factory, soft/strict JSON prompt suffixes, the
+        ``EventLoopException`` unwrap hook, and fallback factories into
+        ``call_json_with_retry``. Attempt-count, soft-then-strict re-prompt, and
+        transient-vs-unexpected classification are owned by that helper's contract;
+        this method does not re-implement them.
+
+        Args:
+            prompt: Fully assembled per-request editor context (style/brand/draft).
+            on_llm_request: Optional progress callback invoked once before the helper
+                runs (status text: "Reviewing draft for style and clarity...").
 
         Preconditions:
-            - prompt is the fully assembled per-request editor context.
+            - ``prompt`` is the fully assembled per-request editor context.
         Postconditions:
-            - Returns a non-None ``dict``. On a successful JSON parse the dict may be empty
+            - Returns a non-None ``dict``. On a successful parse it may be empty
               (``{}``) or omit keys; callers in :meth:`run` supply defaults for missing
-              ``summary`` / ``feedback_items``. On JSON-parse exhaustion or an unexpected
-              error, returns a ``_fallback_editor_data`` dict (includes ``approved``,
-              ``summary``, and ``feedback_items``).
-            - Re-raises only genuinely transient LLM errors (unwrapped from
-              ``EventLoopException``); never returns None.
+              ``summary`` / ``feedback_items``.
+            - On JSON-parse exhaustion or an unexpected error, returns a
+              ``_fallback_editor_data`` dict (includes ``approved``, ``summary``, and
+              ``feedback_items``) via the helper's ``on_exhausted`` /
+              ``on_unexpected_error`` hooks.
+            - Transient LLM errors follow ``call_json_with_retry``'s contract (with
+              this method's unwrap hook so strands ``EventLoopException`` wrappers
+              are classified by cause).
         """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
