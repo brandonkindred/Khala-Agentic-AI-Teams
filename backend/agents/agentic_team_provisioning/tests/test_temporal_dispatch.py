@@ -213,7 +213,17 @@ def test_cancel_cancels_workflow_when_temporal_owned(api_main, client, monkeypat
     assert cancelled == {"workflow_id": "agentic-pipeline-run-cancel"}
 
 
-def test_temporal_enabled_false_without_shared_temporal(api_main, monkeypatch):
-    """_temporal_enabled tolerates shared.temporal being importable and disabled."""
+def test_temporal_enabled_false_when_shared_temporal_missing(api_main, monkeypatch):
+    """_temporal_enabled returns False when shared.temporal is not importable."""
+    import sys
+
+    # `from shared.temporal import ...` raises ImportError when the module
+    # entry is None (same pattern as sales_team deep-research dispatch tests).
+    monkeypatch.setitem(sys.modules, "shared.temporal", None)
+    assert api_main._temporal_enabled() is False
+
+
+def test_temporal_enabled_false_when_temporal_disabled(api_main, monkeypatch):
+    """_temporal_enabled returns False when shared.temporal reports disabled."""
     monkeypatch.setattr("shared.temporal.is_temporal_enabled", lambda: False)
     assert api_main._temporal_enabled() is False
