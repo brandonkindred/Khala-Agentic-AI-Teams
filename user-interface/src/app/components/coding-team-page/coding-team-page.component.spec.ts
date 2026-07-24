@@ -1126,6 +1126,48 @@ describe('CodingTeamPageComponent', () => {
       source: 'tech_lead',
     };
 
+    it('appends activity narrative lines when jobStatus gains status_text', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running', status_text: 'Building task graph' });
+      expect(component.activityNarrative.lines.map((l) => l.text)).toContain('Status: Building task graph');
+      expect(component.thoughtStreamTitle).toBe('Agent activity');
+      expect(component.showThoughtStreamPanel).toBe(true);
+    });
+
+    it('does not duplicate narrative lines for identical consecutive status snapshots', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running', status_text: 'Building task graph' });
+      const n = component.activityNarrative.lines.length;
+      component.jobStatus = { job_id: 'j1', status: 'running', status_text: 'Building task graph' };
+      expect(component.activityNarrative.lines.length).toBe(n);
+    });
+
+    it('clears activity narrative when selecting a different run', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running', status_text: 'Building task graph' });
+      expect(component.activityNarrative.lines.length).toBeGreaterThan(0);
+      component.runs = [
+        ghRun({ job_id: 'j1' }),
+        ghRun({ job_id: 'j2', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } }),
+      ];
+      component['buildRunVms']();
+      component.selectRun('j2');
+      expect(component.activityNarrative.lines).toEqual([]);
+      expect(component.showThoughtStreamPanel).toBe(false);
+    });
+
+    it('thoughtStreamTitle is Agent thinking when reasoning is present', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), {
+        job_id: 'j1',
+        status: 'running',
+        thinking: 'weighing options',
+        status_text: 'Implementing',
+      });
+      expect(component.thoughtStreamTitle).toBe('Agent thinking');
+      expect(component.showThoughtStreamPanel).toBe(true);
+    });
+
     it('renders the Agent thinking panel when jobStatus.thinking is present', async () => {
       await setup();
       openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running', thinking: 'weighing the approach' });
@@ -1134,9 +1176,10 @@ describe('CodingTeamPageComponent', () => {
       expect(stream?.textContent).toContain('weighing the approach');
     });
 
-    it('hides the Agent thinking panel when there is no thinking text', async () => {
+    it('hides the thought stream panel when there is no thinking and no narrative', async () => {
       await setup();
       openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running' });
+      expect(fixture.nativeElement.querySelector('.thought-stream-panel')).toBeNull();
       expect(fixture.nativeElement.querySelector('.thinking-stream')).toBeNull();
     });
 
@@ -1155,6 +1198,53 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running' });
       expect(fixture.nativeElement.querySelector('.thinking-announcement')).toBeNull();
+    });
+
+    it('renders Agent activity title and activity stream without thinking', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), {
+        job_id: 'j1',
+        status: 'running',
+        status_text: 'Implementing 1 task(s)',
+      });
+      const panel = fixture.nativeElement.querySelector('.thought-stream-panel');
+      expect(panel).not.toBeNull();
+      expect(panel?.textContent).toContain('Agent activity');
+      expect(fixture.nativeElement.querySelector('.activity-stream')?.textContent).toContain(
+        'Status: Implementing 1 task(s)',
+      );
+      expect(fixture.nativeElement.querySelector('.reasoning-section')).toBeNull();
+    });
+
+    it('renders Reasoning and Activity sections together when both sources exist', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), {
+        job_id: 'j1',
+        status: 'running',
+        thinking: 'weighing the approach',
+        status_text: 'Implementing 1 task(s)',
+      });
+      const panel = fixture.nativeElement.querySelector('.thought-stream-panel');
+      expect(panel?.textContent).toContain('Agent thinking');
+      expect(fixture.nativeElement.querySelector('.reasoning-section .thinking-stream')?.textContent).toContain(
+        'weighing the approach',
+      );
+      expect(fixture.nativeElement.querySelector('.activity-stream')?.textContent).toContain(
+        'Status: Implementing 1 task(s)',
+      );
+    });
+
+    it('renders a polite activity announcement region for activity-only updates', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), {
+        job_id: 'j1',
+        status: 'running',
+        status_text: 'Building task graph',
+      });
+      const live = fixture.nativeElement.querySelector('.activity-announcement');
+      expect(live?.getAttribute('aria-live')).toBe('polite');
+      expect(live?.textContent?.trim()).toBe('Agent activity updated');
+      expect(live?.textContent).not.toContain('Building task graph');
     });
 
     it('renders the questions panel and waiting banner when the run is paused', async () => {

@@ -547,16 +547,31 @@
                 </button>
               </app-inline-banner>
             }
-            @if (jobStatus.thinking) {
-              <div class="visually-hidden thinking-announcement" aria-live="polite">{{ thinkingAnnouncement }}</div>
-              <mat-expansion-panel class="thinking-panel">
+            @if (showThoughtStreamPanel) {
+              @if (jobStatus.thinking) {
+                <div class="visually-hidden thinking-announcement" aria-live="polite">{{ thinkingAnnouncement }}</div>
+              } @else if (activityAnnouncement) {
+                <div class="visually-hidden activity-announcement" aria-live="polite">{{ activityAnnouncement }}</div>
+              }
+              <mat-expansion-panel class="thinking-panel thought-stream-panel">
                 <mat-expansion-panel-header>
                   <mat-panel-title>
                     <mat-icon aria-hidden="true">psychology</mat-icon>
-                    Agent thinking
+                    {{ thoughtStreamTitle }}
                   </mat-panel-title>
                 </mat-expansion-panel-header>
-                <pre class="thinking-stream">{{ jobStatus.thinking }}</pre>
+                @if (jobStatus.thinking) {
+                  <div class="reasoning-section">
+                    <span class="thought-stream-label">Reasoning</span>
+                    <pre class="thinking-stream">{{ jobStatus.thinking }}</pre>
+                  </div>
+                }
+                @if (activityNarrative.lines.length > 0) {
+                  <div class="activity-section">
+                    <span class="thought-stream-label">Activity</span>
+                    <pre class="thinking-stream activity-stream">{{ activityStreamText }}</pre>
+                  </div>
+                }
               </mat-expansion-panel>
             }
             @if (jobStatus.github_pr_url) {
