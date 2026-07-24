@@ -5,7 +5,8 @@ Preconditions:
       under the test path setup.
 Postconditions:
     - Assertions pin shared-field composition for ``BrandingMission``,
-      ``CreateBrandRequest``, and ``UpdateBrandRequest``.
+      ``CreateBrandRequest``, ``UpdateBrandRequest``, and
+      ``RunBrandingTeamRequest``.
 """
 
 from __future__ import annotations
@@ -13,7 +14,11 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from branding_team.api.models import CreateBrandRequest, UpdateBrandRequest
+from branding_team.api.models import (
+    CreateBrandRequest,
+    RunBrandingTeamRequest,
+    UpdateBrandRequest,
+)
 from branding_team.models import BrandingMission, BrandingMissionFields
 
 SHARED_FIELD_NAMES = (
@@ -35,6 +40,15 @@ CREATE_BRAND_EXTRA_FIELD_NAMES = (
 UPDATE_BRAND_EXTRA_FIELD_NAMES = (
     "name",
     "status",
+)
+
+RUN_BRANDING_TEAM_EXTRA_FIELD_NAMES = (
+    "brand_checks",
+    "human_approved",
+    "human_feedback",
+    "client_id",
+    "brand_id",
+    "target_phase",
 )
 
 VISUAL_FIELD_NAMES = (
@@ -80,6 +94,45 @@ def test_create_brand_request_validation_and_defaults_match_shared_base() -> Non
     assert dumped["conversation_id"] is None
     with pytest.raises(ValidationError):
         CreateBrandRequest(
+            company_name="A",
+            company_description="We build widgets for teams",
+            target_audience="B2B buyers",
+        )
+
+
+def test_run_branding_team_request_subclasses_mission_fields() -> None:
+    assert issubclass(RunBrandingTeamRequest, BrandingMissionFields)
+
+
+def test_run_branding_team_request_keeps_shared_plus_run_extra_fields() -> None:
+    names = tuple(RunBrandingTeamRequest.model_fields)
+    for name in SHARED_FIELD_NAMES:
+        assert name in names
+    for name in RUN_BRANDING_TEAM_EXTRA_FIELD_NAMES:
+        assert name in names
+    assert names[: len(SHARED_FIELD_NAMES)] == SHARED_FIELD_NAMES
+
+
+def test_run_branding_team_request_validation_and_defaults_match_shared_base() -> None:
+    req = RunBrandingTeamRequest(
+        company_name="Acme",
+        company_description="We build widgets for teams",
+        target_audience="B2B buyers",
+    )
+    dumped = req.model_dump()
+    assert dumped["desired_voice"] == "clear, confident, human"
+    assert dumped["values"] == []
+    assert dumped["differentiators"] == []
+    assert dumped["existing_brand_material"] == []
+    assert dumped["wiki_path"] is None
+    assert dumped["brand_checks"] == []
+    assert dumped["human_approved"] is False
+    assert dumped["human_feedback"] == ""
+    assert dumped["client_id"] is None
+    assert dumped["brand_id"] is None
+    assert dumped["target_phase"] is None
+    with pytest.raises(ValidationError):
+        RunBrandingTeamRequest(
             company_name="A",
             company_description="We build widgets for teams",
             target_audience="B2B buyers",
