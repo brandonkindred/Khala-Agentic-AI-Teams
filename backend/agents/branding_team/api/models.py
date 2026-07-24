@@ -179,15 +179,16 @@ class RunBrandRequest(BaseModel):
     target_phase: Optional[str] = None
 
 
-class RunBrandingTeamRequest(BaseModel):
-    company_name: str = Field(..., min_length=2)
-    company_description: str = Field(..., min_length=10)
-    target_audience: str = Field(..., min_length=3)
-    values: List[str] = Field(default_factory=list)
-    differentiators: List[str] = Field(default_factory=list)
-    desired_voice: str = Field(default="clear, confident, human")
-    existing_brand_material: List[str] = Field(default_factory=list)
-    wiki_path: Optional[str] = None
+class RunBrandingTeamRequest(BrandingMissionFields):
+    """Run/session body: shared mission fields plus run-routing extras.
+
+    Preconditions:
+        - Same as ``BrandingMissionFields`` for the eight shared mission fields.
+    Postconditions:
+        - Instance exposes shared mission fields plus the six run extras below;
+          omitted extras use the defaults declared here.
+    """
+
     brand_checks: List[BrandCheckRequest] = Field(default_factory=list)
     human_approved: bool = False
     human_feedback: str = ""
