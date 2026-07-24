@@ -24,10 +24,11 @@ export function emptyActivityNarrative(): ActivityNarrativeState {
 
 /**
  * Preconditions: `receiveTimeIso` is a non-empty ISO-ish timestamp string.
- * Postconditions: prefers `updated_at`, then `last_activity_at`, else `receiveTimeIso`.
+ * Postconditions: prefers `last_activity_at` (real orchestrator progress; not refreshed by
+ * wait-loop heartbeats), then `updated_at`, else `receiveTimeIso`.
  */
 export function activityTimestamp(status: CodingTeamJobStatus, receiveTimeIso: string): string {
-  return status.updated_at || status.last_activity_at || receiveTimeIso;
+  return status.last_activity_at || status.updated_at || receiveTimeIso;
 }
 
 function formatCurrentActivity(status: CodingTeamJobStatus): string {

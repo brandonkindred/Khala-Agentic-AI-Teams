@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import {
   ACTIVITY_NARRATIVE_MAX_LINES,
+  activityTimestamp,
   appendActivityNarrative,
   emptyActivityNarrative,
   thoughtStreamPanelTitle,
@@ -90,5 +91,21 @@ describe('activity-narrative', () => {
     expect(thoughtStreamPanelTitle(true, true)).toBe('Agent thinking');
     expect(thoughtStreamPanelTitle(false, true)).toBe('Agent activity');
     expect(thoughtStreamPanelTitle(false, false)).toBeNull();
+  });
+
+  it('activityTimestamp prefers last_activity_at over heartbeat-refreshed updated_at', () => {
+    expect(
+      activityTimestamp(
+        status({
+          last_activity_at: '2026-07-24T12:00:00Z',
+          updated_at: '2026-07-24T18:00:00Z',
+        }),
+        '2026-07-24T18:00:01Z',
+      ),
+    ).toBe('2026-07-24T12:00:00Z');
+    expect(activityTimestamp(status({ updated_at: '2026-07-24T18:00:00Z' }), '2026-07-24T18:00:01Z')).toBe(
+      '2026-07-24T18:00:00Z',
+    );
+    expect(activityTimestamp(status({}), '2026-07-24T18:00:01Z')).toBe('2026-07-24T18:00:01Z');
   });
 });
