@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient
+from llm_service import DummyLLMClient, LLMClient
 from software_engineering_team.shared.branch_utils import make_branch_suffix
 from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
 from software_engineering_team.shared.git_utils import (
@@ -694,9 +694,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             # Enable parallel execution unless the backing LLM client is a
             # DummyLLMClient (or subclass) — scripted test clients use a shared
             # sequential response list that breaks under concurrent access.
-            from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
-
-            use_parallel = not isinstance(self.llm, _Dummy)
+            use_parallel = not isinstance(self.llm, DummyLLMClient)
             phase2 = run_phase2_parallel(
                 self.iac_agent,
                 self.cicd_agent,
