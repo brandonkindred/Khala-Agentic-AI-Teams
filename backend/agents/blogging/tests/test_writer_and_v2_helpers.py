@@ -538,6 +538,12 @@ def test_ghost_writer_no_experience_phrase() -> None:
     assert _is_no_experience("pass") is True
     assert _is_no_experience("n/a") is True
 
+    # Explicit command-prefixed skips (leading token + trailing text)
+    assert _is_no_experience("skip this one") is True
+    assert _is_no_experience("skip, please") is True
+    assert _is_no_experience("pass on this question") is True
+    assert _is_no_experience("n/a for this section") is True
+
     # Specific refusal phrases (word-boundary containment)
     assert _is_no_experience("I don't have any story") is True
     assert _is_no_experience("no relevant experience for this") is True
@@ -546,13 +552,16 @@ def test_ghost_writer_no_experience_phrase() -> None:
     assert _is_no_experience("I can't think of a story") is True
     assert _is_no_experience("Yes I have a great one") is False
 
-    # Ambiguous substrings must NOT trigger a premature skip
+    # Ambiguous substrings / incidental short-word uses must NOT skip
     assert _is_no_experience("I have no idea what you mean") is False
     assert _is_no_experience("I haven't thought about it that way") is False
     assert _is_no_experience("I can't think of anything else right now") is False
     assert _is_no_experience("Nothing comes to mind immediately") is False
     assert _is_no_experience("I haven't tried that") is False
     assert _is_no_experience("nothing comes to mind here") is False
+    assert _is_no_experience("please skip ahead in the draft") is False
+    assert _is_no_experience("I will pass along the details") is False
+    assert _is_no_experience("none of my colleagues knew the answer, but I did") is False
 
 
 def test_ghost_writer_agent_construction() -> None:

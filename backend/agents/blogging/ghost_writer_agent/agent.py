@@ -173,6 +173,11 @@ _NO_EXPERIENCE_EXACT = frozenset(
     }
 )
 
+# Leading command tokens: "skip this one", "pass on this question", "n/a for now".
+# Anchored at start so incidental mid-sentence uses ("please skip ahead") stay False.
+# "none" stays exact-only — "none of my colleagues…" is ordinary prose, not a skip command.
+_NO_EXPERIENCE_COMMAND_PREFIX_RE = re.compile(r"^(?:skip|pass|n/a)\b")
+
 # Specific refusal phrases matched with word-boundary regex. Ambiguous stems
 # like "i have no" / "i haven't" / "i can't think of" / "nothing comes to mind"
 # are omitted so mid-sentence non-refusals do not prematurely end the interview;
@@ -203,14 +208,17 @@ def _is_no_experience(message: str) -> bool:
     Preconditions:
         - ``message`` is a string (may be empty or whitespace-only).
     Postconditions:
-        - Returns True only for exact short-token refusals or word-boundary
-          matches against ``_NO_EXPERIENCE_PHRASES``; otherwise False.
+        - Returns True for exact short-token refusals, leading skip/pass/n/a
+          command prefixes, or word-boundary matches against
+          ``_NO_EXPERIENCE_PHRASES``; otherwise False.
         - Does not mutate ``message``.
     """
     text = message.strip().lower().rstrip(".!?")
     if not text:
         return False
     if text in _NO_EXPERIENCE_EXACT:
+        return True
+    if _NO_EXPERIENCE_COMMAND_PREFIX_RE.match(text):
         return True
     return any(pattern.search(text) for pattern in _NO_EXPERIENCE_PHRASE_RE)
 
