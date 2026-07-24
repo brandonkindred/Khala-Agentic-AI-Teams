@@ -139,15 +139,19 @@ def test_writer_run_old_short_prefix_still_self_reviews(monkeypatch) -> None:
     assert calls == [body]
 
 
-def test_writer_run_call_agent_throws_then_json_fallback(monkeypatch) -> None:
-    """_call_agent raises; _call_agent_json succeeds with a draft."""
+def test_writer_run_json_parse_error_then_json_fallback(monkeypatch) -> None:
+    """LLMJsonParseError on the text path soft-fails into the JSON draft fallback."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMJsonParseError
 
     a = _agent()
     monkeypatch.setattr(
         BlogWriterAgent,
         "_call_text",
-        lambda self, p, system_prompt="": (_ for _ in ()).throw(ValueError("oops")),
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(
+            LLMJsonParseError("bad draft text")
+        ),
     )
     monkeypatch.setattr(
         BlogWriterAgent,
@@ -159,23 +163,46 @@ def test_writer_run_call_agent_throws_then_json_fallback(monkeypatch) -> None:
     assert "Fallback" in out.draft
 
 
-def test_writer_run_call_agent_throws_and_fallback_also_fails(monkeypatch) -> None:
-    """Both _call_agent and _call_agent_json fail — placeholder returned."""
+def test_writer_run_json_parse_error_and_fallback_also_fails(monkeypatch) -> None:
+    """LLMJsonParseError on both text and JSON paths yields the placeholder draft."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMJsonParseError
+
+    a = _agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(
+            LLMJsonParseError("bad draft text")
+        ),
+    )
+
+    def boom(self, p, **kw):
+        raise LLMJsonParseError("bad json fallback")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    out = a.run(_writer_input())
+    assert "No draft was generated" in out.draft
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [TypeError("programmer bug"), ValueError("programmer bug")],
+    ids=["TypeError", "ValueError"],
+)
+def test_writer_run_programming_error_propagates(monkeypatch, exc: Exception) -> None:
+    """TypeError/ValueError on draft generation must propagate, not soft-fail."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _agent()
     monkeypatch.setattr(
         BlogWriterAgent,
         "_call_text",
-        lambda self, p, system_prompt="": (_ for _ in ()).throw(ValueError("oops")),
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(exc),
     )
-
-    def boom(self, p, **kw):
-        raise TypeError("nope")
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
-    out = a.run(_writer_input())
-    assert "No draft was generated" in out.draft
+    with pytest.raises(type(exc), match="programmer bug"):
+        a.run(_writer_input())
 
 
 def test_writer_run_default_length_guidance(monkeypatch) -> None:

@@ -57,9 +57,7 @@ from .prompts import (
 
 logger = logging.getLogger(__name__)
 
-_PLACEHOLDER_DRAFT = (
-    "# Draft\n\nNo draft was generated. Check the model response or try again."
-)
+_PLACEHOLDER_DRAFT = "# Draft\n\nNo draft was generated. Check the model response or try again."
 
 # ---------------------------------------------------------------------------
 # Deterministic compliance constants
@@ -572,6 +570,16 @@ class BlogWriterAgent(_BlogAgentBase):
         Generate a blog post draft from the approved content plan.
 
         When draft_output_path is set, writes the draft to that path and logs the path.
+
+        Preconditions:
+            - Brand and writing guidelines are present (enforced by
+              ``_assert_guidelines_present``).
+            - ``draft_input`` is a valid ``WriterInput``.
+        Postconditions:
+            - Returns a ``WriterOutput`` with a non-empty draft string.
+            - Expected LLM parse failures (``LLMJsonParseError``) soft-fail into a
+              JSON fallback, then a placeholder if both paths yield no content.
+            - Unexpected programming errors from the LLM call path propagate.
         """
         self._assert_guidelines_present()
         outline = draft_input.outline_for_prompt().strip()
@@ -671,11 +679,12 @@ class BlogWriterAgent(_BlogAgentBase):
 
         # Use raw-text completion so the model can output the hybrid format (---DRAFT--- then markdown).
         # complete_json() forces a single JSON object, so the model would output only {"draft": 0} and we'd get no content.
+        # Soft-fail only on expected LLM parse failures; programming bugs (TypeError/ValueError/etc.) propagate.
         draft = ""
         try:
             raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             draft = _extract_draft_after_marker(raw_response)
-        except (LLMJsonParseError, TypeError, ValueError) as e:
+        except LLMJsonParseError as e:
             logger.warning(
                 "Draft text completion failed: %s; trying JSON fallback.",
                 e,
@@ -685,7 +694,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 raw_draft = data.get("draft")
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     draft = raw_draft.strip()
-            except (LLMJsonParseError, TypeError, ValueError):
+            except LLMJsonParseError:
                 pass
 
         if not draft:
@@ -1222,9 +1231,7 @@ class BlogWriterAgent(_BlogAgentBase):
             except (LLMRateLimitError, LLMTemporaryError):
                 raise
             except Exception as e:
-                logger.warning(
-                    "Batch revise JSON fallback failed: %s; keeping original draft.", e
-                )
+                logger.warning("Batch revise JSON fallback failed: %s; keeping original draft.", e)
 
         logger.info(
             "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
