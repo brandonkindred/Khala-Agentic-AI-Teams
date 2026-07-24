@@ -1243,8 +1243,29 @@ describe('CodingTeamPageComponent', () => {
       });
       const live = fixture.nativeElement.querySelector('.activity-announcement');
       expect(live?.getAttribute('aria-live')).toBe('polite');
-      expect(live?.textContent?.trim()).toBe('Agent activity updated');
+      expect(live?.textContent?.trim()).toBe('Agent activity updated (1)');
       expect(live?.textContent).not.toContain('Building task graph');
+    });
+
+    it('mutates the activity live region on each subsequent activity-only update', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), {
+        job_id: 'j1',
+        status: 'running',
+        status_text: 'Building task graph',
+      });
+      expect(fixture.nativeElement.querySelector('.activity-announcement')?.textContent?.trim()).toBe(
+        'Agent activity updated (1)',
+      );
+      component.jobStatus = {
+        job_id: 'j1',
+        status: 'running',
+        status_text: 'Implementing 1 task(s)',
+      };
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.activity-announcement')?.textContent?.trim()).toBe(
+        'Agent activity updated (2)',
+      );
     });
 
     it('renders the questions panel and waiting banner when the run is paused', async () => {

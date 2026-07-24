@@ -259,6 +259,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   activityNarrative: ActivityNarrativeState = emptyActivityNarrative();
   /** Polite live-region cue for activity-only updates; never contains raw narrative lines. */
   activityAnnouncement = '';
+  /** Monotonic counter so each activity cue mutates the live-region text (identical strings are not re-announced). */
+  private activityAnnounceSeq = 0;
 
   /**
    * Preconditions: none.
@@ -301,14 +303,15 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     if (!status) {
       this.activityNarrative = emptyActivityNarrative();
       this.activityAnnouncement = '';
+      this.activityAnnounceSeq = 0;
       return;
     }
     const prev = this.activityNarrative;
     this.activityNarrative = appendActivityNarrative(prev, status, new Date().toISOString());
-    if (this.activityNarrative !== prev && this.activityNarrative.lines.length > prev.lines.length) {
-      if (!status.thinking) {
-        this.activityAnnouncement = 'Agent activity updated';
-      }
+    // Compare `lines` identity (not length): a capped append keeps length constant but replaces the array.
+    if (this.activityNarrative.lines !== prev.lines && !status.thinking) {
+      this.activityAnnounceSeq += 1;
+      this.activityAnnouncement = `Agent activity updated (${this.activityAnnounceSeq})`;
     }
   }
 
@@ -985,6 +988,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     }
     this.activityNarrative = emptyActivityNarrative();
     this.activityAnnouncement = '';
+    this.activityAnnounceSeq = 0;
     this.jobStatus = null;
     this.issueError = null;
     this.jobStatusError = null;
