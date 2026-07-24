@@ -16,15 +16,17 @@ from branding_team.tests._fake_postgres import install_fake_postgres
 
 
 class _Probe(PostgresHelperMixin):
-    pass
+    """Minimal concrete mixin subclass for exercising shared helper methods."""
 
 
 @pytest.fixture
 def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Install the branding fake Postgres harness and return its backing db."""
     return install_fake_postgres(monkeypatch)
 
 
 def test_execute_then_fetch_one_round_trips(fake_pg: dict) -> None:
+    """_execute inserts a row that _fetch_one can read back as a dict."""
     probe = _Probe()
 
     affected = probe._execute(
@@ -38,12 +40,14 @@ def test_execute_then_fetch_one_round_trips(fake_pg: dict) -> None:
 
 
 def test_fetch_one_returns_none_for_missing_row(fake_pg: dict) -> None:
+    """_fetch_one returns None when no row matches."""
     probe = _Probe()
     row = probe._fetch_one("SELECT data FROM branding_clients WHERE id = %s", ("nope",))
     assert row is None
 
 
 def test_fetch_all_returns_all_rows(fake_pg: dict) -> None:
+    """_fetch_all returns every matching row as dicts."""
     probe = _Probe()
     probe._execute(
         "INSERT INTO branding_clients (id, data) VALUES (%s, %s)",
@@ -59,6 +63,7 @@ def test_fetch_all_returns_all_rows(fake_pg: dict) -> None:
 
 
 def test_transaction_shares_one_cursor_across_statements(fake_pg: dict) -> None:
+    """_transaction yields one cursor shared across multiple statements."""
     probe = _Probe()
 
     with probe._transaction() as cur:
@@ -73,6 +78,7 @@ def test_transaction_shares_one_cursor_across_statements(fake_pg: dict) -> None:
 
 
 def test_execute_rowcount_reflects_matched_rows(fake_pg: dict) -> None:
+    """_execute returns the number of rows matched by an UPDATE statement."""
     probe = _Probe()
     now = datetime.now(tz=timezone.utc)
     probe._execute(
@@ -82,14 +88,19 @@ def test_execute_rowcount_reflects_matched_rows(fake_pg: dict) -> None:
         ("conv_1", None, Json({}), None, now, now),
     )
 
+    # Use a live store UPDATE shape (set brand_id) — the bare ``SET updated_at``
+    # form is no longer emitted by BrandingConversationStore and was dropped
+    # from the fake dispatch table.
     affected = probe._execute(
-        "UPDATE branding_conversations SET updated_at = %s WHERE conversation_id = %s",
-        (now, "conv_1"),
+        "UPDATE branding_conversations SET brand_id = %s, updated_at = %s "
+        "WHERE conversation_id = %s",
+        ("brand_1", now, "conv_1"),
     )
     assert affected == 1
 
     affected = probe._execute(
-        "UPDATE branding_conversations SET updated_at = %s WHERE conversation_id = %s",
-        (now, "does_not_exist"),
+        "UPDATE branding_conversations SET brand_id = %s, updated_at = %s "
+        "WHERE conversation_id = %s",
+        ("brand_1", now, "does_not_exist"),
     )
     assert affected == 0
