@@ -331,10 +331,8 @@ def test_design_rejects_prose_entry_rules(monkeypatch: pytest.MonkeyPatch) -> No
     assert "close > sma(20)" in str(exc_info.value)
 
 
-def test_design_rejects_legacy_sizing_rules_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pre-DSL ``sizing_rules: list[str]`` shape is not silently passed
-    through. With no ``sizing`` key the parser is forgiving (the orchestrator
-    falls back to the DSL default), but prose rules still raise."""
+def test_design_rejects_prose_exit_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prose strings in ``exit_rules`` raise ``StrategySpecParseError``."""
     payload = _design_payload(
         entry_rules=[_structured_entry_rule_dict()],
         exit_rules=["close when ready"],
