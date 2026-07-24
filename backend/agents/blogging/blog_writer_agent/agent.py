@@ -1062,14 +1062,18 @@ class BlogWriterAgent(_BlogAgentBase):
                     return revised.strip()
             except LLMJsonParseError as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
-            except Exception:
-                logger.warning(
-                    "Revise item %s/%s: transient error (attempt %s/2); retrying.",
-                    item_index,
-                    total_items,
-                    attempt + 1,
-                )
-                time.sleep(2.0 + attempt)
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "Revise item %s/%s: transient error (attempt %s/2); retrying.",
+                        item_index,
+                        total_items,
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 + attempt)
+                    continue
+                raise
         # Fallback — keep original on unexpected failure; re-raise transient LLM
         # errors so the draft-stage retry funnel can own backoff.
         try:
