@@ -24,6 +24,8 @@ import sys
 from collections import Counter
 from typing import Any
 
+from psycopg.errors import UniqueViolation
+
 from shared.postgres.fake import (
     DispatchTable,
     FakeCursor,
@@ -503,6 +505,10 @@ def _dispatch() -> DispatchTable:
 
     def handle_insert_session(cur: FakeCursor, params: tuple) -> None:
         session_id, session_json, updated_at = params
+        if session_id in cur.db["sessions"]:
+            raise UniqueViolation(
+                'duplicate key value violates unique constraint "branding_sessions_pkey"'
+            )
         cur.db["sessions"][session_id] = {
             "session_id": session_id,
             "session_json": unwrap_json(session_json),
