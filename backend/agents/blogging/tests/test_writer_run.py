@@ -163,6 +163,31 @@ def test_writer_run_json_parse_error_then_json_fallback(monkeypatch) -> None:
     assert "Fallback" in out.draft
 
 
+def test_writer_run_wrapped_json_parse_error_then_json_fallback(monkeypatch) -> None:
+    """EventLoopException-wrapped LLMJsonParseError still soft-fails to JSON fallback."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMJsonParseError
+
+    a = _agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(
+            EventLoopException(LLMJsonParseError("bad draft text"))
+        ),
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_agent_json",
+        lambda self, p, **kw: {"draft": "# Unwrapped Fallback\nBody."},
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_self_review", lambda self, d: d)
+    out = a.run(_writer_input())
+    assert "Unwrapped Fallback" in out.draft
+
+
 def test_writer_run_json_parse_error_and_fallback_also_fails(monkeypatch) -> None:
     """LLMJsonParseError on both text and JSON paths yields the placeholder draft."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
@@ -186,6 +211,30 @@ def test_writer_run_json_parse_error_and_fallback_also_fails(monkeypatch) -> Non
     assert "No draft was generated" in out.draft
 
 
+def test_writer_run_wrapped_json_parse_error_and_fallback_also_fails(monkeypatch) -> None:
+    """Wrapped parse errors on both paths still yield the placeholder draft."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMJsonParseError
+
+    a = _agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(
+            EventLoopException(LLMJsonParseError("bad draft text"))
+        ),
+    )
+
+    def boom(self, p, **kw):
+        raise EventLoopException(LLMJsonParseError("bad json fallback"))
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    out = a.run(_writer_input())
+    assert "No draft was generated" in out.draft
+
+
 @pytest.mark.parametrize(
     "exc",
     [TypeError("programmer bug"), ValueError("programmer bug")],
@@ -203,6 +252,24 @@ def test_writer_run_programming_error_propagates(monkeypatch, exc: Exception) ->
     )
     with pytest.raises(type(exc), match="programmer bug"):
         a.run(_writer_input())
+
+
+def test_writer_run_wrapped_programming_error_propagates(monkeypatch) -> None:
+    """EventLoopException wrapping a programming error must still propagate."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    a = _agent()
+    wrapped = EventLoopException(TypeError("programmer bug"))
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(wrapped),
+    )
+    with pytest.raises(EventLoopException) as excinfo:
+        a.run(_writer_input())
+    assert isinstance(excinfo.value.original_exception, TypeError)
+    assert "programmer bug" in str(excinfo.value.original_exception)
 
 
 def test_writer_run_default_length_guidance(monkeypatch) -> None:

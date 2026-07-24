@@ -577,8 +577,9 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``draft_input`` is a valid ``WriterInput``.
         Postconditions:
             - Returns a ``WriterOutput`` with a non-empty draft string.
-            - Expected LLM parse failures (``LLMJsonParseError``) soft-fail into a
-              JSON fallback, then a placeholder if both paths yield no content.
+            - Expected LLM parse failures (``LLMJsonParseError``, including when
+              Strands wraps them in ``EventLoopException``) soft-fail into a JSON
+              fallback, then a placeholder if both paths yield no content.
             - Unexpected programming errors from the LLM call path propagate.
         """
         self._assert_guidelines_present()
@@ -679,23 +680,29 @@ class BlogWriterAgent(_BlogAgentBase):
 
         # Use raw-text completion so the model can output the hybrid format (---DRAFT--- then markdown).
         # complete_json() forces a single JSON object, so the model would output only {"draft": 0} and we'd get no content.
-        # Soft-fail only on expected LLM parse failures; programming bugs (TypeError/ValueError/etc.) propagate.
+        # Soft-fail only on expected LLM parse failures (unwrap Strands EventLoopException);
+        # programming bugs (TypeError/ValueError/etc.) propagate.
         draft = ""
         try:
             raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             draft = _extract_draft_after_marker(raw_response)
-        except LLMJsonParseError as e:
+        except Exception as e:
+            cause = _unwrap_llm_cause(e)
+            if not isinstance(cause, LLMJsonParseError):
+                raise
             logger.warning(
                 "Draft text completion failed: %s; trying JSON fallback.",
-                e,
+                cause,
             )
             try:
                 data = self._call_agent_json(prompt)
                 raw_draft = data.get("draft")
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     draft = raw_draft.strip()
-            except LLMJsonParseError:
-                pass
+            except Exception as e2:
+                cause2 = _unwrap_llm_cause(e2)
+                if not isinstance(cause2, LLMJsonParseError):
+                    raise
 
         if not draft:
             logger.warning("LLM returned no draft content; returning placeholder.")
