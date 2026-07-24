@@ -90,6 +90,7 @@ def invoke_structured_with_schema(
             objective=objective,
             system_prompt=system_prompt,
             schema=dict(schema),
+            think=False,
         )
         # invoke_agent unconditionally does str(result) on whatever this
         # callable returns before handing it to `parse` — a raw dict would

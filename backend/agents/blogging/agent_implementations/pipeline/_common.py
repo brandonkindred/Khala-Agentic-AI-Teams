@@ -1011,7 +1011,7 @@ def _run_title_selection(
             replacement = None
             try:
                 data = llm_client.complete_json(
-                    feedback_prompt, temperature=0.7, objective="regenerate blog titles"
+                    feedback_prompt, temperature=0.7, objective="regenerate blog titles", think=False
                 )
                 new_titles = data.get("titles", []) if data else []
                 if new_titles and isinstance(new_titles, list):

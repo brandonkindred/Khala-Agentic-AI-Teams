@@ -266,6 +266,7 @@ def _llm_rerank(
             prompt,
             system_prompt="Return a JSON array of integers only. No other text.",
             objective="rerank winning posts",
+            think=False,
         )
         indices = data if isinstance(data, list) else data.get("indices", data.get("text", []))
         if isinstance(indices, list):
