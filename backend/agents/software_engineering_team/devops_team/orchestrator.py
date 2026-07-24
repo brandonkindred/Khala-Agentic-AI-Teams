@@ -179,16 +179,24 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     a separate forward channel and may be set/cleared per run without losing
     historical log output.
 
+    This class intentionally does **not** subclass ``BaseTeamLead``: that type's
+    constructor and shared-state wiring differ from DevOps's
+    ``TeamLeadSharedState`` setup. Instead, pure phase/retry helpers are aliased
+    from ``BaseTeamLead`` as unbound methods on this class (see
+    ``_run_gated_phases`` / ``_run_bounded_retry_loop`` below) so call sites can
+    use ``self._run_*`` without inheriting ``BaseTeamLead`` instance state.
+
     Invariants: ``self.llm`` is the client passed to ``__init__``; specialist
     agents and tools are constructed once; ``_status_callback`` defaults to
     None (mixin default) and is independent of fallback logging.
     """
 
-    # Reuse BaseTeamLead phase/retry helpers without inheriting its constructor
-    # (DevOps uses TeamLeadSharedState). These unbound methods only need ``self``
-    # for the call signature — they do not read BaseTeamLead instance state.
-    # ``_run_phase_gates`` delegates to ``self._run_gated_phases``, so alias that
-    # hook; alias the retry loop so call sites use ``self._run_bounded_retry_loop``.
+    # Unbound-method reuse (not inheritance): assign BaseTeamLead helpers onto
+    # this class so ``self._run_gated_phases`` / ``self._run_bounded_retry_loop``
+    # work without subclassing BaseTeamLead. The helpers only need ``self`` for
+    # the Python method call signature — they do not read BaseTeamLead fields.
+    # ``_run_phase_gates`` (called via BaseTeamLead._run_phase_gates) delegates
+    # to ``self._run_gated_phases``, so that alias must exist on this class.
     _run_gated_phases = BaseTeamLead._run_gated_phases
     _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
 
