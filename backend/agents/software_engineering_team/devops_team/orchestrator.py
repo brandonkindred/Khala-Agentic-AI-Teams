@@ -24,7 +24,11 @@ from software_engineering_team.shared.git_utils import (
 )
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
-from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
+from software_engineering_team.shared.team_lead_base import (
+    BaseTeamLead,
+    TeamLeadSharedState,
+    build_team_failure_result,
+)
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -632,6 +636,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         deploy_result: Any = None
         aggregated_artifacts: Dict[str, str] = {}
         quality_gates: Dict[str, str] = {}
+        completion: Any = None  # filled by Phase 5 on success
 
         def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
             """Phase 1: environment policy + task clarification gates.
@@ -909,6 +914,127 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 [_quality_gates_check, _build_verifier_check],
             )
 
+        def _phase5_completion_deliver() -> Optional[DevOpsTeamResult]:
+            """Phase 5: completion package assembly + deliver/merge.
+
+            Preconditions: Phases 1–4 returned ``None``; ``quality_gates``,
+              ``aggregated_artifacts``, and Phase 2 results are set (artifacts may
+              be empty).
+            Postconditions: on merge failure returns a failed ``DevOpsTeamResult``
+              via ``build_team_failure_result`` with the blocked completion
+              package; otherwise assigns nonlocal ``completion`` (completed status,
+              git ops, handoff, quality gates) and returns ``None`` so the thin
+              success envelope after the sequencer runs.
+            """
+            nonlocal completion
+
+            # Phase 5: commit, merge, release readiness
+            self._report_status(
+                "phase5",
+                detail="DevOps team pipeline: phase 5 - completion package assembly",
+            )
+            doc = self.doc_runbook_agent.run(
+                DocumentationRunbookInput(
+                    task_id=task_spec.task_id,
+                    task_title=task_spec.title,
+                    artifacts=aggregated_artifacts,
+                    quality_gates=quality_gates,
+                    notes=[iac_result.summary, cicd_result.summary, deploy_result.summary],
+                )
+            )
+
+            completion = doc.completion_package
+            completion.acceptance_criteria_trace = [
+                CriterionTrace(
+                    criterion=c,
+                    implementation_refs=sorted(aggregated_artifacts.keys()),
+                    tests=[{"validation": "pass"}],
+                )
+                for c in task_spec.acceptance_criteria
+            ]
+            completion.release_readiness = ReleaseReadiness(
+                deployment_strategy=deploy_result.strategy
+                or task_spec.constraints.deployment.strategy
+                or "rolling",
+                rollback_available=bool(deploy_result.rollback_plan),
+                alerting_configured=True,
+                required_approvals=["manual_prod_approval"]
+                if "production" in task_spec.platform_scope.environments
+                else [],
+                runtime_verification_checklist=[
+                    "deployment_rollout_status",
+                    "service_health",
+                    "alert_health",
+                ],
+            )
+            # Deliver the artifacts for real via the shared inline-merge helper and
+            # report the actual outcome (real branch, commit SHA, merge status) rather
+            # than fabricated placeholders. A model-only run (write_changes=False) does
+            # no git work, so the neutral default honestly reports "nothing delivered".
+            git_ops = GitOperationsMetadata()
+            if write_changes and aggregated_artifacts:
+                deliver_result = deliver_inline_merge(
+                    task_id=task_spec.task_id,
+                    repo_path=repo_path,
+                    deliver_files=aggregated_artifacts,
+                    summary=f"implement task [{task_spec.task_id}]",
+                    task_title=task_spec.title,
+                    commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
+                    ops=_git_ops(),
+                    logger=logger,
+                )
+                # deliver_inline_merge leaves development checked out at the merged
+                # commit. merge_branch fast-forwards (development never advanced since
+                # the branch was cut), so this single HEAD SHA is the honest identifier
+                # for both the delivered commit and the merge result.
+                head_ok, head_sha = get_head_sha(repo_path)
+                sha = head_sha if head_ok else ""
+                commit_msg = (
+                    deliver_result.commit_messages[0]
+                    if deliver_result.commit_messages
+                    else f"feat(devops): implement task [{task_spec.task_id}]"
+                )
+                if not deliver_result.merged:
+                    return build_team_failure_result(
+                        DevOpsTeamResult,
+                        deliver_result.summary or "DevOps delivery merge failed",
+                        completion_package=DevOpsCompletionPackage(
+                            task_id=task_spec.task_id,
+                            status="blocked",
+                            files_changed=sorted(aggregated_artifacts.keys()),
+                            quality_gates=quality_gates,
+                            git_operations=GitOperationsMetadata(
+                                branch_created=deliver_result.branch_name,
+                                commits=[GitCommitMetadata(hash="", message=commit_msg)],
+                                merge=GitMergeMetadata(
+                                    target_branch=DEVELOPMENT_BRANCH,
+                                    strategy="merge",
+                                    merge_commit_hash="",
+                                    status="failed",
+                                ),
+                            ),
+                            notes=[deliver_result.summary],
+                        ),
+                    )
+                git_ops = GitOperationsMetadata(
+                    branch_created=deliver_result.branch_name,
+                    commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
+                    merge=GitMergeMetadata(
+                        target_branch=DEVELOPMENT_BRANCH,
+                        strategy="merge",
+                        merge_commit_hash=sha,
+                        status="merged",
+                    ),
+                )
+            completion.git_operations = git_ops
+            completion.handoff = HandoffInfo(
+                prod_approval_required="production" in task_spec.platform_scope.environments,
+                runbook_updated=bool(doc.files),
+            )
+            completion.status = "completed"
+            completion.quality_gates = quality_gates
+            return None
+
         # Consume BaseTeamLead's gate-based phase sequencer without inheriting
         # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
         early_exit = BaseTeamLead._run_gated_phases(
@@ -918,115 +1044,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 _phase2_parallel_design,
                 _phase3_branch_write,
                 _phase4_validation_review,
+                _phase5_completion_deliver,
             ],
         )
         if early_exit is not None:
             return early_exit
 
-        # Phase 5: commit, merge, release readiness
-        self._report_status(
-            "phase5",
-            detail="DevOps team pipeline: phase 5 - completion package assembly",
-        )
-        doc = self.doc_runbook_agent.run(
-            DocumentationRunbookInput(
-                task_id=task_spec.task_id,
-                task_title=task_spec.title,
-                artifacts=aggregated_artifacts,
-                quality_gates=quality_gates,
-                notes=[iac_result.summary, cicd_result.summary, deploy_result.summary],
-            )
-        )
-
-        completion = doc.completion_package
-        completion.acceptance_criteria_trace = [
-            CriterionTrace(
-                criterion=c,
-                implementation_refs=sorted(aggregated_artifacts.keys()),
-                tests=[{"validation": "pass"}],
-            )
-            for c in task_spec.acceptance_criteria
-        ]
-        completion.release_readiness = ReleaseReadiness(
-            deployment_strategy=deploy_result.strategy
-            or task_spec.constraints.deployment.strategy
-            or "rolling",
-            rollback_available=bool(deploy_result.rollback_plan),
-            alerting_configured=True,
-            required_approvals=["manual_prod_approval"]
-            if "production" in task_spec.platform_scope.environments
-            else [],
-            runtime_verification_checklist=[
-                "deployment_rollout_status",
-                "service_health",
-                "alert_health",
-            ],
-        )
-        # Deliver the artifacts for real via the shared inline-merge helper and
-        # report the actual outcome (real branch, commit SHA, merge status) rather
-        # than fabricated placeholders. A model-only run (write_changes=False) does
-        # no git work, so the neutral default honestly reports "nothing delivered".
-        git_ops = GitOperationsMetadata()
-        if write_changes and aggregated_artifacts:
-            deliver_result = deliver_inline_merge(
-                task_id=task_spec.task_id,
-                repo_path=repo_path,
-                deliver_files=aggregated_artifacts,
-                summary=f"implement task [{task_spec.task_id}]",
-                task_title=task_spec.title,
-                commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
-                ops=_git_ops(),
-                logger=logger,
-            )
-            # deliver_inline_merge leaves development checked out at the merged
-            # commit. merge_branch fast-forwards (development never advanced since
-            # the branch was cut), so this single HEAD SHA is the honest identifier
-            # for both the delivered commit and the merge result.
-            head_ok, head_sha = get_head_sha(repo_path)
-            sha = head_sha if head_ok else ""
-            commit_msg = (
-                deliver_result.commit_messages[0]
-                if deliver_result.commit_messages
-                else f"feat(devops): implement task [{task_spec.task_id}]"
-            )
-            if not deliver_result.merged:
-                return DevOpsTeamResult(
-                    success=False,
-                    failure_reason=deliver_result.summary or "DevOps delivery merge failed",
-                    completion_package=DevOpsCompletionPackage(
-                        task_id=task_spec.task_id,
-                        status="blocked",
-                        files_changed=sorted(aggregated_artifacts.keys()),
-                        quality_gates=quality_gates,
-                        git_operations=GitOperationsMetadata(
-                            branch_created=deliver_result.branch_name,
-                            commits=[GitCommitMetadata(hash="", message=commit_msg)],
-                            merge=GitMergeMetadata(
-                                target_branch=DEVELOPMENT_BRANCH,
-                                strategy="merge",
-                                merge_commit_hash="",
-                                status="failed",
-                            ),
-                        ),
-                        notes=[deliver_result.summary],
-                    ),
-                )
-            git_ops = GitOperationsMetadata(
-                branch_created=deliver_result.branch_name,
-                commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
-                merge=GitMergeMetadata(
-                    target_branch=DEVELOPMENT_BRANCH,
-                    strategy="merge",
-                    merge_commit_hash=sha,
-                    status="merged",
-                ),
-            )
-        completion.git_operations = git_ops
-        completion.handoff = HandoffInfo(
-            prod_approval_required="production" in task_spec.platform_scope.environments,
-            runbook_updated=bool(doc.files),
-        )
-        completion.status = "completed"
-        completion.quality_gates = quality_gates
-
+        assert completion is not None  # phase 5 success path always assigns it
         return DevOpsTeamResult(success=True, iterations=1, completion_package=completion)
