@@ -468,8 +468,10 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
 
     Preconditions:
         ``state`` is an ``_active_runs`` entry (or a persisted job dict of the
-        same shape); ``state["run_id"]`` is present. Every other field is read
-        with a default, so a partially-populated resume/snapshot dict is safe.
+        same shape); ``state["run_id"]``, ``state["status"]``,
+        ``state["started_at"]``, and ``state["total_cycles"]`` are present.
+        Every other field is read with a default, so a partially-populated
+        resume/snapshot dict is safe for those optional fields.
     Postconditions:
         Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
         field, defaulting each absent numeric/list field to its response default
