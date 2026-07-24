@@ -55,6 +55,29 @@ from .phase2_graph import run_phase2_parallel
 # here (``str.format`` ignores the unreferenced ``scope`` kwarg).
 DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE = "feat(devops): {summary}"
 
+# Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
+# Keep list values read-only — do not mutate them in the adapter.
+_DEFAULT_LEGACY_CLOUD = "on-premises"
+_DEFAULT_LEGACY_APP_REPO = "application"
+_DEFAULT_LEGACY_INFRA_REPO = "platform-infra"
+_DEFAULT_LEGACY_SECRETS_SOURCE = "managed_secret_store"
+
+_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = [
+    "CI/CD workflow exists and validates",
+    "Deployment strategy and rollback documented",
+    "Security and policy review executed",
+]
+_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = [
+    "Rollback to previous known good release",
+]
+_DEFAULT_LEGACY_SECURITY_CONSTRAINTS = [
+    "No plaintext credentials",
+    "Least privilege IAM",
+]
+_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
+    "Audit trail required",
+]
+
 
 def _git_ops() -> DeliverGitOps:
     """Bundle this module's git callables for the shared deliver helper.
@@ -299,23 +322,19 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         return DevOpsTaskSpec(
             task_id=task_id,
             title=task_description[:120] or task_id,
-            platform_scope={"cloud": "on-premises", "environments": ["dev", env]},
+            platform_scope={"cloud": _DEFAULT_LEGACY_CLOUD, "environments": ["dev", env]},
             repo_context={
-                "app_repo": repo_name or "application",
-                "infra_repo": "platform-infra",
-                "pipeline_repo": repo_name or "application",
+                "app_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
+                "infra_repo": _DEFAULT_LEGACY_INFRA_REPO,
+                "pipeline_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
             },
             goal={"summary": task_description},
             scope={"included": [requirements], "excluded": []},
-            constraints={"secrets": {"source": "managed_secret_store"}},
-            acceptance_criteria=[
-                "CI/CD workflow exists and validates",
-                "Deployment strategy and rollback documented",
-                "Security and policy review executed",
-            ],
-            rollback_requirements=["Rollback to previous known good release"],
-            security_constraints=["No plaintext credentials", "Least privilege IAM"],
-            compliance_constraints=["Audit trail required"],
+            constraints={"secrets": {"source": _DEFAULT_LEGACY_SECRETS_SOURCE}},
+            acceptance_criteria=_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA,
+            rollback_requirements=_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS,
+            security_constraints=_DEFAULT_LEGACY_SECURITY_CONSTRAINTS,
+            compliance_constraints=_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS,
             environment=env,
         )
 
