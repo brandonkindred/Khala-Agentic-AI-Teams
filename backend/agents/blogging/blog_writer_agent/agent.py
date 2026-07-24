@@ -952,6 +952,8 @@ class BlogWriterAgent(_BlogAgentBase):
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     return revised.strip()
+            except LLMJsonParseError as e:
+                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
             except Exception:
                 logger.warning(
                     "Revise item %s/%s: transient error (attempt %s/2); retrying.",
@@ -960,8 +962,6 @@ class BlogWriterAgent(_BlogAgentBase):
                     attempt + 1,
                 )
                 time.sleep(2.0 + attempt)
-            except LLMJsonParseError as e:
-                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
         # Fallback
         try:
             data = self._call_agent_json(prompt)
@@ -1063,14 +1063,14 @@ class BlogWriterAgent(_BlogAgentBase):
                 if revised and revised.strip():
                     current_draft = revised.strip()
                     break
+            except LLMJsonParseError as e:
+                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
             except Exception:
                 logger.warning(
                     "Batch revise transient error (attempt %s/3); retrying.",
                     attempt + 1,
                 )
                 time.sleep(2.0 * (2**attempt))
-            except LLMJsonParseError as e:
-                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
         if current_draft == draft:
             try:
                 data = self._call_agent_json(prompt)
@@ -1311,13 +1311,13 @@ class BlogWriterAgent(_BlogAgentBase):
                 if revised and revised.strip():
                     current_draft = revised.strip()
                     break
+            except LLMJsonParseError as e:
+                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
             except Exception:
                 logger.warning(
                     "User-feedback revision transient error (attempt %s/3); retrying.", attempt + 1
                 )
                 time.sleep(2.0 * (2**attempt))
-            except LLMJsonParseError as e:
-                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
 
         if current_draft == draft:
             try:
