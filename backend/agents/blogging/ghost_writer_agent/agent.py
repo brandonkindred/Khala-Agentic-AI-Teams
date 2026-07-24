@@ -21,6 +21,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -161,32 +162,57 @@ Guidelines:
 # No-experience phrase detection
 # ---------------------------------------------------------------------------
 
-_NO_EXPERIENCE_PHRASES = frozenset(
+# Short tokens that must equal the whole normalized message (too ambiguous for
+# substring matching — e.g. "pass" / "none" appear in ordinary prose).
+_NO_EXPERIENCE_EXACT = frozenset(
     {
         "skip",
-        "no experience",
-        "no relevant experience",
-        "n/a",
         "none",
         "pass",
-        "i don't have",
-        "i haven't",
-        "i have no",
-        "i can't think of",
-        "nothing comes to mind",
+        "n/a",
+    }
+)
+
+# Specific refusal phrases matched with word-boundary regex. Ambiguous stems
+# like "i have no" / "i haven't" / "i can't think of" / "nothing comes to mind"
+# are omitted so mid-sentence non-refusals do not prematurely end the interview;
+# the LLM evaluator still has a no_experience path for softer refusals.
+_NO_EXPERIENCE_PHRASES = frozenset(
+    {
+        "no experience",
+        "no relevant experience",
         "not applicable",
+        "i don't have",
         "i don't have a story",
         "no story",
+        "i have no experience",
+        "i have no story",
+        "i can't think of a story",
+        "i can't think of any",
     }
+)
+
+_NO_EXPERIENCE_PHRASE_RE = tuple(
+    re.compile(r"\b" + re.escape(phrase) + r"\b") for phrase in _NO_EXPERIENCE_PHRASES
 )
 
 
 def _is_no_experience(message: str) -> bool:
-    """Return True if the user's message indicates they have no relevant experience."""
+    """Return True if the user's message indicates they have no relevant experience.
+
+    Preconditions:
+        - ``message`` is a string (may be empty or whitespace-only).
+    Postconditions:
+        - Returns True only for exact short-token refusals or word-boundary
+          matches against ``_NO_EXPERIENCE_PHRASES``; otherwise False.
+        - Does not mutate ``message``.
+    """
     text = message.strip().lower().rstrip(".!?")
-    if text in _NO_EXPERIENCE_PHRASES:
+    if not text:
+        return False
+    if text in _NO_EXPERIENCE_EXACT:
         return True
-    return any(phrase in text for phrase in _NO_EXPERIENCE_PHRASES)
+    return any(pattern.search(text) for pattern in _NO_EXPERIENCE_PHRASE_RE)
 
 
 def _notify_job_updater(

@@ -531,13 +531,28 @@ def test_v2_build_plan_critic_agent_when_enabled(monkeypatch) -> None:
 def test_ghost_writer_no_experience_phrase() -> None:
     from agents.blogging.ghost_writer_agent.agent import _is_no_experience
 
+    # Exact short tokens
     assert _is_no_experience("skip") is True
     assert _is_no_experience("SKIP.") is True
     assert _is_no_experience("none") is True
+    assert _is_no_experience("pass") is True
+    assert _is_no_experience("n/a") is True
+
+    # Specific refusal phrases (word-boundary containment)
     assert _is_no_experience("I don't have any story") is True
-    assert _is_no_experience("I haven't tried that") is True
+    assert _is_no_experience("no relevant experience for this") is True
+    assert _is_no_experience("I have no experience with that") is True
+    assert _is_no_experience("I have no story for this topic") is True
+    assert _is_no_experience("I can't think of a story") is True
     assert _is_no_experience("Yes I have a great one") is False
-    assert _is_no_experience("nothing comes to mind here") is True
+
+    # Ambiguous substrings must NOT trigger a premature skip
+    assert _is_no_experience("I have no idea what you mean") is False
+    assert _is_no_experience("I haven't thought about it that way") is False
+    assert _is_no_experience("I can't think of anything else right now") is False
+    assert _is_no_experience("Nothing comes to mind immediately") is False
+    assert _is_no_experience("I haven't tried that") is False
+    assert _is_no_experience("nothing comes to mind here") is False
 
 
 def test_ghost_writer_agent_construction() -> None:
