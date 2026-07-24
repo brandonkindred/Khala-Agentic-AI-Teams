@@ -115,6 +115,18 @@ class BrandingMissionFields(BaseModel):
     existing_brand_material: List[str] = Field(default_factory=list)
     wiki_path: Optional[str] = None
 
+    def mission_fields(self) -> dict[str, Any]:
+        """Return only the eight shared mission fields as a plain dict.
+
+        Preconditions:
+            ``self`` is a valid ``BrandingMissionFields`` instance (or subclass).
+        Postconditions:
+            Returns a dict whose keys are exactly the eight shared mission field
+            names from ``BrandingMissionFields.model_fields``; values match
+            ``self``; API-only extras declared on subclasses are omitted.
+        """
+        return self.model_dump(include=set(BrandingMissionFields.model_fields))
+
 
 class BrandingMission(BrandingMissionFields):
     """Full branding mission: shared fields + visual-identity inputs.
