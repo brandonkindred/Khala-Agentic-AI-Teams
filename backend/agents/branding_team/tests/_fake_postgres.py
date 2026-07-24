@@ -235,7 +235,22 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("insert into branding_conversations")
 
     def handle_insert_conversation(cur: FakeCursor, params: tuple) -> None:
+        """Emulate INSERT into branding_conversations (conversation_id PRIMARY KEY).
+
+        Preconditions:
+            ``params`` is ``(conversation_id, brand_id, mission, latest_output,
+            created_at, updated_at)``.
+        Postconditions:
+            On success, ``cur.db["conversations"][conversation_id]`` holds the
+            new row and ``cur.rowcount`` is 1.
+            If ``conversation_id`` already exists, raises ``UniqueViolation`` and
+            leaves the existing row unchanged (matches Postgres PK semantics).
+        """
         cid, brand_id, mission, latest_output, created_at, updated_at = params
+        if cid in cur.db["conversations"]:
+            raise UniqueViolation(
+                'duplicate key value violates unique constraint "branding_conversations_pkey"'
+            )
         cur.db["conversations"][cid] = {
             "conversation_id": cid,
             "brand_id": brand_id,
