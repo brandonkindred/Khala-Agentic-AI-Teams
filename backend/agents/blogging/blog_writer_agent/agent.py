@@ -1191,12 +1191,16 @@ class BlogWriterAgent(_BlogAgentBase):
                     break
             except LLMJsonParseError as e:
                 logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
-            except Exception:
-                logger.warning(
-                    "Batch revise transient error (attempt %s/3); retrying.",
-                    attempt + 1,
-                )
-                time.sleep(2.0 * (2**attempt))
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "Batch revise transient error (attempt %s/3); retrying.",
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 * (2**attempt))
+                    continue
+                raise
         if not primary_succeeded:
             try:
                 fallback = self._fallback_draft_via_json(prompt)
