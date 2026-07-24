@@ -139,12 +139,12 @@ def _extract_draft_after_marker(raw_response: str) -> str:
             if after:
                 return after
     try:
-        data = json.loads(text)
+        data = extract_json_from_response(text)
         if isinstance(data, dict):
             d = data.get("draft")
             if isinstance(d, str) and d.strip():
                 return d.strip()
-    except (json.JSONDecodeError, TypeError):
+    except LLMJsonParseError:
         pass
     return ""
 
