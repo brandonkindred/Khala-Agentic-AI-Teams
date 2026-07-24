@@ -31,9 +31,9 @@ from investment_team.strategy_lab.agents._parse_helpers import (
 from investment_team.strategy_lab.agents._response_schemas import DESIGN_SPEC_SCHEMA
 from investment_team.strategy_lab.agents.design import (
     _DESIGN_SPEC_SCHEMA_JSON,
-    _SELF_REVIEW_SYSTEM_PROMPT,
     DesignAgent,
     _build_correction_prompt,
+    _get_self_review_system_prompt,
     _resolve_diversity_mode,
 )
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
@@ -346,9 +346,9 @@ def test_run_without_expectancy_forecast_is_accepted(
 def test_design_system_prompt_states_dual_objective_and_forecast() -> None:
     """The design system prompt must frame the dual objective + expectancy
     constraint, flag the win-rate-alone trap, and wire in the FORECAST step."""
-    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+    from investment_team.strategy_lab.agents.design import _get_design_system_prompt
 
-    text = _SYSTEM_PROMPT
+    text = _get_design_system_prompt()
     lowered = text.lower()
     assert "dual objective" in lowered
     assert "win rate" in lowered
@@ -362,12 +362,12 @@ def test_design_system_prompt_documents_multi_confirmation_combinator() -> None:
     """The design system prompt must document the ``all_of`` / ``any_of``
     combinator as the win-rate lever for multi-confirmation entries — selective,
     compilable, and NOT a ``requires_custom_code`` case."""
-    # The system prompt is loaded as a module-level constant; the test reads it
-    # directly to assert prompt-content guidance (mirrors the existing
+    # The system prompt is loaded lazily; the test reads it via the helper to
+    # assert prompt-content guidance (mirrors the existing
     # ``test_design_system_prompt_states_dual_objective_and_forecast``).
-    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+    from investment_team.strategy_lab.agents.design import _get_design_system_prompt
 
-    text = _SYSTEM_PROMPT
+    text = _get_design_system_prompt()
     lowered = text.lower()
     # Entry selection is framed around win-rate selectivity.
     assert "selectivity" in lowered
@@ -384,9 +384,9 @@ def test_design_system_prompt_keeps_custom_code_off_the_multi_confirmation_path(
     """``requires_custom_code`` must NOT be steered toward for multi-confirmation
     (the Codex P1): the combinator handles it, so the flag reverts to genuinely
     inexpressible cases (cross-asset / path-dependent state)."""
-    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+    from investment_team.strategy_lab.agents.design import _get_design_system_prompt
 
-    text = _SYSTEM_PROMPT
+    text = _get_design_system_prompt()
     lowered = text.lower()
     assert "requires_custom_code" in text
     # The default framing is restored: setting it true is rare.
@@ -400,9 +400,9 @@ def test_design_system_prompt_states_win_rate_tuned_exit_guidance() -> None:
     """The design system prompt must carry the win-rate-tuned exit guidance:
     bank partials early via a scaled take-profit, with a trailing-stop runner
     on the remainder to preserve return."""
-    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+    from investment_team.strategy_lab.agents.design import _get_design_system_prompt
 
-    lowered = _SYSTEM_PROMPT.lower()
+    lowered = _get_design_system_prompt().lower()
     assert "scaled_take_profit" in lowered
     assert "partials early" in lowered
     assert "trailing" in lowered and "runner" in lowered
@@ -1558,9 +1558,10 @@ def _expectancy_incoherent_critique_payload() -> str:
 def test_self_review_system_prompt_includes_expectancy_check() -> None:
     """The self-review system prompt must carry the objective/expectancy audit
     and allow flagging the ``expectancy_forecast`` field."""
-    assert "Expectancy / objective sanity" in _SELF_REVIEW_SYSTEM_PROMPT
-    assert "break-even" in _SELF_REVIEW_SYSTEM_PROMPT
-    assert "expectancy_forecast" in _SELF_REVIEW_SYSTEM_PROMPT
+    text = _get_self_review_system_prompt()
+    assert "Expectancy / objective sanity" in text
+    assert "break-even" in text
+    assert "expectancy_forecast" in text
 
 
 def test_run_self_review_flags_expectancy_incoherence_then_self_revises(

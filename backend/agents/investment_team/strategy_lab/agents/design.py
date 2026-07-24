@@ -94,19 +94,53 @@ def _resolve_diversity_mode() -> str:
 
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
 # Shared stop-order semantics reference (stop-market / stop-limit / trailing
 # stop). Appended to the designer's system prompts so a trailing stop's
 # above-entry ratchet is understood as intended gain-locking behavior, and so
 # the designer does not author exits that contradict the engine's mechanics.
-_STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
-_SYSTEM_PROMPT = (
-    (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8") + "\n\n" + _STOP_ORDER_SEMANTICS
-)
-_SELF_REVIEW_SYSTEM_PROMPT = (
-    (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
-    + "\n\n"
-    + _STOP_ORDER_SEMANTICS
-)
+_STOP_ORDER_SEMANTICS: str | None = None
+
+
+def _get_stop_order_semantics() -> str:
+    """Load and cache shared stop-order semantics markdown.
+
+    Preconditions: ``_PROMPT_DIR / "_stop_order_semantics.md"`` exists and is
+    readable UTF-8 text when first invoked.
+    Postconditions: returns a non-empty ``str``; subsequent calls return the
+    same cached value without re-reading the file.
+    Invariants: module import does not invoke this helper.
+    """
+    global _STOP_ORDER_SEMANTICS
+    if _STOP_ORDER_SEMANTICS is None:
+        text = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
+        assert text, "_stop_order_semantics.md must be non-empty"
+        _STOP_ORDER_SEMANTICS = text
+    return _STOP_ORDER_SEMANTICS
+
+
+def _get_design_system_prompt() -> str:
+    """Build the designer system prompt (design_system.md + stop-order block).
+
+    Preconditions: ``design_system.md`` and stop-order semantics file exist.
+    Postconditions: returned string contains both the design system body and
+    the stop-order semantics text, separated by a blank line.
+    """
+    body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
+    assert body, "design_system.md must be non-empty"
+    return body + "\n\n" + _get_stop_order_semantics()
+
+
+def _get_self_review_system_prompt() -> str:
+    """Build the self-review system prompt (self-review md + stop-order block).
+
+    Preconditions: ``design_self_review_system.md`` and stop-order file exist.
+    Postconditions: returned string contains both the self-review body and
+    the stop-order semantics text, separated by a blank line.
+    """
+    body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
+    assert body, "design_self_review_system.md must be non-empty"
+    return body + "\n\n" + _get_stop_order_semantics()
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
@@ -304,7 +338,7 @@ class DesignAgent:
             response_schema_json=_DESIGN_SPEC_SCHEMA_JSON,
         )
 
-        strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
+        strategy_dict, rationale = self._invoke_and_parse(_get_design_system_prompt(), user_prompt)
         return self._with_self_review(strategy_dict, rationale)
 
     def revise(
@@ -347,7 +381,7 @@ class DesignAgent:
             response_schema_json=_DESIGN_SPEC_SCHEMA_JSON,
         )
 
-        strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, user_prompt)
+        strategy_dict, rationale = self._invoke_and_parse(_get_design_system_prompt(), user_prompt)
         # Thread the external critique lineage AND the regression notice into the
         # internal self-review so a self-revision cannot regress a fix (or undo a
         # prior-round defect the ledger is keeping fixed) that an earlier external
@@ -638,7 +672,9 @@ class DesignAgent:
             )
 
             try:
-                strategy_dict, rationale = self._invoke_and_parse(_SYSTEM_PROMPT, revision_prompt)
+                strategy_dict, rationale = self._invoke_and_parse(
+                    _get_design_system_prompt(), revision_prompt
+                )
             except DesignBudgetExhausted:
                 # As above: propagate budget exhaustion rather than falling back.
                 raise
@@ -683,7 +719,7 @@ class DesignAgent:
         def _invoke_legacy() -> Dict[str, Any]:
             agent = Agent(
                 model=get_strands_model("strategy_design"),
-                system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
+                system_prompt=_get_self_review_system_prompt(),
                 tools=[],
             )
             return run_structured_agent(
@@ -700,7 +736,7 @@ class DesignAgent:
             try:
                 parsed = so.invoke_structured_with_schema(
                     "strategy_design",
-                    _SELF_REVIEW_SYSTEM_PROMPT,
+                    _get_self_review_system_prompt(),
                     user_prompt,
                     phase="design_self_review_structured",
                     schema=CRITIQUE_SCHEMA,

@@ -34,8 +34,8 @@ def test_analysis_agent_loads_block() -> None:
 def test_design_system_prompts_include_block() -> None:
     from investment_team.strategy_lab.agents import design
 
-    assert _MARKER in design._SYSTEM_PROMPT
-    assert _MARKER in design._SELF_REVIEW_SYSTEM_PROMPT
+    assert _MARKER in design._get_design_system_prompt()
+    assert _MARKER in design._get_self_review_system_prompt()
 
 
 def test_design_review_system_prompt_includes_block() -> None:
