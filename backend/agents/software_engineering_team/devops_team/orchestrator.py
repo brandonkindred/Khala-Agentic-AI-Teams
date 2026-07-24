@@ -597,7 +597,21 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
 
     @staticmethod
     def _enforce_env_policy(task_spec: DevOpsTaskSpec) -> Optional[str]:
-        """Return a blocking reason if environment policy is violated, else None."""
+        """Return a blocking reason if environment policy is violated, else None.
+
+        Preconditions:
+            - ``task_spec`` is a fully populated ``DevOpsTaskSpec``.
+            - ``task_spec.platform_scope.environments`` is iterable.
+            - ``task_spec.scope.included`` is an iterable of strings.
+
+        Postconditions:
+            - Returns ``None`` if no configured environment policy is violated.
+            - Returns a human-readable blocking reason string if any environment
+              requires an approval gate or rollback requirements that are missing.
+
+        Invariants:
+            - The method does not mutate ``task_spec``.
+        """
         for env in task_spec.platform_scope.environments:
             policy = ENV_POLICY.get(env)
             if policy is None:
