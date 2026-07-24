@@ -38,6 +38,14 @@ def test_extract_draft_after_marker_falls_back_to_json() -> None:
     assert "Title" in out
 
 
+def test_extract_draft_after_marker_falls_back_to_fenced_json() -> None:
+    from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
+
+    raw = '```json\n{"draft": "# Fenced\\n\\nBody"}\n```'
+    out = _extract_draft_after_marker(raw)
+    assert "Fenced" in out
+
+
 def test_extract_draft_after_marker_empty_inputs() -> None:
     from agents.blogging.blog_writer_agent.agent import _extract_draft_after_marker
 
