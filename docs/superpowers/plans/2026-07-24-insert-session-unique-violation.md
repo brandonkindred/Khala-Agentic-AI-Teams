@@ -1,105 +1,141 @@
-# Branding Fake Session Unique-Violation Implementation Plan
+# Insert Session Unique Violation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `handle_insert_session` raise `psycopg.errors.UniqueViolation` on duplicate `session_id`, matching the real `branding_sessions` primary key.
+**Goal:** Make the branding fake Postgres `handle_insert_session` raise `psycopg.errors.UniqueViolation` on duplicate `session_id`, matching real `branding_sessions` primary-key semantics.
 
-**Architecture:** Guard the existing dict-backed insert handler before write; leave select/update and production store code untouched. Prove the contract with one unit test through `PostgresHelperMixin._execute`.
+**Architecture:** One-line guard at the top of `handle_insert_session` before writing to `cur.db["sessions"]`. Raise the real `UniqueViolation` type (SQLSTATE `23505`) with a Postgres-shaped message so any future `except UniqueViolation` / `IntegrityError` handling sees the same type under the fake as under live Postgres. Prove the behavior with a unit test that inserts twice through `PostgresHelperMixin._execute`.
 
-**Tech Stack:** Python 3.10+, pytest, psycopg (`UniqueViolation`), branding team fake Postgres harness.
+**Tech Stack:** Python 3.10, pytest, psycopg (`psycopg.errors.UniqueViolation`), branding fake in `_fake_postgres.py`.
 
 **Spec:** `docs/superpowers/specs/2026-07-24-insert-session-unique-violation-design.md`
 
 ## Global Constraints
 
-- Raise real `psycopg.errors.UniqueViolation`, not a local `FakeUniqueViolation`.
-- Exception message must include `branding_sessions_pkey`.
-- Sessions-only: do not change `handle_insert_client`, `handle_insert_brand`, or `handle_insert_conversation` in this plan.
-- No production store/API changes.
-- Work in worktree `.worktrees/fix-2263-insert-session-unique` on branch `fix/2263-insert-session-unique`.
-- Never reference GitHub issue numbers in code, comments, or commit messages (PR body only).
+- Test-only change: touch `backend/agents/branding_team/tests/_fake_postgres.py` and `backend/agents/branding_team/tests/test_db.py` only.
+- Raise `psycopg.errors.UniqueViolation`, not a local `FakeUniqueViolation`.
+- Exception message must be exactly: `duplicate key value violates unique constraint "branding_sessions_pkey"`.
+- On duplicate insert, leave the original row unchanged.
+- Do not fix `handle_insert_client`, `handle_insert_brand`, or `handle_insert_conversation` in this plan (follow-ups).
+- Never reference GitHub issue numbers in code, comments, or commit messages.
+- Design by Contract: document Preconditions/Postconditions on any modified handler docstring.
+
+---
 
 ## File Structure
 
 | File | Responsibility |
 |---|---|
-| `backend/agents/branding_team/tests/_fake_postgres.py` | Branding SQL→handler dispatch; own the duplicate-session guard |
-| `backend/agents/branding_team/tests/test_db.py` | Unit coverage for fake Postgres behavior via `_Probe` / `_execute` |
+| `backend/agents/branding_team/tests/_fake_postgres.py` | Dict-backed SQL dispatch; `handle_insert_session` must enforce PK uniqueness |
+| `backend/agents/branding_team/tests/test_db.py` | Unit tests for `PostgresHelperMixin` via the fake; add duplicate-insert coverage |
+
+No new files. No production store/API changes (`BrandingSessionStore.create` already mints a fresh UUID).
 
 ---
 
-### Task 1: Duplicate session insert raises UniqueViolation
+### Task 1: Failing duplicate-insert test
 
 **Files:**
-- Modify: `backend/agents/branding_team/tests/test_db.py` (append new test; import `UniqueViolation`)
-- Modify: `backend/agents/branding_team/tests/_fake_postgres.py` (`handle_insert_session` ~lines 504–510; add `UniqueViolation` import)
-- Test: `backend/agents/branding_team/tests/test_db.py::test_duplicate_session_insert_raises_unique_violation`
+- Modify: `backend/agents/branding_team/tests/test_db.py`
+- Test: `backend/agents/branding_team/tests/test_db.py::test_insert_session_raises_unique_violation_on_duplicate`
 
 **Interfaces:**
-- Consumes: `install_fake_postgres` / `fake_pg` fixture; `PostgresHelperMixin._execute`; store SQL shape from `BrandingSessionStore.create`
-- Produces: `handle_insert_session` raises `UniqueViolation` when `session_id in cur.db["sessions"]`; otherwise writes the row unchanged from today
+- Consumes: `install_fake_postgres` fixture pattern (`fake_pg`), `_Probe` / `PostgresHelperMixin._execute`, INSERT SQL shape from `BrandingSessionStore.create`:
+  `"INSERT INTO branding_sessions (session_id, session_json, updated_at) VALUES (%s, %s, %s)"`
+- Produces: A failing test that expects `UniqueViolation` and an unchanged original row
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Append the failing test to `test_db.py`**
 
-In `backend/agents/branding_team/tests/test_db.py`, add the import next to the existing `psycopg.types.json.Json` import:
+Add these imports at the top of `test_db.py` (keep existing imports; add only what is missing):
 
 ```python
 from psycopg.errors import UniqueViolation
-from psycopg.types.json import Json
 ```
 
-Append this test at the end of the file:
+Append this test at the end of the file (after `test_execute_rowcount_reflects_matched_rows`):
 
 ```python
-def test_duplicate_session_insert_raises_unique_violation(fake_pg: dict) -> None:
-    """Duplicate branding_sessions insert raises UniqueViolation and keeps the row."""
+def test_insert_session_raises_unique_violation_on_duplicate(fake_pg: dict) -> None:
+    """Duplicate branding_sessions INSERT raises UniqueViolation; original row kept."""
     probe = _Probe()
     now = datetime.now(tz=timezone.utc)
-    original = {"mission": {"company_name": "Acme"}, "questions": []}
+    original = {"mission": "v1"}
+    duplicate = {"mission": "v2"}
+
     probe._execute(
         "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
         "VALUES (%s, %s, %s)",
         ("sess_1", Json(original), now),
     )
 
-    with pytest.raises(UniqueViolation, match="branding_sessions_pkey"):
+    with pytest.raises(UniqueViolation, match='branding_sessions_pkey'):
         probe._execute(
             "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
             "VALUES (%s, %s, %s)",
-            (
-                "sess_1",
-                Json({"mission": {"company_name": "Overwrite"}, "questions": []}),
-                now,
-            ),
+            ("sess_1", Json(duplicate), now),
         )
 
-    assert fake_pg["sessions"]["sess_1"]["session_json"] == original
-    assert fake_pg["sessions"]["sess_1"]["updated_at"] is now
+    row = fake_pg["sessions"]["sess_1"]
+    assert row["session_json"] == original
+    assert row["updated_at"] == now
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run the new test and confirm it fails**
 
-From `backend/`:
+Run from `backend/`:
 
 ```bash
-LLM_PROVIDER=dummy .venv/bin/pytest \
-  agents/branding_team/tests/test_db.py::test_duplicate_session_insert_raises_unique_violation -v
+pytest agents/branding_team/tests/test_db.py::test_insert_session_raises_unique_violation_on_duplicate -v
 ```
 
-Expected: FAIL — either `Failed: DID NOT RAISE <class 'psycopg.errors.UniqueViolation'>` (current silent overwrite) or assertion failure on `session_json` if the raise somehow succeeds without the guard. Do not proceed until the failure is the missing raise / overwrite.
+Expected: FAIL — second insert succeeds (or no `UniqueViolation` raised), because `handle_insert_session` still overwrites silently.
 
-- [ ] **Step 3: Implement the guard in `handle_insert_session`**
+- [ ] **Step 3: Commit the failing test**
 
-In `backend/agents/branding_team/tests/_fake_postgres.py`, add the import with the other top-level imports (after `from typing import Any`):
+```bash
+git add backend/agents/branding_team/tests/test_db.py
+git commit -m "$(cat <<'EOF'
+Add failing test for duplicate branding session insert uniqueness.
+
+EOF
+)"
+```
+
+---
+
+### Task 2: Raise UniqueViolation in `handle_insert_session`
+
+**Files:**
+- Modify: `backend/agents/branding_team/tests/_fake_postgres.py` (imports + `handle_insert_session` ~lines 504–510)
+- Test: `backend/agents/branding_team/tests/test_db.py::test_insert_session_raises_unique_violation_on_duplicate`
+
+**Interfaces:**
+- Consumes: `cur.db["sessions"]` dict keyed by `session_id`; params `(session_id, session_json, updated_at)`
+- Produces: `handle_insert_session` that raises `UniqueViolation` when `session_id` already exists; otherwise inserts as today
+
+- [ ] **Step 1: Import `UniqueViolation`**
+
+Near the top of `_fake_postgres.py`, after the existing imports, add:
 
 ```python
 from psycopg.errors import UniqueViolation
 ```
 
-Replace `handle_insert_session` with:
+- [ ] **Step 2: Guard `handle_insert_session` before writing**
+
+Replace the current `handle_insert_session` body with:
 
 ```python
     def handle_insert_session(cur: FakeCursor, params: tuple) -> None:
+        """Emulate INSERT into branding_sessions (session_id PRIMARY KEY).
+
+        Preconditions:
+            ``params`` is ``(session_id, session_json, updated_at)``.
+        Postconditions:
+            On success, ``cur.db["sessions"][session_id]`` holds the new row.
+            If ``session_id`` already exists, raises ``UniqueViolation`` and
+            leaves the existing row unchanged (matches Postgres PK semantics).
+        """
         session_id, session_json, updated_at = params
         if session_id in cur.db["sessions"]:
             raise UniqueViolation(
@@ -112,31 +148,30 @@ Replace `handle_insert_session` with:
         }
 ```
 
-Do not change `match_insert_session`, select, or update handlers.
+Do not change `match_insert_session`, `handle_select_session`, or `handle_update_session`.
 
-- [ ] **Step 4: Run the new test and the branding suite**
+- [ ] **Step 3: Run the new test and confirm it passes**
 
 ```bash
-LLM_PROVIDER=dummy .venv/bin/pytest \
-  agents/branding_team/tests/test_db.py::test_duplicate_session_insert_raises_unique_violation -v
+pytest agents/branding_team/tests/test_db.py::test_insert_session_raises_unique_violation_on_duplicate -v
 ```
 
 Expected: PASS
 
+- [ ] **Step 4: Run the full branding unit suite**
+
 ```bash
-LLM_PROVIDER=dummy .venv/bin/pytest agents/branding_team/tests/ -q
+pytest agents/branding_team/tests/ -q --ignore=agents/branding_team/tests/test_store_real_postgres.py
 ```
 
-Expected: all previously green tests still pass (plus the new one); skips for real-postgres / API markers unchanged.
+Expected: all tests pass (0 failures). Skip the `real_postgres` marker suite unless a live Postgres is configured.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit the fix**
 
 ```bash
-git add \
-  backend/agents/branding_team/tests/_fake_postgres.py \
-  backend/agents/branding_team/tests/test_db.py
+git add backend/agents/branding_team/tests/_fake_postgres.py
 git commit -m "$(cat <<'EOF'
-Raise UniqueViolation on duplicate branding session insert in fake Postgres.
+Raise UniqueViolation on duplicate branding session insert in fake.
 
 EOF
 )"
@@ -144,86 +179,8 @@ EOF
 
 ---
 
-### Task 2: Open follow-up issues for other silent-overwrite inserts
+## Self-Review
 
-**Files:**
-- None in-repo (GitHub issues only)
-
-**Interfaces:**
-- Consumes: same root cause as Task 1; handlers `handle_insert_client`, `handle_insert_brand`, `handle_insert_conversation` in `_fake_postgres.py`
-- Produces: three open GitHub issues linking back to the pattern fixed for sessions
-
-- [ ] **Step 1: Create three issues with `gh`**
-
-From the worktree root (needs network):
-
-```bash
-gh issue create --title "[low] handle_insert_client silently overwrites an existing client with the same id" --body "$(cat <<'EOF'
-## Context
-
-Follow-up from the branding fake Postgres unique-violation fix for sessions.
-
-## Problem
-
-`handle_insert_client` in `backend/agents/branding_team/tests/_fake_postgres.py` silently overwrites when `client_id` already exists in `cur.db["clients"]`. The real `branding_clients` table has a primary key on `id`, so a duplicate insert should raise `psycopg.errors.UniqueViolation`.
-
-## Suggested fix
-
-Mirror the session handler: if the id is already present, raise `UniqueViolation` with a message naming `branding_clients_pkey`, and leave the existing row unchanged. Add a unit test in `test_db.py`.
-
-## Non-goals
-
-No production store changes unless a real double-insert path is found.
-EOF
-)"
-
-gh issue create --title "[low] handle_insert_brand silently overwrites an existing brand with the same id" --body "$(cat <<'EOF'
-## Context
-
-Follow-up from the branding fake Postgres unique-violation fix for sessions.
-
-## Problem
-
-`handle_insert_brand` in `backend/agents/branding_team/tests/_fake_postgres.py` silently overwrites when `brand_id` already exists in `cur.db["brands"]`. The real `branding_brands` table has a primary key on `id`, so a duplicate insert should raise `psycopg.errors.UniqueViolation`.
-
-## Suggested fix
-
-If the id is already present, raise `UniqueViolation` with a message naming `branding_brands_pkey`, and leave the existing row unchanged. Add a unit test in `test_db.py`.
-
-## Non-goals
-
-No production store changes unless a real double-insert path is found.
-EOF
-)"
-
-gh issue create --title "[low] handle_insert_conversation silently overwrites an existing conversation with the same id" --body "$(cat <<'EOF'
-## Context
-
-Follow-up from the branding fake Postgres unique-violation fix for sessions.
-
-## Problem
-
-`handle_insert_conversation` in `backend/agents/branding_team/tests/_fake_postgres.py` silently overwrites when `conversation_id` already exists in `cur.db["conversations"]`. The real `branding_conversations` table has a primary key on `conversation_id`, so a duplicate insert should raise `psycopg.errors.UniqueViolation`.
-
-## Suggested fix
-
-If the id is already present, raise `UniqueViolation` with a message naming `branding_conversations_pkey`, and leave the existing row unchanged. Add a unit test in `test_db.py`.
-
-## Non-goals
-
-No production store changes unless a real double-insert path is found.
-EOF
-)"
-```
-
-- [ ] **Step 2: Record the issue URLs**
-
-Paste the three URLs into the PR description when opening the PR for Task 1 (under a “Follow-ups” heading). Do not put issue numbers in code or commit messages.
-
----
-
-## Self-review checklist (plan author)
-
-1. **Spec coverage:** UniqueViolation type + pkey message → Task 1 Step 3; unit test + unchanged row → Task 1 Steps 1–4; follow-up issues → Task 2; non-goals (no production / no other handlers) → Global Constraints.
-2. **Placeholders:** None — full test and handler code included.
-3. **Type consistency:** `UniqueViolation` from `psycopg.errors`; params `(session_id, session_json, updated_at)` match store SQL and existing handler.
+1. **Spec coverage:** UniqueViolation type + exact message → Task 2. Unchanged original row → Task 1 assertions. Unit test via `_execute` → Task 1. No production changes → Global Constraints. Follow-ups left out → Global Constraints.
+2. **Placeholder scan:** No TBD/TODO; full test and handler code included.
+3. **Type consistency:** `UniqueViolation` from `psycopg.errors` in both test and handler; params tuple shape matches store INSERT.
