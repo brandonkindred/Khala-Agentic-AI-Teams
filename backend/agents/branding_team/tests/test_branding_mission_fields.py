@@ -4,8 +4,8 @@ Preconditions:
     - ``branding_team.models`` and ``branding_team.api.models`` are importable
       under the test path setup.
 Postconditions:
-    - Assertions pin shared-field composition for ``BrandingMission`` and
-      ``CreateBrandRequest``.
+    - Assertions pin shared-field composition for ``BrandingMission``,
+      ``CreateBrandRequest``, and ``UpdateBrandRequest``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from branding_team.api.models import CreateBrandRequest
+from branding_team.api.models import CreateBrandRequest, UpdateBrandRequest
 from branding_team.models import BrandingMission, BrandingMissionFields
 
 SHARED_FIELD_NAMES = (
@@ -30,6 +30,11 @@ SHARED_FIELD_NAMES = (
 CREATE_BRAND_EXTRA_FIELD_NAMES = (
     "name",
     "conversation_id",
+)
+
+UPDATE_BRAND_EXTRA_FIELD_NAMES = (
+    "name",
+    "status",
 )
 
 VISUAL_FIELD_NAMES = (
@@ -176,3 +181,40 @@ def test_default_mission_and_detection_use_shared_placeholders() -> None:
     for sentinel in MISSION_PLACEHOLDERS:
         assert _is_real_value(sentinel) is False
     assert _is_real_value("Acme Corp") is True
+
+
+def test_update_brand_request_includes_shared_and_extra_fields() -> None:
+    names = tuple(UpdateBrandRequest.model_fields)
+    for name in SHARED_FIELD_NAMES:
+        assert name in names
+    for name in UPDATE_BRAND_EXTRA_FIELD_NAMES:
+        assert name in names
+
+
+def test_update_brand_request_mission_fields_default_to_none() -> None:
+    req = UpdateBrandRequest()
+    dumped = req.model_dump()
+    for name in SHARED_FIELD_NAMES:
+        assert dumped[name] is None
+    assert dumped["name"] is None
+    assert dumped["status"] is None
+
+
+def test_update_brand_request_rejects_short_company_name_when_supplied() -> None:
+    with pytest.raises(ValidationError):
+        UpdateBrandRequest(company_name="A")
+
+
+def test_update_brand_request_partial_dump_excludes_none_mission_fields() -> None:
+    req = UpdateBrandRequest(company_description="Updated description here")
+    patch = req.model_dump(exclude_none=True, exclude={"status", "name"})
+    assert patch == {"company_description": "Updated description here"}
+
+
+def test_update_brand_request_mission_fields_come_from_optionalized_base() -> None:
+    """Mission fields must be inherited from the generated partial, not redeclared."""
+    from branding_team.api import models as api_models
+
+    partial = api_models._BrandingMissionFieldsPartial
+    assert issubclass(UpdateBrandRequest, partial)
+    assert tuple(partial.model_fields) == SHARED_FIELD_NAMES
