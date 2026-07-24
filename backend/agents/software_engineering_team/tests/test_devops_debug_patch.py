@@ -13,7 +13,10 @@ from software_engineering_team.devops_team.infra_debug_agent import (
     InfraDebugAgent,
 )
 from software_engineering_team.devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
-from software_engineering_team.devops_team.orchestrator import _DebugPatchState
+from software_engineering_team.devops_team.orchestrator import (
+    MAX_INFRA_FIX_ITERATIONS,
+    _DebugPatchState,
+)
 
 
 class _StubClient(DummyLLMClient):
@@ -615,7 +618,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -638,7 +641,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -667,7 +670,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -697,7 +700,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -755,7 +758,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=True,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is not None
         assert execution_tools_call_count[0] == 1
@@ -798,7 +801,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is state
         assert out.exec_failures == []
@@ -847,7 +850,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is not None
         assert out.exec_failures == []
