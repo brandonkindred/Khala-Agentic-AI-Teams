@@ -40,7 +40,7 @@ EVENT_WAIT_TIMEOUT = 60  # seconds — safety net for event-based waiting
 MAX_ROUNDS = 5  # hard cap for pre-draft interviews
 MAX_ROUNDS_POST_DRAFT = 50  # hard safety cap for post-draft interviews
 
-_JSON_RETRY_SUFFIX = "\n\nRespond with a single JSON object only (no markdown, no code fences)."
+_JSON_RETRY_SUFFIX = "\n\nRespond with valid JSON only (no markdown, no code fences)."
 
 # ---------------------------------------------------------------------------
 # Prompt: find story gaps in the content plan

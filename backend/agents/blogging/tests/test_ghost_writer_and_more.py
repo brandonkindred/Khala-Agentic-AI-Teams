@@ -44,6 +44,21 @@ def _gap():
 
 
 # ---------------------------------------------------------------------------
+# _JSON_RETRY_SUFFIX — shape neutrality
+# ---------------------------------------------------------------------------
+
+
+def test_json_retry_suffix_is_shape_agnostic() -> None:
+    """Retry suffix must not demand a JSON object (gap-finding returns an array)."""
+    from agents.blogging.ghost_writer_agent.agent import _JSON_RETRY_SUFFIX
+
+    assert _JSON_RETRY_SUFFIX == (
+        "\n\nRespond with valid JSON only (no markdown, no code fences)."
+    )
+    assert "object" not in _JSON_RETRY_SUFFIX.lower()
+
+
+# ---------------------------------------------------------------------------
 # _plan_to_text
 # ---------------------------------------------------------------------------
 
