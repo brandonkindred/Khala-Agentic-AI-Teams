@@ -151,6 +151,7 @@ def _scripted_llm_for_happy_path() -> _ScriptedClient:
                 "summary": "deploy ok",
                 "strategy": "rolling",
                 "rollback_plan": ["helm rollback"],
+                "alerting_configured": True,
             },
             # Debug agent (execution tools fail because terraform CLI is not installed)
             {
@@ -1215,6 +1216,7 @@ class TestDocumentationRunbookAgent:
         )
         assert out.completion_package.task_id == "DO-1"
         assert "docs/runbook.md" in out.files
+        assert out.completion_package.release_readiness.alerting_configured is False
 
 
 # ===========================================================================
@@ -1428,6 +1430,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         pkg = agent.run(spec)
         assert pkg.release_readiness.rollback_available
         assert "manual_prod_approval" in pkg.release_readiness.required_approvals
+        assert pkg.release_readiness.alerting_configured is True
 
     def test_completion_package_has_git_operations(self) -> None:
         # A model-only run (``run`` → write_changes=False) performs no git work,
