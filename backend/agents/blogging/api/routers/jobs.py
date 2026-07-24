@@ -3,8 +3,9 @@ approve/unapprove, and listing."""
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, Dict, List
 
+from agents.blogging.api.dependencies import get_job
 from agents.blogging.api.models import (
     BlogJobListItem,
     BlogJobStatusResponse,
@@ -15,7 +16,7 @@ from agents.blogging.api.models import (
     _blog_job_dict_to_status_response,
     _format_audience,
 )
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
@@ -32,20 +33,11 @@ _BLOG_RESTARTABLE = RESTARTABLE_STATUSES | {"needs_human_review"}
     summary="Get job status",
     description="Poll the status of a running or completed pipeline job.",
 )
-def get_job_status(job_id: str) -> BlogJobStatusResponse:
+def get_job_status(
+    job_id: str,
+    job: Dict[str, Any] = Depends(get_job()),
+) -> BlogJobStatusResponse:
     """Get the current status of a pipeline job."""
-    from agents.blogging.api import main as _main
-
-    if _main.get_blog_job is None:
-        raise HTTPException(
-            status_code=501,
-            detail="Job status not available - job store module not found",
-        )
-
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
     return _blog_job_dict_to_status_response(job, job_id)
 
 
@@ -58,19 +50,15 @@ def get_job_status(job_id: str) -> BlogJobStatusResponse:
         "and a terminal event ('complete', 'error', or 'cancelled') before closing."
     ),
 )
-def stream_job_status(job_id: str) -> StreamingResponse:
+def stream_job_status(
+    job_id: str,
+    job: Dict[str, Any] = Depends(get_job()),
+) -> StreamingResponse:
     """SSE stream for a pipeline job. Falls back gracefully if job is already terminal."""
     from agents.blogging.api import main as _main
     from agents.blogging.shared.job_event_bus import subscribe, unsubscribe
 
     from shared.sse import sse_job_stream_sync, sse_line
-
-    if _main.get_blog_job is None:
-        raise HTTPException(status_code=501, detail="Job store not available")
-
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     def _snapshot_event() -> dict:
         current = _main.get_blog_job(job_id) or {}
