@@ -311,6 +311,20 @@ class BlogPublicationAgent(_BlogAgentBase):
                     )
                 )
 
+        # If structured conversion produced nothing, keep the raw rejection as a
+        # deterministic must_fix item so we still revise instead of clearing the
+        # rejection and claiming the draft was updated.
+        if not human_feedback_items:
+            human_feedback_items = [
+                FeedbackItem(
+                    category="content",
+                    severity="must_fix",
+                    location=None,
+                    issue=human_feedback_text.strip() or "Address the rejection feedback.",
+                    suggestion="Revise the draft to address the reviewer's rejection feedback.",
+                )
+            ]
+
         draft = meta.draft_content
         research = research_document or ""
         outline_text = outline or ""
@@ -345,6 +359,13 @@ class BlogPublicationAgent(_BlogAgentBase):
                 else copy_editor_result.feedback_items
             )
 
+            # Stop when there is nothing left to revise: empty feedback means a
+            # clean pass; after the first iteration, an approved editor result also
+            # ends the loop so we do not keep calling revise() with no actionable
+            # items for max_revision_loops.
+            if not all_feedback or (iteration > 0 and copy_editor_result.approved):
+                break
+
             revise_input = ReviseWriterInput(
                 draft=draft,
                 feedback_items=all_feedback,
@@ -359,6 +380,25 @@ class BlogPublicationAgent(_BlogAgentBase):
             iterations += 1
 
         meta.draft_content = draft
+        if iterations == 0:
+            # Rejection was never applied — keep it so the submitter can retry.
+            meta.save(meta_path)
+            draft_path = self.pending_dir / f"{submission_id}.md"
+            draft_path.write_text(draft, encoding="utf-8")
+            logger.warning(
+                "Revision loop applied 0 iterations for submission_id=%s; rejection feedback retained",
+                submission_id,
+            )
+            return RevisionLoopResult(
+                submission_id=submission_id,
+                revised_draft=draft,
+                iterations_completed=0,
+                message=(
+                    "Could not apply rejection feedback automatically; "
+                    "rejection feedback retained. Review and try again."
+                ),
+            )
+
         meta.rejection_feedback = []
         meta.state = "awaiting_approval"
         meta.save(meta_path)

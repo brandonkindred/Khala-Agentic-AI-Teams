@@ -9,6 +9,11 @@ prompt) so the model critiques without being primed as the author's voice. It
 uses the same LLM client as the planner per the project's tenet that per-role
 model diversification is a future concern; only the role (prompt + session) is
 separate today.
+
+Transient LLM errors (``LLMRateLimitError``, ``LLMTemporaryError``) — including
+when strands wraps them in ``EventLoopException`` — propagate unwrapped so the
+job runner or Temporal activity owns retry/backoff. Non-transient failures and
+JSON parse exhaustion fall back to a FAIL report.
 """
 
 from __future__ import annotations
@@ -20,9 +25,9 @@ from typing import Any, Callable, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import ContentPlan
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
-
-from llm_service import LLMJsonParseError, extract_json_from_response
+from strands.types.exceptions import EventLoopException
 
 from .models import PlanCriticReport, PlanViolation
 from .prompts import PLAN_CRITIC_SYSTEM, PLAN_CRITIC_USER_TEMPLATE
@@ -33,13 +38,6 @@ except ImportError:  # pragma: no cover - defensive; artifacts may be unavailabl
     write_artifact = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
-
-_JSON_RETRY_SUFFIX = (
-    "\n\nRespond with a single JSON object only (no markdown, no code fences). "
-    'Keys: "status", "approved", "violations", "notes", "rubric_version".'
-)
-
-_MAX_CRITIC_LLM_ATTEMPTS = 2
 
 _RESEARCH_DIGEST_CHAR_CAP = 8000
 _BRAND_SPEC_CHAR_CAP = 16000
@@ -95,6 +93,23 @@ class BlogPlanCriticAgent(_BlogAgentBase):
             on_llm_request: optional progress callback.
             work_dir: when provided, persists the report as JSON for inspection.
             artifact_name: override for the persisted filename (useful per iteration).
+
+        Preconditions:
+            - ``self._model`` is a usable LLM client (enforced in ``__init__``).
+            - ``plan`` is a ``ContentPlan``; ``brand_spec_prompt`` and
+              ``writing_guidelines`` are strings (empty is tolerated but low-signal).
+        Postconditions:
+            - Always returns a ``PlanCriticReport`` (never ``None``); ``status`` is
+              normalized to ``"PASS"`` or ``"FAIL"`` and ``approved`` is reconciled
+              with ``status`` and ``must_fix`` violations.
+            - A transient LLM-transport error (``LLMRateLimitError`` / ``LLMTemporaryError``),
+              including when strands wraps it in ``EventLoopException``, propagates
+              unwrapped so the caller (or Temporal) can retry; JSON parse exhaustion
+              and other unexpected non-transient errors fail closed via ``on_exhausted`` /
+              ``on_unexpected_error`` hooks with a ``status="FAIL"`` fallback report
+              rather than raising.
+            - When ``work_dir`` is set and ``write_artifact`` is available, the report is
+              persisted as ``artifact_name`` (default ``plan_critic_report.json``).
         """
         user_prompt = PLAN_CRITIC_USER_TEMPLATE.format(
             brand_spec_prompt=(brand_spec_prompt or "").strip(),
@@ -106,40 +121,33 @@ class BlogPlanCriticAgent(_BlogAgentBase):
         if on_llm_request:
             on_llm_request("Plan critic: evaluating plan against brand spec + rubric...")
 
-        data: Optional[dict[str, Any]] = None
-        last_err: Optional[Exception] = None
-        for attempt in range(_MAX_CRITIC_LLM_ATTEMPTS):
-            suffix = (
-                "\n\nRespond with valid JSON only, no markdown fences."
-                if attempt == 0
-                else _JSON_RETRY_SUFFIX
-            )
-            try:
-                agent = Agent(model=self._model, system_prompt=PLAN_CRITIC_SYSTEM)
-                raw = str(agent(user_prompt + suffix)).strip()
-                data = extract_json_from_response(raw)
-                break
-            except LLMJsonParseError as e:
-                last_err = e
-                logger.warning(
-                    "Plan critic JSON parse failed on attempt %s/%s: %s",
-                    attempt + 1,
-                    _MAX_CRITIC_LLM_ATTEMPTS,
-                    e,
-                )
-            except Exception as e:  # pragma: no cover - network / infra errors
-                last_err = e
-                logger.warning(
-                    "Plan critic LLM call failed on attempt %s/%s: %s",
-                    attempt + 1,
-                    _MAX_CRITIC_LLM_ATTEMPTS,
-                    e,
-                )
+        soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
+        strict_json_suffix = (
+            "\n\nRespond with a single JSON object only (no markdown, no code fences). "
+            'Keys: "status", "approved", "violations", "notes", "rubric_version".'
+        )
 
-        if data is None:
-            report = _fallback_report(str(last_err) if last_err else "unknown")
-        else:
-            report = self._coerce_report(data)
+        def _agent_factory():
+            return Agent(model=self._model, system_prompt=PLAN_CRITIC_SYSTEM)
+
+        def _unwrap(exc: Exception) -> Exception:
+            return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
+        def _fallback_dict(exc: Exception) -> dict[str, Any]:
+            return _fallback_report(str(exc)).model_dump(mode="json")
+
+        data = call_json_with_retry(
+            _agent_factory,
+            user_prompt + soft_json_instruction,
+            max_attempts=2,
+            strict_json_suffix=strict_json_suffix,
+            fresh_agent_per_attempt=True,
+            unwrap_exception=_unwrap,
+            on_exhausted=_fallback_dict,
+            on_unexpected_error=_fallback_dict,
+            logger=logger,
+        )
+        report = self._coerce_report(data)
 
         # Enforce the invariant: approved iff status == PASS with no must_fix items
         approved = report.status == "PASS" and report.must_fix_count() == 0

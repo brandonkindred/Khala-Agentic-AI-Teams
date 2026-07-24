@@ -68,14 +68,17 @@ def call_json_with_retry(
     zero-based attempt index and returning the number of seconds to sleep
     before that retry; omit it to skip sleeping between retries.
 
-    Any other exception ``e`` is first passed through ``unwrap_exception``
-    (identity by default; pass a hook to unwrap a framework wrapper such as
+    Any other exception ``e`` — including one raised by ``agent_factory()`` —
+    is first passed through ``unwrap_exception`` (identity by default; pass a
+    hook to unwrap a framework wrapper such as
     ``strands.types.exceptions.EventLoopException`` before classifying the
     cause). If the unwrapped cause is one of ``transient_exceptions``, it is
     re-raised immediately and unwrapped — never retried locally — so the
     caller's own retry/backoff owns it. Otherwise, ``on_unexpected_error``
     (if given) produces a fallback dict; without it, the unwrapped cause is
-    re-raised.
+    re-raised. ``agent_factory()`` runs inside the same exception boundary as
+    the invoke so a construction failure (e.g. rejected model config) follows
+    the same fallback path as an invoke-time unexpected error.
 
     Preconditions:
         - ``max_attempts >= 1``.
@@ -90,8 +93,8 @@ def call_json_with_retry(
         - Otherwise raises the (possibly unwrapped) triggering exception —
           no failure is silently swallowed without an explicit fallback hook.
         - Consumes at most one retry attempt per JSON-parse failure; a
-          transient or unexpected error never consumes an attempt (it exits
-          the loop immediately).
+          transient or unexpected error (including ``agent_factory`` failure)
+          never consumes an attempt (it exits the loop immediately).
     """
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
@@ -105,9 +108,9 @@ def call_json_with_retry(
     working_prompt = prompt
 
     for attempt in range(max_attempts):
-        if invoke is None or fresh_agent_per_attempt:
-            invoke = agent_factory()
         try:
+            if invoke is None or fresh_agent_per_attempt:
+                invoke = agent_factory()
             result = invoke(working_prompt)
             return extract_json_from_response(str(result).strip(), expected_keys=keys)
         except LLMJsonParseError as e:
