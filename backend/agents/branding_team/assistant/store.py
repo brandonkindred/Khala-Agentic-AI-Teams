@@ -16,12 +16,12 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from branding_team.models import BrandingMission, TeamOutput
-from shared.postgres import get_conn
 from shared.postgres.metrics import timed_query
+
+from .._db import PostgresHelperMixin
+from ..models import BrandingMission, TeamOutput
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,13 @@ class ConversationState:
 
 @dataclass
 class ConversationSummary:
+    """Summary view of a branding conversation for list endpoints.
+
+    Invariants:
+        ``message_count`` is >= 0; ``brand_id`` is None when the conversation
+        is not attached to a brand; timestamps are ISO-formatted strings.
+    """
+
     conversation_id: str
     brand_id: Optional[str]
     created_at: str
@@ -116,7 +123,7 @@ def _parse_conversation_rows(
     return mission, latest_output, messages
 
 
-class BrandingConversationStore:
+class BrandingConversationStore(PostgresHelperMixin):
     """Postgres-backed store for chat conversations and mission state."""
 
     def __init__(self) -> None:
@@ -131,24 +138,35 @@ class BrandingConversationStore:
         mission: Optional[BrandingMission] = None,
         latest_output: Optional[TeamOutput] = None,
     ) -> str:
+        """Insert a new conversation row and return its id.
+
+        Preconditions:
+            ``conversation_id`` if provided is unique among existing rows;
+            ``mission`` / ``latest_output`` if provided are valid models.
+        Postconditions:
+            A row is inserted into ``branding_conversations``. Returns the
+            provided ``conversation_id`` when it is a non-empty string;
+            otherwise generates a new UUID4 (``None`` and ``""`` both count
+            as absent). Uses ``_default_mission()`` when ``mission`` is None;
+            stores ``latest_output`` as JSONB or NULL.
+        """
         cid = conversation_id or str(uuid4())
         m = mission or _default_mission()
         output_dict = latest_output.model_dump(mode="json") if latest_output else None
         now = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO branding_conversations "
-                "(conversation_id, brand_id, mission_json, latest_output_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (
-                    cid,
-                    brand_id,
-                    Json(m.model_dump(mode="json")),
-                    Json(output_dict) if output_dict is not None else None,
-                    now,
-                    now,
-                ),
-            )
+        self._execute(
+            "INSERT INTO branding_conversations "
+            "(conversation_id, brand_id, mission_json, latest_output_json, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                cid,
+                brand_id,
+                Json(m.model_dump(mode="json")),
+                Json(output_dict) if output_dict is not None else None,
+                now,
+                now,
+            ),
+        )
         return cid
 
     @timed_query(store=_STORE, op="get_state")
@@ -173,16 +191,14 @@ class BrandingConversationStore:
             grow large, add a message ``limit`` / pagination here and in the
             response model — tracked as a follow-up.
         """
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT c.brand_id, c.mission_json, c.latest_output_json, "
-                "m.role, m.content, m.timestamp "
-                "FROM branding_conversations c "
-                "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
-                "WHERE c.conversation_id = %s ORDER BY m.id",
-                (conversation_id,),
-            )
-            rows = cur.fetchall()
+        rows = self._fetch_all(
+            "SELECT c.brand_id, c.mission_json, c.latest_output_json, "
+            "m.role, m.content, m.timestamp "
+            "FROM branding_conversations c "
+            "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
+            "WHERE c.conversation_id = %s ORDER BY m.id",
+            (conversation_id,),
+        )
         if not rows:
             return None
         mission, latest_output, messages = _parse_conversation_rows(rows)
@@ -219,34 +235,55 @@ class BrandingConversationStore:
         if role not in ("user", "assistant"):
             return False
         ts = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "WITH conv AS ("
-                "UPDATE branding_conversations SET updated_at = %s "
-                "WHERE conversation_id = %s RETURNING conversation_id) "
-                "INSERT INTO branding_conv_messages (conversation_id, role, content, timestamp) "
-                "SELECT conversation_id, %s, %s, %s FROM conv RETURNING id",
-                (ts, conversation_id, role, content, ts),
-            )
-            return cur.fetchone() is not None
+        row = self._fetch_one(
+            "WITH conv AS ("
+            "UPDATE branding_conversations SET updated_at = %s "
+            "WHERE conversation_id = %s RETURNING conversation_id) "
+            "INSERT INTO branding_conv_messages (conversation_id, role, content, timestamp) "
+            "SELECT conversation_id, %s, %s, %s FROM conv RETURNING id",
+            (ts, conversation_id, role, content, ts),
+        )
+        return row is not None
 
     @timed_query(store=_STORE, op="update_mission")
     def update_mission(self, conversation_id: str, mission: BrandingMission) -> bool:
+        """Replace the mission JSON for a conversation and bump ``updated_at``.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string; ``mission`` is a valid
+            :class:`BrandingMission`.
+        Postconditions:
+            Returns True iff a matching conversation row was updated; False
+            when no such conversation exists.
+        """
         ts = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
+        return (
+            self._execute(
                 "UPDATE branding_conversations SET mission_json = %s, updated_at = %s "
                 "WHERE conversation_id = %s",
                 (Json(mission.model_dump(mode="json")), ts, conversation_id),
             )
-            return cur.rowcount > 0
+            > 0
+        )
 
     @timed_query(store=_STORE, op="update_output")
     def update_output(self, conversation_id: str, output: Optional[TeamOutput]) -> bool:
+        """Set or clear the latest team output for a conversation.
+
+        Passing ``output=None`` clears ``latest_output_json``.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string; ``output`` is None or a
+            valid :class:`TeamOutput`.
+        Postconditions:
+            Returns True iff a matching conversation row was updated; False
+            when no such conversation exists. ``updated_at`` is bumped on
+            success.
+        """
         output_dict = output.model_dump(mode="json") if output else None
         ts = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
+        return (
+            self._execute(
                 "UPDATE branding_conversations SET latest_output_json = %s, updated_at = %s "
                 "WHERE conversation_id = %s",
                 (
@@ -255,18 +292,32 @@ class BrandingConversationStore:
                     conversation_id,
                 ),
             )
-            return cur.rowcount > 0
+            > 0
+        )
 
     @timed_query(store=_STORE, op="set_brand")
     def set_brand(self, conversation_id: str, brand_id: Optional[str]) -> bool:
+        """Attach or detach a conversation from a brand.
+
+        Passing ``brand_id=None`` clears the association.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string; ``brand_id`` is None or
+            a brand id string.
+        Postconditions:
+            Returns True iff a matching conversation row was updated; False
+            when no such conversation exists. ``updated_at`` is bumped on
+            success.
+        """
         ts = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
+        return (
+            self._execute(
                 "UPDATE branding_conversations SET brand_id = %s, updated_at = %s "
                 "WHERE conversation_id = %s",
                 (brand_id, ts, conversation_id),
             )
-            return cur.rowcount > 0
+            > 0
+        )
 
     @timed_query(store=_STORE, op="get_by_brand_id")
     def get_by_brand_id(
@@ -277,16 +328,14 @@ class BrandingConversationStore:
         Single ``LEFT JOIN`` load (conversation + messages) — same pattern as
         :meth:`get_state`, keyed by brand id.
         """
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT c.conversation_id, c.mission_json, c.latest_output_json, "
-                "m.role, m.content, m.timestamp "
-                "FROM branding_conversations c "
-                "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
-                "WHERE c.brand_id = %s ORDER BY m.id",
-                (brand_id,),
-            )
-            rows = cur.fetchall()
+        rows = self._fetch_all(
+            "SELECT c.conversation_id, c.mission_json, c.latest_output_json, "
+            "m.role, m.content, m.timestamp "
+            "FROM branding_conversations c "
+            "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
+            "WHERE c.brand_id = %s ORDER BY m.id",
+            (brand_id,),
+        )
         if not rows:
             return None
         cid = str(rows[0]["conversation_id"])
@@ -295,32 +344,33 @@ class BrandingConversationStore:
 
     @timed_query(store=_STORE, op="list_conversations")
     def list_conversations(self, brand_id: Optional[str] = None) -> List[ConversationSummary]:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            if brand_id:
-                cur.execute(
-                    """
-                    SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at,
-                           COUNT(m.id) AS message_count
-                    FROM branding_conversations c
-                    LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id
-                    WHERE c.brand_id = %s
-                    GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
-                    ORDER BY c.updated_at DESC
-                    """,
-                    (brand_id,),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at,
-                           COUNT(m.id) AS message_count
-                    FROM branding_conversations c
-                    LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id
-                    GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
-                    ORDER BY c.updated_at DESC
-                    """
-                )
-            rows = cur.fetchall()
+        """List conversations, optionally filtered by brand.
+
+        Preconditions:
+            ``brand_id`` is None or a brand id string.
+        Postconditions:
+            Returns summaries ordered by most recently updated first (empty
+            when none match). When ``brand_id`` is set, only conversations
+            attached to that brand are included; ``message_count`` is the
+            number of rows in ``branding_conv_messages`` for each conversation.
+        """
+        params: list[Any] = []
+        where_clause = ""
+        if brand_id:
+            where_clause = "WHERE c.brand_id = %s"
+            params.append(brand_id)
+        rows = self._fetch_all(
+            f"""
+            SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at,
+                   COUNT(m.id) AS message_count
+            FROM branding_conversations c
+            LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id
+            {where_clause}
+            GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
+            ORDER BY c.updated_at DESC
+            """,
+            params,
+        )
         return [
             ConversationSummary(
                 conversation_id=str(r["conversation_id"]),
@@ -334,15 +384,21 @@ class BrandingConversationStore:
 
     @timed_query(store=_STORE, op="get_conversation_brand_id")
     def get_conversation_brand_id(self, conversation_id: str) -> Optional[str]:
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT brand_id FROM branding_conversations WHERE conversation_id = %s",
-                (conversation_id,),
-            )
-            row = cur.fetchone()
-        if row is None or not row[0]:
+        """Return the brand id associated with a conversation, if any.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string.
+        Postconditions:
+            Returns the associated brand id as a string, or None when the
+            conversation does not exist or has no brand attached.
+        """
+        row = self._fetch_one(
+            "SELECT brand_id FROM branding_conversations WHERE conversation_id = %s",
+            (conversation_id,),
+        )
+        if row is None or not row["brand_id"]:
             return None
-        return str(row[0])
+        return str(row["brand_id"])
 
 
 # ---------------------------------------------------------------------------

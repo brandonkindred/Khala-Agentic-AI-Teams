@@ -138,7 +138,8 @@ def attach_conversation_to_brand(
     state = _main.conversation_store.get_state(conversation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    _main.conversation_store.set_brand(conversation_id, brand_id)
+    if not _main.conversation_store.set_brand(conversation_id, brand_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     return _conversation_to_response(
         conversation_id, brand_id, state.messages, state.mission, state.latest_output, []
     )

@@ -736,7 +736,8 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 """Fail the phase when any assembled quality gate is ``fail``.
 
                 Preconditions: ``quality_gates``, ``devsec``, ``change_review``,
-                  and ``val`` are set by Phase 4 setup above.
+                  ``val``, ``task_spec``, and ``aggregated_artifacts`` are set by
+                  Phase 4 setup above.
                 Postconditions: returns the blocked ``DevOpsTeamResult`` with the
                   existing completion-package shape when any gate fails; otherwise
                   ``None``.
