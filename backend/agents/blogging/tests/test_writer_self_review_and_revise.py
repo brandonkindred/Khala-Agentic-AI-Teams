@@ -169,6 +169,30 @@ def test_writer_llm_self_review_object_with_nested_arrays_returns_draft(monkeypa
     assert calls["n"] == 1
 
 
+def test_writer_llm_self_review_fenced_object_before_array_applies_fixes(monkeypatch) -> None:
+    """An unrelated fenced object must not hide a later issues array."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        'Example metadata:\n```json\n{"status": "example"}\n```\n'
+        "Actual issues:\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
 def test_writer_llm_self_review_prose_prefixed_array_applies_fixes(monkeypatch) -> None:
     """Unfenced prose before a valid issues array must still apply fixes."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
@@ -176,8 +200,7 @@ def test_writer_llm_self_review_prose_prefixed_array_applies_fixes(monkeypatch) 
     a = _make_agent_with_guidelines()
     state = {"i": 0}
     review_payload = (
-        "Here are the issues: "
-        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+        'Here are the issues: [{"location": "intro", "issue": "vague", "fix": "be specific"}]'
     )
 
     def fake(self, prompt, system_prompt=""):
@@ -376,6 +399,15 @@ def test_writer_revise_empty_draft() -> None:
     assert out.draft == "   "
 
 
+def test_writer_revise_none_draft_is_treated_as_empty() -> None:
+    """Defensively normalize a model-constructed None draft to an empty string."""
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+
+    a = _make_agent_with_guidelines()
+    revise_input = ReviseWriterInput.model_construct(draft=None, feedback_items=[])
+    assert a.revise(revise_input).draft == ""
+
+
 def test_writer_revise_no_feedback_items() -> None:
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
@@ -515,9 +547,7 @@ def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) 
     assert any(r.exc_info is not None for r in caplog.records)
 
 
-def test_writer_llm_self_review_malformed_bracket_text_returns_draft(
-    monkeypatch, caplog
-) -> None:
+def test_writer_llm_self_review_malformed_bracket_text_returns_draft(monkeypatch, caplog) -> None:
     """Malformed bracket text is treated as no issues, not an exception soft-fail."""
     import logging
 
@@ -532,9 +562,7 @@ def test_writer_llm_self_review_malformed_bracket_text_returns_draft(
     with caplog.at_level(logging.INFO):
         out = a._llm_self_review("orig")
     assert out == "orig"
-    assert any(
-        "response was not a JSON array" in r.message for r in caplog.records
-    )
+    assert any("response was not a JSON array" in r.message for r in caplog.records)
     assert not any("LLM self-review failed" in r.message for r in caplog.records)
 
 

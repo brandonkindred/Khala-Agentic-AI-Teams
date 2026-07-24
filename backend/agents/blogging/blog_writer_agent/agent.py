@@ -57,9 +57,7 @@ from .prompts import (
 
 logger = logging.getLogger(__name__)
 
-_PLACEHOLDER_DRAFT = (
-    "# Draft\n\nNo draft was generated. Check the model response or try again."
-)
+_PLACEHOLDER_DRAFT = "# Draft\n\nNo draft was generated. Check the model response or try again."
 
 # ---------------------------------------------------------------------------
 # Deterministic compliance constants
@@ -128,7 +126,7 @@ def _unwrap_llm_cause(exc: BaseException) -> BaseException:
     return exc
 
 
-def _extract_draft_after_marker(raw_response: str) -> str:
+def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
     """
     Extract draft content from model output that uses the hybrid format:
     first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
@@ -165,15 +163,19 @@ def _extract_json_array_from_text(text: str) -> Optional[list]:
           ``[label](url)`` are skipped when they are not valid JSON arrays.
     """
     decoder = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch != "[":
-            continue
+    search_from = 0
+    while True:
+        i = text.find("[", search_from)
+        if i == -1:
+            break
         try:
             value, _end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
+            search_from = i + 1
             continue
         if isinstance(value, list):
             return value
+        search_from = i + 1
     return None
 
 
@@ -183,14 +185,17 @@ def _looks_like_top_level_json_object(text: str) -> bool:
     Preconditions:
         - ``text`` is a string (may be empty).
     Postconditions:
-        - Returns True if the stripped text (or its first fenced code block body)
-          begins with ``{``; otherwise False.
+        - Returns True only when the entire stripped response is a JSON object;
+          prose and fenced snippets are not treated as top-level objects.
     """
     candidate = text.strip()
-    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", candidate, flags=re.IGNORECASE)
-    if fence:
-        candidate = fence.group(1).strip()
-    return candidate.startswith("{")
+    if not candidate.startswith("{"):
+        return False
+    try:
+        value, end = json.JSONDecoder().raw_decode(candidate)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, dict) and not candidate[end:].strip()
 
 
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
@@ -556,9 +561,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 if isinstance(parsed, list):
                     issues = parsed
                 elif _looks_like_top_level_json_object(cleaned):
-                    logger.info(
-                        "LLM self-review: no issues found (response was not a JSON array)"
-                    )
+                    logger.info("LLM self-review: no issues found (response was not a JSON array)")
                     return draft
                 else:
                     issues = _extract_json_array_from_text(cleaned)
@@ -992,6 +995,12 @@ class BlogWriterAgent(_BlogAgentBase):
         feedback_items: list[Any],
         revise_input: ReviseWriterInput,
     ) -> RevisionPlan:
+        """Build a structured revision plan, with a plain-text fallback.
+
+        Calls the JSON-oriented LLM path first and converts its response to a
+        ``RevisionPlan``. Non-transient structured-call failures fall back to a
+        plain-text plan; transient LLM errors are unwrapped and re-raised.
+        """
         prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
         try:
             data = self._call_agent_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
@@ -1128,6 +1137,8 @@ class BlogWriterAgent(_BlogAgentBase):
                     return revised.strip()
             except LLMJsonParseError as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
+                if attempt == 0:
+                    time.sleep(0.5)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
@@ -1184,10 +1195,11 @@ class BlogWriterAgent(_BlogAgentBase):
                Persisted as *draft_output_path* (e.g. ``draft_v{iteration}.md``).
         """
         self._assert_guidelines_present()
-        draft = revise_input.draft.strip()
+        original_draft = revise_input.draft or ""
+        draft = original_draft.strip()
         if not draft:
             logger.warning("Empty draft in revise; returning as-is.")
-            return WriterOutput(draft=revise_input.draft)
+            return WriterOutput(draft=original_draft)
         if not revise_input.feedback_items:
             logger.info("No feedback items; returning draft unchanged.")
             return WriterOutput(draft=draft)
@@ -1275,9 +1287,7 @@ class BlogWriterAgent(_BlogAgentBase):
             except (LLMRateLimitError, LLMTemporaryError):
                 raise
             except Exception as e:
-                logger.warning(
-                    "Batch revise JSON fallback failed: %s; keeping original draft.", e
-                )
+                logger.warning("Batch revise JSON fallback failed: %s; keeping original draft.", e)
 
         logger.info(
             "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
