@@ -33,6 +33,7 @@ from llm_service import (
     extract_json_from_response,
 )
 
+from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS
 from .models import (
     ReviseWriterInput,
     RevisionPlan,
@@ -621,11 +622,27 @@ class BlogWriterAgent(_BlogAgentBase):
         return WriterOutput(draft=draft)
 
     def _format_feedback_item_line(self, item: Any, index: int) -> str:
-        """One numbered feedback line (+ optional suggestion) for batch revise prompts."""
-        loc = f" [{item.location}]" if getattr(item, "location", None) else ""
-        line = f"{index}. [{item.severity}] {item.category}{loc}: {item.issue}"
-        if getattr(item, "suggestion", None):
-            line += f"\n   Suggestion: {item.suggestion}"
+        """One numbered feedback line (+ optional suggestion) for batch revise prompts.
+
+        Preconditions:
+            ``index`` is a positive int. ``item`` exposes ``severity``, ``category``,
+            and ``issue`` (via attribute or duck typing); empty/missing values are
+            rejected. ``location`` and ``suggestion`` are optional.
+        Postconditions:
+            Returns a numbered feedback line; includes a location bracket and a
+            suggestion sub-line when those optional fields are present.
+        """
+        severity = getattr(item, "severity", None)
+        category = getattr(item, "category", None)
+        issue = getattr(item, "issue", None)
+        if not all([severity, category, issue]):
+            raise ValueError(f"Feedback item missing required fields: {item!r}")
+        location = getattr(item, "location", None)
+        loc = f" [{location}]" if location else ""
+        line = f"{index}. [{severity}] {category}{loc}: {issue}"
+        suggestion = getattr(item, "suggestion", None)
+        if suggestion:
+            line += f"\n   Suggestion: {suggestion}"
         return line
 
     def _build_revise_all_items_prompt(
@@ -710,7 +727,9 @@ class BlogWriterAgent(_BlogAgentBase):
         )
         if revise_input.previous_feedback_items:  # pragma: no cover - prompt-assembly branch when previous_feedback_items are supplied; covered by integration tests that exercise the revise loop end-to-end.
             prev_lines = []
-            for i, item in enumerate(revise_input.previous_feedback_items[:10], 1):
+            for i, item in enumerate(
+                revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
+            ):
                 loc = f" [{item.location}]" if item.location else ""
                 prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
             prompt_parts.extend(
@@ -775,6 +794,22 @@ class BlogWriterAgent(_BlogAgentBase):
     def _build_revision_plan_prompt(
         self, draft: str, feedback_items: list[Any], revise_input: ReviseWriterInput
     ) -> str:
+        """Build a prompt that asks the LLM for a structured revision plan.
+
+        Preconditions:
+            - ``draft`` is the current Markdown draft text.
+            - ``feedback_items`` is a sequence of items that each expose
+              ``severity``, ``category``, and ``issue`` (and optionally
+              ``location`` / ``suggestion``) for ``_format_feedback_item_line``.
+            - ``revise_input`` provides the content plan via
+              ``outline_for_prompt()``.
+        Postconditions:
+            - Returns a prompt string that instructs the model to return JSON
+              matching the ``RevisionPlan`` schema (``summary``, ordered
+              ``changes`` with ``section`` / ``feedback_ids`` / ``action`` /
+              ``rationale``, and ``risks``), with feedback referenced by
+              1-based index and ``must_fix`` severity prioritized.
+        """
         feedback_lines = [
             self._format_feedback_item_line(item, i)
             for i, item in enumerate(feedback_items, start=1)
