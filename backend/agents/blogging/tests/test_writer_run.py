@@ -92,6 +92,53 @@ def test_writer_run_no_marker_returns_placeholder(monkeypatch) -> None:
     assert "No draft was generated" in out.draft
 
 
+def test_writer_run_placeholder_skips_self_review(monkeypatch) -> None:
+    """Empty draft uses ``_PLACEHOLDER_DRAFT`` and does not invoke self-review."""
+    from agents.blogging.blog_writer_agent.agent import (
+        _PLACEHOLDER_DRAFT,
+        BlogWriterAgent,
+    )
+
+    a = _agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": "no marker text",
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_self_review",
+        lambda self, d: calls.append(d) or d,
+    )
+    out = a.run(_writer_input())
+    assert out.draft == _PLACEHOLDER_DRAFT
+    assert calls == []
+
+
+def test_writer_run_old_short_prefix_still_self_reviews(monkeypatch) -> None:
+    """A draft matching only the old short prefix still runs self-review."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _agent()
+    body = "# Draft\n\nNo draft yet — waiting on research."
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": f'{{"draft": 0}}\n---DRAFT---\n{body}',
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_self_review",
+        lambda self, d: calls.append(d) or d,
+    )
+    out = a.run(_writer_input())
+    assert out.draft == body
+    assert calls == [body]
+
+
 def test_writer_run_call_agent_throws_then_json_fallback(monkeypatch) -> None:
     """_call_agent raises; _call_agent_json succeeds with a draft."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
@@ -184,7 +231,7 @@ def test_writer_revise_single_item_happy(monkeypatch) -> None:
 
 
 def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
-    """All text attempts fail; JSON fallback helper succeeds."""
+    """Text path yields no draft marker; JSON fallback helper succeeds."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
@@ -197,10 +244,9 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
-    def boom(self, p, system_prompt=""):
-        raise RuntimeError("transient")
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
+    )
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
@@ -227,8 +273,8 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     assert "Recovered" in out
 
 
-def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -> None:
-    """All retries + fallback fail → original draft returned."""
+def test_writer_revise_single_item_programming_error_propagates(monkeypatch) -> None:
+    """Non-transient errors from the text path must not be retried as transient."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
@@ -242,9 +288,93 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
     def boom(self, p, system_prompt=""):
-        raise RuntimeError("nope")
+        raise RuntimeError("programmer bug")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    item = FeedbackItem(category="x", severity="minor", issue="i")
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    ri = ReviseWriterInput(
+        draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
+    )
+    with pytest.raises(RuntimeError, match="programmer bug"):
+        a._revise_single_item(
+            draft="# Orig\nBody.",
+            item=item,
+            item_index=1,
+            total_items=1,
+            style_guide_text="style",
+            revise_input=ri,
+        )
+
+
+def test_writer_revise_single_item_transient_retries_then_fallback(monkeypatch) -> None:
+    """LLMTemporaryError on the text path is retried, then JSON fallback may recover."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import LLMTemporaryError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise LLMTemporaryError("503")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# Recovered transient",
+    )
+    item = FeedbackItem(category="x", severity="minor", issue="i")
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    ri = ReviseWriterInput(
+        draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
+    )
+    out = a._revise_single_item(
+        draft="# Orig",
+        item=item,
+        item_index=1,
+        total_items=1,
+        style_guide_text="style",
+        revise_input=ri,
+    )
+    assert "Recovered transient" in out
+
+
+def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -> None:
+    """Empty text responses + failed fallback → original draft returned."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    monkeypatch.setattr(
+        BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
+    )
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
@@ -281,13 +411,13 @@ def test_writer_revise_single_item_fallback_unexpected_keeps_original(monkeypatc
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
-    def boom_text(self, p, system_prompt=""):
-        raise RuntimeError("nope")
+    monkeypatch.setattr(
+        BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
+    )
 
     def boom_fallback(self, p):
         raise RuntimeError("fallback boom")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom_text)
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
@@ -326,13 +456,13 @@ def test_writer_revise_single_item_fallback_transient_reraises(monkeypatch) -> N
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
 
-    def boom_text(self, p, system_prompt=""):
-        raise RuntimeError("nope")
+    monkeypatch.setattr(
+        BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
+    )
 
     def boom_fallback(self, p):
         raise LLMRateLimitError("429")
 
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom_text)
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(

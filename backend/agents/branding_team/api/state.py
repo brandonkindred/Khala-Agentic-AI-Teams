@@ -10,7 +10,7 @@ participates in an import cycle.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -22,7 +22,13 @@ from branding_team.api.models import (
     BrandingSession,
     BrandingSessionResponse,
 )
-from branding_team.models import BrandingMission, BrandPhase, TeamOutput
+from branding_team.models import (
+    MISSION_PLACEHOLDERS,
+    BrandingMission,
+    BrandingMissionFields,
+    BrandPhase,
+    TeamOutput,
+)
 from shared.postgres.metrics import timed_query
 
 # ---------------------------------------------------------------------------
@@ -124,10 +130,6 @@ def _parse_target_phase(raw: Optional[str]) -> Optional[BrandPhase]:
         raise HTTPException(status_code=400, detail=f"Invalid target_phase: {raw}")
 
 
-# Sentinel strings the assistant/UI use for a field that has no real value yet.
-_MISSION_PLACEHOLDERS = ("TBD", "To be discussed.", "—", "")
-
-
 def _is_real_value(value: Optional[str]) -> bool:
     """True when *value* is a real (non-placeholder) string.
 
@@ -135,9 +137,9 @@ def _is_real_value(value: Optional[str]) -> bool:
         ``value`` is a string or None.
     Postconditions:
         Returns True iff the stripped value is non-empty and not one of the
-        known placeholder sentinels (``_MISSION_PLACEHOLDERS``).
+        known placeholder sentinels (``MISSION_PLACEHOLDERS``).
     """
-    return (value or "").strip() not in _MISSION_PLACEHOLDERS
+    return (value or "").strip() not in MISSION_PLACEHOLDERS
 
 
 def _mission_has_brand_name(mission: BrandingMission) -> bool:
@@ -154,29 +156,18 @@ def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
     )
 
 
-def _mission_from_payload(payload: Any) -> BrandingMission:
+def _mission_from_payload(payload: BrandingMissionFields) -> BrandingMission:
     """Build a ``BrandingMission`` from a create/run request payload.
 
     Preconditions:
-        ``payload`` exposes the eight mission fields (``company_name``,
-        ``company_description``, ``target_audience``, ``values``,
-        ``differentiators``, ``desired_voice``, ``existing_brand_material``,
-        ``wiki_path``) — satisfied by ``CreateBrandRequest`` and
-        ``RunBrandingTeamRequest``.
+        ``payload`` is a ``BrandingMissionFields`` instance (satisfied by
+        ``CreateBrandRequest`` and ``RunBrandingTeamRequest``).
     Postconditions:
-        Returns a ``BrandingMission`` populated from those fields; performs no
+        Returns a ``BrandingMission`` built from ``payload.mission_fields()``;
+        visual-identity fields use ``BrandingMission`` defaults; performs no
         I/O and does not mutate ``payload``.
     """
-    return BrandingMission(
-        company_name=payload.company_name,
-        company_description=payload.company_description,
-        target_audience=payload.target_audience,
-        values=payload.values,
-        differentiators=payload.differentiators,
-        desired_voice=payload.desired_voice,
-        existing_brand_material=payload.existing_brand_material,
-        wiki_path=payload.wiki_path,
-    )
+    return BrandingMission(**payload.mission_fields())
 
 
 def _build_open_questions(mission: BrandingMission) -> List[BrandingQuestion]:

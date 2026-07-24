@@ -1055,6 +1055,108 @@ def test_ollama_chat_round_returns_tool_calls_when_tools_present(
     assert result["__tool_calls__"][0]["function"]["name"] == "do_thing"
 
 
+def test_ollama_chat_json_self_corrects_prose_when_tools_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With tools present, response_format=json_object cannot be set on the wire,
+    so models sometimes emit analysis prose. chat(response_format=\"json\") must
+    perform one corrective follow-up that recovers a JSON object instead of
+    raising LLMJsonParseError (code_review Strands tool-loop failure mode).
+    """
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    prose = (
+        "I'll analyze the file structure you've provided to understand the "
+        "project's architecture and components.\n\n## Core Architecture"
+    )
+    prose_sse = [
+        f'data: {{"choices":[{{"delta":{{"content":{json.dumps(prose)}}},"finish_reason":null}}]}}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    json_sse = [
+        'data: {"choices":[{"delta":{"content":"{\\"findings\\": []}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_files",
+                "description": "List files",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    mock_client = _multi_attempt_client(
+        [_stream_cm(200, prose_sse), _stream_cm(200, json_sse)]
+    )
+    captured: list[dict] = []
+    original_stream = mock_client.__enter__.return_value.stream
+
+    def capturing_stream(method, url, json=None, headers=None):
+        if json is not None:
+            captured.append(json)
+        return original_stream(method, url, json=json, headers=headers)
+
+    mock_client.__enter__.return_value.stream = capturing_stream
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.chat(
+            [{"role": "user", "content": "review this"}],
+            objective="strands agent turn (code_review)",
+            response_format="json",
+            tools=tools,
+            temperature=0.0,
+        )
+    assert result == {"findings": []}
+    assert len(captured) == 2
+    # First attempt: tools present, no response_format (OpenAI-compat mutual exclusion).
+    assert "tools" in captured[0]
+    assert "response_format" not in captured[0]
+    # Corrective attempt keeps tools and appends a rejection of the prose turn.
+    assert "tools" in captured[1]
+    msgs = captured[1]["messages"]
+    assert msgs[-2]["role"] == "assistant"
+    assert "architecture" in msgs[-2]["content"]
+    assert msgs[-1]["role"] == "user"
+    assert "rejected" in msgs[-1]["content"].lower()
+    assert "json" in msgs[-1]["content"].lower()
+
+
+def test_ollama_chat_json_self_correct_exhausted_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the corrective follow-up is also non-JSON prose, re-raise LLMJsonParseError
+    after exactly one corrective attempt (two total stream calls)."""
+    from llm_service.interface import LLMJsonParseError
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    prose = "Still thinking about the architecture in markdown."
+    prose_sse = [
+        f'data: {{"choices":[{{"delta":{{"content":{json.dumps(prose)}}},"finish_reason":null}}]}}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    tools = [{"type": "function", "function": {"name": "list_files", "parameters": {}}}]
+    mock_client = _multi_attempt_client(
+        [_stream_cm(200, prose_sse), _stream_cm(200, prose_sse)]
+    )
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMJsonParseError):
+            client.chat(
+                [{"role": "user", "content": "review this"}],
+                objective="strands agent turn (code_review)",
+                response_format="json",
+                tools=tools,
+                temperature=0.0,
+            )
+    assert mock_client.__enter__.return_value.stream.call_count == 2
+
+
 def test_ollama_get_max_context_tokens_deepseek_v4_pro(monkeypatch: pytest.MonkeyPatch) -> None:
     """deepseek-v4-pro:cloud has a 1M-token context window; the registry must
     reflect it so context-sizing scales prompts to the real budget instead of

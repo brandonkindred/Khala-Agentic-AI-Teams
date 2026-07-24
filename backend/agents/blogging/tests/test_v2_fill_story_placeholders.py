@@ -61,6 +61,31 @@ def _make_stub_draft_agent(draft_text: str):
     return _StubAgent
 
 
+def _valid_fill_kwargs(**overrides):
+    """Minimal valid kwargs for `_fill_story_placeholders` guard tests.
+
+    Preconditions:
+        - Overrides only replace keys that `_fill_story_placeholders` accepts.
+    Postconditions:
+        - Returns a complete kwargs dict that satisfies the happy-path contract
+          unless an override intentionally violates it.
+    """
+    base = dict(
+        draft_text="# Draft\nBody with no placeholders.",
+        plan=_plan(),
+        llm_client=object(),
+        job_id="j1",
+        job_updater=lambda **kw: None,
+        elicited_stories_text=None,
+        draft_agent=_make_stub_draft_agent("unused")(),
+        draft_input_kwargs={},
+        work_dir=None,
+        iteration=1,
+    )
+    base.update(overrides)
+    return base
+
+
 def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> None:
     """When no [Author: ...] placeholders exist, return original draft and stories."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
@@ -74,7 +99,7 @@ def test_fill_story_placeholders_no_placeholders_returns_input(monkeypatch) -> N
         job_id="j1",
         job_updater=lambda **kw: None,
         elicited_stories_text="existing stories",
-        draft_agent=object(),
+        draft_agent=_make_stub_draft_agent("unused")(),
         draft_input_kwargs={},
         work_dir=None,
         iteration=1,
@@ -267,3 +292,55 @@ def test_fill_story_placeholders_cancelled_break(monkeypatch, tmp_path) -> None:
     )
     # Original kept (no narratives, no skipped → returns WriterOutput with original draft)
     assert "[Author:" in out_draft.draft
+
+
+def test_fill_story_placeholders_rejects_non_str_draft_text() -> None:
+    """draft_text must be a str — fail before placeholder scanning."""
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
+
+    with pytest.raises(TypeError, match="draft_text must be a string"):
+        _fill_story_placeholders(**_valid_fill_kwargs(draft_text=123))  # type: ignore[arg-type]
+
+
+def test_fill_story_placeholders_rejects_elicited_stories_in_kwargs() -> None:
+    """draft_input_kwargs must not already contain elicited_stories."""
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
+
+    with pytest.raises(ValueError, match="elicited_stories"):
+        _fill_story_placeholders(
+            **_valid_fill_kwargs(draft_input_kwargs={"elicited_stories": "pre-set"})
+        )
+
+
+def test_fill_story_placeholders_rejects_non_content_plan() -> None:
+    """plan must be a ContentPlan instance."""
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
+
+    with pytest.raises(TypeError, match="ContentPlan"):
+        _fill_story_placeholders(**_valid_fill_kwargs(plan=object()))  # type: ignore[arg-type]
+
+
+def test_fill_story_placeholders_rejects_none_llm_client() -> None:
+    """llm_client must not be None."""
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
+
+    with pytest.raises(TypeError, match="llm_client must not be None"):
+        _fill_story_placeholders(**_valid_fill_kwargs(llm_client=None))
+
+
+def test_fill_story_placeholders_rejects_draft_agent_without_run() -> None:
+    """draft_agent must provide a callable run method."""
+    from agents.blogging.agent_implementations.blog_writing_process_v2 import (
+        _fill_story_placeholders,
+    )
+
+    with pytest.raises(TypeError, match="callable run"):
+        _fill_story_placeholders(**_valid_fill_kwargs(draft_agent=object()))  # type: ignore[arg-type]

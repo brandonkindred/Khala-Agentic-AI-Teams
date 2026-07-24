@@ -40,7 +40,7 @@ EVENT_WAIT_TIMEOUT = 60  # seconds — safety net for event-based waiting
 MAX_ROUNDS = 5  # hard cap for pre-draft interviews
 MAX_ROUNDS_POST_DRAFT = 50  # hard safety cap for post-draft interviews
 
-_JSON_RETRY_SUFFIX = "\n\nRespond with a single JSON object only (no markdown, no code fences)."
+_JSON_RETRY_SUFFIX = "\n\nRespond with valid JSON only (no markdown, no code fences)."
 
 # ---------------------------------------------------------------------------
 # Prompt: find story gaps in the content plan
@@ -727,7 +727,21 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
         conversation: List[Dict[str, str]],
         story_context: Optional[str] = None,
     ) -> Optional[str]:
-        """Compile the final narrative from the full conversation using a dedicated narrator."""
+        """
+        Compile the final first-person narrative from the full conversation.
+
+        Preconditions:
+            - ``gap`` provides section context for the narrator prompt.
+            - ``conversation`` is a list of ``{"role", "content"}`` turns.
+            - ``story_context`` is optional (``personal``, ``client``, ``employer``,
+              or unrecognized / omitted for no tone hint).
+        Postconditions:
+            - Returns the compiled narrative string, or ``None`` when there is no
+              non-empty user content, the narrator returns blank text, or the
+              narrator fails after one retry.
+            - On a narrator exception, waits ``time.sleep(2.0)`` once before the
+              retry; after the second failure, returns ``None``.
+        """
         user_content = " ".join(
             m["content"] for m in conversation if m["role"] == "user" and m.get("content")
         )
@@ -776,7 +790,6 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                     continue
                 logger.warning("Ghost writer narrator error after retry: %s", e)
                 return None
-        return None
 
     # ------------------------------------------------------------------
     # Helpers

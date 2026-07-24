@@ -17,6 +17,7 @@ from software_engineering_team.devops_team import (
     DevOpsTeamResult,
 )
 from software_engineering_team.devops_team.models import (
+    CriterionTrace,
     DevOpsCompletionPackage,
     DevOpsConstraints,
     PlatformScope,
@@ -27,6 +28,7 @@ from software_engineering_team.devops_team.models import (
 from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
+    _criterion_traces_from_phase4,
 )
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
@@ -129,10 +131,15 @@ def _base_task_spec(**overrides) -> DevOpsTaskSpec:
     return DevOpsTaskSpec(**defaults)
 
 
-def _scripted_llm_for_happy_path() -> _ScriptedClient:
+def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _ScriptedClient:
     """Script a full DevOps pipeline run: one response per sub-agent call in
     orchestrator order (task_clarifier, iac, cicd, deployment, infra_debug,
-    devsecops, change_review, test_validation, doc_runbook)."""
+    devsecops, change_review, test_validation, doc_runbook).
+
+    ``alerting_configured`` is set only on the deployment-strategy response.
+    The doc_runbook LLM payload intentionally omits it — the doc agent uses a
+    Python-side ``False`` placeholder that Phase 5 overwrites from deploy output.
+    """
     return _ScriptedClient(
         [
             {"approved_for_execution": True, "checklist": []},
@@ -151,6 +158,7 @@ def _scripted_llm_for_happy_path() -> _ScriptedClient:
                 "summary": "deploy ok",
                 "strategy": "rolling",
                 "rollback_plan": ["helm rollback"],
+                "alerting_configured": alerting_configured,
             },
             # Debug agent (execution tools fail because terraform CLI is not installed)
             {
@@ -163,7 +171,13 @@ def _scripted_llm_for_happy_path() -> _ScriptedClient:
             {
                 "approved": True,
                 "quality_gates": {"iac_validate": "pass", "policy_checks": "pass"},
-                "acceptance_trace": [],
+                "acceptance_trace": [
+                    {
+                        "criterion": "Pipeline runs tests and scan before deploy",
+                        "implementation_refs": ["infra/main.tf"],
+                        "tests": [{"iac_validate": "pass"}],
+                    }
+                ],
                 "summary": "validation ok",
             },
             {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
@@ -727,6 +741,73 @@ class TestDeploymentStrategyAgent:
         assert out.strategy == "rolling"
         assert len(out.rollback_plan) == 1
         assert out.rollout_timeout_minutes == 10
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_missing_defaults_false(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"strategy": "rolling", "summary": "ok"},
+        )
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_false(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": False},
+        )
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_true(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": True},
+        )
+        assert out.alerting_configured is True
+
+    def test_build_output_alerting_configured_string_false_is_false(self) -> None:
+        """Schema-drift ``\"false\"`` must not become True via Python truthiness."""
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": "false"},
+        )
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_string_true_is_true(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": "TRUE"},
+        )
+        assert out.alerting_configured is True
 
 
 class TestDevSecOpsReviewAgent:
@@ -1175,6 +1256,77 @@ class TestDocumentationRunbookAgent:
         )
         assert out.completion_package.task_id == "DO-1"
         assert "docs/runbook.md" in out.files
+        assert out.completion_package.release_readiness.alerting_configured is False
+
+
+# ===========================================================================
+# UNIT TESTS -- PHASE 4 CRITERION TRACE MAPPER
+# ===========================================================================
+
+
+class TestCriterionTracesFromPhase4:
+    """Unit tests for the Phase 4 → CriterionTrace mapper."""
+
+    def test_match_uses_phase4_entry(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1", "c2"],
+            acceptance_trace=[
+                {
+                    "criterion": "c1",
+                    "implementation_refs": ["infra/main.tf"],
+                    "tests": [{"iac_validate": "pass"}],
+                }
+            ],
+            artifact_keys=["infra/main.tf", "deploy/values.yaml"],
+        )
+        assert len(traces) == 2
+        assert traces[0].criterion == "c1"
+        assert traces[0].implementation_refs == ["infra/main.tf"]
+        assert traces[0].tests == [{"iac_validate": "pass"}]
+        assert traces[1].criterion == "c2"
+        assert traces[1].tests == []
+        assert traces[1].implementation_refs == [
+            "deploy/values.yaml",
+            "infra/main.tf",
+        ]
+
+    def test_no_match_uses_empty_tests_and_artifact_keys(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["lonely"],
+            acceptance_trace=[],
+            artifact_keys=["a.py"],
+        )
+        assert traces == [
+            CriterionTrace(
+                criterion="lonely",
+                implementation_refs=["a.py"],
+                tests=[],
+            )
+        ]
+
+    def test_coerces_bad_shapes(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1"],
+            acceptance_trace=[
+                {
+                    "criterion": "c1",
+                    "implementation_refs": "not-a-list",
+                    "tests": [{"ok": 1}, "skip-me", {"gate": True}],
+                }
+            ],
+            artifact_keys=["fallback.py"],
+        )
+        assert traces[0].implementation_refs == []
+        assert traces[0].tests == [{"ok": "1"}, {"gate": "True"}]
+
+    def test_never_invents_validation_pass(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1"],
+            acceptance_trace=[],
+            artifact_keys=[],
+        )
+        assert traces[0].tests == []
+        assert {"validation": "pass"} not in traces[0].tests
 
 
 # ===========================================================================
@@ -1372,14 +1524,46 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package.quality_gates["security_review"] == "fail"
 
     def test_completion_package_has_acceptance_trace(self) -> None:
+        from software_engineering_team.devops_team.test_validation_agent.models import (
+            DevOpsTestValidationOutput,
+        )
+
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
+        # Stub Phase 4 validation output directly. The DummyLLM + Strands
+        # structured-output path reuses the prior change-review payload for the
+        # QA acceptance_evidence call, so a scripted ``acceptance_trace`` on the
+        # LLM client does not reach the orchestrator. This test targets Phase 5
+        # wiring, not that adapter quirk.
+        agent.test_validation_agent.run = (  # type: ignore[method-assign]
+            lambda _inp: DevOpsTestValidationOutput(
+                approved=True,
+                quality_gates={"iac_validate": "pass", "policy_checks": "pass"},
+                acceptance_trace=[
+                    {
+                        "criterion": "Pipeline runs tests and scan before deploy",
+                        "implementation_refs": ["infra/main.tf"],
+                        "tests": [{"iac_validate": "pass"}],
+                    }
+                ],
+                summary="validation ok",
+            )
+        )
         pkg = agent.run(spec)
         assert len(pkg.acceptance_criteria_trace) == len(spec.acceptance_criteria)
+
+        by_criterion = {t.criterion: t for t in pkg.acceptance_criteria_trace}
+        matched = by_criterion["Pipeline runs tests and scan before deploy"]
+        assert matched.implementation_refs == ["infra/main.tf"]
+        assert matched.tests == [{"iac_validate": "pass"}]
+
+        unmatched = by_criterion["Prod deploy requires explicit approval"]
+        assert unmatched.tests == []
+        assert len(unmatched.implementation_refs) > 0
+
         for trace in pkg.acceptance_criteria_trace:
-            assert trace.criterion
-            assert len(trace.implementation_refs) > 0
+            assert {"validation": "pass"} not in trace.tests
 
     def test_completion_package_has_release_readiness(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
@@ -1388,6 +1572,17 @@ class TestDevOpsTeamLeadAgentIntegration:
         pkg = agent.run(spec)
         assert pkg.release_readiness.rollback_available
         assert "manual_prod_approval" in pkg.release_readiness.required_approvals
+        assert pkg.release_readiness.alerting_configured is True
+
+    @pytest.mark.parametrize("alerting_configured", [True, False])
+    def test_release_readiness_alerting_follows_deploy_result(
+        self, alerting_configured: bool
+    ) -> None:
+        """Phase 5 copies deploy output, overwriting the doc-agent False placeholder."""
+        mock_llm = _scripted_llm_for_happy_path(alerting_configured=alerting_configured)
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        pkg = agent.run(_base_task_spec())
+        assert pkg.release_readiness.alerting_configured is alerting_configured
 
     def test_completion_package_has_git_operations(self) -> None:
         # A model-only run (``run`` → write_changes=False) performs no git work,

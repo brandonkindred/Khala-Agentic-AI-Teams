@@ -186,7 +186,8 @@ class TeamLeadSharedState:
         Postconditions: if ``_status_callback`` is set, it is invoked once with
           kwargs ``phase``, ``detail``, optional ``progress`` (omitted when
           None), and ``**extra``; callback exceptions are logged and swallowed;
-          if the callback is None, this is a no-op. Never raises into the caller.
+          if the callback is None, this is a no-op. Never raises when
+          preconditions hold.
         """
         assert isinstance(phase, str) and phase, "phase must be a non-empty str"
         callback = self._status_callback

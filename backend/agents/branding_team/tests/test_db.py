@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Json
 
 from branding_team._db import PostgresHelperMixin
@@ -104,3 +105,64 @@ def test_execute_rowcount_reflects_matched_rows(fake_pg: dict) -> None:
         ("brand_1", now, "does_not_exist"),
     )
     assert affected == 0
+
+
+def test_duplicate_session_insert_raises_unique_violation(fake_pg: dict) -> None:
+    """Duplicate branding_sessions insert raises UniqueViolation and keeps the row."""
+    probe = _Probe()
+    now = datetime.now(tz=timezone.utc)
+    original = {"mission": {"company_name": "Acme"}, "questions": []}
+    probe._execute(
+        "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
+        "VALUES (%s, %s, %s)",
+        ("sess_1", Json(original), now),
+    )
+
+    with pytest.raises(UniqueViolation, match="branding_sessions_pkey"):
+        probe._execute(
+            "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
+            "VALUES (%s, %s, %s)",
+            (
+                "sess_1",
+                Json({"mission": {"company_name": "Overwrite"}, "questions": []}),
+                now,
+            ),
+        )
+
+    assert fake_pg["sessions"]["sess_1"]["session_json"] == original
+    assert fake_pg["sessions"]["sess_1"]["updated_at"] is now
+
+
+def test_duplicate_conversation_insert_raises_unique_violation(fake_pg: dict) -> None:
+    """Duplicate branding_conversations insert raises UniqueViolation and keeps the row."""
+    probe = _Probe()
+    now = datetime.now(tz=timezone.utc)
+    original_mission = {"company_name": "Acme"}
+    probe._execute(
+        "INSERT INTO branding_conversations "
+        "(conversation_id, brand_id, mission_json, latest_output_json, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        ("conv_1", None, Json(original_mission), None, now, now),
+    )
+
+    with pytest.raises(UniqueViolation, match="branding_conversations_pkey"):
+        probe._execute(
+            "INSERT INTO branding_conversations "
+            "(conversation_id, brand_id, mission_json, latest_output_json, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                "conv_1",
+                "brand_overwrite",
+                Json({"company_name": "Overwrite"}),
+                Json({"status": "done"}),
+                now,
+                now,
+            ),
+        )
+
+    row = fake_pg["conversations"]["conv_1"]
+    assert row["mission_json"] == original_mission
+    assert row["brand_id"] is None
+    assert row["latest_output_json"] is None
+    assert row["created_at"] is now
+    assert row["updated_at"] is now

@@ -291,6 +291,80 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
     assert "# Fallback" in out.draft
 
 
+def test_revise_from_user_feedback_programming_error_propagates(monkeypatch) -> None:
+    """Non-transient text-path errors must propagate from user-feedback revise."""
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise RuntimeError("programmer bug")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(RuntimeError, match="programmer bug"):
+        a.revise_from_user_feedback(
+            draft="# Original", user_feedback="tighten", content_plan_text="cp"
+        )
+
+
+def test_revise_from_user_feedback_transient_retries_then_fallback(monkeypatch) -> None:
+    """LLMTemporaryError on the text path is retried; JSON fallback may recover."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise LLMTemporaryError("503")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# User Feedback Recovered",
+    )
+    out = a.revise_from_user_feedback(
+        draft="# Original", user_feedback="tighten", content_plan_text="cp"
+    )
+    assert "User Feedback Recovered" in out.draft
+
+def test_revise_from_user_feedback_json_parse_error_skips_sleep(monkeypatch) -> None:
+    """LLMJsonParseError must use the no-sleep handler, not the transient backoff."""
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMJsonParseError
+
+    a = _make_agent()
+    sleep_calls: list[float] = []
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMJsonParseError("bad json", response_preview="x")
+
+    def fail_json(self, p, **kw):
+        raise LLMJsonParseError("bad json", response_preview="x")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", fail_json)
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda secs: sleep_calls.append(secs))
+
+    out = a.revise_from_user_feedback(
+        draft="# Original",
+        user_feedback="tighten the intro",
+        content_plan_text="cp",
+    )
+    assert out.draft == "# Original"
+    assert sleep_calls == []
+
+
 # ---------------------------------------------------------------------------
 # generate_escalation_summary
 # ---------------------------------------------------------------------------
@@ -455,8 +529,50 @@ def test_revise_skips_json_fallback_when_primary_returns_identical_draft(monkeyp
     assert fallback_calls["n"] == 0
 
 
+def test_revise_programming_error_propagates(monkeypatch) -> None:
+    """Non-transient text-path errors must propagate from batch revise."""
+    import pytest
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_generate_revision_plan",
+        lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
+    )
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("programmer bug")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    with pytest.raises(RuntimeError, match="programmer bug"):
+        a.revise(
+            ReviseWriterInput(
+                draft="# Original\nBody",
+                feedback_items=[FeedbackItem(category="x", severity="minor", issue="y")],
+                feedback_summary="s",
+                content_plan=plan,
+            ),
+        )
+
+
 def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
-    """If all retries fail and json fallback fails, return original draft."""
+    """If text yields no draft and json fallback fails, return original draft."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
@@ -472,14 +588,13 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
         lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
     )
 
-    def fail(self, *a, **kw):
-        raise RuntimeError("transient")
-
     # Patch time.sleep to skip waits
     import agents.blogging.blog_writer_agent.agent as wa_mod
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_call_text", lambda self, *a, **kw: "no marker"
+    )
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
 
     plan = make_content_plan(
@@ -518,10 +633,9 @@ def test_revise_batch_uses_json_fallback_when_text_fails(monkeypatch) -> None:
         lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
     )
 
-    def fail(self, *a, **kw):
-        raise RuntimeError("transient")
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_call_text", lambda self, *a, **kw: "no marker"
+    )
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
@@ -542,6 +656,55 @@ def test_revise_batch_uses_json_fallback_when_text_fails(monkeypatch) -> None:
         ),
     )
     assert "Batch Recovered" in out.draft
+
+
+def test_revise_wrapped_temporary_retries_then_fallback(monkeypatch) -> None:
+    """EventLoopException(LLMTemporaryError) is treated as transient and retried."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMTemporaryError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_generate_revision_plan",
+        lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
+    )
+    wrapped = LLMTemporaryError("temporary")
+
+    def boom(self, *a, **kw):
+        raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# Batch Recovered Wrapped",
+    )
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    out = a.revise(
+        ReviseWriterInput(
+            draft="# Original\nBody",
+            feedback_items=[FeedbackItem(category="x", severity="minor", issue="y")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert "Batch Recovered Wrapped" in out.draft
 
 
 def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
