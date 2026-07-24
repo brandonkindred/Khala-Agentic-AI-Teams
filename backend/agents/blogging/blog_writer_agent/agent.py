@@ -486,15 +486,10 @@ class BlogWriterAgent(_BlogAgentBase):
                 f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
             )
             cleaned = raw.strip()
-            # Extract JSON array
-            start = cleaned.find("[")
-            end = cleaned.rfind("]") + 1
-            if start == -1:
-                logger.info("LLM self-review: no issues found (no JSON array)")
+            issues = extract_json_from_response(cleaned)
+            if not isinstance(issues, list):
+                logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft
-            if end <= start:
-                end = len(cleaned)
-            issues = json.loads(cleaned[start:end])
             if not issues:
                 logger.info("LLM self-review: draft passed all 5 checks")
                 return draft

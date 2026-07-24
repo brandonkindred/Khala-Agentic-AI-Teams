@@ -99,6 +99,52 @@ def test_writer_llm_self_review_no_array(monkeypatch) -> None:
     assert out == "draft text"
 
 
+def test_writer_llm_self_review_markdown_link_before_fenced_array(monkeypatch) -> None:
+    """Markdown brackets before a fenced issues array must not block extraction.
+
+    Naive first-``[`` / last-``]`` slicing grabs the Markdown link and fails;
+    ``extract_json_from_response`` reads the fenced JSON array and applies fixes.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "See [docs](https://example.com/guide) for context.\n\n"
+        "```json\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]\n'
+        "```"
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_non_list_json_returns_draft(monkeypatch) -> None:
+    """A JSON object (not an array) is treated as no issues."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    calls = {"n": 0}
+
+    def fake(self, prompt, system_prompt=""):
+        calls["n"] += 1
+        return '{"status": "ok"}'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert out == "draft text"
+    assert calls["n"] == 1
+
+
 def test_writer_llm_self_review_unexpected_error_propagates(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
