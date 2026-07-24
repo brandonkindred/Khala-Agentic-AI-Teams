@@ -1145,6 +1145,21 @@ class BlogWriterAgent(_BlogAgentBase):
                *iteration* is a positive int, otherwise ``revision_plan.json``.
             3. **Execute** — apply the plan to produce the revised draft.
                Persisted as *draft_output_path* (e.g. ``draft_v{iteration}.md``).
+
+        Preconditions:
+            - ``revise_input`` is a ``ReviseWriterInput``.
+            - Brand and writing guidelines have both been loaded
+              (``_assert_guidelines_present``).
+        Postconditions:
+            - Strips leading/trailing whitespace from ``revise_input.draft`` before
+              revision. If the result is empty, returns ``revise_input.draft``
+              unchanged (preserves the caller's original whitespace-only text).
+            - Otherwise returns a ``WriterOutput`` whose draft is the revised text,
+              the stripped draft when feedback is empty, or the stripped draft when
+              the text path and JSON fallback both fail to produce a usable draft.
+            - During batch execute retries, only unwrapped ``LLMRateLimitError`` /
+              ``LLMTemporaryError`` (including ``EventLoopException`` wrappers) are
+              retried with backoff; unexpected exceptions propagate immediately.
         """
         self._assert_guidelines_present()
         draft = revise_input.draft.strip()
