@@ -243,6 +243,86 @@ def test_reject_questions_string_coerced_to_list(agent, monkeypatch) -> None:
     assert rejection.questions == ["Which section feels off?", "What tone do you want?"]
 
 
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_reject_event_loop_exception_unwraps_transient(agent, monkeypatch, kind) -> None:
+    """Wrapped transient LLM errors re-raise the unwrapped cause, not soft-fallback."""
+    from agents.blogging.blog_publication_agent import agent as pub_mod
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+    cause = err_cls("transient outage")
+
+    result = agent.submit_draft(
+        SubmitDraftInput(
+            draft="# Rejected Post\n\nNeeds work.",
+            title="Rejected Post",
+        )
+    )
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise EventLoopException(cause)
+
+    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+
+    with pytest.raises(err_cls) as exc_info:
+        agent.reject(result.submission_id, "Tone is wrong.")
+    assert exc_info.value is cause
+
+
+@pytest.mark.parametrize("kind", ["rate_limit", "temporary"])
+def test_revision_loop_event_loop_exception_unwraps_transient(agent, monkeypatch, kind) -> None:
+    """Convert-step wrapped transient errors re-raise instead of synthesizing feedback."""
+    from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
+    from agents.blogging.blog_publication_agent import agent as pub_mod
+    from agents.blogging.blog_writer_agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if kind == "rate_limit" else LLMTemporaryError
+    cause = err_cls("transient outage")
+
+    result = agent.submit_draft(
+        SubmitDraftInput(
+            draft="# Rejected Post\n\nNeeds work.",
+            title="Rejected Post",
+            audience="developers",
+        )
+    )
+    agent.reject(result.submission_id, "The intro is too short.", force_ready_to_revise=True)
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise EventLoopException(cause)
+
+    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+
+    draft_agent = BlogWriterAgent(
+        llm_client=DummyLLMClient(),
+        writing_style_guide_content="clear",
+        brand_spec_content="brand",
+    )
+    copy_editor_agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
+
+    with pytest.raises(err_cls) as exc_info:
+        agent.run_revision_loop(
+            result.submission_id,
+            draft_agent=draft_agent,
+            copy_editor_agent=copy_editor_agent,
+            audience="developers",
+        )
+    assert exc_info.value is cause
+
+
 def test_revision_loop_convert_json_parse_exhaustion_synthesizes_must_fix(
     agent, temp_blog_root, monkeypatch
 ) -> None:

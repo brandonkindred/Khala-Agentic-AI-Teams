@@ -26,6 +26,7 @@ from agents.blogging.shared.content_plan import (
 )
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
+from strands.types.exceptions import EventLoopException
 
 from .models import (
     ApprovalResult,
@@ -59,6 +60,11 @@ _CONVERT_STRICT_JSON_SUFFIX = (
     'Keys: "feedback_items" (array of objects with category, severity, location?, '
     "issue, suggestion?)."
 )
+
+
+def _unwrap_event_loop(exc: Exception) -> Exception:
+    """Unwrap strands EventLoopException so transient LLM causes re-raise correctly."""
+    return exc.original_exception if isinstance(exc, EventLoopException) else exc
 
 
 def _content_plan_from_outline(outline: str) -> ContentPlan:
@@ -267,6 +273,7 @@ class BlogPublicationAgent(_BlogAgentBase):
             prompt + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=_REJECT_STRICT_JSON_SUFFIX,
+            unwrap_exception=_unwrap_event_loop,
             on_exhausted=_reject_fallback,
             on_unexpected_error=_reject_fallback,
             logger=logger,
@@ -332,6 +339,7 @@ class BlogPublicationAgent(_BlogAgentBase):
             + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=_CONVERT_STRICT_JSON_SUFFIX,
+            unwrap_exception=_unwrap_event_loop,
             on_exhausted=_convert_fallback,
             on_unexpected_error=_convert_fallback,
             logger=logger,
