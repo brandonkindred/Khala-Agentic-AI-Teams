@@ -7,6 +7,7 @@ Define deployment mechanics and release safety:
 - health checks and rollout timeout
 - rollback path and trigger conditions
 - environment-specific sequencing
+- whether alerting is configured for the release
 
 Output JSON:
 - artifacts: object(path -> file_content)
@@ -14,6 +15,7 @@ Output JSON:
 - rollback_plan: list[string]
 - health_checks: list[string]
 - rollout_timeout_minutes: number
+- alerting_configured: boolean
 - summary: string
 
 Return JSON only.

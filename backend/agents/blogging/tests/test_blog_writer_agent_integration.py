@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 import pytest
-from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
+from agents.blogging.blog_writer_agent import WriterInput, WriterOutput
 from agents.blogging.shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -31,6 +31,8 @@ from llm_service import (
     get_client,
     unwrap_client,
 )
+
+from .conftest import make_writer_agent
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +114,7 @@ def test_writer_agent_with_ollama_produces_real_content() -> None:
             "integration test requires the Strands-compatible model interface"
         )
 
-    agent = BlogWriterAgent(
+    agent = make_writer_agent(
         llm_client=client,
         writing_style_guide_content=(
             "Clear, conversational prose: full thoughts in natural-length sentences (~8th grade). "

@@ -19,4 +19,5 @@ class DeploymentStrategyAgentOutput(BaseModel):
     rollback_plan: List[str] = Field(default_factory=list)
     health_checks: List[str] = Field(default_factory=list)
     rollout_timeout_minutes: int = 15
+    alerting_configured: bool = False
     summary: str = ""

@@ -932,6 +932,32 @@ def _run_backtest_background(
     submitted_by: str,
     notes: List[str],
 ) -> None:
+    """Background worker: run a real-data backtest and persist the completed record.
+
+    Long-running (market data + sandbox execution), so this runs off the request
+    thread (or via Temporal dispatch) to avoid proxy timeouts.
+
+    Preconditions:
+        - ``job_id`` must already exist in the backtest job store (created by
+          ``run_backtest`` / ``_bt_create_job``), typically with status PENDING
+        - ``strategy`` must be a valid ``StrategySpec`` suitable for
+          ``_run_real_data_backtest``
+        - ``config`` must be a valid ``BacktestConfig``
+        - ``submitted_by`` and ``notes`` are recorded on the resulting
+          ``BacktestRecord`` as-is
+
+    Postconditions:
+        - On the success path: job status becomes RUNNING then COMPLETED with a
+          serialized ``RunBacktestResponse``; a new ``BacktestRecord`` is stored
+          under ``_backtests[backtest_id]``
+        - On ``HTTPException`` or other exceptions: job status becomes FAILED with
+          an error string, unless a cancel check already returned
+        - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
+          without writing COMPLETED or FAILED so the cancelled status visible at
+          that check is preserved. Updates use unconditional ``_bt_update_job``,
+          so a cancel that lands between a check and the next update can still be
+          overwritten with RUNNING, COMPLETED, or FAILED.
+    """
     try:
         if _bt_is_job_cancelled(job_id):
             return

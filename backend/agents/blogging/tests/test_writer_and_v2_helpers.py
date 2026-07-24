@@ -62,13 +62,29 @@ def test_write_draft_to_path_creates_parents(tmp_path: Path) -> None:
     assert target.read_text() == "# draft\n"
 
 
+@pytest.mark.parametrize("draft", [None, 123])
+def test_write_draft_to_path_rejects_non_string_draft(tmp_path: Path, draft: object) -> None:
+    from agents.blogging.blog_writer_agent.agent import _write_draft_to_path
+
+    target = tmp_path / "draft.md"
+    with pytest.raises(TypeError, match="draft must be a string"):
+        _write_draft_to_path(draft, target)  # type: ignore[arg-type]
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("path", [None, 123])
+def test_write_draft_to_path_rejects_invalid_path(tmp_path: Path, path: object) -> None:
+    from agents.blogging.blog_writer_agent.agent import _write_draft_to_path
+
+    with pytest.raises(TypeError, match="path must be a str or Path"):
+        _write_draft_to_path("# draft\n", path)  # type: ignore[arg-type]
+
+
 def test_writer_agent_requires_guidelines() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    # Initialised without guidelines is allowed; only revise/draft enforces.
-    agent = BlogWriterAgent(llm_client=DummyLLMClient())
+    # Empty guidelines preserve constructor-default behavior (factory defaults are non-empty).
+    agent = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     with pytest.raises(ValueError, match="brand"):
         agent._assert_guidelines_present()
 
@@ -76,17 +92,15 @@ def test_writer_agent_requires_guidelines() -> None:
 def test_writer_agent_assertion_on_none_llm() -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
+    # Direct construction intentional: make_writer_agent() replaces None with DummyLLMClient.
     with pytest.raises(AssertionError):
         BlogWriterAgent(llm_client=None)
 
 
 def test_writer_agent_style_prompt_merge() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    a = BlogWriterAgent(
-        llm_client=DummyLLMClient(),
+    a = make_writer_agent(
         writing_style_guide_content="Style A",
         brand_spec_content="Brand B",
     )
@@ -96,11 +110,9 @@ def test_writer_agent_style_prompt_merge() -> None:
 
 
 def test_writer_agent_deterministic_self_check() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    a = BlogWriterAgent(llm_client=DummyLLMClient())
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     # Em-dash, banned phrase, vague citation, few 'you', staccato prose
     bad = (
         "In today's fast-paced world—as we navigate change. "
@@ -115,11 +127,9 @@ def test_writer_agent_deterministic_self_check() -> None:
 
 
 def test_writer_agent_deterministic_self_check_clean_draft() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    a = BlogWriterAgent(llm_client=DummyLLMClient())
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     clean = (
         "# Header\n\n"
         "You are reading something. You will learn. You will see. "
