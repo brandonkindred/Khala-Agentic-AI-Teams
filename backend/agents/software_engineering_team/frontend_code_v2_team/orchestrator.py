@@ -85,23 +85,23 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     from .tool_agents.ui_design import UiDesignToolAgent
     from .tool_agents.ux_usability import UxUsabilityToolAgent
 
-    return {
-        ToolAgentKind.STATE_MANAGEMENT: StateManagementToolAgent(),
-        ToolAgentKind.AUTH: AuthToolAgent(),
-        ToolAgentKind.API_OPENAPI: ApiOpenApiToolAgent(),
-        ToolAgentKind.DOCUMENTATION: DocumentationToolAgent(llm),
-        ToolAgentKind.TESTING_QA: TestingQAToolAgent(llm),
-        ToolAgentKind.SECURITY: SecurityToolAgent(llm),
-        ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent(),
-        ToolAgentKind.UI_DESIGN: UiDesignToolAgent(llm),
-        ToolAgentKind.BRANDING_THEME: BrandingThemeToolAgent(llm),
-        ToolAgentKind.UX_USABILITY: UxUsabilityToolAgent(llm),
-        ToolAgentKind.ACCESSIBILITY: AccessibilityToolAgent(llm),
-        ToolAgentKind.PERFORMANCE: PerformanceToolAgent(llm),
-        ToolAgentKind.ARCHITECTURE: ArchitectureToolAgent(llm),
-        ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(llm),
-        ToolAgentKind.LINTER: LinterToolAgent(),
-    }
+    return BaseV2DevelopmentAgent._assemble_tool_agents(
+        (ToolAgentKind.STATE_MANAGEMENT, StateManagementToolAgent()),
+        (ToolAgentKind.AUTH, AuthToolAgent()),
+        (ToolAgentKind.API_OPENAPI, ApiOpenApiToolAgent()),
+        (ToolAgentKind.DOCUMENTATION, DocumentationToolAgent(llm)),
+        (ToolAgentKind.TESTING_QA, TestingQAToolAgent(llm)),
+        (ToolAgentKind.SECURITY, SecurityToolAgent(llm)),
+        (ToolAgentKind.GIT_BRANCH_MANAGEMENT, GitBranchManagementToolAgent()),
+        (ToolAgentKind.UI_DESIGN, UiDesignToolAgent(llm)),
+        (ToolAgentKind.BRANDING_THEME, BrandingThemeToolAgent(llm)),
+        (ToolAgentKind.UX_USABILITY, UxUsabilityToolAgent(llm)),
+        (ToolAgentKind.ACCESSIBILITY, AccessibilityToolAgent(llm)),
+        (ToolAgentKind.PERFORMANCE, PerformanceToolAgent(llm)),
+        (ToolAgentKind.ARCHITECTURE, ArchitectureToolAgent(llm)),
+        (ToolAgentKind.BUILD_SPECIALIST, BuildSpecialistAdapterAgent(llm)),
+        (ToolAgentKind.LINTER, LinterToolAgent()),
+    )
 
 
 class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
