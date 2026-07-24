@@ -154,7 +154,20 @@ def _extract_draft_after_marker(raw_response: str) -> str:
 
 
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
-    """Write draft content to path; create parent dirs if needed. Log the saved path."""
+    """Write draft content to path; create parent dirs if needed. Log the saved path.
+
+    Preconditions:
+        - ``draft`` must be a string (may be empty).
+        - ``path`` must be a ``str`` or ``pathlib.Path``.
+    Postconditions:
+        - Parent directories of ``path`` exist.
+        - The resolved path contains ``draft`` as UTF-8 text.
+        - A success log records the resolved path.
+    """
+    if not isinstance(draft, str):
+        raise TypeError(f"draft must be a string, got {type(draft).__name__}")
+    if not isinstance(path, (str, Path)):
+        raise TypeError(f"path must be a str or Path, got {type(path).__name__}")
     p = Path(path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(draft, encoding="utf-8")
