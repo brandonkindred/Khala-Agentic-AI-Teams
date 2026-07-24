@@ -108,14 +108,28 @@ def test_run_title_selection_llm_failure_falls_back_to_removal(
 
     monkeypatch.setattr(v2.time, "sleep", fake_sleep)
 
+    plan = _plan()
+    recorded_choices: list = []
+
+    def updater(**kw):
+        choices = kw.get("title_choices")
+        if choices is not None:
+            recorded_choices.append(choices)
+
     out = _run_title_selection(
-        plan=_plan(),
+        plan=plan,
         llm_client=_AngryLLM(),
         job_id=job_id,
-        job_updater=lambda **kw: None,
+        job_updater=updater,
         _update=lambda phase, **kw: None,
     )
     assert out == "Fallback Title"
+    assert recorded_choices, "expected job_updater to receive title_choices after LLM failure"
+    assert all(
+        candidate.get("title") != "First"
+        for snapshot in recorded_choices
+        for candidate in snapshot
+    )
 
 
 def test_run_title_selection_propagates_cancelled_error(
