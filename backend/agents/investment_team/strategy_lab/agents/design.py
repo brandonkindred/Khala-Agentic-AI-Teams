@@ -100,6 +100,8 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # above-entry ratchet is understood as intended gain-locking behavior, and so
 # the designer does not author exits that contradict the engine's mechanics.
 _STOP_ORDER_SEMANTICS: str | None = None
+_DESIGN_SYSTEM_PROMPT: str | None = None
+_SELF_REVIEW_SYSTEM_PROMPT: str | None = None
 
 
 def _get_stop_order_semantics() -> str:
@@ -120,27 +122,39 @@ def _get_stop_order_semantics() -> str:
 
 
 def _get_design_system_prompt() -> str:
-    """Build the designer system prompt (design_system.md + stop-order block).
+    """Build and cache the designer system prompt (body + stop-order block).
 
-    Preconditions: ``design_system.md`` and stop-order semantics file exist.
+    Preconditions: ``design_system.md`` and stop-order semantics file exist
+    when first invoked.
     Postconditions: returned string contains both the design system body and
-    the stop-order semantics text, separated by a blank line.
+    the stop-order semantics text, separated by a blank line; subsequent calls
+    return the same cached composed prompt without re-reading either file.
+    Invariants: module import does not invoke this helper.
     """
-    body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
-    assert body, "design_system.md must be non-empty"
-    return body + "\n\n" + _get_stop_order_semantics()
+    global _DESIGN_SYSTEM_PROMPT
+    if _DESIGN_SYSTEM_PROMPT is None:
+        body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
+        assert body, "design_system.md must be non-empty"
+        _DESIGN_SYSTEM_PROMPT = body + "\n\n" + _get_stop_order_semantics()
+    return _DESIGN_SYSTEM_PROMPT
 
 
 def _get_self_review_system_prompt() -> str:
-    """Build the self-review system prompt (self-review md + stop-order block).
+    """Build and cache the self-review system prompt (body + stop-order block).
 
-    Preconditions: ``design_self_review_system.md`` and stop-order file exist.
+    Preconditions: ``design_self_review_system.md`` and stop-order file exist
+    when first invoked.
     Postconditions: returned string contains both the self-review body and
-    the stop-order semantics text, separated by a blank line.
+    the stop-order semantics text, separated by a blank line; subsequent calls
+    return the same cached composed prompt without re-reading either file.
+    Invariants: module import does not invoke this helper.
     """
-    body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
-    assert body, "design_self_review_system.md must be non-empty"
-    return body + "\n\n" + _get_stop_order_semantics()
+    global _SELF_REVIEW_SYSTEM_PROMPT
+    if _SELF_REVIEW_SYSTEM_PROMPT is None:
+        body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
+        assert body, "design_self_review_system.md must be non-empty"
+        _SELF_REVIEW_SYSTEM_PROMPT = body + "\n\n" + _get_stop_order_semantics()
+    return _SELF_REVIEW_SYSTEM_PROMPT
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).

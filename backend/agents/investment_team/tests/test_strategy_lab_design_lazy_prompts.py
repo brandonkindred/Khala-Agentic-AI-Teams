@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # Prompt files that ``design.py`` used to read at import time. Sibling agents
 # under ``strategy_lab.agents`` may still read other prompts during package
 # import; this suite only guards the design agent.
@@ -60,6 +62,10 @@ if reads:
     raise SystemExit(f"import read design prompt files: {{reads!r}}")
 if mod._STOP_ORDER_SEMANTICS is not None:
     raise SystemExit("stop-order cache warmed at import")
+if mod._DESIGN_SYSTEM_PROMPT is not None:
+    raise SystemExit("design system prompt cache warmed at import")
+if mod._SELF_REVIEW_SYSTEM_PROMPT is not None:
+    raise SystemExit("self-review prompt cache warmed at import")
 """
 
     env = os.environ.copy()
@@ -102,3 +108,42 @@ def test_design_prompt_helpers_include_stop_order_and_bodies() -> None:
     assert stop in review
     assert design.index(stop) > 0
     assert review.index(stop) > 0
+
+
+def test_design_prompt_helpers_cache_composed_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second helper calls must reuse the composed cache (no extra disk reads).
+
+    Preconditions: prompt files exist; caches may already be warm from earlier
+    tests in this module — this test still verifies identity stability and that
+    further helper calls do not invoke ``Path.read_text``.
+    Postconditions: repeated helper calls return the same string object and
+    perform zero additional prompt-directory reads.
+    """
+    import investment_team.strategy_lab.agents.design as design_mod
+
+    prompt_dir = design_mod._PROMPT_DIR.resolve()
+    reads: list[Path] = []
+    real_read_text = Path.read_text
+
+    def tracking_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        resolved = self.resolve()
+        try:
+            resolved.relative_to(prompt_dir)
+        except ValueError:
+            return real_read_text(self, *args, **kwargs)
+        reads.append(resolved)
+        return real_read_text(self, *args, **kwargs)
+
+    # Warm caches first (may already be warm).
+    first_design = design_mod._get_design_system_prompt()
+    first_review = design_mod._get_self_review_system_prompt()
+
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+    second_design = design_mod._get_design_system_prompt()
+    second_review = design_mod._get_self_review_system_prompt()
+
+    assert second_design is first_design
+    assert second_review is first_review
+    assert reads == []
