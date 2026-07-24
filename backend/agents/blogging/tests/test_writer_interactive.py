@@ -291,6 +291,35 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
     assert "# Fallback" in out.draft
 
 
+def test_revise_from_user_feedback_json_parse_error_skips_sleep(monkeypatch) -> None:
+    """LLMJsonParseError must use the no-sleep handler, not the transient backoff."""
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMJsonParseError
+
+    a = _make_agent()
+    sleep_calls: list[float] = []
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMJsonParseError("bad json", response_preview="x")
+
+    def fail_json(self, p, **kw):
+        raise LLMJsonParseError("bad json", response_preview="x")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", fail_json)
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda secs: sleep_calls.append(secs))
+
+    out = a.revise_from_user_feedback(
+        draft="# Original",
+        user_feedback="tighten the intro",
+        content_plan_text="cp",
+    )
+    assert out.draft == "# Original"
+    assert sleep_calls == []
+
+
 # ---------------------------------------------------------------------------
 # generate_escalation_summary
 # ---------------------------------------------------------------------------
