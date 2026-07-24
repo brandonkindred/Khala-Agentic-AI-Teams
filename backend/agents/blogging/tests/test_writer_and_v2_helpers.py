@@ -564,6 +564,8 @@ def test_ghost_writer_no_experience_phrase() -> None:
 
     # Specific refusal phrases (word-boundary containment)
     assert _is_no_experience("I don't have any story") is True
+    assert _is_no_experience("I don't have direct experience with that") is True
+    assert _is_no_experience("I don't have any relevant experiences") is True
     assert _is_no_experience("no relevant experience for this") is True
     assert _is_no_experience("I have no experience with that") is True
     assert _is_no_experience("I have no story for this topic") is True
@@ -586,6 +588,10 @@ def test_ghost_writer_no_experience_phrase() -> None:
     assert _is_no_experience("please skip ahead in the draft") is False
     assert _is_no_experience("I will pass along the details") is False
     assert _is_no_experience("none of my colleagues knew the answer, but I did") is False
+    assert (
+        _is_no_experience("I don't have the exact dates, but the migration started after launch")
+        is False
+    )
 
 
 def test_ghost_writer_agent_construction() -> None:
