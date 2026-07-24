@@ -55,6 +55,51 @@ DEFAULT_TERMINAL_STATUSES: FrozenSet[str] = frozenset({"completed", "failed", "c
 # response body that isn't valid JSON.
 _REQUEST_ERRORS = (httpx.HTTPError, ValueError)
 
+# Short grace for cancelled callback cleanup after the polling budget expires.
+# Deliberately small so a CancelledError-suppressing callback cannot overrun
+# the advertised wall-time deadline by more than this amount.
+_BUDGET_CANCEL_GRACE_S = 0.05
+
+
+class _BudgetExpired(Exception):
+    """Internal: the overall ``total_timeout`` budget expired while awaiting."""
+
+
+async def _await_within_budget(awaitable: Awaitable[Any], remaining: float) -> Any:
+    """Await ``awaitable`` within ``remaining`` seconds without ``wait_for`` overrun.
+
+    Unlike ``asyncio.wait_for``, once the budget expires this cancels the task
+    and returns control after a short grace — it does not wait for slow
+    cancellation cleanup, and it ignores a late success after the deadline.
+
+    Preconditions:
+        - ``awaitable`` is a coroutine or other awaitable to run once.
+        - ``remaining`` is the seconds left in the overall poll budget.
+    Postconditions:
+        - Returns the awaitable's result if it finishes within ``remaining``.
+        - Raises :class:`_BudgetExpired` if the budget expires (including when
+          ``remaining <= 0`` before starting). A late terminal result after
+          expiry is discarded.
+        - Propagates exceptions raised by the awaitable itself (including
+          ``asyncio.TimeoutError`` from the callback) unchanged — those are
+          not budget expiry.
+    """
+    if remaining <= 0:
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise _BudgetExpired()
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=remaining)
+        if task in done:
+            return task.result()
+        task.cancel()
+        await asyncio.wait({task}, timeout=_BUDGET_CANCEL_GRACE_S)
+        raise _BudgetExpired()
+    finally:
+        if not task.done():
+            task.cancel()
+
 
 def post_json(
     url: str,
@@ -236,17 +281,20 @@ async def async_poll_until_terminal(
     Postconditions:
         - Returns the first status dict for which
           ``status.get(status_key)`` is in ``terminal_statuses``, unmodified.
-        - If ``status_fn()`` returns None, or raises any exception other than
-          an overall-budget ``asyncio.TimeoutError``, on any call, immediately
+        - If ``status_fn()`` returns None, or raises any exception (including
+          a callback-raised ``asyncio.TimeoutError``), on any call, immediately
           returns ``{status_key: "failed", "error": "Failed to get status"}``
           — no further polling, no sleep. The same failure dict is returned if
-          ``on_poll`` raises a non-timeout exception.
+          ``on_poll`` raises (including callback ``TimeoutError``).
         - If no terminal status is observed within ``total_timeout`` seconds
           of wall time — including time spent awaiting ``status_fn``,
           ``on_poll``, and the inter-poll sleep — returns
           ``{status_key: "failed", "error": f"Timed out waiting for
           {log_context}"}``. Each await is bounded by the remaining budget via
-          ``asyncio.wait_for``.
+          :func:`_await_within_budget` (``asyncio.wait`` + cancel + short
+          grace), so a slow-cancelling callback cannot report success after
+          the deadline and budget expiry is distinct from callback
+          ``TimeoutError``.
         - Never raises; never sleeps past a terminal/None/exception
           short-circuit.
         - Uses ``asyncio.sleep`` between non-terminal polls.
@@ -254,14 +302,15 @@ async def async_poll_until_terminal(
     assert poll_interval > 0, f"poll_interval must be positive, got {poll_interval!r}"
     assert total_timeout > 0, f"total_timeout must be positive, got {total_timeout!r}"
     start = time.monotonic()
+    timeout_result = {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
     while True:
         remaining = total_timeout - (time.monotonic() - start)
         if remaining <= 0:
-            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
+            return timeout_result
         try:
-            status = await asyncio.wait_for(status_fn(), timeout=remaining)
-        except asyncio.TimeoutError:
-            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
+            status = await _await_within_budget(status_fn(), remaining)
+        except _BudgetExpired:
+            return timeout_result
         except Exception as e:
             logger.warning("%s status_fn raised: %s", log_context, e)
             return {status_key: "failed", "error": "Failed to get status"}
@@ -272,24 +321,18 @@ async def async_poll_until_terminal(
         if on_poll is not None:
             remaining = total_timeout - (time.monotonic() - start)
             if remaining <= 0:
-                return {
-                    status_key: "failed",
-                    "error": f"Timed out waiting for {log_context}",
-                }
+                return timeout_result
             try:
-                await asyncio.wait_for(on_poll(status), timeout=remaining)
-            except asyncio.TimeoutError:
-                return {
-                    status_key: "failed",
-                    "error": f"Timed out waiting for {log_context}",
-                }
+                await _await_within_budget(on_poll(status), remaining)
+            except _BudgetExpired:
+                return timeout_result
             except Exception as e:
                 logger.warning("%s on_poll raised: %s", log_context, e)
                 return {status_key: "failed", "error": "Failed to get status"}
         remaining = total_timeout - (time.monotonic() - start)
         if remaining <= 0:
-            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
+            return timeout_result
         try:
-            await asyncio.wait_for(asyncio.sleep(poll_interval), timeout=remaining)
-        except asyncio.TimeoutError:
-            return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
+            await _await_within_budget(asyncio.sleep(poll_interval), remaining)
+        except _BudgetExpired:
+            return timeout_result

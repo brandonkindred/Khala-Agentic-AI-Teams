@@ -421,7 +421,7 @@ async def test_async_poll_rejects_non_positive_total_timeout():
 
 @pytest.mark.asyncio
 async def test_async_poll_times_out_when_status_fn_stalls():
-    """A status_fn that never returns must still honor total_timeout via wait_for."""
+    """A status_fn that never returns must still honor total_timeout."""
 
     async def _stall():
         await asyncio.sleep(60.0)
@@ -434,6 +434,66 @@ async def test_async_poll_times_out_when_status_fn_stalls():
         log_context="stalled job",
     )
     assert result == {"status": "failed", "error": "Timed out waiting for stalled job"}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_budget_timeout_ignores_late_success_after_cancel():
+    """Slow cancel cleanup + late terminal result must not beat the deadline."""
+
+    async def _suppress_cancel_then_complete():
+        try:
+            await asyncio.sleep(60.0)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # longer than cancel grace
+            return {"status": "completed"}
+        return {"status": "completed"}
+
+    result = await async_poll_until_terminal(
+        _suppress_cancel_then_complete,
+        poll_interval=0.01,
+        total_timeout=0.05,
+        log_context="late success",
+    )
+    assert result == {"status": "failed", "error": "Timed out waiting for late success"}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_callback_timeout_error_is_status_failure_not_budget():
+    """status_fn raising TimeoutError is callback failure, not budget expiry."""
+
+    async def _status_fn():
+        raise asyncio.TimeoutError("per-request timed out")
+
+    result = await async_poll_until_terminal(
+        _status_fn,
+        poll_interval=0.01,
+        total_timeout=10.0,
+        log_context="should not appear",
+    )
+    assert result == {"status": "failed", "error": "Failed to get status"}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_on_poll_timeout_error_is_status_failure_not_budget(monkeypatch):
+    async def _nosleep(*_):
+        return None
+
+    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _nosleep)
+
+    async def _status():
+        return {"status": "running"}
+
+    async def _on_poll(_status: dict) -> None:
+        raise asyncio.TimeoutError("progress sink timed out")
+
+    result = await async_poll_until_terminal(
+        _status,
+        on_poll=_on_poll,
+        poll_interval=0.01,
+        total_timeout=10.0,
+        log_context="should not appear",
+    )
+    assert result == {"status": "failed", "error": "Failed to get status"}
 
 
 @pytest.mark.asyncio

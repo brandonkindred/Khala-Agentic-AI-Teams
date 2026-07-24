@@ -13,6 +13,7 @@ from shared.http import (
     _MIN_KEEPALIVE_EXPIRY_S,
     DEFAULT_LIMITS,
     _keepalive_expiry_seconds,
+    aclose_async_pool,
     close_async_pool,
     close_pool,
     get_pooled_async_client,
@@ -195,12 +196,13 @@ def test_async_same_timeout_returns_same_instance():
 
 
 def test_async_close_terminates_and_replaces_on_next_get():
-    async def _grab():
-        return get_pooled_async_client(30.0)
+    async def _grab_and_aclose():
+        a = get_pooled_async_client(30.0)
+        await aclose_async_pool()
+        assert a.is_closed
+        return a
 
-    a = asyncio.run(_grab())
-    close_async_pool()
-    assert a.is_closed
+    a = asyncio.run(_grab_and_aclose())
 
     async def _second():
         b = get_pooled_async_client(30.0)
@@ -240,12 +242,18 @@ def test_async_replaces_externally_closed_client():
 
 
 def test_async_close_pool_is_idempotent():
+    async def _grab_and_aclose():
+        client = get_pooled_async_client(9.0)
+        await aclose_async_pool()
+        return client
+
+    asyncio.run(_grab_and_aclose())
+    close_async_pool()
+    close_async_pool()
+
     async def _grab():
         return get_pooled_async_client(9.0)
 
-    asyncio.run(_grab())
-    close_async_pool()
-    close_async_pool()
     assert asyncio.run(_grab()) is not None
 
 
@@ -270,14 +278,14 @@ def test_async_non_finite_timeout_rejected():
 
 
 def test_async_close_pool_swallows_client_close_errors(monkeypatch):
-    def _boom(_client: httpx.AsyncClient) -> None:
+    async def _boom(_client: httpx.AsyncClient) -> None:
         raise RuntimeError("close failed")
 
-    monkeypatch.setattr(shared.http, "_force_close_async_client", _boom)
+    monkeypatch.setattr(shared.http, "_aclose_quietly", _boom)
 
     async def _body():
         client = get_pooled_async_client(15.0)
-        close_async_pool()  # must not raise
+        await aclose_async_pool()  # must not raise
         # Client could not be closed; remains tracked (not silently orphaned).
         assert any(
             entry.client is client
@@ -288,12 +296,35 @@ def test_async_close_pool_swallows_client_close_errors(monkeypatch):
     asyncio.run(_body())
 
 
+@pytest.mark.asyncio
+async def test_async_aclose_pool_under_running_loop_awaits_without_asyncio_run():
+    """Awaited teardown must close on the owning loop, never via asyncio.run."""
+    client = get_pooled_async_client(15.0)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            shared.http.asyncio,
+            "run",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not asyncio.run")),
+        )
+        await aclose_async_pool()
+    assert client.is_closed
+    assert client not in [e.client for e in shared.http._async_clients.values()]  # noqa: SLF001
+
+
 def test_async_close_pool_closes_even_when_caller_has_running_loop():
-    """close_async_pool must not no-op-orphan when invoked under a live loop."""
+    """Sync close under a live owning loop schedules aclose (no foreign asyncio.run)."""
 
     async def _body():
         client = get_pooled_async_client(15.0)
-        close_async_pool()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                shared.http.asyncio,
+                "run",
+                lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not asyncio.run")),
+            )
+            close_async_pool()
+        # Give the scheduled aclose task a turn on this loop.
+        await asyncio.sleep(0)
         assert client.is_closed
         assert client not in [
             e.client
@@ -312,11 +343,12 @@ def test_async_clients_isolated_across_sequential_event_loops():
     first = asyncio.run(_grab())
     second = asyncio.run(_grab())
     assert first is not second
-    assert first.is_closed
+    # Owning loop is dead: entry is dropped without foreign-loop aclose, so the
+    # prior client must not be reused even if httpx still reports it open.
 
 
-def test_async_purge_closes_stale_client_before_dropping_entry():
-    """A new loop's get must close the prior loop's client, not orphan it."""
+def test_async_purge_drops_stale_entry_without_foreign_aclose():
+    """A new loop's get must drop the prior loop's entry, not reuse it."""
 
     async def _grab() -> httpx.AsyncClient:
         return get_pooled_async_client(30.0)
@@ -324,7 +356,7 @@ def test_async_purge_closes_stale_client_before_dropping_entry():
     first = asyncio.run(_grab())
     second = asyncio.run(_grab())
     assert first is not second
-    assert first.is_closed
+    assert first not in [e.client for e in shared.http._async_clients.values()]  # noqa: SLF001
 
 
 def test_async_pool_does_not_accumulate_across_many_asyncio_runs():
