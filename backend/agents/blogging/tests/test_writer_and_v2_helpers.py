@@ -548,6 +548,14 @@ def test_ghost_writer_no_experience_phrase() -> None:
     assert _is_no_experience("pass") is True
     assert _is_no_experience("n/a") is True
 
+    # Formerly ambiguous stems — exact message only (not substring)
+    assert _is_no_experience("Nothing comes to mind") is True
+    assert _is_no_experience("nothing comes to mind.") is True
+    assert _is_no_experience("I haven't done that") is True
+    assert _is_no_experience("i haven't") is True
+    assert _is_no_experience("i have no") is True
+    assert _is_no_experience("i can't think of") is True
+
     # Explicit command-prefixed skips (leading token + trailing text)
     assert _is_no_experience("skip this one") is True
     assert _is_no_experience("skip, please") is True

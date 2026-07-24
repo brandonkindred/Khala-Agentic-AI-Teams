@@ -162,14 +162,19 @@ Guidelines:
 # No-experience phrase detection
 # ---------------------------------------------------------------------------
 
-# Short tokens that must equal the whole normalized message (too ambiguous for
-# substring matching — e.g. "pass" / "none" appear in ordinary prose).
+# Exact whole-message refusals (normalized). Short tokens and formerly ambiguous
+# stems belong here so they never match as substrings inside ordinary prose.
 _NO_EXPERIENCE_EXACT = frozenset(
     {
         "skip",
         "none",
         "pass",
         "n/a",
+        "i haven't",
+        "i have no",
+        "i can't think of",
+        "nothing comes to mind",
+        "i haven't done that",
     }
 )
 
@@ -180,8 +185,9 @@ _NO_EXPERIENCE_COMMAND_PREFIX_RE = re.compile(r"^(?:skip|pass|n/a)\b")
 
 # Specific refusal phrases matched with word-boundary regex. Ambiguous stems
 # like "i have no" / "i haven't" / "i can't think of" / "nothing comes to mind"
-# are omitted so mid-sentence non-refusals do not prematurely end the interview;
-# the LLM evaluator still has a no_experience path for softer refusals.
+# are exact-only (see ``_NO_EXPERIENCE_EXACT``) so mid-sentence non-refusals do
+# not prematurely end the interview; the LLM evaluator still has a no_experience
+# path for softer refusals.
 _NO_EXPERIENCE_PHRASES = frozenset(
     {
         "no experience",
@@ -208,8 +214,8 @@ def _is_no_experience(message: str) -> bool:
     Preconditions:
         - ``message`` is a string (may be empty or whitespace-only).
     Postconditions:
-        - Returns True for exact short-token refusals, leading skip/pass/n/a
-          command prefixes, or word-boundary matches against
+        - Returns True for exact whole-message refusals (``_NO_EXPERIENCE_EXACT``),
+          leading skip/pass/n/a command prefixes, or word-boundary matches against
           ``_NO_EXPERIENCE_PHRASES``; otherwise False.
         - Does not mutate ``message``.
     """
