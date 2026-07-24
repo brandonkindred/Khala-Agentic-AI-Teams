@@ -17,7 +17,7 @@ from typing import Any, List
 import pytest
 
 from investment_team.models import StrategySpec
-from investment_team.strategy_lab.agents import design_review as design_review_mod
+from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents._response_schemas import CRITIQUE_SCHEMA
 from investment_team.strategy_lab.agents.design_review import (
     _CRITIQUE_SCHEMA_JSON,
@@ -46,10 +46,10 @@ def _force_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     Force the structured-output seam off so these tests are deterministic
     regardless of ambient ``LLM_PROVIDER`` (unset defaults to ``"ollama"``,
     whose capability flag is True) — see
-    ``design_review._structured_output_available``. The structured path
+    ``_structured_output.structured_output_available``. The structured path
     itself is covered by ``test_strategy_lab_design_review_structured_output.py``.
     """
-    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: False)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: False)
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +429,7 @@ def test_issue_with_missing_fields_is_tolerated(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("ready_value", ["false", "False", "FALSE", "no", "", 0, 1, "yes", None])
+@pytest.mark.parametrize("ready_value", ["no", "", 0, 1, "yes", None])
 def test_ready_non_bool_values_default_to_false(
     monkeypatch: pytest.MonkeyPatch, ready_value
 ) -> None:
@@ -451,6 +451,16 @@ def test_ready_true_string_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
     critique = DesignReviewAgent().run(_spec(), readiness_results=[])
 
     assert critique.ready is True
+
+
+def test_ready_false_string_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The case-insensitive literal ``"false"`` (any case) is accepted as ``False``."""
+    payload = json.dumps({"ready": "FALSE", "rationale": "ok", "issues": []})
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is False
 
 
 def test_ready_true_with_critical_issue_is_demoted(

@@ -784,6 +784,21 @@ def test_feedback_tracker_empty_input() -> None:
     assert t.is_stalled() is False
 
 
+def test_max_previous_feedback_items_constant_is_tracker_default() -> None:
+    import inspect
+
+    from agents.blogging.blog_writer_agent.feedback_tracker import (
+        MAX_PREVIOUS_FEEDBACK_ITEMS,
+        FeedbackTracker,
+    )
+
+    assert MAX_PREVIOUS_FEEDBACK_ITEMS == 15
+    default = inspect.signature(FeedbackTracker.get_capped_previous_feedback).parameters[
+        "max_items"
+    ].default
+    assert default == MAX_PREVIOUS_FEEDBACK_ITEMS
+
+
 def test_feedback_tracker_jaccard_no_overlap() -> None:
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.feedback_tracker import FeedbackTracker

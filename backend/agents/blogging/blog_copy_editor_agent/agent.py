@@ -365,22 +365,29 @@ class BlogCopyEditorAgent(_BlogAgentBase):
 
         Preconditions:
             - actual_word_count == len(draft.split()) for the reviewed draft.
+            - target_word_count > 0 to inject any length items; non-positive targets
+              are treated as "no length target" and leave feedback_items unchanged.
         Postconditions:
-            - Returns the same list object passed in, mutated with 0..2 length items:
-              an over-length item (must_fix inserted at the front, else should_fix
-              appended) when the draft is past the soft ceiling, and/or a 'consider'
-              under-length hint appended for thin technical deep dives.
+            - If target_word_count <= 0, returns the same list object unchanged.
+            - Otherwise returns the same list object passed in, mutated with 0..2
+              length items: an over-length item (must_fix inserted at the front,
+              else should_fix appended) when the draft is past the soft ceiling,
+              and/or a 'consider' under-length hint appended for thin technical
+              deep dives.
         Invariants:
             - Item ordering matches the pre-refactor behavior: must_fix is prepended;
               should_fix and the deep-dive hint are appended.
         """
         target_word_count = copy_editor_input.target_word_count
+        if target_word_count <= 0:
+            return feedback_items
+
         soft_min = copy_editor_input.soft_min_words
         soft_max = copy_editor_input.soft_max_words
         must_ratio = copy_editor_input.editor_must_fix_over_ratio
         should_ratio = copy_editor_input.editor_should_fix_over_ratio
 
-        over_ratio = actual_word_count / target_word_count if target_word_count > 0 else 1.0
+        over_ratio = actual_word_count / target_word_count
         cap_label = soft_max if soft_max is not None else target_word_count
         past_soft_ceiling = soft_max is None or actual_word_count > soft_max
 
@@ -474,9 +481,12 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         inject programmatic length feedback, derive approval, and return the output.
 
         Preconditions:
-            - copy_editor_input is a valid CopyEditorInput (draft non-empty).
+            - copy_editor_input is a CopyEditorInput instance.
+            - The draft may be empty; if so, a minimal output is returned without calling the LLM.
         Postconditions:
             - Returns CopyEditorOutput with summary and feedback_items.
+            - If the draft is empty (or whitespace-only), returns a minimal output with an
+              explanatory summary and no feedback items, without invoking the LLM.
             - If feedback_output_path is set, best-effort writes the same output to
               that path before returning. This write may silently fail (e.g. permission
               denied or disk-full); such failures are logged at WARNING and never raised,
