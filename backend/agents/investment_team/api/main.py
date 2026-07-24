@@ -951,9 +951,12 @@ def _run_backtest_background(
           serialized ``RunBacktestResponse``; a new ``BacktestRecord`` is stored
           under ``_backtests[backtest_id]``
         - On ``HTTPException`` or other exceptions: job status becomes FAILED with
-          an error string (unless cancelled — see below)
-        - If ``_bt_is_job_cancelled(job_id)`` is true at any check point, return
-          without writing COMPLETED or FAILED so the cancelled status is preserved
+          an error string, unless a cancel check already returned
+        - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
+          without writing COMPLETED or FAILED so the cancelled status visible at
+          that check is preserved. Updates use unconditional ``_bt_update_job``,
+          so a cancel that lands between a check and the next update can still be
+          overwritten with RUNNING, COMPLETED, or FAILED.
     """
     try:
         if _bt_is_job_cancelled(job_id):
