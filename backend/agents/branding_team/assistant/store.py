@@ -21,7 +21,12 @@ from psycopg.types.json import Json
 from shared.postgres.metrics import timed_query
 
 from .._db import PostgresHelperMixin
-from ..models import BrandingMission, TeamOutput
+from ..models import (
+    MISSION_PLACEHOLDER_TBD,
+    MISSION_PLACEHOLDER_TO_BE_DISCUSSED,
+    BrandingMission,
+    TeamOutput,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +35,9 @@ _STORE = "branding_conversations"
 
 def _default_mission() -> BrandingMission:
     return BrandingMission(
-        company_name="TBD",
-        company_description="To be discussed.",
-        target_audience="TBD",
+        company_name=MISSION_PLACEHOLDER_TBD,
+        company_description=MISSION_PLACEHOLDER_TO_BE_DISCUSSED,
+        target_audience=MISSION_PLACEHOLDER_TBD,
     )
 
 

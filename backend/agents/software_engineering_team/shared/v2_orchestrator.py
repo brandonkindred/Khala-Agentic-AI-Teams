@@ -60,6 +60,18 @@ class BaseV2DevelopmentAgent:
         return build_tool_runners(tool_agents)
 
     @staticmethod
+    def _assemble_tool_agents(*entries: Tuple[Any, Any]) -> Dict[Any, Any]:
+        """Assemble a tool-agent roster from (kind, instance) pairs.
+
+        Preconditions: each entry is a ``(kind, agent)`` pair; kinds are hashable;
+          agent instances are already constructed (deferred imports happen in the
+          caller). Duplicate kinds are last-wins (same as ``dict(entries)``).
+        Postconditions: returns a ``Dict`` mapping each kind to its instance;
+          does not import or construct agents itself.
+        """
+        return dict(entries)
+
+    @staticmethod
     def _build_progress_callback(
         update_job: Callable[..., None], *, review_label: str = "Reviewing code"
     ) -> Callable[..., None]:

@@ -696,6 +696,9 @@ def _fill_story_placeholders(
             propagates unchanged — the non-fatal story-bank-save guard below
             never swallows it.
     """
+    # Local imports so GhostWriterElicitationAgent is resolved from
+    # agents.blogging.ghost_writer_agent at call time — tests monkeypatch that
+    # module attribute. Hoisting would freeze the class binding and break those patches.
     from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
     from agents.blogging.ghost_writer_agent import GhostWriterElicitationAgent
     from agents.blogging.ghost_writer_agent.agent import MAX_ROUNDS_POST_DRAFT
