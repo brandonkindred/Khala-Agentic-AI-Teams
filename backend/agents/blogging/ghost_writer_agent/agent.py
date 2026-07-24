@@ -830,7 +830,6 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                     continue
                 logger.warning("Ghost writer narrator error after retry: %s", e)
                 return None
-        return None
 
     # ------------------------------------------------------------------
     # Helpers

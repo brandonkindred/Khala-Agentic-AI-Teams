@@ -264,6 +264,21 @@ describe('StrategyCardComponent', () => {
     });
   });
 
+  describe('cardToggleLabel / cardRegionLabel / cardBodyId', () => {
+    it('cardToggleLabel includes Show verb and asset class when collapsed', () => {
+      expect(component.expanded).toBe(false);
+      expect(component.cardToggleLabel()).toBe('Show details for stocks strategy');
+    });
+
+    it('cardRegionLabel returns the asset-class details label', () => {
+      expect(component.cardRegionLabel()).toBe('stocks strategy details');
+    });
+
+    it('cardBodyId uses the card-body-{lab_record_id} format', () => {
+      expect(component.cardBodyId()).toBe('card-body-rec-1');
+    });
+  });
+
   it('verdictColor covers ready_for_live, not_performant, and inconclusive', () => {
     expect(component.verdictColor('ready_for_live')).toBe('winning');
     expect(component.verdictColor('not_performant')).toBe('losing');
