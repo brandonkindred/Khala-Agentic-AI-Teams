@@ -295,14 +295,27 @@ class TestDevOpsPipelineDebugPatchLoop:
     def test_loop_terminates_after_max_iterations(self) -> None:
         """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts.
 
-        Also spot-checks Phase 4.6 status details contain ``iteration N/3`` for each
-        attempt (N from 1 through ``MAX_INFRA_FIX_ITERATIONS``).
+        Also spot-checks Phase 4.6 status details contain
+        ``iteration {i}/{MAX_INFRA_FIX_ITERATIONS}`` for each attempt
+        (i from 1 through ``MAX_INFRA_FIX_ITERATIONS``).
         """
         from software_engineering_team.devops_team.orchestrator import (
             MAX_INFRA_FIX_ITERATIONS,
             DevOpsTeamLeadAgent,
         )
 
+        debug_patch_pair = [
+            {
+                "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                "summary": "err",
+                "fixable": True,
+            },
+            {
+                "patched_artifacts": {"main.tf": "resource { }"},
+                "summary": "fix",
+                "edits_applied": 1,
+            },
+        ]
         client = _ScriptedClient(
             [
                 # Task clarifier
@@ -313,37 +326,12 @@ class TestDevOpsPipelineDebugPatchLoop:
                 {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
                 # Deployment
                 {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
-                # Debug agent (will be called up to 3 times)
-                {
-                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                    "summary": "err",
-                    "fixable": True,
-                },
-                {
-                    "patched_artifacts": {"main.tf": "resource { }"},
-                    "summary": "fix",
-                    "edits_applied": 1,
-                },
-                {
-                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                    "summary": "err",
-                    "fixable": True,
-                },
-                {
-                    "patched_artifacts": {"main.tf": "resource { }"},
-                    "summary": "fix",
-                    "edits_applied": 1,
-                },
-                {
-                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                    "summary": "err",
-                    "fixable": True,
-                },
-                {
-                    "patched_artifacts": {"main.tf": "resource { }"},
-                    "summary": "fix",
-                    "edits_applied": 1,
-                },
+                # Debug + patch agents (one pair per MAX_INFRA_FIX_ITERATIONS)
+                *[
+                    response
+                    for _ in range(MAX_INFRA_FIX_ITERATIONS)
+                    for response in debug_patch_pair
+                ],
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
