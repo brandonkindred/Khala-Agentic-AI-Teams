@@ -10,7 +10,7 @@ participates in an import cycle.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -25,6 +25,7 @@ from branding_team.api.models import (
 from branding_team.models import (
     MISSION_PLACEHOLDERS,
     BrandingMission,
+    BrandingMissionFields,
     BrandPhase,
     TeamOutput,
 )
@@ -155,29 +156,18 @@ def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
     )
 
 
-def _mission_from_payload(payload: Any) -> BrandingMission:
+def _mission_from_payload(payload: BrandingMissionFields) -> BrandingMission:
     """Build a ``BrandingMission`` from a create/run request payload.
 
     Preconditions:
-        ``payload`` exposes the eight mission fields (``company_name``,
-        ``company_description``, ``target_audience``, ``values``,
-        ``differentiators``, ``desired_voice``, ``existing_brand_material``,
-        ``wiki_path``) — satisfied by ``CreateBrandRequest`` and
-        ``RunBrandingTeamRequest``.
+        ``payload`` is a ``BrandingMissionFields`` instance (satisfied by
+        ``CreateBrandRequest`` and ``RunBrandingTeamRequest``).
     Postconditions:
-        Returns a ``BrandingMission`` populated from those fields; performs no
+        Returns a ``BrandingMission`` built from ``payload.mission_fields()``;
+        visual-identity fields use ``BrandingMission`` defaults; performs no
         I/O and does not mutate ``payload``.
     """
-    return BrandingMission(
-        company_name=payload.company_name,
-        company_description=payload.company_description,
-        target_audience=payload.target_audience,
-        values=payload.values,
-        differentiators=payload.differentiators,
-        desired_voice=payload.desired_voice,
-        existing_brand_material=payload.existing_brand_material,
-        wiki_path=payload.wiki_path,
-    )
+    return BrandingMission(**payload.mission_fields())
 
 
 def _build_open_questions(mission: BrandingMission) -> List[BrandingQuestion]:
