@@ -18,15 +18,17 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Protocol, Tuple, Union
 
 if TYPE_CHECKING:
+    from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
     from agents.blogging.ghost_writer_agent.models import StoryGap
 
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
 from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import (
+    ContentPlan,
     PlanningInput,
     PlanningPhaseResult,
     content_plan_to_content_brief_markdown,
@@ -669,19 +671,37 @@ def _extract_story_placeholders(draft_text: str) -> List[Tuple[str, str]]:
     return results
 
 
+class _DraftAgent(Protocol):
+    """Minimal draft-agent surface used by post-draft story placeholder fill.
+
+    Preconditions:
+        - Implementers provide a callable ``run`` matching this signature.
+    Postconditions:
+        - Structural typing only; no runtime registration.
+    """
+
+    def run(
+        self,
+        draft_input: "WriterInput",
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+        draft_output_path: Optional[Union[str, Path]] = None,
+    ) -> "WriterOutput": ...
+
+
 def _fill_story_placeholders(
     *,
     draft_text: str,
-    plan: Any,
+    plan: ContentPlan,
     llm_client: Any,
     job_id: str,
-    job_updater: Callable,
+    job_updater: JobUpdater,
     elicited_stories_text: Optional[str],
-    draft_agent: Any,
-    draft_input_kwargs: dict,
+    draft_agent: _DraftAgent,
+    draft_input_kwargs: dict[str, Any],
     work_dir: Optional[Union[str, Path]],
     iteration: int,
-) -> Tuple[Any, Optional[str]]:
+) -> Tuple["WriterOutput", Optional[str]]:
     """Scan draft for ``[Author: ...]`` placeholders and interview the user for each.
 
     For each placeholder the ghost writer conducts an interview.  If the user
@@ -689,9 +709,27 @@ def _fill_story_placeholders(
     the section is rewritten without a personal story.  Otherwise the collected
     narrative replaces the placeholder.
 
-    Returns ``(updated_draft_result, updated_elicited_stories_text)``.
+    ``llm_client`` is typed as ``Any`` deliberately (same as ``PipelineContext``):
+    production passes a Strands ``LLMClientModel`` / model wrapper that does not
+    subclass ``llm_service.interface.LLMClient``, while tests and failover paths
+    may pass other client shapes. The runtime contract is non-None only.
+
+    Preconditions:
+        - ``draft_text`` is a ``str``.
+        - ``plan`` is a ``ContentPlan`` instance.
+        - ``llm_client`` is not ``None``.
+        - ``draft_agent`` provides a callable ``run`` method.
+        - ``draft_input_kwargs`` does not already contain ``elicited_stories``
+          (this function injects that key when building ``WriterInput``).
+    Postconditions:
+        - Returns ``(updated_draft_result, updated_elicited_stories_text)``.
+        - When no placeholders exist, returns a ``WriterOutput`` wrapping the
+          original ``draft_text`` and the unchanged ``elicited_stories_text``.
 
     Raises:
+        TypeError: a precondition on ``draft_text``, ``plan``, ``llm_client``,
+            or ``draft_agent`` is violated.
+        ValueError: ``draft_input_kwargs`` already contains ``elicited_stories``.
         CancelledError: a Temporal-native (or otherwise external) cancellation
             propagates unchanged — the non-fatal story-bank-save guard below
             never swallows it.
@@ -708,6 +746,17 @@ def _fill_story_placeholders(
         get_blog_job,
         update_blog_job,
     )
+
+    if not isinstance(draft_text, str):
+        raise TypeError("draft_text must be a string")
+    if "elicited_stories" in draft_input_kwargs:
+        raise ValueError("draft_input_kwargs must not contain 'elicited_stories'")
+    if not isinstance(plan, ContentPlan):
+        raise TypeError("plan must be a ContentPlan")
+    if llm_client is None:
+        raise TypeError("llm_client must not be None")
+    if not callable(getattr(draft_agent, "run", None)):
+        raise TypeError("draft_agent must provide a callable run method")
 
     placeholders = _extract_story_placeholders(draft_text)
     if not placeholders:
