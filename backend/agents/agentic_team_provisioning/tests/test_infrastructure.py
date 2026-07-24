@@ -63,6 +63,69 @@ def test_get_team_infrastructure_rejects_empty_team_id(fake_pg: dict) -> None:
         get_team_infrastructure("")
 
 
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "../escape",
+        "../../etc/cron.d",
+        "a/b",
+        "a\\b",
+        "..",
+        ".",
+        "te am",
+        "team;id",
+        "team?id",
+        "/abs",
+    ],
+)
+def test_provision_team_rejects_unsafe_team_id(
+    tmp_path: Path, fake_pg: dict, bad_id: str
+) -> None:
+    """team_id is interpolated into a filesystem path under provisioned_teams/.
+
+    Characters outside [A-Za-z0-9_-] (path separators, ``..``, whitespace, etc.)
+    must be rejected before mkdir so a crafted id cannot escape the cache root.
+    """
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    with pytest.raises(ValueError, match="unsafe characters"):
+        provision_team(bad_id)
+
+    provisioned = tmp_path / "provisioned_teams"
+    # No directory materialization for a rejected id — neither under the
+    # intended subtree nor at a traversal escape outside it.
+    assert not provisioned.exists() or bad_id not in {
+        p.name for p in provisioned.iterdir()
+    }
+    assert not (tmp_path / "escape").exists()
+    assert not (tmp_path / "etc").exists()
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["../escape", "a/b", ".."],
+)
+def test_get_team_infrastructure_rejects_unsafe_team_id(
+    fake_pg: dict, bad_id: str
+) -> None:
+    from agentic_team_provisioning.infrastructure import get_team_infrastructure
+
+    with pytest.raises(ValueError, match="unsafe characters"):
+        get_team_infrastructure(bad_id)
+
+
+def test_build_team_infrastructure_rejects_resolved_escape(
+    tmp_path: Path, fake_pg: dict
+) -> None:
+    """Defense-in-depth: even if charset checks are bypassed, mkdir must not escape."""
+    from agentic_team_provisioning.infrastructure import _build_team_infrastructure
+
+    with pytest.raises(ValueError, match="escapes provisioned_teams"):
+        _build_team_infrastructure("../escape")
+
+    assert not (tmp_path / "escape").exists()
+
+
 def test_provision_team_replaces_cache_entry(tmp_path: Path, fake_pg: dict) -> None:
     from agentic_team_provisioning.infrastructure import (
         get_team_infrastructure,

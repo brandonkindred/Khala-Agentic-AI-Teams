@@ -861,7 +861,16 @@ def _finalize_parsed(parsed: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
 
 
 def _format_issues(critique: "SpecCritique") -> str:
-    """Render critique issues as a short, deterministic block."""
+    """Render critique issues as a short, deterministic block.
+
+    Pre: ``critique`` is a :class:`SpecCritique` whose ``issues`` sequence
+    (possibly empty) should be rendered for a revision or self-audit prompt.
+    Post: returns a newline-joined string of numbered issue lines
+    (``N. [severity] field: description`` with an optional ``Fix:``
+    suffix when ``suggested_fix`` is set), or
+    ``"(no specific issues — see rationale)"`` when ``critique.issues``
+    is empty.
+    """
     if not critique.issues:
         return "(no specific issues — see rationale)"
     lines = []

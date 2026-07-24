@@ -194,7 +194,20 @@ def _looks_like_top_level_json_object(text: str) -> bool:
 
 
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
-    """Write draft content to path; create parent dirs if needed. Log the saved path."""
+    """Write draft content to path; create parent dirs if needed. Log the saved path.
+
+    Preconditions:
+        - ``draft`` must be a string (may be empty).
+        - ``path`` must be a ``str`` or ``pathlib.Path``.
+    Postconditions:
+        - Parent directories of ``path`` exist.
+        - The resolved path contains ``draft`` as UTF-8 text.
+        - A success log records the resolved path.
+    """
+    if not isinstance(draft, str):
+        raise TypeError(f"draft must be a string, got {type(draft).__name__}")
+    if not isinstance(path, (str, Path)):
+        raise TypeError(f"path must be a str or Path, got {type(path).__name__}")
     p = Path(path).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(draft, encoding="utf-8")
@@ -1115,14 +1128,18 @@ class BlogWriterAgent(_BlogAgentBase):
                     return revised.strip()
             except LLMJsonParseError as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
-            except Exception:
-                logger.warning(
-                    "Revise item %s/%s: transient error (attempt %s/2); retrying.",
-                    item_index,
-                    total_items,
-                    attempt + 1,
-                )
-                time.sleep(2.0 + attempt)
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "Revise item %s/%s: transient error (attempt %s/2); retrying.",
+                        item_index,
+                        total_items,
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 + attempt)
+                    continue
+                raise
         # Fallback — keep original on unexpected failure; re-raise transient LLM
         # errors so the draft-stage retry funnel can own backoff.
         try:
@@ -1240,12 +1257,16 @@ class BlogWriterAgent(_BlogAgentBase):
                     break
             except LLMJsonParseError as e:
                 logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
-            except Exception:
-                logger.warning(
-                    "Batch revise transient error (attempt %s/3); retrying.",
-                    attempt + 1,
-                )
-                time.sleep(2.0 * (2**attempt))
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "Batch revise transient error (attempt %s/3); retrying.",
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 * (2**attempt))
+                    continue
+                raise
         if not primary_succeeded:
             try:
                 fallback = self._fallback_draft_via_json(prompt)
@@ -1492,11 +1513,16 @@ class BlogWriterAgent(_BlogAgentBase):
                     break
             except LLMJsonParseError as e:
                 logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
-            except Exception:
-                logger.warning(
-                    "User-feedback revision transient error (attempt %s/3); retrying.", attempt + 1
-                )
-                time.sleep(2.0 * (2**attempt))
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "User-feedback revision transient error (attempt %s/3); retrying.",
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 * (2**attempt))
+                    continue
+                raise
 
         if not primary_succeeded:
             try:
