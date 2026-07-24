@@ -156,8 +156,8 @@ def test_revision_loop_stops_after_editor_approval(agent, temp_blog_root, monkey
     # Convert rejection → structured feedback: return empty so iteration 0 uses
     # only the mocked editor's must_fix item (avoids DummyLLM JSON noise).
     monkeypatch.setattr(
-        "agents.blogging.blog_publication_agent.agent.extract_json_from_response",
-        lambda _text: {"feedback_items": []},
+        "agents.blogging.blog_publication_agent.agent.call_json_with_retry",
+        lambda *_a, **_kw: {"feedback_items": []},
     )
 
     draft_agent = BlogWriterAgent(
@@ -212,3 +212,109 @@ def test_reject_json_parse_exhaustion_falls_back_ready_to_revise(
     meta_path = temp_blog_root / "pending" / f"{result.submission_id}_meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert "The intro is too short." in meta["rejection_feedback"]
+
+
+def test_reject_questions_string_coerced_to_list(agent, monkeypatch) -> None:
+    """A string ``questions`` value from the LLM is split into a list."""
+    from agents.blogging.blog_publication_agent import agent as pub_mod
+
+    result = agent.submit_draft(
+        SubmitDraftInput(
+            draft="# Rejected Post\n\nNeeds work.",
+            title="Rejected Post",
+        )
+    )
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return (
+                '{"ready_to_revise": false, '
+                '"questions": "Which section feels off?\\nWhat tone do you want?", '
+                '"feedback_summary": ""}'
+            )
+
+    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+
+    rejection = agent.reject(result.submission_id, "Tone is wrong.")
+    assert rejection.ready_to_revise is False
+    assert rejection.questions == ["Which section feels off?", "What tone do you want?"]
+
+
+def test_revision_loop_convert_json_parse_exhaustion_synthesizes_must_fix(
+    agent, temp_blog_root, monkeypatch
+) -> None:
+    """Unparseable convert JSON falls back to empty items; raw rejection drives revise."""
+    from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorOutput
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_publication_agent import agent as pub_mod
+    from agents.blogging.blog_writer_agent import BlogWriterAgent, WriterOutput
+
+    result = agent.submit_draft(
+        SubmitDraftInput(
+            draft="# Rejected Post\n\nNeeds work.",
+            title="Rejected Post",
+            audience="developers",
+        )
+    )
+    agent.reject(result.submission_id, "The intro is too short.", force_ready_to_revise=True)
+
+    class _BadConvertAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return "not json at all"
+
+    monkeypatch.setattr(pub_mod, "Agent", _BadConvertAgent)
+
+    calls = {"editor": 0, "revise": 0}
+
+    def _fake_editor_run(self, copy_editor_input, **_kw):
+        calls["editor"] += 1
+        if calls["editor"] == 1:
+            return CopyEditorOutput(
+                approved=False,
+                summary="needs a longer intro",
+                feedback_items=[
+                    FeedbackItem(
+                        category="structure",
+                        severity="must_fix",
+                        location="intro",
+                        issue="Intro is too short",
+                        suggestion="Add context",
+                    )
+                ],
+            )
+        return CopyEditorOutput(approved=True, summary="looks good", feedback_items=[])
+
+    def _fake_revise(self, revise_input):
+        calls["revise"] += 1
+        # Prove the synthesised human must_fix reached revise on iteration 0.
+        assert any(
+            "intro is too short" in item.issue.lower() for item in revise_input.feedback_items
+        )
+        return WriterOutput(draft=revise_input.draft + "\n\nRevised.")
+
+    monkeypatch.setattr(BlogCopyEditorAgent, "run", _fake_editor_run)
+    monkeypatch.setattr(BlogWriterAgent, "revise", _fake_revise)
+
+    draft_agent = BlogWriterAgent(
+        llm_client=DummyLLMClient(),
+        writing_style_guide_content="clear",
+        brand_spec_content="brand",
+    )
+    copy_editor_agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
+
+    revision = agent.run_revision_loop(
+        result.submission_id,
+        draft_agent=draft_agent,
+        copy_editor_agent=copy_editor_agent,
+        audience="developers",
+    )
+
+    assert calls["revise"] >= 1
+    assert revision.iterations_completed >= 1
+    assert "Revised." in revision.revised_draft

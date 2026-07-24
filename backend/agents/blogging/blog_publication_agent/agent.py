@@ -27,8 +27,6 @@ from agents.blogging.shared.content_plan import (
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
-from llm_service import extract_json_from_response
-
 from .models import (
     ApprovalResult,
     PublicationMetadata,
@@ -319,15 +317,25 @@ class BlogPublicationAgent(_BlogAgentBase):
 
         human_feedback_text = "\n".join(f"- {f}" for f in meta.rejection_feedback)
 
-        convert_agent = Agent(
-            model=self._model,
-            system_prompt="You convert rejection feedback into structured editor feedback.",
-        )
-        convert_result = convert_agent(
+        def _agent_factory():
+            return Agent(
+                model=self._model,
+                system_prompt="You convert rejection feedback into structured editor feedback.",
+            )
+
+        def _convert_fallback(_exc: Exception) -> dict:
+            return {"feedback_items": []}
+
+        data = call_json_with_retry(
+            _agent_factory,
             CONVERT_FEEDBACK_TO_EDITOR_PROMPT.format(feedback=human_feedback_text)
-            + "\n\nRespond with valid JSON only, no markdown fences."
+            + _SOFT_JSON_INSTRUCTION,
+            max_attempts=2,
+            strict_json_suffix=_CONVERT_STRICT_JSON_SUFFIX,
+            on_exhausted=_convert_fallback,
+            on_unexpected_error=_convert_fallback,
+            logger=logger,
         )
-        data = extract_json_from_response(str(convert_result).strip())
 
         feedback_data = data.get("feedback_items") or []
         human_feedback_items: list[FeedbackItem] = []
