@@ -270,7 +270,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         Postconditions: emits the historical INFO line via ``_log_pipeline_status``;
           then invokes ``TeamLeadSharedState._report_status`` (no-op when callback
           is None; forwards kwargs when set; swallows callback errors). Never
-          raises into the caller.
+          raises when preconditions hold.
         """
         assert isinstance(phase, str) and phase, "phase must be a non-empty str"
         self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
