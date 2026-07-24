@@ -17,6 +17,7 @@ from software_engineering_team.devops_team import (
     DevOpsTeamResult,
 )
 from software_engineering_team.devops_team.models import (
+    CriterionTrace,
     DevOpsCompletionPackage,
     DevOpsConstraints,
     PlatformScope,
@@ -27,6 +28,7 @@ from software_engineering_team.devops_team.models import (
 from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
+    _criterion_traces_from_phase4,
 )
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
@@ -1175,6 +1177,76 @@ class TestDocumentationRunbookAgent:
         )
         assert out.completion_package.task_id == "DO-1"
         assert "docs/runbook.md" in out.files
+
+
+# ===========================================================================
+# UNIT TESTS -- PHASE 4 CRITERION TRACE MAPPER
+# ===========================================================================
+
+
+class TestCriterionTracesFromPhase4:
+    """Unit tests for the Phase 4 → CriterionTrace mapper."""
+
+    def test_match_uses_phase4_entry(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1", "c2"],
+            acceptance_trace=[
+                {
+                    "criterion": "c1",
+                    "implementation_refs": ["infra/main.tf"],
+                    "tests": [{"iac_validate": "pass"}],
+                }
+            ],
+            artifact_keys=["infra/main.tf", "deploy/values.yaml"],
+        )
+        assert len(traces) == 2
+        assert traces[0].criterion == "c1"
+        assert traces[0].implementation_refs == ["infra/main.tf"]
+        assert traces[0].tests == [{"iac_validate": "pass"}]
+        assert traces[1].criterion == "c2"
+        assert traces[1].tests == []
+        assert traces[1].implementation_refs == [
+            "deploy/values.yaml",
+            "infra/main.tf",
+        ]
+
+    def test_no_match_uses_empty_tests_and_artifact_keys(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["lonely"],
+            acceptance_trace=[],
+            artifact_keys=["a.py"],
+        )
+        assert traces == [
+            CriterionTrace(
+                criterion="lonely",
+                implementation_refs=["a.py"],
+                tests=[],
+            )
+        ]
+
+    def test_coerces_bad_shapes(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1"],
+            acceptance_trace=[
+                {
+                    "criterion": "c1",
+                    "implementation_refs": "not-a-list",
+                    "tests": [{"ok": 1}, "skip-me", {"gate": True}],
+                }
+            ],
+            artifact_keys=["fallback.py"],
+        )
+        assert traces[0].implementation_refs == []
+        assert traces[0].tests == [{"ok": "1"}, {"gate": "True"}]
+
+    def test_never_invents_validation_pass(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1"],
+            acceptance_trace=[],
+            artifact_keys=[],
+        )
+        assert traces[0].tests == []
+        assert {"validation": "pass"} not in traces[0].tests
 
 
 # ===========================================================================

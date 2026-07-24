@@ -71,6 +71,70 @@ def _git_ops() -> DeliverGitOps:
     )
 
 
+def _criterion_traces_from_phase4(
+    criteria: List[str],
+    acceptance_trace: List[Dict[str, object]],
+    artifact_keys: List[str],
+) -> List[CriterionTrace]:
+    """Map acceptance criteria onto Phase 4 validation evidence.
+
+    Preconditions:
+        - ``criteria`` is an iterable of criterion strings (may be empty).
+        - ``acceptance_trace`` is an iterable of dict-like Phase 4 entries
+          (may be empty); non-dict entries are ignored.
+        - ``artifact_keys`` is an iterable of artifact path strings used as
+          fallback ``implementation_refs`` when no Phase 4 match exists.
+
+    Postconditions:
+        - Returns one ``CriterionTrace`` per entry in ``criteria``, in order.
+        - A Phase 4 match (first entry whose ``criterion`` string-equals the
+          criterion) supplies coerced ``implementation_refs`` and ``tests``.
+        - Unmatched criteria get ``implementation_refs=sorted(artifact_keys)``
+          and ``tests=[]``.
+        - Never invents a fabricated ``{"validation": "pass"}`` entry.
+    """
+    by_criterion: Dict[str, Dict[str, object]] = {}
+    for entry in acceptance_trace:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("criterion", ""))
+        if key and key not in by_criterion:
+            by_criterion[key] = entry
+
+    fallback_refs = sorted(artifact_keys)
+    traces: List[CriterionTrace] = []
+    for criterion in criteria:
+        match = by_criterion.get(criterion)
+        if match is None:
+            traces.append(
+                CriterionTrace(
+                    criterion=criterion,
+                    implementation_refs=list(fallback_refs),
+                    tests=[],
+                )
+            )
+            continue
+
+        raw_refs = match.get("implementation_refs", [])
+        refs = [str(r) for r in raw_refs] if isinstance(raw_refs, list) else []
+
+        raw_tests = match.get("tests", [])
+        tests: List[Dict[str, str]] = []
+        if isinstance(raw_tests, list):
+            for item in raw_tests:
+                if isinstance(item, dict):
+                    tests.append({str(k): str(v) for k, v in item.items()})
+
+        traces.append(
+            CriterionTrace(
+                criterion=criterion,
+                implementation_refs=refs,
+                tests=tests,
+            )
+        )
+    return traces
+
+
 DEVOPS_REQUIRED_GATE_NAMES = [
     "iac_validate",
     "iac_validate_fmt",
