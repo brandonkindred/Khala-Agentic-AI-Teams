@@ -189,6 +189,42 @@ def test_run_planning_wraps_unknown_exception(monkeypatch) -> None:
     assert "Planning failed" in str(exc.value)
 
 
+@pytest.mark.parametrize("err_cls_name", ["LLMRateLimitError", "LLMTemporaryError"])
+def test_run_planning_reraises_transient_llm_errors(monkeypatch, err_cls_name) -> None:
+    """Transient LLM errors must stay unwrapped for Temporal stage retry."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.blog_research_agent.models import ResearchBriefInput
+    from agents.blogging.shared.content_profile import ContentProfile, resolve_length_policy
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    err_cls = LLMRateLimitError if err_cls_name == "LLMRateLimitError" else LLMTemporaryError
+    cause = err_cls("transient outage")
+
+    class _FakeAgent:
+        def __init__(self, **_kw):
+            pass
+
+        def plan_content(self, *_a, **_kw):
+            raise cause
+
+    monkeypatch.setattr(v2, "BlogWriterAgent", _FakeAgent)
+    monkeypatch.setattr(v2, "load_brand_spec_prompt", lambda _p: "")
+    monkeypatch.setattr(v2, "load_style_file", lambda _p: "")
+    monkeypatch.setattr(v2, "build_plan_critic_agent", lambda _llm: None)
+
+    with pytest.raises(err_cls) as exc:
+        v2.run_planning(
+            ResearchBriefInput(brief="b", max_results=5),
+            work_dir=None,
+            llm_client=object(),
+            length_policy=resolve_length_policy(content_profile=ContentProfile.standard_article),
+            series_context=None,
+            job_updater=None,
+        )
+    assert exc.value is cause
+
+
 def test_extract_plan_keywords_returns_filtered_unique() -> None:
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate

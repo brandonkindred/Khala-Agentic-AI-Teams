@@ -29,13 +29,13 @@ from llm_service.interface import LLMSemanticExhaustionError
 from ...models import StrategySpec
 from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
+from . import _structured_output as so
 from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
 from ._prompt_context import spec_prompt_fields
 from ._response_schemas import CRITIQUE_SCHEMA
-from ._structured_output import structured_output_available as _structured_output_available
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -55,77 +55,6 @@ _SYSTEM_PROMPT = (
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
 _CRITIQUE_SCHEMA_JSON = json.dumps(CRITIQUE_SCHEMA, indent=2)
-
-
-def _invoke_structured_critique(
-    agent_key: str, system_prompt: str, user_prompt: str, *, phase: str, charge: bool
-) -> Dict[str, Any]:
-    """Request provider-enforced schema-conformant decoding for a ``CRITIQUE_SCHEMA`` call.
-
-    Shared by :meth:`DesignReviewAgent.run` (the external reviewer) and
-    :meth:`DesignAgent._self_review` (the internal self-audit) — both emit the
-    same ``_CritiqueWire`` shape. Bypasses ``strands.Agent`` (whose
-    ``stream()``/``structured_output()`` do not forward a ``schema`` to the
-    backing client) and calls ``LLMClient.complete_json(..., schema=CRITIQUE_SCHEMA)``
-    directly, still routed through :func:`run_structured_agent` for the same
-    charge/invoke/timeout/parse envelope every other call site uses. Mirrors
-    ``RefinementAgent._invoke_structured``.
-
-    ``phase`` is threaded through rather than derived from ``agent_key`` so
-    each caller keeps its own pre-existing telemetry label
-    (``"design_review_structured"`` / ``"design_self_review_structured"``)
-    unchanged by this shared-helper extraction. ``charge`` is likewise
-    threaded straight through to :func:`run_structured_agent` rather than
-    hardcoded: :meth:`DesignReviewAgent.run` charges the budget itself via an
-    explicit ``charge_active_budget()`` call before invoking this function
-    (so it must pass ``charge=False`` here to avoid double-charging), while
-    :meth:`DesignAgent._self_review` has no such external call and must pass
-    ``charge=True`` so the round is still charged.
-
-    Preconditions: :func:`_structured_output_available` is True (checked by
-    the caller before calling this — only the Ollama provider answers True
-    today, and only Ollama's branch of ``get_strands_model`` returns an
-    adapter exposing ``.client``); ``agent_key`` / ``system_prompt`` /
-    ``user_prompt`` / ``phase`` are non-empty strings.
-    Postconditions: returns the parsed JSON dict on success. Raises
-    :class:`~..exceptions.StrategyLabLLMError` on any transport/parse
-    failure — including a ``schema_forced`` semantic-exhaustion starvation
-    signal (``LLMSemanticExhaustionError.schema_forced``), which the caller
-    inspects to decide whether to degrade to the legacy single-shot call.
-    This function never falls back itself and never retries.
-    """
-    assert _structured_output_available(), (
-        "precondition: caller must verify _structured_output_available() before "
-        "invoking (only that path exposes an adapter with a .client)"
-    )
-    assert agent_key and system_prompt and user_prompt and phase, (
-        "precondition: agent_key, system_prompt, user_prompt, and phase must be non-empty"
-    )
-    client = get_strands_model(agent_key).client
-
-    def _call(prompt: str) -> str:
-        result = client.complete_json(
-            prompt,
-            objective="strategy design review (structured)",
-            system_prompt=system_prompt,
-            schema=CRITIQUE_SCHEMA,
-        )
-        # invoke_agent unconditionally does str(result) on whatever this
-        # callable returns before handing it to `parse` — a raw dict would
-        # come back as Python repr (single-quoted, True/False/None), which
-        # extract_json_object cannot parse. json.dumps re-renders it as valid
-        # JSON so the round trip is exact.
-        return json.dumps(result)
-
-    return run_structured_agent(
-        _call,
-        user_prompt,
-        agent_key=agent_key,
-        phase=phase,
-        parse=extract_json_object,
-        charge=charge,
-        logger=logger,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -585,14 +514,17 @@ class DesignReviewAgent:
         charge_active_budget()
 
         try:
-            if _structured_output_available():
+            if so.structured_output_available():
                 try:
-                    parsed = _invoke_structured_critique(
-                        agent_key="strategy_design_review",
-                        system_prompt=_SYSTEM_PROMPT,
-                        user_prompt=user_prompt,
+                    parsed = so.invoke_structured_with_schema(
+                        "strategy_design_review",
+                        _SYSTEM_PROMPT,
+                        user_prompt,
                         phase="design_review_structured",
+                        schema=CRITIQUE_SCHEMA,
                         charge=False,
+                        objective="strategy design review (structured)",
+                        logger=logger,
                     )
                 except StrategyLabLLMError as exc:
                     cause = exc.cause

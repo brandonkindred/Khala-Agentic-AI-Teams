@@ -14,6 +14,8 @@ import json
 from typing import Any, List
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _content_plan():
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
@@ -627,3 +629,96 @@ def test_ghost_conduct_interview_no_experience_quick_exit(monkeypatch) -> None:
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     result = agent.conduct_interview(gap=_gap(), job_id="job-1", gap_index=0, max_rounds=2)
     assert result.skipped is True
+
+
+# ---------------------------------------------------------------------------
+# _notify_job_updater
+# ---------------------------------------------------------------------------
+
+
+def test_notify_job_updater_noop_when_none() -> None:
+    """_notify_job_updater is a no-op when job_updater is None."""
+    from agents.blogging.ghost_writer_agent.agent import _notify_job_updater
+
+    _notify_job_updater(None, status_text="unused")
+
+
+def test_notify_job_updater_invokes_callback() -> None:
+    """_notify_job_updater forwards kwargs to the callback."""
+    from agents.blogging.ghost_writer_agent.agent import _notify_job_updater
+
+    calls: list[dict] = []
+    _notify_job_updater(lambda **kw: calls.append(kw), status_text="hi", phase="story_elicitation")
+    assert calls == [{"status_text": "hi", "phase": "story_elicitation"}]
+
+
+def test_notify_job_updater_swallows_errors() -> None:
+    """Progress-callback failures are logged and do not raise."""
+    from agents.blogging.ghost_writer_agent.agent import _notify_job_updater
+
+    def boom(**kwargs):
+        raise RuntimeError("store down")
+
+    _notify_job_updater(boom, status_text="x")
+
+
+def test_notify_job_updater_reraises_cancelled() -> None:
+    """CancelledError from the callback must propagate."""
+    from agents.blogging.ghost_writer_agent.agent import _notify_job_updater
+    from temporalio.exceptions import CancelledError
+
+    def cancel(**kwargs):
+        raise CancelledError("stop")
+
+    with pytest.raises(CancelledError):
+        _notify_job_updater(cancel, status_text="x")
+
+
+def test_ghost_conduct_interview_notifies_job_updater(monkeypatch) -> None:
+    """conduct_interview invokes job_updater while waiting for a quick no-experience exit."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    waiting = {"n": 0}
+
+    def fake_is_waiting(job_id):
+        waiting["n"] += 1
+        return waiting["n"] == 1
+
+    def fake_get_job(job_id):
+        return {
+            "status": "running",
+            "story_chat_history": [
+                {"role": "user", "content": "skip", "gap_round": 0},
+            ],
+            "current_story_gap_index": 0,
+            "current_gap_round": 0,
+        }
+
+    from agents.blogging.shared import blog_job_store as bjs
+
+    monkeypatch.setattr(bjs, "is_waiting_for_story_input", fake_is_waiting)
+    monkeypatch.setattr(bjs, "get_blog_job", fake_get_job)
+
+    fake_sub = MagicMock()
+    fake_sub.notify.wait = lambda timeout=0: None
+    fake_sub.notify.clear = lambda: None
+    fake_sub.touch = lambda: None
+    from agents.blogging.shared import job_event_bus as bus
+
+    monkeypatch.setattr(bus, "subscribe", lambda jid: fake_sub)
+    monkeypatch.setattr(bus, "unsubscribe", lambda jid, sub: None)
+
+    updates: list[dict] = []
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    result = agent.conduct_interview(
+        gap=_gap(),
+        job_id="job-1",
+        gap_index=0,
+        job_updater=lambda **kw: updates.append(kw),
+        max_rounds=2,
+    )
+    assert result.skipped is True
+    assert updates
+    assert any("Waiting for your response" in u.get("status_text", "") for u in updates)

@@ -751,12 +751,18 @@ class BlogWriterAgent(_BlogAgentBase):
             "",
         ]
         # Persistent issues — placed BEFORE current feedback for higher LLM attention.
-        if revise_input.persistent_issues:  # pragma: no cover - prompt-assembly branch when persistent issues are supplied; covered by integration tests that exercise the revise loop end-to-end.
+        if revise_input.persistent_issues:
             pi_lines = []
             for i, pi in enumerate(revise_input.persistent_issues, 1):
-                loc = f" [{pi.location}]" if pi.location else ""
-                line = f"{i}. [{pi.severity}] {pi.category}{loc} (flagged {pi.occurrence_count} times): {pi.issue}"
-                if pi.suggestion:
+                loc = f" [{pi.location}]" if getattr(pi, "location", None) else ""
+                occurrence_count = getattr(pi, "occurrence_count", 0)
+                severity = getattr(pi, "severity", "unknown")
+                category = getattr(pi, "category", "")
+                line = (
+                    f"{i}. [{severity}] {category}{loc} "
+                    f"(flagged {occurrence_count} times): {getattr(pi, 'issue', '')}"
+                )
+                if getattr(pi, "suggestion", None):
                     line += f'\n   REQUIRED FIX: "{pi.suggestion}"'
                 pi_lines.append(line)
             prompt_parts.extend(
