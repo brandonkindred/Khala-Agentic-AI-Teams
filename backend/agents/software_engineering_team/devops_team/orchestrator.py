@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -130,6 +131,44 @@ from .tool_agents import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Bounded Phase 4.6 debug → patch → re-exec iterations for fixable infra failures.
+MAX_INFRA_FIX_ITERATIONS = 3
+
+
+@dataclass
+class _DebugPatchState:
+    """Mutable bag for one Phase 4.6 debug-patch retry session.
+
+    Invariants: ``exec_failures`` is derived from ``exec_results`` (entries where
+    ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` always mirror
+    ``exec_results`` — established in ``__post_init__`` and refreshed via
+    :meth:`refresh_aggregates` after each re-exec.
+    """
+
+    exec_results: List[Dict[str, Any]]
+    exec_gate_map: Dict[str, str] = field(init=False, default_factory=dict)
+    exec_findings: List[str] = field(init=False, default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.refresh_aggregates()
+
+    @property
+    def exec_failures(self) -> List[Dict[str, Any]]:
+        """Failing execution-tool results derived from ``exec_results``."""
+        return [er for er in self.exec_results if not er.get("success", True)]
+
+    def refresh_aggregates(self) -> None:
+        """Rebuild ``exec_gate_map`` / ``exec_findings`` from ``exec_results``.
+
+        Preconditions: ``exec_results`` is the latest execution-tool output list.
+        Postconditions: ``exec_gate_map`` and ``exec_findings`` mirror that list.
+        """
+        self.exec_gate_map = {}
+        self.exec_findings = []
+        for er in self.exec_results:
+            self.exec_gate_map.update(er.get("checks", {}))
+            self.exec_findings.extend(er.get("findings", []))
+
 
 class DevOpsTeamLeadAgent(TeamLeadSharedState):
     """Coordinates specialized DevOps agents with hard gates.
@@ -140,14 +179,26 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     a separate forward channel and may be set/cleared per run without losing
     historical log output.
 
+    This class intentionally does **not** subclass ``BaseTeamLead``: that type's
+    constructor and shared-state wiring differ from DevOps's
+    ``TeamLeadSharedState`` setup. Instead, pure phase/retry helpers are aliased
+    from ``BaseTeamLead`` as unbound methods on this class (see
+    ``_run_gated_phases`` / ``_run_bounded_retry_loop`` below) so call sites can
+    use ``self._run_*`` without inheriting ``BaseTeamLead`` instance state.
+
     Invariants: ``self.llm`` is the client passed to ``__init__``; specialist
     agents and tools are constructed once; ``_status_callback`` defaults to
     None (mixin default) and is independent of fallback logging.
     """
 
-    # Unbound BaseTeamLead._run_phase_gates delegates to self._run_gated_phases;
-    # alias the helper so TeamLeadSharedState consumers can invoke both hooks.
+    # Unbound-method reuse (not inheritance): assign BaseTeamLead helpers onto
+    # this class so ``self._run_gated_phases`` / ``self._run_bounded_retry_loop``
+    # work without subclassing BaseTeamLead. The helpers only need ``self`` for
+    # the Python method call signature — they do not read BaseTeamLead fields.
+    # ``_run_phase_gates`` (called via BaseTeamLead._run_phase_gates) delegates
+    # to ``self._run_gated_phases``, so that alias must exist on this class.
     _run_gated_phases = BaseTeamLead._run_gated_phases
+    _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
@@ -189,12 +240,14 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     ) -> None:
         """Emit the historical pipeline status line at INFO.
 
-        Preconditions: ``phase`` is a non-empty str (enforced by ``_report_status``
-          before invocation).
+        Preconditions: ``phase`` is a non-empty str (caller's responsibility;
+          :meth:`_report_status` asserts this before delegating; direct callers
+          of this staticmethod must satisfy it too — enforced below).
         Postconditions: logs ``detail`` when non-empty, otherwise logs
           ``DevOps team pipeline: {phase}``; ``progress`` and ``extra`` are ignored
-          (reserved for external consumers). Never raises.
+          (reserved for external consumers). Never raises when preconditions hold.
         """
+        assert isinstance(phase, str) and phase, "phase must be a non-empty str"
         if detail:
             logger.info("%s", detail)
         else:
@@ -263,7 +316,13 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         )
 
     def run(self, input_data: DevOpsTaskSpec) -> DevOpsCompletionPackage:
-        """Execute model-only run for contract-first input (no repo writes)."""
+        """Execute a contract-first model run without orchestrator artifact writes.
+
+        ``write_changes=False`` skips this team's ``write_agent_output`` / branch
+        commits. Phase 4.5 execution tools (e.g. ``terraform init``, ``cdk synth``,
+        ``helm lint``, ``docker-compose config``) may still write under the working
+        directory as validation side effects.
+        """
         result = self._run_pipeline(
             repo_path=Path("."),
             task_spec=input_data,
@@ -423,6 +482,118 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             )
 
         return results
+
+    def _debug_patch_once(
+        self,
+        fix_iter: int,
+        *,
+        state: _DebugPatchState,
+        aggregated_artifacts: Dict[str, str],
+        repo_path: Path,
+        repo_str: str,
+        write_changes: bool,
+        subdir: str,
+        max_iterations: int,
+    ) -> Optional[_DebugPatchState]:
+        """Run one infra debug → patch → re-exec iteration.
+
+        Parameters:
+          fix_iter: 0-based iteration index (status logging).
+          state: mutable debug-patch state bag; ``exec_failures`` drives the
+            iteration.
+          aggregated_artifacts: mutable artifact path → content map; updated
+            in place when a patch is applied.
+          repo_path: repository path on disk (for optional writes).
+          repo_str: string form of ``repo_path`` passed to tool agents.
+          write_changes: when True, persist patched files via
+            ``write_agent_output`` before re-exec.
+          subdir: subdirectory scope for ``write_agent_output``.
+          max_iterations: bound shown in status logs (enforced by
+            ``_run_bounded_retry_loop``, not re-asserted here).
+
+        Preconditions:
+          - ``fix_iter`` is a 0-based index from the bounded-retry helper
+          - ``state.exec_failures`` is expected to be non-empty when invoked by
+            the helper; if empty, returns ``state`` unchanged
+        Postconditions:
+          - Empty ``state.exec_failures`` → return ``state`` unchanged
+          - Soft abort (debug/patch exception, not fixable, or empty patches)
+            → log and return ``None`` (retry helper stops; no further attempts)
+          - Failed patch write → log a warning, still re-exec against the
+            in-memory (and possibly on-disk) patch, then return ``state`` so
+            validation is not skipped after a persistence failure
+          - Successful debug/patch/re-exec that resolves all execution failures
+            → ``state.exec_failures`` is cleared and ``state`` is returned
+          - Partial success (some failures remain after re-exec) → return
+            ``state`` with updated ``exec_failures`` so the retry helper can
+            continue to the next iteration
+        """
+        if not state.exec_failures:
+            return state
+
+        self._report_status(
+            "phase4.6",
+            detail=(
+                "DevOps team pipeline: phase 4.6 - debug-patch iteration "
+                f"{fix_iter + 1}/{max_iterations} ({len(state.exec_failures)} failures)"
+            ),
+        )
+        combined_output = "\n---\n".join(
+            "\n".join(ef.get("findings", [])) for ef in state.exec_failures
+        )
+        first_tool = state.exec_failures[0].get("tool", "unknown")
+        first_cmd = state.exec_failures[0].get("command", "unknown")
+        try:
+            debug_out = self.infra_debug_agent.run(
+                IaCDebugInput(
+                    execution_output=combined_output,
+                    tool_name=first_tool,
+                    command=first_cmd,
+                    artifacts=aggregated_artifacts,
+                )
+            )
+        except Exception as dbg_err:
+            logger.warning("DevOps debug agent failed: %s", dbg_err)
+            return None
+        if not debug_out.fixable:
+            logger.info("DevOps debug agent: errors are not fixable via code changes")
+            return None
+        try:
+            patch_out = self.infra_patch_agent.run(
+                IaCPatchInput(
+                    debug_output=debug_out,
+                    original_artifacts=aggregated_artifacts,
+                    repo_path=repo_str,
+                )
+            )
+        except Exception as patch_err:
+            logger.warning("DevOps patch agent failed: %s", patch_err)
+            return None
+        if not patch_out.patched_artifacts:
+            logger.info("DevOps patch agent returned no patches")
+            return None
+        aggregated_artifacts.update(patch_out.patched_artifacts)
+        if write_changes:
+            ok, msg = write_agent_output(
+                repo_path=repo_path,
+                output={
+                    "files": patch_out.patched_artifacts,
+                    "commit_message": f"fix(devops): patch iteration {fix_iter + 1}",
+                },
+                subdir=subdir,
+            )
+            # Persistence failure must not skip re-exec: patched content is
+            # already in ``aggregated_artifacts`` and may already be on disk
+            # (e.g. commit-hook reject after write). Soft-aborting here would
+            # let Phase 5 commit unvalidated patches.
+            if not ok and msg != NO_FILES_TO_WRITE_MSG:
+                logger.warning(
+                    "DevOps patch write failed (%s); continuing with re-exec validation",
+                    msg,
+                )
+        state.exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
+        state.refresh_aggregates()
+        return state
 
     @staticmethod
     def _enforce_env_policy(task_spec: DevOpsTaskSpec) -> Optional[str]:
@@ -616,11 +787,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             )
             repo_str = str(repo_path)
             exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-            exec_gate_map: Dict[str, str] = {}
-            exec_findings: List[str] = []
             for er in exec_results:
-                exec_gate_map.update(er.get("checks", {}))
-                exec_findings.extend(er.get("findings", []))
                 fc = er.get("failure_class", "")
                 if fc:
                     logger.info(
@@ -630,73 +797,32 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         fc,
                     )
 
-            # Phase 4.6: Debug-patch loop for fixable execution failures
-            MAX_INFRA_FIX_ITERATIONS = 3
-            exec_failures = [er for er in exec_results if not er.get("success", True)]
-            for fix_iter in range(MAX_INFRA_FIX_ITERATIONS):
-                if not exec_failures:
-                    break
-                self._report_status(
-                    "phase4.6",
-                    detail=(
-                        "DevOps team pipeline: phase 4.6 - debug-patch iteration "
-                        f"{fix_iter + 1}/{MAX_INFRA_FIX_ITERATIONS} "
-                        f"({len(exec_failures)} failures)"
-                    ),
-                )
-                combined_output = "\n---\n".join(
-                    "\n".join(ef.get("findings", [])) for ef in exec_failures
-                )
-                first_tool = exec_failures[0].get("tool", "unknown")
-                first_cmd = exec_failures[0].get("command", "unknown")
-                try:
-                    debug_out = self.infra_debug_agent.run(
-                        IaCDebugInput(
-                            execution_output=combined_output,
-                            tool_name=first_tool,
-                            command=first_cmd,
-                            artifacts=aggregated_artifacts,
-                        )
-                    )
-                except Exception as dbg_err:
-                    logger.warning("DevOps debug agent failed: %s", dbg_err)
-                    break
-                if not debug_out.fixable:
-                    logger.info("DevOps debug agent: errors are not fixable via code changes")
-                    break
-                try:
-                    patch_out = self.infra_patch_agent.run(
-                        IaCPatchInput(
-                            debug_output=debug_out,
-                            original_artifacts=aggregated_artifacts,
-                            repo_path=repo_str,
-                        )
-                    )
-                except Exception as patch_err:
-                    logger.warning("DevOps patch agent failed: %s", patch_err)
-                    break
-                if not patch_out.patched_artifacts:
-                    logger.info("DevOps patch agent returned no patches")
-                    break
-                aggregated_artifacts.update(patch_out.patched_artifacts)
-                if write_changes:
-                    write_agent_output(
+            # Phase 4.6: Debug-patch loop for fixable execution failures.
+            # Mutation contract: ``attempt`` / ``is_success`` share ``state`` and
+            # ``aggregated_artifacts`` by reference (same as the former inline
+            # locals). After the loop, ``state.exec_gate_map`` (aggregated
+            # execution-tool check statuses) is merged into local
+            # ``tool_gate_map``; remaining ``state.exec_failures`` do not
+            # early-return a failed ``DevOpsTeamResult`` (pre-refactor behavior
+            # preserved).
+            state = _DebugPatchState(exec_results=exec_results)
+            if state.exec_failures:
+                self._run_bounded_retry_loop(
+                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                    attempt=lambda i: self._debug_patch_once(
+                        i,
+                        state=state,
+                        aggregated_artifacts=aggregated_artifacts,
                         repo_path=repo_path,
-                        output={
-                            "files": patch_out.patched_artifacts,
-                            "commit_message": (f"fix(devops): patch iteration {fix_iter + 1}"),
-                        },
+                        repo_str=repo_str,
+                        write_changes=write_changes,
                         subdir=subdir,
-                    )
-                exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-                exec_failures = [er for er in exec_results if not er.get("success", True)]
-                exec_gate_map = {}
-                exec_findings = []
-                for er in exec_results:
-                    exec_gate_map.update(er.get("checks", {}))
-                    exec_findings.extend(er.get("findings", []))
+                        max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                    ),
+                    is_success=lambda s: not s.exec_failures,
+                )
 
-            tool_gate_map.update(exec_gate_map)
+            tool_gate_map.update(state.exec_gate_map)
 
             devsec = self.devsecops_review_agent.run(
                 DevSecOpsReviewInput(

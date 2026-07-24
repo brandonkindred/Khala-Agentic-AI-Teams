@@ -1234,18 +1234,28 @@ class TestDevOpsTeamLeadAgentIntegration:
         This test runs the full pipeline twice on the same lead-agent
         instance — the second run exercises every cached sub-agent for a
         second time, which is exactly the failure mode that bug caused."""
-        # Chain two happy-path scripts together so one client can serve both
-        # pipeline runs without having to be swapped mid-run. One happy-path run
-        # makes exactly 8 scripted LLM calls (the infra-debug agent's tool path
-        # fails without an LLM call, so the script's trailing entry is never
-        # consumed in a single run). Trim each run's script to those 8 responses
-        # so the two runs stay aligned end-to-end; leaving the unconsumed 9th
-        # entry in would shift run 2 by one and feed change_review — which now
-        # routes through the stricter shared review engine — a non-conforming
-        # response that it correctly rejects.
-        per_run = _scripted_llm_for_happy_path()._responses[:8]
+        # Pin Phase 4.5 so infra_debug is always invoked (fixable=False soft-abort).
+        # Without this, hosts with a working terraform CLI skip debug and consume
+        # 8 LLM calls while hosts without it consume 9 — which desynchronizes a
+        # chained two-run script. Use the full 9-response happy-path script twice.
+        per_run = list(_scripted_llm_for_happy_path()._responses)
+        assert len(per_run) == 9
         chained = _ScriptedClient(per_run + per_run)
         agent = DevOpsTeamLeadAgent(chained)
+
+        def _failing_exec(_repo: str, _artifacts: dict) -> list:
+            return [
+                {
+                    "tool": "terraform",
+                    "command": "validate",
+                    "success": False,
+                    "checks": {"terraform_validate": "fail"},
+                    "findings": ["terraform not found"],
+                    "failure_class": "execution",
+                }
+            ]
+
+        agent._run_execution_tools = _failing_exec  # type: ignore[method-assign]
         for i in range(2):
             pkg = agent.run(_base_task_spec())
             assert pkg.status == "completed", f"iter {i}: {pkg.status}"

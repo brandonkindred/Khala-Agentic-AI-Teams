@@ -157,6 +157,29 @@ def test_unexpected_error_without_fallback_reraises():
         call_json_with_retry(factory, "prompt")
 
 
+def test_agent_factory_failure_uses_on_unexpected_error():
+    """A raise from agent_factory() is classified like an invoke-time unexpected error."""
+
+    def boom_factory():
+        raise RuntimeError("rejected model config")
+
+    fallback = {"fallback": True}
+    data = call_json_with_retry(
+        boom_factory, "prompt", on_unexpected_error=lambda e: fallback
+    )
+    assert data is fallback
+
+
+def test_agent_factory_failure_without_fallback_reraises():
+    """Without on_unexpected_error, a factory raise propagates unwrapped."""
+
+    def boom_factory():
+        raise RuntimeError("rejected model config")
+
+    with pytest.raises(RuntimeError, match="rejected model config"):
+        call_json_with_retry(boom_factory, "prompt")
+
+
 def test_expected_keys_threaded_through_to_extract_json_from_response(monkeypatch):
     """expected_keys is forwarded to extract_json_from_response as a frozenset."""
     seen = {}
