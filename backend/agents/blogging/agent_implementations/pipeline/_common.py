@@ -693,7 +693,7 @@ def _fill_story_placeholders(
     *,
     draft_text: str,
     plan: ContentPlan,
-    llm_client: LLMClient,
+    llm_client: Any,
     job_id: str,
     job_updater: JobUpdater,
     elicited_stories_text: Optional[str],
@@ -708,6 +708,11 @@ def _fill_story_placeholders(
     indicates they have no relevant experience the placeholder is removed and
     the section is rewritten without a personal story.  Otherwise the collected
     narrative replaces the placeholder.
+
+    ``llm_client`` is typed as ``Any`` deliberately (same as ``PipelineContext``):
+    production passes a Strands ``LLMClientModel`` / model wrapper that does not
+    subclass ``llm_service.interface.LLMClient``, while tests and failover paths
+    may pass other client shapes. The runtime contract is non-None only.
 
     Preconditions:
         - ``draft_text`` is a ``str``.
