@@ -1132,7 +1132,8 @@ class BlogWriterAgent(_BlogAgentBase):
 
         Preconditions:
             - ``revise_input`` is a ``ReviseWriterInput``.
-            - Writing guidelines have been loaded (``_assert_guidelines_present``).
+            - Brand and writing guidelines have both been loaded
+              (``_assert_guidelines_present``).
         Postconditions:
             - Strips leading/trailing whitespace from ``revise_input.draft`` before
               revision. If the result is empty, returns ``revise_input.draft``
