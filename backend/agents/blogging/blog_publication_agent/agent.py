@@ -24,9 +24,9 @@ from agents.blogging.shared.content_plan import (
     RequirementsAnalysis,
     TitleCandidate,
 )
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
-
-from llm_service import extract_json_from_response
+from strands.types.exceptions import EventLoopException
 
 from .models import (
     ApprovalResult,
@@ -46,6 +46,25 @@ from .platform_formatters import (
 from .prompts import CONVERT_FEEDBACK_TO_EDITOR_PROMPT, REJECTION_FOLLOW_UP_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
+
+_REJECT_STRICT_JSON_SUFFIX = (
+    "\n\nRespond with a single JSON object only (no markdown, no code fence). "
+    'Keys: "ready_to_revise" (boolean), "questions" (array of strings), '
+    '"feedback_summary" (string).'
+)
+
+_CONVERT_STRICT_JSON_SUFFIX = (
+    "\n\nRespond with a single JSON object only (no markdown, no code fence). "
+    'Keys: "feedback_items" (array of objects with category, severity, location?, '
+    "issue, suggestion?)."
+)
+
+
+def _unwrap_event_loop(exc: Exception) -> Exception:
+    """Unwrap strands EventLoopException so transient LLM causes re-raise correctly."""
+    return exc.original_exception if isinstance(exc, EventLoopException) else exc
 
 
 def _content_plan_from_outline(outline: str) -> ContentPlan:
@@ -236,11 +255,29 @@ class BlogPublicationAgent(_BlogAgentBase):
             latest_feedback=latest_feedback,
         )
 
-        agent = Agent(
-            model=self._model, system_prompt="You help analyze rejection feedback for blog posts."
+        def _agent_factory():
+            return Agent(
+                model=self._model,
+                system_prompt="You help analyze rejection feedback for blog posts.",
+            )
+
+        def _reject_fallback(_exc: Exception) -> dict:
+            return {
+                "ready_to_revise": True,
+                "questions": [],
+                "feedback_summary": "\n".join(f"- {f}" for f in meta.rejection_feedback),
+            }
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt + _SOFT_JSON_INSTRUCTION,
+            max_attempts=2,
+            strict_json_suffix=_REJECT_STRICT_JSON_SUFFIX,
+            unwrap_exception=_unwrap_event_loop,
+            on_exhausted=_reject_fallback,
+            on_unexpected_error=_reject_fallback,
+            logger=logger,
         )
-        result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
-        data = extract_json_from_response(str(result).strip())
 
         ready_to_revise = bool(data.get("ready_to_revise", False))
         questions = data.get("questions") or []
@@ -287,15 +324,26 @@ class BlogPublicationAgent(_BlogAgentBase):
 
         human_feedback_text = "\n".join(f"- {f}" for f in meta.rejection_feedback)
 
-        convert_agent = Agent(
-            model=self._model,
-            system_prompt="You convert rejection feedback into structured editor feedback.",
-        )
-        convert_result = convert_agent(
+        def _agent_factory():
+            return Agent(
+                model=self._model,
+                system_prompt="You convert rejection feedback into structured editor feedback.",
+            )
+
+        def _convert_fallback(_exc: Exception) -> dict:
+            return {"feedback_items": []}
+
+        data = call_json_with_retry(
+            _agent_factory,
             CONVERT_FEEDBACK_TO_EDITOR_PROMPT.format(feedback=human_feedback_text)
-            + "\n\nRespond with valid JSON only, no markdown fences."
+            + _SOFT_JSON_INSTRUCTION,
+            max_attempts=2,
+            strict_json_suffix=_CONVERT_STRICT_JSON_SUFFIX,
+            unwrap_exception=_unwrap_event_loop,
+            on_exhausted=_convert_fallback,
+            on_unexpected_error=_convert_fallback,
+            logger=logger,
         )
-        data = extract_json_from_response(str(convert_result).strip())
 
         feedback_data = data.get("feedback_items") or []
         human_feedback_items: list[FeedbackItem] = []
@@ -310,6 +358,20 @@ class BlogPublicationAgent(_BlogAgentBase):
                         suggestion=(item.get("suggestion") or "").strip() or None,
                     )
                 )
+
+        # If structured conversion produced nothing, keep the raw rejection as a
+        # deterministic must_fix item so we still revise instead of clearing the
+        # rejection and claiming the draft was updated.
+        if not human_feedback_items:
+            human_feedback_items = [
+                FeedbackItem(
+                    category="content",
+                    severity="must_fix",
+                    location=None,
+                    issue=human_feedback_text.strip() or "Address the rejection feedback.",
+                    suggestion="Revise the draft to address the reviewer's rejection feedback.",
+                )
+            ]
 
         draft = meta.draft_content
         research = research_document or ""
@@ -345,6 +407,13 @@ class BlogPublicationAgent(_BlogAgentBase):
                 else copy_editor_result.feedback_items
             )
 
+            # Stop when there is nothing left to revise: empty feedback means a
+            # clean pass; after the first iteration, an approved editor result also
+            # ends the loop so we do not keep calling revise() with no actionable
+            # items for max_revision_loops.
+            if not all_feedback or (iteration > 0 and copy_editor_result.approved):
+                break
+
             revise_input = ReviseWriterInput(
                 draft=draft,
                 feedback_items=all_feedback,
@@ -359,6 +428,25 @@ class BlogPublicationAgent(_BlogAgentBase):
             iterations += 1
 
         meta.draft_content = draft
+        if iterations == 0:
+            # Rejection was never applied — keep it so the submitter can retry.
+            meta.save(meta_path)
+            draft_path = self.pending_dir / f"{submission_id}.md"
+            draft_path.write_text(draft, encoding="utf-8")
+            logger.warning(
+                "Revision loop applied 0 iterations for submission_id=%s; rejection feedback retained",
+                submission_id,
+            )
+            return RevisionLoopResult(
+                submission_id=submission_id,
+                revised_draft=draft,
+                iterations_completed=0,
+                message=(
+                    "Could not apply rejection feedback automatically; "
+                    "rejection feedback retained. Review and try again."
+                ),
+            )
+
         meta.rejection_feedback = []
         meta.state = "awaiting_approval"
         meta.save(meta_path)

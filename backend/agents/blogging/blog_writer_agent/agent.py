@@ -57,6 +57,10 @@ from .prompts import (
 
 logger = logging.getLogger(__name__)
 
+_PLACEHOLDER_DRAFT = (
+    "# Draft\n\nNo draft was generated. Check the model response or try again."
+)
+
 # ---------------------------------------------------------------------------
 # Deterministic compliance constants
 # ---------------------------------------------------------------------------
@@ -139,12 +143,12 @@ def _extract_draft_after_marker(raw_response: str) -> str:
             if after:
                 return after
     try:
-        data = json.loads(text)
+        data = extract_json_from_response(text)
         if isinstance(data, dict):
             d = data.get("draft")
             if isinstance(d, str) and d.strip():
                 return d.strip()
-    except (json.JSONDecodeError, TypeError):
+    except LLMJsonParseError:
         pass
     return ""
 
@@ -701,10 +705,10 @@ class BlogWriterAgent(_BlogAgentBase):
 
         if not draft:
             logger.warning("LLM returned no draft content; returning placeholder.")
-            draft = "# Draft\n\nNo draft was generated. Check the model response or try again."
+            draft = _PLACEHOLDER_DRAFT
 
         logger.info("Draft generated: length=%s", len(draft))
-        if draft and not draft.startswith("# Draft\n\nNo draft"):
+        if draft and not draft.startswith(_PLACEHOLDER_DRAFT):
             if on_llm_request:
                 on_llm_request("Running self-review...")
             draft = self._self_review(draft)

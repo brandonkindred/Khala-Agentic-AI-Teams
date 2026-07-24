@@ -24,9 +24,11 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import ContentPlan
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
+from temporalio.exceptions import CancelledError
 
 from llm_service import LLMRateLimitError, LLMTemporaryError, extract_json_from_response
 
@@ -187,6 +189,31 @@ def _is_no_experience(message: str) -> bool:
     return any(phrase in text for phrase in _NO_EXPERIENCE_PHRASES)
 
 
+def _notify_job_updater(
+    job_updater: Optional[Callable[..., None]],
+    **kwargs: Any,
+) -> None:
+    """Best-effort progress callback for interview milestones.
+
+    Preconditions:
+        - ``kwargs`` are acceptable to the pipeline ``job_updater`` (typically
+          ``status_text`` / ``phase`` / ``progress``).
+    Postconditions:
+        - If ``job_updater`` is None, no side effects.
+        - Otherwise ``job_updater(**kwargs)`` is invoked. ``CancelledError``
+          propagates; other exceptions are logged and swallowed so progress
+          failures cannot abort the interview.
+    """
+    if job_updater is None:
+        return
+    try:
+        job_updater(**kwargs)
+    except CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("Ghost writer job_updater failed (non-fatal): %s", e)
+
+
 def _empty_list_fallback(_exc: Exception) -> list:
     """
     Shared JSON-retry fallback for gap finding.
@@ -223,7 +250,7 @@ def _default_sufficiency_fallback(_exc: Exception) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class GhostWriterElicitationAgent:
+class GhostWriterElicitationAgent(_BlogAgentBase):
     """
     Identifies story gaps in a content plan and conducts conversational interviews
     to elicit personal anecdotes from the author.
@@ -232,10 +259,17 @@ class GhostWriterElicitationAgent:
       - Evaluator: assesses story sufficiency via ``call_json_with_retry``
       - Interviewer: generates conversational follow-up questions
       - Narrator: compiles vivid first-person narratives
+
+    Preconditions:
+        - llm_client is not None.
     """
 
     def __init__(self, llm_client: Any) -> None:
-        self._model = llm_client
+        """
+        Preconditions:
+            - llm_client is not None.
+        """
+        super().__init__(llm_client)
 
     # ------------------------------------------------------------------
     # Gap finding
@@ -422,6 +456,9 @@ class GhostWriterElicitationAgent:
               can receive replies; those steps are not enforced here. If the wait
               flag is already false, the wait loop is skipped and the last stored
               user message (if any) is used.
+            - ``job_updater`` is an optional progress callback invoked at wait /
+              evaluate / follow-up / compile milestones (failures are non-fatal).
+            - ``max_rounds`` is the hard cap on interview rounds.
         """
         from agents.blogging.shared.blog_job_store import (
             add_story_agent_message,
@@ -432,11 +469,17 @@ class GhostWriterElicitationAgent:
 
         conversation: List[Dict[str, str]] = [{"role": "agent", "content": gap.seed_question}]
         detected_context: Optional[str] = None
+        section = gap.section_title
 
         sub = subscribe(job_id)
         try:
             for round_num in range(max_rounds):
                 # ── Wait for the user to respond (event-driven) ─────────
+                _notify_job_updater(
+                    job_updater,
+                    phase="story_elicitation",
+                    status_text=f"Waiting for your response about: {section}",
+                )
                 while is_waiting_for_story_input(job_id):
                     # Liveness signal for the event-bus reaper: this consumer
                     # may wait on human input for much longer than the idle
@@ -483,6 +526,11 @@ class GhostWriterElicitationAgent:
                 conversation.append({"role": "user", "content": last_user_msg})
 
                 # ── Evaluate with dedicated evaluator ────────────────────
+                _notify_job_updater(
+                    job_updater,
+                    phase="story_elicitation",
+                    status_text=f"Evaluating your story for: {section}",
+                )
                 evaluation = self._evaluate_sufficiency(gap, conversation)
 
                 # Track story context as it's detected
@@ -505,6 +553,11 @@ class GhostWriterElicitationAgent:
                         gap.section_title,
                         round_num + 1,
                     )
+                    _notify_job_updater(
+                        job_updater,
+                        phase="story_elicitation",
+                        status_text=f"Compiling your story for: {section}",
+                    )
                     narrative = self._compile_narrative(gap, conversation, detected_context)
                     return StoryElicitationResult(
                         gap=gap,
@@ -518,6 +571,11 @@ class GhostWriterElicitationAgent:
                 follow_up = self._generate_follow_up(gap, conversation, evaluation)
                 if not follow_up:
                     # Interviewer couldn't generate a question — compile from what we have
+                    _notify_job_updater(
+                        job_updater,
+                        phase="story_elicitation",
+                        status_text=f"Compiling your story for: {section}",
+                    )
                     narrative = self._compile_narrative(gap, conversation, detected_context)
                     if narrative:
                         return StoryElicitationResult(
@@ -531,12 +589,22 @@ class GhostWriterElicitationAgent:
 
                 conversation.append({"role": "agent", "content": follow_up})
                 add_story_agent_message(job_id, follow_up, gap_index)
+                _notify_job_updater(
+                    job_updater,
+                    phase="story_elicitation",
+                    status_text=f"Asking a follow-up about: {section}",
+                )
         finally:
             unsubscribe(job_id, sub)
 
         # Safety cap reached — compile whatever we have
         logger.info(
             "Ghost writer: round cap reached for '%s', compiling from history", gap.section_title
+        )
+        _notify_job_updater(
+            job_updater,
+            phase="story_elicitation",
+            status_text=f"Compiling your story for: {section}",
         )
         narrative = self._compile_narrative(gap, conversation, detected_context)
         return StoryElicitationResult(
@@ -659,7 +727,21 @@ class GhostWriterElicitationAgent:
         conversation: List[Dict[str, str]],
         story_context: Optional[str] = None,
     ) -> Optional[str]:
-        """Compile the final narrative from the full conversation using a dedicated narrator."""
+        """
+        Compile the final first-person narrative from the full conversation.
+
+        Preconditions:
+            - ``gap`` provides section context for the narrator prompt.
+            - ``conversation`` is a list of ``{"role", "content"}`` turns.
+            - ``story_context`` is optional (``personal``, ``client``, ``employer``,
+              or unrecognized / omitted for no tone hint).
+        Postconditions:
+            - Returns the compiled narrative string, or ``None`` when there is no
+              non-empty user content, the narrator returns blank text, or the
+              narrator fails after one retry.
+            - On a narrator exception, waits ``time.sleep(2.0)`` once before the
+              retry; after the second failure, returns ``None``.
+        """
         user_content = " ".join(
             m["content"] for m in conversation if m["role"] == "user" and m.get("content")
         )

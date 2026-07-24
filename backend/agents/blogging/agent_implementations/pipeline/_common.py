@@ -18,15 +18,17 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Protocol, Tuple, Union
 
 if TYPE_CHECKING:
+    from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
     from agents.blogging.ghost_writer_agent.models import StoryGap
 
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
 from agents.blogging.blog_research_agent.models import ResearchBriefInput
 from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import (
+    ContentPlan,
     PlanningInput,
     PlanningPhaseResult,
     content_plan_to_content_brief_markdown,
@@ -46,7 +48,7 @@ from agents.blogging.shared.run_pipeline_job import _is_external_cancellation
 from temporalio.exceptions import CancelledError
 
 from llm_service import LLMClientModel, with_model_override
-from llm_service.interface import LLMClient
+from llm_service.interface import LLMClient, LLMRateLimitError, LLMTemporaryError
 
 from .constants import (
     BRAND_SPEC_PROMPT_PATH,
@@ -89,11 +91,14 @@ def _wait_for_hitl(
           (``get_blog_job`` is None). The caller aborts with its own FAIL result.
         - Returns False once ``is_waiting`` became False without a terminal state
           (a human responded) — the caller reads the response.
-        - A transient job-store read failure (``is_waiting``/``get_blog_job`` raising)
-          is ridden out: it is logged and retried on the next poll, up to
-          ``HITL_MAX_CONSECUTIVE_READ_ERRORS`` CONSECUTIVE failures, after which the
-          error propagates (a persistent outage still fails the job). ``on_poll`` errors
-          are not caught — they propagate immediately.
+        - Any exception raised by ``is_waiting`` / ``get_blog_job`` (not just
+          network/HTTP blips — also unexpected programming errors) is ridden out:
+          logged and retried on the next poll, up to
+          ``HITL_MAX_CONSECUTIVE_READ_ERRORS`` consecutive failures, after which the
+          error propagates (a persistent outage still fails the job).
+          ``CancelledError`` is re-raised immediately so Temporal cancellation is
+          not delayed by the retry budget. ``on_poll`` errors are not caught — they
+          propagate immediately.
         - Does not mutate job state; ``on_poll`` may.
     """
     # Deferred import: see module docstring — keeps monkeypatch.setattr(shim,
@@ -104,11 +109,14 @@ def _wait_for_hitl(
     while True:
         # Wrap only the job-store reads: a transient blip during a long HITL wait should
         # retry next poll, not fail the whole job. on_poll (below) stays outside so its
-        # errors surface immediately.
+        # errors surface immediately. CancelledError must escape immediately so Temporal
+        # cancellation is not delayed by the consecutive-error budget.
         try:
             if not is_waiting(job_id):
                 return False
             job_data = get_blog_job(job_id)
+        except CancelledError:
+            raise
         except Exception as e:
             consecutive_read_errors += 1
             if consecutive_read_errors > HITL_MAX_CONSECUTIVE_READ_ERRORS:
@@ -257,7 +265,13 @@ def run_planning(
         - Returns a ``PlanningPhaseResult`` (content plan with title candidates,
           sections, requirements analysis, and planning telemetry).
     Raises:
-        PlanningError: If content planning fails.
+        PlanningError: If content planning fails for a non-transient reason.
+        BloggingError: Blogging-domain errors from the planner or plan critic
+            propagate unwrapped (not re-wrapped as ``PlanningError``).
+        LLMRateLimitError / LLMTemporaryError: transient LLM-transport failures
+            (including from the plan critic) propagate unwrapped so Temporal's
+            activity funnel can retry the stage instead of treating them as a
+            terminal PlanningError.
     """
     # Deferred import: see module docstring.
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (
@@ -288,9 +302,9 @@ def run_planning(
     )
 
     # Load the author's brand spec + writing guidelines so the plan critic can
-    # evaluate against the author-owned sources of truth. These are safe to load
-    # even when the critic is disabled — the BlogWriterAgent used for drafting
-    # wants them too, but planning uses an empty-style instance by design.
+    # evaluate against the author-owned sources of truth, and so the planning
+    # BlogWriterAgent receives the same brand/style context (even when the
+    # critic is disabled).
     try:
         brand_spec_for_critic = load_brand_spec_prompt(BRAND_SPEC_PROMPT_PATH)
     except Exception as e:  # pragma: no cover - defensive
@@ -323,7 +337,9 @@ def run_planning(
             work_dir=work_dir,
             max_iterations=planning_max_iter,
         )
-    except BloggingError:
+    except (BloggingError, LLMRateLimitError, LLMTemporaryError):
+        # Domain errors and transient LLM-transport errors must stay unwrapped
+        # so temporal.activities._run_stage (and callers) classify them correctly.
         raise
     except Exception as e:
         if _is_external_cancellation(e):
@@ -655,19 +671,37 @@ def _extract_story_placeholders(draft_text: str) -> List[Tuple[str, str]]:
     return results
 
 
+class _DraftAgent(Protocol):
+    """Minimal draft-agent surface used by post-draft story placeholder fill.
+
+    Preconditions:
+        - Implementers provide a callable ``run`` matching this signature.
+    Postconditions:
+        - Structural typing only; no runtime registration.
+    """
+
+    def run(
+        self,
+        draft_input: "WriterInput",
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+        draft_output_path: Optional[Union[str, Path]] = None,
+    ) -> "WriterOutput": ...
+
+
 def _fill_story_placeholders(
     *,
     draft_text: str,
-    plan: Any,
+    plan: ContentPlan,
     llm_client: Any,
     job_id: str,
-    job_updater: Callable,
+    job_updater: JobUpdater,
     elicited_stories_text: Optional[str],
-    draft_agent: Any,
-    draft_input_kwargs: dict,
+    draft_agent: _DraftAgent,
+    draft_input_kwargs: dict[str, Any],
     work_dir: Optional[Union[str, Path]],
     iteration: int,
-) -> Tuple[Any, Optional[str]]:
+) -> Tuple["WriterOutput", Optional[str]]:
     """Scan draft for ``[Author: ...]`` placeholders and interview the user for each.
 
     For each placeholder the ghost writer conducts an interview.  If the user
@@ -675,13 +709,34 @@ def _fill_story_placeholders(
     the section is rewritten without a personal story.  Otherwise the collected
     narrative replaces the placeholder.
 
-    Returns ``(updated_draft_result, updated_elicited_stories_text)``.
+    ``llm_client`` is typed as ``Any`` deliberately (same as ``PipelineContext``):
+    production passes a Strands ``LLMClientModel`` / model wrapper that does not
+    subclass ``llm_service.interface.LLMClient``, while tests and failover paths
+    may pass other client shapes. The runtime contract is non-None only.
+
+    Preconditions:
+        - ``draft_text`` is a ``str``.
+        - ``plan`` is a ``ContentPlan`` instance.
+        - ``llm_client`` is not ``None``.
+        - ``draft_agent`` provides a callable ``run`` method.
+        - ``draft_input_kwargs`` does not already contain ``elicited_stories``
+          (this function injects that key when building ``WriterInput``).
+    Postconditions:
+        - Returns ``(updated_draft_result, updated_elicited_stories_text)``.
+        - When no placeholders exist, returns a ``WriterOutput`` wrapping the
+          original ``draft_text`` and the unchanged ``elicited_stories_text``.
 
     Raises:
+        TypeError: a precondition on ``draft_text``, ``plan``, ``llm_client``,
+            or ``draft_agent`` is violated.
+        ValueError: ``draft_input_kwargs`` already contains ``elicited_stories``.
         CancelledError: a Temporal-native (or otherwise external) cancellation
             propagates unchanged — the non-fatal story-bank-save guard below
             never swallows it.
     """
+    # Local imports so GhostWriterElicitationAgent is resolved from
+    # agents.blogging.ghost_writer_agent at call time — tests monkeypatch that
+    # module attribute. Hoisting would freeze the class binding and break those patches.
     from agents.blogging.blog_writer_agent.models import WriterInput, WriterOutput
     from agents.blogging.ghost_writer_agent import GhostWriterElicitationAgent
     from agents.blogging.ghost_writer_agent.agent import MAX_ROUNDS_POST_DRAFT
@@ -691,6 +746,17 @@ def _fill_story_placeholders(
         get_blog_job,
         update_blog_job,
     )
+
+    if not isinstance(draft_text, str):
+        raise TypeError("draft_text must be a string")
+    if "elicited_stories" in draft_input_kwargs:
+        raise ValueError("draft_input_kwargs must not contain 'elicited_stories'")
+    if not isinstance(plan, ContentPlan):
+        raise TypeError("plan must be a ContentPlan")
+    if llm_client is None:
+        raise TypeError("llm_client must not be None")
+    if not callable(getattr(draft_agent, "run", None)):
+        raise TypeError("draft_agent must provide a callable run method")
 
     placeholders = _extract_story_placeholders(draft_text)
     if not placeholders:

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json as json_module
 from pathlib import Path
+from typing import Any, Dict
 
+from agents.blogging.api.dependencies import get_job
 from agents.blogging.api.models import (
     ArtifactContentResponse,
     ArtifactListResponse,
     ArtifactMeta,
 )
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
 router = APIRouter()
@@ -22,18 +24,13 @@ router = APIRouter()
     summary="List job artifacts",
     description="List artifact filenames that exist for a pipeline job. Returns 404 if the job is missing or has no work_dir.",
 )
-def list_job_artifacts(job_id: str) -> ArtifactListResponse:
+def list_job_artifacts(
+    job_id: str,
+    job: Dict[str, Any] = Depends(get_job()),
+) -> ArtifactListResponse:
     """List existing artifact names for a job."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None:
-        raise HTTPException(
-            status_code=501,
-            detail="Job store not available",
-        )
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     work_dir = job.get("work_dir")
     if not work_dir:
         raise HTTPException(status_code=404, detail="Job has no artifact directory")
@@ -64,18 +61,11 @@ def get_job_artifact_content(
     download: bool = Query(
         False, description="If true, return content as attachment with Content-Disposition"
     ),
+    job: Dict[str, Any] = Depends(get_job("read_artifact")),
 ) -> ArtifactContentResponse | Response:
     """Return content of one artifact for a job, or as download attachment."""
     from agents.blogging.api import main as _main
 
-    if _main.get_blog_job is None or _main.read_artifact is None:
-        raise HTTPException(
-            status_code=501,
-            detail="Job store or artifact reader not available",
-        )
-    job = _main.get_blog_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     work_dir = job.get("work_dir")
     if not work_dir:
         raise HTTPException(status_code=404, detail="Job has no artifact directory")

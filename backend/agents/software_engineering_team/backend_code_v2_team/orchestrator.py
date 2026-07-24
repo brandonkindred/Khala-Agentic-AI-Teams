@@ -71,16 +71,16 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     from .tool_agents.security import SecurityToolAgent
     from .tool_agents.testing_qa import TestingQAToolAgent
 
-    return {
-        ToolAgentKind.DATA_ENGINEERING: DataEngineeringToolAgent(llm),
-        ToolAgentKind.API_OPENAPI: ApiOpenApiToolAgent(llm),
-        ToolAgentKind.AUTH: AuthToolAgent(llm),
-        ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent(),
-        ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(llm),
-        ToolAgentKind.TESTING_QA: TestingQAToolAgent(llm),
-        ToolAgentKind.SECURITY: SecurityToolAgent(llm),
-        ToolAgentKind.DOCUMENTATION: DocumentationToolAgent(llm),
-    }
+    return BaseV2DevelopmentAgent._assemble_tool_agents(
+        (ToolAgentKind.DATA_ENGINEERING, DataEngineeringToolAgent(llm)),
+        (ToolAgentKind.API_OPENAPI, ApiOpenApiToolAgent(llm)),
+        (ToolAgentKind.AUTH, AuthToolAgent(llm)),
+        (ToolAgentKind.GIT_BRANCH_MANAGEMENT, GitBranchManagementToolAgent()),
+        (ToolAgentKind.BUILD_SPECIALIST, BuildSpecialistAdapterAgent(llm)),
+        (ToolAgentKind.TESTING_QA, TestingQAToolAgent(llm)),
+        (ToolAgentKind.SECURITY, SecurityToolAgent(llm)),
+        (ToolAgentKind.DOCUMENTATION, DocumentationToolAgent(llm)),
+    )
 
 
 class BackendDevelopmentAgent(BaseV2DevelopmentAgent):

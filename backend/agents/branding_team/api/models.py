@@ -16,7 +16,12 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from branding_team.models import BrandCheckRequest, BrandingMission, TeamOutput
+from branding_team.models import (
+    BrandCheckRequest,
+    BrandingMission,
+    BrandingMissionFields,
+    TeamOutput,
+)
 from branding_team.shared.job_store import JOB_STATUS_PENDING
 
 # ---------------------------------------------------------------------------
@@ -30,16 +35,17 @@ class CreateClientRequest(BaseModel):
     notes: Optional[str] = None
 
 
-class CreateBrandRequest(BaseModel):
-    company_name: str = Field(..., min_length=2)
-    company_description: str = Field(..., min_length=10)
-    target_audience: str = Field(..., min_length=3)
+class CreateBrandRequest(BrandingMissionFields):
+    """Create-brand API body: shared mission fields plus brand/conversation extras.
+
+    Preconditions:
+        - Same as ``BrandingMissionFields`` for the eight shared mission fields.
+    Postconditions:
+        - Instance exposes shared mission fields plus optional ``name`` and
+          ``conversation_id``; omitted extras default to ``None``.
+    """
+
     name: Optional[str] = None
-    values: List[str] = Field(default_factory=list)
-    differentiators: List[str] = Field(default_factory=list)
-    desired_voice: str = Field(default="clear, confident, human")
-    existing_brand_material: List[str] = Field(default_factory=list)
-    wiki_path: Optional[str] = None
     conversation_id: Optional[str] = None
 
 
