@@ -24,6 +24,7 @@ from agents.blogging.shared.content_plan import (
     RequirementsAnalysis,
     TitleCandidate,
 )
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
 from llm_service import extract_json_from_response
@@ -46,6 +47,20 @@ from .platform_formatters import (
 from .prompts import CONVERT_FEEDBACK_TO_EDITOR_PROMPT, REJECTION_FOLLOW_UP_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
+
+_REJECT_STRICT_JSON_SUFFIX = (
+    "\n\nRespond with a single JSON object only (no markdown, no code fence). "
+    'Keys: "ready_to_revise" (boolean), "questions" (array of strings), '
+    '"feedback_summary" (string).'
+)
+
+_CONVERT_STRICT_JSON_SUFFIX = (
+    "\n\nRespond with a single JSON object only (no markdown, no code fence). "
+    'Keys: "feedback_items" (array of objects with category, severity, location?, '
+    "issue, suggestion?)."
+)
 
 
 def _content_plan_from_outline(outline: str) -> ContentPlan:
@@ -236,11 +251,28 @@ class BlogPublicationAgent(_BlogAgentBase):
             latest_feedback=latest_feedback,
         )
 
-        agent = Agent(
-            model=self._model, system_prompt="You help analyze rejection feedback for blog posts."
+        def _agent_factory():
+            return Agent(
+                model=self._model,
+                system_prompt="You help analyze rejection feedback for blog posts.",
+            )
+
+        def _reject_fallback(_exc: Exception) -> dict:
+            return {
+                "ready_to_revise": True,
+                "questions": [],
+                "feedback_summary": "\n".join(f"- {f}" for f in meta.rejection_feedback),
+            }
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt + _SOFT_JSON_INSTRUCTION,
+            max_attempts=2,
+            strict_json_suffix=_REJECT_STRICT_JSON_SUFFIX,
+            on_exhausted=_reject_fallback,
+            on_unexpected_error=_reject_fallback,
+            logger=logger,
         )
-        result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
-        data = extract_json_from_response(str(result).strip())
 
         ready_to_revise = bool(data.get("ready_to_revise", False))
         questions = data.get("questions") or []

@@ -178,3 +178,37 @@ def test_revision_loop_stops_after_editor_approval(agent, temp_blog_root, monkey
     assert calls["revise"] == 1
     assert revision.iterations_completed == 1
     assert "Revised." in revision.revised_draft
+
+
+def test_reject_json_parse_exhaustion_falls_back_ready_to_revise(
+    agent, temp_blog_root, monkeypatch
+) -> None:
+    """Unparseable follow-up JSON retries then soft-falls back to ready_to_revise."""
+    import json
+
+    from agents.blogging.blog_publication_agent import agent as pub_mod
+
+    result = agent.submit_draft(
+        SubmitDraftInput(
+            draft="# Rejected Post\n\nNeeds work.",
+            title="Rejected Post",
+        )
+    )
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return "not json at all"
+
+    monkeypatch.setattr(pub_mod, "Agent", _Agent)
+
+    rejection = agent.reject(result.submission_id, "The intro is too short.")
+    assert rejection.ready_to_revise is True
+    assert rejection.questions == []
+    assert rejection.submission_id == result.submission_id
+
+    meta_path = temp_blog_root / "pending" / f"{result.submission_id}_meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "The intro is too short." in meta["rejection_feedback"]
