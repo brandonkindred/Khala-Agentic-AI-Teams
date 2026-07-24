@@ -17,6 +17,7 @@ from software_engineering_team.devops_team import (
     DevOpsTeamResult,
 )
 from software_engineering_team.devops_team.models import (
+    CriterionTrace,
     DevOpsCompletionPackage,
     DevOpsConstraints,
     PlatformScope,
@@ -27,6 +28,7 @@ from software_engineering_team.devops_team.models import (
 from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
+    _criterion_traces_from_phase4,
 )
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
@@ -163,7 +165,13 @@ def _scripted_llm_for_happy_path() -> _ScriptedClient:
             {
                 "approved": True,
                 "quality_gates": {"iac_validate": "pass", "policy_checks": "pass"},
-                "acceptance_trace": [],
+                "acceptance_trace": [
+                    {
+                        "criterion": "Pipeline runs tests and scan before deploy",
+                        "implementation_refs": ["infra/main.tf"],
+                        "tests": [{"iac_validate": "pass"}],
+                    }
+                ],
                 "summary": "validation ok",
             },
             {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
@@ -1178,6 +1186,76 @@ class TestDocumentationRunbookAgent:
 
 
 # ===========================================================================
+# UNIT TESTS -- PHASE 4 CRITERION TRACE MAPPER
+# ===========================================================================
+
+
+class TestCriterionTracesFromPhase4:
+    """Unit tests for the Phase 4 → CriterionTrace mapper."""
+
+    def test_match_uses_phase4_entry(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1", "c2"],
+            acceptance_trace=[
+                {
+                    "criterion": "c1",
+                    "implementation_refs": ["infra/main.tf"],
+                    "tests": [{"iac_validate": "pass"}],
+                }
+            ],
+            artifact_keys=["infra/main.tf", "deploy/values.yaml"],
+        )
+        assert len(traces) == 2
+        assert traces[0].criterion == "c1"
+        assert traces[0].implementation_refs == ["infra/main.tf"]
+        assert traces[0].tests == [{"iac_validate": "pass"}]
+        assert traces[1].criterion == "c2"
+        assert traces[1].tests == []
+        assert traces[1].implementation_refs == [
+            "deploy/values.yaml",
+            "infra/main.tf",
+        ]
+
+    def test_no_match_uses_empty_tests_and_artifact_keys(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["lonely"],
+            acceptance_trace=[],
+            artifact_keys=["a.py"],
+        )
+        assert traces == [
+            CriterionTrace(
+                criterion="lonely",
+                implementation_refs=["a.py"],
+                tests=[],
+            )
+        ]
+
+    def test_coerces_bad_shapes(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1"],
+            acceptance_trace=[
+                {
+                    "criterion": "c1",
+                    "implementation_refs": "not-a-list",
+                    "tests": [{"ok": 1}, "skip-me", {"gate": True}],
+                }
+            ],
+            artifact_keys=["fallback.py"],
+        )
+        assert traces[0].implementation_refs == []
+        assert traces[0].tests == [{"ok": "1"}, {"gate": "True"}]
+
+    def test_never_invents_validation_pass(self) -> None:
+        traces = _criterion_traces_from_phase4(
+            criteria=["c1"],
+            acceptance_trace=[],
+            artifact_keys=[],
+        )
+        assert traces[0].tests == []
+        assert {"validation": "pass"} not in traces[0].tests
+
+
+# ===========================================================================
 # INTEGRATION TESTS -- ORCHESTRATOR
 # ===========================================================================
 
@@ -1372,14 +1450,46 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package.quality_gates["security_review"] == "fail"
 
     def test_completion_package_has_acceptance_trace(self) -> None:
+        from software_engineering_team.devops_team.test_validation_agent.models import (
+            DevOpsTestValidationOutput,
+        )
+
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
+        # Stub Phase 4 validation output directly. The DummyLLM + Strands
+        # structured-output path reuses the prior change-review payload for the
+        # QA acceptance_evidence call, so a scripted ``acceptance_trace`` on the
+        # LLM client does not reach the orchestrator. This test targets Phase 5
+        # wiring, not that adapter quirk.
+        agent.test_validation_agent.run = (  # type: ignore[method-assign]
+            lambda _inp: DevOpsTestValidationOutput(
+                approved=True,
+                quality_gates={"iac_validate": "pass", "policy_checks": "pass"},
+                acceptance_trace=[
+                    {
+                        "criterion": "Pipeline runs tests and scan before deploy",
+                        "implementation_refs": ["infra/main.tf"],
+                        "tests": [{"iac_validate": "pass"}],
+                    }
+                ],
+                summary="validation ok",
+            )
+        )
         pkg = agent.run(spec)
         assert len(pkg.acceptance_criteria_trace) == len(spec.acceptance_criteria)
+
+        by_criterion = {t.criterion: t for t in pkg.acceptance_criteria_trace}
+        matched = by_criterion["Pipeline runs tests and scan before deploy"]
+        assert matched.implementation_refs == ["infra/main.tf"]
+        assert matched.tests == [{"iac_validate": "pass"}]
+
+        unmatched = by_criterion["Prod deploy requires explicit approval"]
+        assert unmatched.tests == []
+        assert len(unmatched.implementation_refs) > 0
+
         for trace in pkg.acceptance_criteria_trace:
-            assert trace.criterion
-            assert len(trace.implementation_refs) > 0
+            assert {"validation": "pass"} not in trace.tests
 
     def test_completion_package_has_release_readiness(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
