@@ -222,9 +222,9 @@ def _run_chunk_review(
             len(code_chunk),
             max_chunk_chars,
         )
-    spec_excerpt = input_data.spec_excerpt[:max_spec]
-    architecture_overview = input_data.architecture_overview[:max_arch]
-    existing_codebase_excerpt = (input_data.existing_codebase_excerpt or "")[:max_existing]
+    spec_excerpt = input_data.spec_excerpt
+    architecture_overview = input_data.architecture_overview
+    existing_codebase_excerpt = (input_data.existing_codebase_excerpt or "")
 
     language = input_data.language.strip().lower() if input_data.language else ""
     if not language:

@@ -90,7 +90,7 @@ def filter_duplicate_questions(
             logger.info(
                 "Filtering duplicate question (%.0f%% match): %s",
                 match_ratio * 100,
-                q.question_text[:60],
+                q.question_text,
             )
             duplicates.append(q)
             continue
@@ -354,8 +354,8 @@ def dedupe_questions_by_answer_similarity(
                     logger.info(
                         "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
                         q.id,
-                        opt_label[:50],
-                        existing[:50],
+                        opt_label,
+                        existing,
                     )
                     already_covered = True
                     break

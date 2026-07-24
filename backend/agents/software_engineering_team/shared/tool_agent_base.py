@@ -60,21 +60,11 @@ def relevant_code_for_issue(
     """
     if issue.file_path and issue.file_path in current_files:
         content = current_files[issue.file_path]
-        if len(content) <= max_chars:
-            return f"--- {issue.file_path} ---\n{content}"
-        return f"--- {issue.file_path} ---\n{content[:max_chars]}\n... [truncated]"
+        return f"--- {issue.file_path} ---\n{content}"
     parts: List[str] = []
-    total = 0
-    for path, content in list(current_files.items())[:10]:
+    for path, content in list(current_files.items()):
         chunk = f"--- {path} ---\n{content}\n"
-        if total + len(chunk) > max_chars:
-            remaining = max_chars - total
-            if remaining > 200:
-                chunk = f"--- {path} ---\n{content[:remaining]}\n... [truncated]"
-                parts.append(chunk)
-            break
         parts.append(chunk)
-        total += len(chunk)
     return "\n".join(parts) if parts else "(no code)"
 
 

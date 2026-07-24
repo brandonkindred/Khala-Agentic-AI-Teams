@@ -82,12 +82,6 @@ _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 # receive plain code and a physical (1-based) line index.
 _LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
 
-# Cap on the task-description and each acceptance-criterion text inlined into the
-# verification prompt. The file body already has its own ``max_inline_chars``
-# bound; this keeps an unbounded task/criteria field from dominating the prompt
-# or overflowing context. Normal task text is far below this.
-_CONTEXT_FIELD_CHARS = 4_000
-
 
 def _verify_parallelism() -> int:
     """Concurrency cap for per-file verification calls.
@@ -819,41 +813,30 @@ def _build_group_prompt(
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
           matching ``issues`` order) and never exceeds the inline budget for the
-          primary file body. The task description and each acceptance criterion
-          are capped at ``_CONTEXT_FIELD_CHARS`` so an oversized task field can
-          never dominate the prompt or overflow context.
+          primary file body.
     """
     parts: List[str] = []
-    task = input_data.task_description.strip()[:_CONTEXT_FIELD_CHARS]
+    task = input_data.task_description.strip()
     if task:
         parts.append(f"**Task being implemented:** {task}")
     if input_data.acceptance_criteria:
         parts.append("**Acceptance criteria:**")
-        parts.extend(f"- {c[:_CONTEXT_FIELD_CHARS]}" for c in input_data.acceptance_criteria)
+        parts.extend(f"- {c}" for c in input_data.acceptance_criteria)
         parts.append("")
 
     manifest = index.list_files()
     parts.append(
         f"**Files available to read ({len(manifest)} total) — use read_file/search_codebase:**"
     )
-    parts.extend(manifest[:_MANIFEST_LIMIT])
-    if len(manifest) > _MANIFEST_LIMIT:
-        parts.append(f"... and {len(manifest) - _MANIFEST_LIMIT} more (call list_files()).")
+    parts.extend(manifest)
     parts.append("")
 
     body = index.read_file(file_path)
-    inlined = body[:max_inline_chars]
-    truncated = len(body) > max_inline_chars
-    fence = _code_fence_for(inlined)
+    fence = _code_fence_for(body)
     parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
     parts.append(fence)
-    parts.append(inlined)
+    parts.append(body)
     parts.append(fence)
-    if truncated:
-        parts.append(
-            f"(Only the first {max_inline_chars} characters of `{file_path}` are shown above; "
-            "call read_file to see the rest.)"
-        )
     parts.append("")
 
     parts.append(
@@ -1054,8 +1037,8 @@ def _verify_and_filter(
                     issue.severity,
                     issue.file_path,
                     issue.line if issue.line is not None else "-",
-                    issue.description[:120],
-                    verdict.reasoning[:160] or "no reasoning given",
+                    issue.description,
+                    verdict.reasoning or "no reasoning given",
                 )
 
     if not removed:

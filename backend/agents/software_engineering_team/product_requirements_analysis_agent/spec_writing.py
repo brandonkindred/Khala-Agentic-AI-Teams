@@ -285,15 +285,13 @@ def generate_prd_document(
     # Summarize answered questions for the prompt; this may be empty on the first run
     answered_summary = format_answered_questions(answered_questions)
 
-    # Keep prompt size reasonable while fitting within model context (e.g. 256K)
-    max_chars = compute_prd_snippet_chars(llm)
-    cleaned_spec_snippet = cleaned_spec[:max_chars]
-    answered_summary_snippet = answered_summary[:max_chars]
+    cleaned_spec_snippet = cleaned_spec
+    answered_summary_snippet = answered_summary
     specialist_plan = build_specialist_collaboration_plan(
         cleaned_spec=cleaned_spec_snippet,
         answered_questions=answered_questions,
     )
-    specialist_plan_snippet = specialist_plan[:max_chars]
+    specialist_plan_snippet = specialist_plan
 
     prompt = PRD_PROMPT.format(
         cleaned_spec=cleaned_spec_snippet,

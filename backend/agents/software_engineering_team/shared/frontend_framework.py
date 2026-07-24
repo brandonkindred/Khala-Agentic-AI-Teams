@@ -98,7 +98,7 @@ def get_frontend_framework_from_spec(spec_content: str) -> Optional[str]:
     """
     if not spec_content or not spec_content.strip():
         return None
-    text = spec_content[:_SPEC_SCAN_CHARS]
+    text = spec_content
 
     # Check for explicit framework mentions
     if _ANGULAR_PATTERN.search(text):

@@ -110,17 +110,12 @@ def _build_prompt(
         )
         if p
     )
-    inlined_doc = arch_doc[:max_arch_doc_chars]
+    inlined_doc = arch_doc
     doc_fence = _code_fence_for(inlined_doc)
     parts.append("**Architecture document:**")
     parts.append(doc_fence)
     parts.append(inlined_doc or "(no architecture document provided)")
     parts.append(doc_fence)
-    if len(arch_doc) > max_arch_doc_chars:
-        parts.append(
-            f"(Only the first {max_arch_doc_chars} characters of the architecture document are "
-            "shown above; the rest was not available to this pass.)"
-        )
     parts.append("")
 
     changed_files = list(index.files.items())

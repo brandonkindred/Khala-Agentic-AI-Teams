@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # is replaced with `_`. This is a defense-in-depth measure against prompt
 # injection through manifest fields.
 _PROMPT_VAR_ALLOWED = re.compile(r"[^A-Za-z0-9 _\-./:@,()\[\]{}+=#'\"\n\t]")
-_PROMPT_VAR_MAX_LEN = 4000
+_PROMPT_VAR_MAX_LEN = 100000
 
 
 def sanitize_prompt_var(value: object, *, max_len: int = _PROMPT_VAR_MAX_LEN) -> str:
@@ -111,4 +111,4 @@ class LLMClient:
     @staticmethod
     def _fallback(request: LLMRequest) -> str:
         # A small, structured fallback so callers can detect it explicitly.
-        return f"[llm-fallback] {request.user.strip()[:512]}"
+        return f"[llm-fallback] {request.user.strip()}"

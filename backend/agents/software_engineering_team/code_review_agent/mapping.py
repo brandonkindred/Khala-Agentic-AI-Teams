@@ -765,7 +765,7 @@ def _symbol_surface(content: str) -> List[str]:
             exported = token.split()[-1]
             if re.fullmatch(r"[A-Za-z_$][\w$]*", exported):
                 names.add(exported)
-    return sorted(names)[:_MAX_SYMBOLS_PER_FILE]
+    return sorted(names)
 
 
 def _surface_by_path(blocks: List[Tuple[str, str]]) -> Dict[str, List[str]]:
@@ -810,7 +810,7 @@ def _sibling_surface(chunk: ReviewChunk, surface_by_path: Dict[str, List[str]]) 
         for path in sorted(surface_by_path)
         if path not in own_paths
     ]
-    return "\n".join(lines)[: compute_code_review_sibling_surface_chars()]
+    return "\n".join(lines)
 
 
 def _half_sibling_surface(
@@ -1133,7 +1133,7 @@ def _map_chunks(
                 notify_review_progress(
                     progress_callback,
                     "reviewing",
-                    f"chunk {completed_count[0]}/{total} reviewed: {chunk.paths_label[:120]}",
+                    f"chunk {completed_count[0]}/{total} reviewed: {chunk.paths_label}",
                     _MAP_PHASE_START + _MAP_PHASE_SPAN * completed_count[0] / total,
                 )
         return outcome

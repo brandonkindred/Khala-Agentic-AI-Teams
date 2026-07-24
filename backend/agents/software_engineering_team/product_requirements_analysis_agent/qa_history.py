@@ -162,8 +162,8 @@ def extract_answer_from_qa_history(
         _, matched_q, answer, rationale = best_match
         logger.debug(
             "Extracted answer for duplicate question: '%s' -> '%s'",
-            question.question_text[:40],
-            answer[:40],
+            question.question_text,
+            answer,
         )
         return AnsweredQuestion(
             question_id=question.id,
@@ -172,7 +172,7 @@ def extract_answer_from_qa_history(
             selected_answer=answer,
             was_auto_answered=False,
             was_default=False,
-            rationale=rationale or f"Previously answered (matched: {matched_q[:50]})",
+            rationale=rationale or f"Previously answered (matched: {matched_q})",
             confidence=0.9,  # High confidence since it was user-answered before
         )
 

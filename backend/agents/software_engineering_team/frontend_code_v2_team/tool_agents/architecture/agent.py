@@ -83,7 +83,7 @@ class ArchitectureToolAgent(PlanGeneratorToolAgent):
     )
 
     def _build_plan_prompt(self, inp: ToolAgentPhaseInput) -> str:
-        spec_excerpt = (inp.spec_context or "")[:MAX_SPEC_CHARS]
+        spec_excerpt = (inp.spec_context or "")
         task_desc = inp.task_description or inp.task_title or "Frontend application"
         return FRONTEND_ARCHITECT_PROMPT.format(
             task_description=task_desc,

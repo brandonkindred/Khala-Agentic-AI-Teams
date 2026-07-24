@@ -141,10 +141,10 @@ def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
             max_arch,
             llm,
             "architecture overview",
-        )[:max_arch]
+        )
     existing_codebase = compact_text(
         input_data.existing_codebase or "", max_existing, llm, "existing codebase"
-    )[:max_existing]
+    )
 
     chunks = build_review_chunks(
         blocks, compute_code_review_map_chunk_chars(llm), input_data.pre_numbered

@@ -104,29 +104,18 @@ class LintingToolAgent:
     def _read_affected_files(repo_path: Path, issues: List[LintIssue]) -> str:
         """Read and concatenate content of files mentioned in lint issues.
 
-        De-duplicates file paths and truncates total output to stay within
-        context-window limits.
+        De-duplicates file paths.
         """
         seen_files: Dict[str, str] = {}
-        total_chars = 0
         for issue in issues:
             if issue.file_path in seen_files:
                 continue
-            if len(seen_files) >= MAX_AFFECTED_FILES:
-                break
             file_abs = repo_path / issue.file_path
             if not file_abs.is_file():
                 continue
             try:
                 content = file_abs.read_text(encoding="utf-8", errors="replace")
-                if total_chars + len(content) > MAX_AFFECTED_CODE_CHARS:
-                    remaining = MAX_AFFECTED_CODE_CHARS - total_chars
-                    if remaining > 200:
-                        content = content[:remaining] + "\n... [truncated]"
-                    else:
-                        break
                 seen_files[issue.file_path] = content
-                total_chars += len(content)
             except Exception:
                 continue
 
