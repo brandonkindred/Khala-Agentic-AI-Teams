@@ -95,8 +95,8 @@ def test_writer_run_no_marker_returns_placeholder(monkeypatch) -> None:
 def test_writer_run_placeholder_skips_self_review(monkeypatch) -> None:
     """Empty draft uses ``_PLACEHOLDER_DRAFT`` and does not invoke self-review."""
     from agents.blogging.blog_writer_agent.agent import (
-        BlogWriterAgent,
         _PLACEHOLDER_DRAFT,
+        BlogWriterAgent,
     )
 
     a = _agent()
