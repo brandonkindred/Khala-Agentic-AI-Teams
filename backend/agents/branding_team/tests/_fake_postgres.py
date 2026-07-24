@@ -24,6 +24,8 @@ import sys
 from collections import Counter
 from typing import Any
 
+from psycopg.errors import UniqueViolation
+
 from shared.postgres.fake import (
     DispatchTable,
     FakeCursor,
@@ -502,7 +504,20 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("insert into branding_sessions")
 
     def handle_insert_session(cur: FakeCursor, params: tuple) -> None:
+        """Emulate INSERT into branding_sessions (session_id PRIMARY KEY).
+
+        Preconditions:
+            ``params`` is ``(session_id, session_json, updated_at)``.
+        Postconditions:
+            On success, ``cur.db["sessions"][session_id]`` holds the new row.
+            If ``session_id`` already exists, raises ``UniqueViolation`` and
+            leaves the existing row unchanged (matches Postgres PK semantics).
+        """
         session_id, session_json, updated_at = params
+        if session_id in cur.db["sessions"]:
+            raise UniqueViolation(
+                'duplicate key value violates unique constraint "branding_sessions_pkey"'
+            )
         cur.db["sessions"][session_id] = {
             "session_id": session_id,
             "session_json": unwrap_json(session_json),
