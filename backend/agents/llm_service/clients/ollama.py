@@ -147,6 +147,17 @@ def _fallback_num_ctx_ttl_s() -> float:
 MAX_CONTINUATION_CYCLES = 10
 CONTINUATION_CONTEXT_CHARS = 150
 
+# One-shot corrective follow-up when chat(response_format="json") receives prose
+# instead of a tool call or JSON. Triggered especially when tools are present:
+# OpenAI-compatible endpoints cannot set response_format=json_object alongside
+# tools, so models (e.g. qwen3-coder) sometimes narrate instead of acting.
+_CHAT_JSON_CORRECTIVE_USER = (
+    "Your previous reply was rejected: it was neither a tool call nor valid JSON. "
+    "Either invoke a tool via the tools API, or respond with ONLY a single JSON "
+    "object — no prose, no markdown, no code fences.\n"
+    "Previous reply (truncated):\n{preview}"
+)
+
 # Max response/body length to log (avoid huge logs)
 _MAX_LOG_BODY = 2000
 
@@ -2125,7 +2136,10 @@ class OllamaLLMClient(LLMClient):
         ``response_format=json_object`` when no tools are present, and the
         assistant content is parsed via ``_extract_json`` instead of being
         returned raw. Tool-invocation envelopes are returned identically in
-        both modes. ``think=None`` (default) resolves to the platform default
+        both modes. When tools are present (so ``json_object`` cannot be forced
+        on the wire) and the model emits prose instead of a tool call or JSON,
+        one corrective follow-up asks it to either invoke a tool or emit JSON
+        only. ``think=None`` (default) resolves to the platform default
         (max registered thinking level when known).
         """
         if not objective or not objective.strip():
@@ -2143,6 +2157,105 @@ class OllamaLLMClient(LLMClient):
                 max_tokens=max_tokens,
                 **kwargs,
             )
+
+    def _chat_json_self_correct(
+        self,
+        *,
+        messages: list,
+        bad_content: str,
+        tools: list,
+        think: "bool | str",
+        temperature: float,
+        max_tokens: int,
+        max_retries: int,
+        backoff_base: float,
+        backoff_max: float,
+        rl_max_retries: int,
+        rl_initial: float,
+        rl_cap: float,
+        sem: threading.BoundedSemaphore,
+        first_error: LLMJsonParseError,
+    ) -> Any:
+        """One corrective chat turn after a non-JSON/non-tool reply with tools present.
+
+        Preconditions:
+            - ``tools`` is a non-empty tool list (caller already gated on this);
+              ``json_object`` cannot be forced on the wire alongside tools.
+            - ``bad_content`` is the rejected assistant text from the prior turn.
+        Postconditions:
+            - Returns a parsed JSON ``dict``, or a ``{"__tool_calls__": [...]}``
+              envelope when the correction invokes a tool.
+            - On a second non-JSON reply, re-raises ``first_error`` (or the
+              second parse error) after recording telemetry — never loops.
+        """
+        preview = (bad_content or "")[:500]
+        corrective_messages = list(messages) + [
+            {"role": "assistant", "content": bad_content},
+            {
+                "role": "user",
+                "content": _CHAT_JSON_CORRECTIVE_USER.format(preview=preview or "(empty)"),
+            },
+        ]
+        payload: dict = {
+            "model": self.model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": corrective_messages,
+            "tools": tools,
+            **_think_payload_fields(think),
+        }
+        logger.info(
+            "chat JSON self-correction: rid=%s %s model=%s (tools present; prior reply was prose)",
+            current_request_id() or "-",
+            _attribution_log_fields(),
+            self.model,
+        )
+        try:
+            content = self._ollama_post(
+                payload,
+                max_retries,
+                backoff_base,
+                backoff_max,
+                rl_max_retries,
+                rl_initial,
+                rl_cap,
+                sem,
+                resolved_think=think,
+            )
+        except LLMSemanticExhaustionError:
+            self._record_telemetry(status="error", error_type="semantic_exhaustion")
+            raise
+        stripped = (content or "").strip()
+        if stripped.startswith("{") and "__tool_calls__" in stripped:
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict) and "__tool_calls__" in parsed:
+                    logger.info(
+                        "chat JSON self-correction succeeded (tool call) after 1 retry (model=%s)",
+                        self.model,
+                    )
+                    self._record_telemetry(status="success")
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        try:
+            result = self._extract_json(content)
+        except LLMJsonParseError as second_err:
+            self._record_telemetry(status="error", error_type="json_parse")
+            logger.warning(
+                "chat JSON self-correction failed terminally (model=%s, preview=%r)",
+                self.model,
+                (content or "")[:500],
+            )
+            second_err.correction_attempts_used = 1
+            first_error.correction_attempts_used = 1
+            raise second_err from first_error
+        logger.info(
+            "chat JSON self-correction succeeded after 1 retry (model=%s)",
+            self.model,
+        )
+        self._record_telemetry(status="success")
+        return result
 
     def _chat_impl(
         self,
@@ -2217,7 +2330,7 @@ class OllamaLLMClient(LLMClient):
             result = self._extract_json(content)
             self._record_telemetry(status="success")
             return result
-        except LLMJsonParseError:
+        except LLMJsonParseError as parse_err:
             self._record_telemetry(status="error", error_type="json_parse")
             if stripped.startswith("{"):
                 try:
@@ -2226,4 +2339,24 @@ class OllamaLLMClient(LLMClient):
                         return parsed
                 except json.JSONDecodeError:
                     pass
+            # Tools and json_object are mutually exclusive on the OpenAI-compat
+            # wire, so a prose reply here is common (not a truncated `{...`).
+            # One corrective follow-up recovers most of these turns.
+            if tools:
+                return self._chat_json_self_correct(
+                    messages=list(messages),
+                    bad_content=content or "",
+                    tools=tools,
+                    think=think,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    max_retries=max_retries,
+                    backoff_base=backoff_base,
+                    backoff_max=backoff_max,
+                    rl_max_retries=rl_max_retries,
+                    rl_initial=rl_initial,
+                    rl_cap=rl_cap,
+                    sem=sem,
+                    first_error=parse_err,
+                )
             raise
