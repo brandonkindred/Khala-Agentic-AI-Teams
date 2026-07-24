@@ -21,6 +21,7 @@ from agents.blogging.shared.content_planning_loop import (
     run_content_planning_loop,
 )
 from agents.blogging.shared.content_profile import LengthPolicy
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 from strands.types.exceptions import EventLoopException
 
@@ -33,6 +34,7 @@ from llm_service import (
     extract_json_from_response,
 )
 
+from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS
 from .models import (
     ReviseWriterInput,
     RevisionPlan,
@@ -212,27 +214,86 @@ class BlogWriterAgent(_BlogAgentBase):
         return str(result).strip()
 
     def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
-        """Call the JSON-mode Strands Agent and return the raw assistant content
-        without parsing. Use this when a caller needs to do its own parsing
-        (e.g. the planning retry path that calls ``extract_json_from_response``)."""
+        """Invoke the injected model via Strands and return raw assistant text.
+
+        Uses ``self._model`` as supplied by the caller (typically already configured
+        for structured/JSON-oriented completions). Does not clone or force
+        ``response_format=json_object`` here — callers that need a specific wire
+        format must configure that on the injected client. Prefer this over
+        parsing when a caller needs to extract JSON itself (e.g. planning paths
+        that call ``extract_json_from_response``).
+        """
         agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
         result = agent(prompt)
         return str(result).strip()
 
     def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
-        """Call the JSON-mode Strands Agent and parse JSON from the result.
+        """Invoke the injected model via Strands and parse JSON from the result.
 
-        Used by the structured helpers (planning, gates) that parse the
-        assistant content via ``extract_json_from_response``.
-        ``response_format=json_object`` is forced on the wire for reliability
-        on Ollama; ``extract_json_from_response`` is a defensive cleanup in
-        case the model wraps the JSON anyway.
+        Appends a soft JSON-only instruction and runs ``extract_json_from_response``
+        as defensive cleanup if the model wraps the object. Relies on ``self._model``
+        already being suitable for structured replies; this method does not force
+        ``response_format=json_object`` on the wire.
         """
         raw = self._call_json_raw(
             prompt + "\n\nRespond with valid JSON only, no markdown fences.",
             system_prompt,
         )
         return extract_json_from_response(raw)
+
+    def _fallback_draft_via_json(self, prompt: str) -> Optional[str]:
+        """Parse a revised draft via shared JSON retry when the text path fails.
+
+        Preconditions:
+            - ``prompt`` is a non-empty string (same prompt used for the text path).
+        Postconditions:
+            - Returns a non-empty stripped draft string on success.
+            - Returns ``None`` when JSON cannot yield a usable draft (caller keeps
+              the prior draft).
+            - Transient LLM transport errors (``LLMRateLimitError`` /
+              ``LLMTemporaryError``), including when strands wraps them in
+              ``EventLoopException``, propagate unwrapped from
+              ``call_json_with_retry`` so the draft-stage retry funnel can catch them.
+        """
+        assert isinstance(prompt, str) and prompt.strip(), "prompt must be a non-empty string"
+
+        soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
+        strict_json_suffix = (
+            "\n\nRespond with a single JSON object only (no markdown, no code fence). "
+            'Keys: "draft" (string — the full revised blog post in Markdown).'
+        )
+
+        def _agent_factory():
+            # Construct Agent inside the invoker so TypeError/ValueError from a
+            # bad model/config land in call_json_with_retry's try block and hit
+            # on_unexpected_error (preserving the prior keep-original behavior).
+            model = self._model
+
+            def _invoke(prompt: str):
+                return Agent(model=model, system_prompt=WRITING_SYSTEM_PROMPT)(prompt)
+
+            return _invoke
+
+        def _unwrap(exc: Exception) -> Exception:
+            return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
+        def _empty_fallback(_exc: Exception) -> dict:
+            return {}
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt + soft_json_instruction,
+            max_attempts=2,
+            strict_json_suffix=strict_json_suffix,
+            unwrap_exception=_unwrap,
+            on_exhausted=_empty_fallback,
+            on_unexpected_error=_empty_fallback,
+            logger=logger,
+        )
+        raw_draft = data.get("draft") if isinstance(data, dict) else None
+        if isinstance(raw_draft, str) and raw_draft.strip():
+            return raw_draft.strip()
+        return None
 
     def _assert_guidelines_present(self) -> None:
         """Require both brand and writing guideline inputs before drafting/revising."""
@@ -598,7 +659,10 @@ class BlogWriterAgent(_BlogAgentBase):
             raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             draft = _extract_draft_after_marker(raw_response)
         except (LLMJsonParseError, TypeError, ValueError) as e:
-            logger.warning("Draft complete() failed: %s; trying complete_json fallback.", e)
+            logger.warning(
+                "Draft text completion failed: %s; trying JSON fallback.",
+                e,
+            )
             try:
                 data = self._call_agent_json(prompt)
                 raw_draft = data.get("draft")
@@ -621,11 +685,27 @@ class BlogWriterAgent(_BlogAgentBase):
         return WriterOutput(draft=draft)
 
     def _format_feedback_item_line(self, item: Any, index: int) -> str:
-        """One numbered feedback line (+ optional suggestion) for batch revise prompts."""
-        loc = f" [{item.location}]" if getattr(item, "location", None) else ""
-        line = f"{index}. [{item.severity}] {item.category}{loc}: {item.issue}"
-        if getattr(item, "suggestion", None):
-            line += f"\n   Suggestion: {item.suggestion}"
+        """One numbered feedback line (+ optional suggestion) for batch revise prompts.
+
+        Preconditions:
+            ``index`` is a positive int. ``item`` exposes ``severity``, ``category``,
+            and ``issue`` (via attribute or duck typing); empty/missing values are
+            rejected. ``location`` and ``suggestion`` are optional.
+        Postconditions:
+            Returns a numbered feedback line; includes a location bracket and a
+            suggestion sub-line when those optional fields are present.
+        """
+        severity = getattr(item, "severity", None)
+        category = getattr(item, "category", None)
+        issue = getattr(item, "issue", None)
+        if not all([severity, category, issue]):
+            raise ValueError(f"Feedback item missing required fields: {item!r}")
+        location = getattr(item, "location", None)
+        loc = f" [{location}]" if location else ""
+        line = f"{index}. [{severity}] {category}{loc}: {issue}"
+        suggestion = getattr(item, "suggestion", None)
+        if suggestion:
+            line += f"\n   Suggestion: {suggestion}"
         return line
 
     def _build_revise_all_items_prompt(
@@ -671,12 +751,18 @@ class BlogWriterAgent(_BlogAgentBase):
             "",
         ]
         # Persistent issues — placed BEFORE current feedback for higher LLM attention.
-        if revise_input.persistent_issues:  # pragma: no cover - prompt-assembly branch when persistent issues are supplied; covered by integration tests that exercise the revise loop end-to-end.
+        if revise_input.persistent_issues:
             pi_lines = []
             for i, pi in enumerate(revise_input.persistent_issues, 1):
-                loc = f" [{pi.location}]" if pi.location else ""
-                line = f"{i}. [{pi.severity}] {pi.category}{loc} (flagged {pi.occurrence_count} times): {pi.issue}"
-                if pi.suggestion:
+                loc = f" [{pi.location}]" if getattr(pi, "location", None) else ""
+                occurrence_count = getattr(pi, "occurrence_count", 0)
+                severity = getattr(pi, "severity", "unknown")
+                category = getattr(pi, "category", "")
+                line = (
+                    f"{i}. [{severity}] {category}{loc} "
+                    f"(flagged {occurrence_count} times): {getattr(pi, 'issue', '')}"
+                )
+                if getattr(pi, "suggestion", None):
                     line += f'\n   REQUIRED FIX: "{pi.suggestion}"'
                 pi_lines.append(line)
             prompt_parts.extend(
@@ -704,7 +790,9 @@ class BlogWriterAgent(_BlogAgentBase):
         )
         if revise_input.previous_feedback_items:  # pragma: no cover - prompt-assembly branch when previous_feedback_items are supplied; covered by integration tests that exercise the revise loop end-to-end.
             prev_lines = []
-            for i, item in enumerate(revise_input.previous_feedback_items[:10], 1):
+            for i, item in enumerate(
+                revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
+            ):
                 loc = f" [{item.location}]" if item.location else ""
                 prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
             prompt_parts.extend(
@@ -769,6 +857,22 @@ class BlogWriterAgent(_BlogAgentBase):
     def _build_revision_plan_prompt(
         self, draft: str, feedback_items: list[Any], revise_input: ReviseWriterInput
     ) -> str:
+        """Build a prompt that asks the LLM for a structured revision plan.
+
+        Preconditions:
+            - ``draft`` is the current Markdown draft text.
+            - ``feedback_items`` is a sequence of items that each expose
+              ``severity``, ``category``, and ``issue`` (and optionally
+              ``location`` / ``suggestion``) for ``_format_feedback_item_line``.
+            - ``revise_input`` provides the content plan via
+              ``outline_for_prompt()``.
+        Postconditions:
+            - Returns a prompt string that instructs the model to return JSON
+              matching the ``RevisionPlan`` schema (``summary``, ordered
+              ``changes`` with ``section`` / ``feedback_ids`` / ``action`` /
+              ``rationale``, and ``risks``), with feedback referenced by
+              1-based index and ``must_fix`` severity prioritized.
+        """
         feedback_lines = [
             self._format_feedback_item_line(item, i)
             for i, item in enumerate(feedback_items, start=1)
@@ -962,14 +1066,21 @@ class BlogWriterAgent(_BlogAgentBase):
                     attempt + 1,
                 )
                 time.sleep(2.0 + attempt)
-        # Fallback
+        # Fallback — keep original on unexpected failure; re-raise transient LLM
+        # errors so the draft-stage retry funnel can own backoff.
         try:
-            data = self._call_agent_json(prompt)
-            raw_draft = data.get("draft") if data else None
-            if isinstance(raw_draft, str) and raw_draft.strip():
-                return raw_draft.strip()
-        except (LLMJsonParseError, TypeError, ValueError):
-            pass
+            fallback = self._fallback_draft_via_json(prompt)
+            if fallback:
+                return fallback
+        except (LLMRateLimitError, LLMTemporaryError):
+            raise
+        except Exception as e:
+            logger.warning(
+                "Revise item %s/%s: JSON fallback failed: %s; keeping draft as-is.",
+                item_index,
+                total_items,
+                e,
+            )
         logger.warning(
             "Revise item %s/%s: could not produce revision; keeping draft as-is.",
             item_index,
@@ -993,7 +1104,8 @@ class BlogWriterAgent(_BlogAgentBase):
         Steps:
             1. **Analyse** — review all feedback items at once.
             2. **Plan** — produce a ``RevisionPlan`` (summary, ordered changes, risks).
-               Persisted as ``revision_plan_{iteration}.json`` in *work_dir*.
+               Persisted in *work_dir* as ``revision_plan_{iteration}.json`` when
+               *iteration* is a positive int, otherwise ``revision_plan.json``.
             3. **Execute** — apply the plan to produce the revised draft.
                Persisted as *draft_output_path* (e.g. ``draft_v{iteration}.md``).
         """
@@ -1023,7 +1135,11 @@ class BlogWriterAgent(_BlogAgentBase):
 
         # Persist the plan as a JSON artifact so it's visible to the user
         if work_dir is not None:
-            plan_name = f"revision_plan_{iteration}.json" if iteration else "revision_plan.json"
+            plan_name = (
+                f"revision_plan_{iteration}.json"
+                if iteration is not None and iteration > 0
+                else "revision_plan.json"
+            )
             try:
                 from agents.blogging.shared.artifacts import write_artifact
 
@@ -1056,12 +1172,14 @@ class BlogWriterAgent(_BlogAgentBase):
             revise_input,
         )
         current_draft = draft
+        primary_succeeded = False
         for attempt in range(3):
             try:
                 raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
+                    primary_succeeded = True
                     break
             except LLMJsonParseError as e:
                 logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
@@ -1071,14 +1189,17 @@ class BlogWriterAgent(_BlogAgentBase):
                     attempt + 1,
                 )
                 time.sleep(2.0 * (2**attempt))
-        if current_draft == draft:
+        if not primary_succeeded:
             try:
-                data = self._call_agent_json(prompt)
-                raw_draft = data.get("draft") if data else None
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    current_draft = raw_draft.strip()
-            except (LLMJsonParseError, TypeError, ValueError):
-                pass
+                fallback = self._fallback_draft_via_json(prompt)
+                if fallback:
+                    current_draft = fallback
+            except (LLMRateLimitError, LLMTemporaryError):
+                raise
+            except Exception as e:
+                logger.warning(
+                    "Batch revise JSON fallback failed: %s; keeping original draft.", e
+                )
 
         logger.info(
             "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
@@ -1109,11 +1230,10 @@ class BlogWriterAgent(_BlogAgentBase):
             draft=draft,
         )
         try:
-            # NOTE: text mode (the ``_call_agent`` default). The prompt asks
-            # for a top-level JSON *array* but Ollama's JSON mode constrains
-            # output to ``json_object`` (object-shaped), so forcing
-            # ``expect_json=True`` here can produce wrapped/empty results.
-            # The slicer below extracts ``[...]`` from prose regardless.
+            # NOTE: use ``_call_text`` (not ``_call_agent_json``). The prompt asks
+            # for a top-level JSON *array*, but JSON-mode adapters constrain
+            # output to a single object, so a JSON-mode call can wrap or empty
+            # the array. The slicer below extracts ``[...]`` from prose.
             raw = self._call_text(
                 prompt,
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
@@ -1304,12 +1424,14 @@ class BlogWriterAgent(_BlogAgentBase):
             on_llm_request("Revising draft based on editor feedback...")
 
         current_draft = draft
+        primary_succeeded = False
         for attempt in range(3):
             try:
                 raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
+                    primary_succeeded = True
                     break
             except LLMJsonParseError as e:
                 logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
@@ -1319,14 +1441,18 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
                 time.sleep(2.0 * (2**attempt))
 
-        if current_draft == draft:
+        if not primary_succeeded:
             try:
-                data = self._call_agent_json(prompt)
-                raw_draft = data.get("draft") if data else None
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    current_draft = raw_draft.strip()
-            except (LLMJsonParseError, TypeError, ValueError):
-                pass
+                fallback = self._fallback_draft_via_json(prompt)
+                if fallback:
+                    current_draft = fallback
+            except (LLMRateLimitError, LLMTemporaryError):
+                raise
+            except Exception as e:
+                logger.warning(
+                    "User-feedback JSON fallback failed after retries; keeping original draft: %s",
+                    e,
+                )
 
         logger.info("User-feedback revision complete, final length=%s", len(current_draft))
         if draft_output_path:

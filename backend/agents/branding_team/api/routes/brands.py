@@ -66,12 +66,16 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
                 status_code=409,
                 detail="Conversation is already attached to another brand",
             )
-        conversation_store.set_brand(existing_conv_id, brand.id)
-        conversation_store.update_mission(existing_conv_id, mission)
+        if not conversation_store.set_brand(existing_conv_id, brand.id):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if not conversation_store.update_mission(existing_conv_id, mission):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         conv_id = existing_conv_id
     else:
         conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
     brand = _main.branding_store.update_brand(client_id, brand.id, conversation_id=conv_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
 
     return brand
 

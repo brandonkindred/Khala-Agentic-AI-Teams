@@ -140,7 +140,7 @@ def test_refinement_agent_filters_and_warns_on_spec_keys(
         lambda *_a, **_k: object(),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.refinement._structured_output_available",
+        "investment_team.strategy_lab.agents._structured_output.structured_output_available",
         lambda: False,
     )
 
@@ -186,7 +186,7 @@ def test_refinement_agent_passes_risk_limits_through(
         lambda *_a, **_k: object(),
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.refinement._structured_output_available",
+        "investment_team.strategy_lab.agents._structured_output.structured_output_available",
         lambda: False,
     )
 

@@ -11,17 +11,15 @@ from llm_service.interface import LLMSemanticExhaustionError
 
 from ...models import BacktestResult, StrategySpec
 from ..exceptions import StrategyLabLLMError
+from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
-from ._llm_envelope import run_structured_agent
+from ._llm_budget import charge_active_budget
 from ._parse_helpers import (
     build_json_correction_prompt,
-    extract_json_object,
     parse_retry_budget,
 )
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import REFINEMENT_SCHEMA
-from ._structured_output import structured_output_available as _structured_output_available
-from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +131,16 @@ class RefinementAgent:
         optional ``"risk_limits"`` passthrough (the orchestrator applies
         tighten-only semantics). Any other top-level keys in the LLM
         response are logged and discarded.
+
+        Raises:
+            DesignBudgetExhausted: If the active per-cycle design LLM budget
+                is spent (raised by :func:`charge_active_budget` on the
+                legacy parse-retry path, or by the structured path when
+                ``charge=True``).
+            StrategyLabLLMError: If the LLM envelope exhausts transport retries
+                or hits a fatal LLM error.
+            ValueError: If the parse-retry budget is exhausted without recovering
+                a balanced JSON object.
         """
         system_prompt = _SYSTEM_PROMPT
 
@@ -184,65 +192,6 @@ class RefinementAgent:
         }
         return narrowed, updated_code
 
-    def _invoke_structured(
-        self, system_prompt: str, user_prompt: str, failure_phase: str
-    ) -> Dict[str, Any]:
-        """Request provider-enforced schema-conformant decoding for one refinement round.
-
-        Bypasses ``strands.Agent`` (whose ``stream()``/``structured_output()``
-        do not forward a ``schema`` to the backing client) and calls
-        ``LLMClient.complete_json(..., schema=REFINEMENT_SCHEMA)`` directly,
-        still routed through :func:`run_structured_agent` for the same
-        charge/invoke/timeout/parse envelope every other call site uses.
-
-        Preconditions: ``_structured_output_available()`` is True (checked by
-        the caller, :meth:`_invoke_and_parse`, before calling this — only the
-        Ollama provider answers True today, and only Ollama's branch of
-        ``get_strands_model`` returns an adapter exposing ``.client``);
-        ``system_prompt`` / ``user_prompt`` are non-empty strings.
-        Postconditions: returns the parsed JSON dict on success. Raises
-        :class:`~..exceptions.StrategyLabLLMError` on any transport/parse
-        failure — including a ``schema_forced`` semantic-exhaustion
-        starvation signal (``LLMSemanticExhaustionError.schema_forced``),
-        which the caller inspects to decide whether to degrade to the
-        unconstrained parse-retry loop. This method never falls back itself
-        and never retries: a schema-conformant decode either succeeds or
-        signals starvation — there is no "malformed JSON" middle state for a
-        correction re-prompt to recover from.
-        """
-        assert _structured_output_available(), (
-            "precondition: caller must verify _structured_output_available() before "
-            "invoking (only that path exposes an adapter with a .client)"
-        )
-        assert system_prompt and user_prompt and failure_phase, (
-            "precondition: system_prompt, user_prompt, and failure_phase must be non-empty"
-        )
-        client = get_strands_model("strategy_refinement").client
-
-        def _call(prompt: str) -> str:
-            result = client.complete_json(
-                prompt,
-                objective="strategy refinement (structured)",
-                system_prompt=system_prompt,
-                schema=REFINEMENT_SCHEMA,
-            )
-            # invoke_agent unconditionally does str(result) on whatever this
-            # callable returns before handing it to `parse` — a raw dict
-            # would come back as Python repr (single-quoted, True/False/None),
-            # which extract_json_object cannot parse. json.dumps re-renders
-            # it as valid JSON so the round trip is exact.
-            return json.dumps(result)
-
-        return run_structured_agent(
-            _call,
-            user_prompt,
-            agent_key="strategy_refinement",
-            phase="refinement_structured",
-            parse=extract_json_object,
-            charge=True,
-            logger=logger,
-        )
-
     def _invoke_and_parse(
         self, system_prompt: str, user_prompt: str, failure_phase: str
     ) -> Dict[str, Any]:
@@ -257,12 +206,12 @@ class RefinementAgent:
         its transport retries / budget.
 
         When the active provider supports provider-enforced structured
-        decoding (:func:`_structured_output_available`), a single
+        decoding (:func:`so.structured_output_available`), a single
         schema-constrained call is attempted first via
-        :meth:`_invoke_structured` — no parse-retry loop needed, since a
-        conformant decode cannot emit unparseable JSON. Any failure OTHER
-        than a ``schema_forced`` starvation signal propagates immediately
-        (unchanged fail-fast semantics for a genuine transport/auth
+        :func:`so.invoke_structured_with_schema` — no parse-retry loop
+        needed, since a conformant decode cannot emit unparseable JSON. Any
+        failure OTHER than a ``schema_forced`` starvation signal propagates
+        immediately (unchanged fail-fast semantics for a genuine transport/auth
         failure) rather than degrading — a deliberate, narrow reading of
         this call site's degrade contract, not an oversight. On capability
         absence, or on ``schema_forced`` starvation specifically, this falls
@@ -286,10 +235,19 @@ class RefinementAgent:
         re-prompt must be read as "reissue the whole object correctly", not
         "continue from what you emitted".
         """
-        structured_attempted = _structured_output_available()
-        if structured_attempted:
+        structured_available = so.structured_output_available()
+        if structured_available:
             try:
-                result = self._invoke_structured(system_prompt, user_prompt, failure_phase)
+                result = so.invoke_structured_with_schema(
+                    "strategy_refinement",
+                    system_prompt,
+                    user_prompt,
+                    phase="refinement_structured",
+                    schema=REFINEMENT_SCHEMA,
+                    charge=True,
+                    objective="strategy refinement (structured)",
+                    logger=logger,
+                )
             except StrategyLabLLMError as exc:
                 cause = exc.cause
                 if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
@@ -315,11 +273,11 @@ class RefinementAgent:
             attempt_box["n"] += 1
             logger.warning(
                 "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
-                "for failure_phase=%s (structured_attempted=%s): %s",
+                "for failure_phase=%s (structured_available=%s): %s",
                 attempt_box["n"],
                 retries + 1,
                 failure_phase,
-                structured_attempted,
+                structured_available,
                 exc,
             )
             return build_json_correction_prompt(user_prompt, exc, keys_hint=_CORRECTION_KEYS_HINT)
@@ -331,5 +289,6 @@ class RefinementAgent:
             base_user_prompt=user_prompt,
             retry_budget=retries,
             logger=logger,
+            before_attempt=charge_active_budget,
             on_parse_error=_on_parse_error,
         )

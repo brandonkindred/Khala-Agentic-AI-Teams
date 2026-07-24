@@ -248,3 +248,20 @@ def test_wait_for_hitl_reraises_after_persistent_read_errors(monkeypatch) -> Non
         v2._wait_for_hitl("job-z", lambda _job_id: True)
     # One more attempt than the tolerated bound, then it gives up.
     assert attempts["n"] == v2.HITL_MAX_CONSECUTIVE_READ_ERRORS + 1
+
+
+def test_wait_for_hitl_reraises_cancelled_error_immediately(monkeypatch) -> None:
+    """Temporal CancelledError must escape immediately, not consume the read-error budget."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from temporalio.exceptions import CancelledError
+
+    slept = {"n": 0}
+    monkeypatch.setattr(v2.time, "sleep", lambda *_a, **_kw: slept.__setitem__("n", slept["n"] + 1))
+
+    def _boom(_job_id: str):
+        raise CancelledError("cancel")
+
+    monkeypatch.setattr(v2, "get_blog_job", _boom)
+    with pytest.raises(CancelledError):
+        v2._wait_for_hitl("job-cancel", lambda _job_id: True)
+    assert slept["n"] == 0

@@ -13,6 +13,7 @@ import json
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent, PlanCriticReport
 from agents.blogging.blog_plan_critic_agent.agent import build_refine_feedback_from_critic
 from agents.blogging.blog_planning_agent import BlogPlanningAgent
@@ -28,7 +29,7 @@ from agents.blogging.shared.content_profile import (
     resolve_length_policy,
 )
 
-from llm_service import DummyLLMClient
+from llm_service import DummyLLMClient, LLMRateLimitError, LLMTemporaryError
 
 from ._content_plan_test_utils import make_content_plan
 
@@ -259,6 +260,72 @@ def test_critic_parse_failure_falls_back_to_fail() -> None:
     assert report.approved is False
     assert report.notes is not None
     assert "parseable JSON" in (report.notes or "")
+
+
+@pytest.mark.parametrize("err_cls", [LLMRateLimitError, LLMTemporaryError])
+def test_critic_transient_error_reraises(err_cls) -> None:
+    """Transient LLM errors propagate so the job runner / Temporal owns retry."""
+
+    class _BoomAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise err_cls("transient outage")
+
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomAgent):
+        with pytest.raises(err_cls):
+            critic.run(
+                plan=_minimal_plan(),
+                brand_spec_prompt="b",
+                writing_guidelines="g",
+            )
+
+
+def test_critic_agent_construction_failure_falls_back() -> None:
+    """Agent(...) construction errors fail closed via the FAIL fallback report."""
+
+    class _BoomCtor:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("rejected model config")
+
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomCtor):
+        report = critic.run(
+            plan=_minimal_plan(),
+            brand_spec_prompt="b",
+            writing_guidelines="g",
+        )
+    assert report.status == "FAIL"
+    assert report.approved is False
+    assert report.notes is not None
+    assert "rejected model config" in (report.notes or "")
+
+
+@pytest.mark.parametrize("err_cls", [LLMRateLimitError, LLMTemporaryError])
+def test_critic_event_loop_exception_unwraps_transient(err_cls) -> None:
+    """strands EventLoopException must re-raise the unwrapped transient cause."""
+    from strands.types.exceptions import EventLoopException
+
+    cause = err_cls("transient outage")
+
+    class _BoomAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            raise EventLoopException(cause)
+
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomAgent):
+        with pytest.raises(err_cls) as exc_info:
+            critic.run(
+                plan=_minimal_plan(),
+                brand_spec_prompt="b",
+                writing_guidelines="g",
+            )
+    assert exc_info.value is cause
 
 
 def test_critic_persists_report_to_work_dir(tmp_path) -> None:

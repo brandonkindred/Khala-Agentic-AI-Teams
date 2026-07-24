@@ -29,8 +29,8 @@ from typing import Any, Dict, List
 import pytest
 
 from investment_team.strategy_lab.agents import _agent_runner as agent_runner_mod
+from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import design as design_mod
-from investment_team.strategy_lab.agents import design_review as design_review_mod
 from investment_team.strategy_lab.agents._response_schemas import (
     CRITIQUE_SCHEMA,
     DESIGN_SPEC_SCHEMA,
@@ -156,9 +156,10 @@ class _SchemaRoutedClient:
     """Backing client whose ``complete_json`` behavior depends on ``schema``.
 
     ``DesignAgent`` routes both the design-generate call and the self-review
-    call through ``get_strands_model("strategy_design").client`` — the same
-    agent key — so a single stub must disambiguate by the (distinct) schema
-    object each call passes.
+    call through ``so.invoke_structured_with_schema`` / the shared
+    ``get_strands_model("strategy_design").client`` — the same agent key — so
+    a single stub must disambiguate by schema content (the helper passes
+    ``dict(schema)``, so identity checks are unreliable).
     """
 
     def __init__(self, design_result: Dict[str, Any], critique_result_or_exc: Any) -> None:
@@ -168,7 +169,7 @@ class _SchemaRoutedClient:
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         self.calls.append({"prompt": prompt, **kwargs})
-        if kwargs.get("schema") is CRITIQUE_SCHEMA:
+        if kwargs.get("schema") == CRITIQUE_SCHEMA:
             if isinstance(self._critique_result_or_exc, BaseException):
                 raise self._critique_result_or_exc
             return self._critique_result_or_exc
@@ -201,8 +202,8 @@ def _raise_if_correction_prompt_built(*_args: Any, **_kwargs: Any) -> Any:
 
 def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     stub_client = _StubClient(_good_design_payload())
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
     monkeypatch.setattr(
         design_mod, "build_json_correction_prompt", _raise_if_correction_prompt_built
@@ -223,8 +224,8 @@ def test_structured_success_logs_outcome_succeeded(
     """The design happy path emits an INFO ``outcome=succeeded`` marker so the
     resend-free path is observable in production logs."""
     stub_client = _StubClient(_good_design_payload())
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
@@ -243,8 +244,8 @@ def test_structured_success_logs_outcome_succeeded(
 
 def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     stub_client = _StubClient(_good_design_payload())
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
@@ -252,7 +253,7 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
 
     assert len(stub_client.calls) == 1
     call = stub_client.calls[0]
-    assert call["schema"] is DESIGN_SPEC_SCHEMA
+    assert call["schema"] == DESIGN_SPEC_SCHEMA
     assert call["system_prompt"] == design_mod._SYSTEM_PROMPT
     assert "Design ONE novel swing-style strategy" in call["prompt"]
     # The original task prompt was sent, not a correction re-prompt.
@@ -279,11 +280,11 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
         captured["charge"] = charge
         return _good_design_payload()
 
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
-        design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({}))
+        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({}))
     )
-    monkeypatch.setattr(design_mod, "run_structured_agent", _fake_run_structured_agent)
+    monkeypatch.setattr(so_mod, "run_structured_agent", _fake_run_structured_agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
     DesignAgent().run(prior_records=[])
@@ -340,8 +341,8 @@ def test_revise_also_uses_structured_path(monkeypatch: pytest.MonkeyPatch) -> No
         ],
     )
     stub_client = _StubClient(_good_design_payload())
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
     monkeypatch.setattr(
         design_mod, "build_json_correction_prompt", _raise_if_correction_prompt_built
@@ -373,8 +374,8 @@ def test_structured_success_dsl_invalid_falls_through_to_correction_retry(
     )
     stub_client = _StubClient(dsl_invalid_payload)
     legacy_agent = _RecordingAgent([json.dumps(_good_design_payload())])
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client))
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: legacy_agent)
     # The legacy fallback loop builds its Agent via `_agent_runner`, not `design`.
     monkeypatch.setattr(agent_runner_mod, "get_strands_model", lambda *_a, **_k: object())
@@ -399,7 +400,7 @@ def test_structured_success_dsl_invalid_falls_through_to_correction_retry(
 
 def test_real_bedrock_provider_degrades_to_legacy_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Proves the actual ``provider_supports_structured_output(resolve_provider())``
-    wiring — not just the ``_structured_output_available`` seam — routes to
+    wiring — not just the ``structured_output_available`` seam — routes to
     the legacy loop for a provider without the capability."""
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
@@ -426,9 +427,9 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
     starved_client = _FailingClient(
         LLMSemanticExhaustionError("starved", schema_forced=True, attempts_used=1)
     )
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
-        design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
+        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
     )
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
     agent = _ScriptedAgent([json.dumps(_good_design_payload())])
@@ -457,8 +458,8 @@ def test_non_schema_forced_permanent_error_propagates_without_degrading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fatal_client = _FailingClient(LLMPermanentError("nope, fatal"))
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
     with pytest.raises(design_mod.StrategyLabLLMError):
@@ -476,9 +477,9 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
             "empty, but not schema forced", schema_forced=False, attempts_used=1
         )
     )
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
-        design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client)
+        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client)
     )
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
@@ -502,18 +503,8 @@ def test_self_review_uses_structured_path_when_available(
         _good_design_payload(),
         {"ready": True, "rationale": "looks fine", "issues": []},
     )
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
-    # The self-review critique call routes through the shared
-    # design_review._invoke_structured_critique helper, which resolves both
-    # get_strands_model and _structured_output_available from design_review.py's
-    # own module bindings — separate names from design.py's, even though both
-    # start out bound to the same function objects at import time. The helper
-    # asserts its own module's _structured_output_available() precondition.
-    monkeypatch.setattr(
-        design_review_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client)
-    )
-    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
 
@@ -523,8 +514,8 @@ def test_self_review_uses_structured_path_when_available(
 
     assert parsed["asset_class"] == "stocks"
     assert len(client.calls) == 2
-    assert client.calls[0]["schema"] is DESIGN_SPEC_SCHEMA
-    assert client.calls[1]["schema"] is CRITIQUE_SCHEMA
+    assert client.calls[0]["schema"] == DESIGN_SPEC_SCHEMA
+    assert client.calls[1]["schema"] == CRITIQUE_SCHEMA
 
     phases = {
         "design_generate_structured": 0,
@@ -548,13 +539,10 @@ def test_self_review_schema_forced_starvation_degrades_to_legacy_agent(
         _good_design_payload(),
         LLMSemanticExhaustionError("starved", schema_forced=True, attempts_used=1),
     )
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
-    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
-    monkeypatch.setattr(
-        design_review_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client)
-    )
-    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
     critique_agent = _ScriptedAgent(['{"ready": true, "rationale": "fine", "issues": []}'])
+    monkeypatch.setattr(design_mod, "get_strands_model", lambda *_a, **_k: object())
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: critique_agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
 
@@ -578,13 +566,10 @@ def test_self_review_non_schema_forced_failure_propagates_without_degrading(
     ``Agent`` fallback — so ``_with_self_review``'s best-effort catch is the
     only thing that decides how it's handled, not this seam."""
     fatal_client = _FailingClient(LLMPermanentError("nope, fatal"))
-    monkeypatch.setattr(design_mod, "_structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
-        design_review_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client)
+        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client)
     )
-    # The self-review critique routes through design_review's shared helper,
-    # which asserts its own module's _structured_output_available().
-    monkeypatch.setattr(design_review_mod, "_structured_output_available", lambda: True)
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
     with pytest.raises(design_mod.StrategyLabLLMError):
@@ -592,7 +577,7 @@ def test_self_review_non_schema_forced_failure_propagates_without_degrading(
 
 
 # ---------------------------------------------------------------------------
-# _structured_output_available() — direct unit coverage of the seam
+# structured_output_available() — direct unit coverage of the seam
 # ---------------------------------------------------------------------------
 
 
@@ -600,18 +585,18 @@ def test_structured_output_available_true_for_ollama_real_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    assert design_mod._structured_output_available() is True
+    assert so_mod.structured_output_available() is True
 
 
 def test_structured_output_available_false_for_dummy_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    assert design_mod._structured_output_available() is False
+    assert so_mod.structured_output_available() is False
 
 
 def test_structured_output_available_false_for_bedrock_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
-    assert design_mod._structured_output_available() is False
+    assert so_mod.structured_output_available() is False

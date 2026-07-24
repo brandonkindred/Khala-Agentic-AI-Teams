@@ -150,8 +150,87 @@ def test_writer_format_feedback_item_line() -> None:
 
     item_no_loc = FeedbackItem(category="x", severity="minor", issue="i")
     line2 = a._format_feedback_item_line(item_no_loc, 1)
-    assert "[" in line2  # No location bracket
+    assert line2 == "1. [minor] x: i"  # severity bracket present; location omitted
     assert "Suggestion:" not in line2
+
+
+def test_build_revise_all_items_prompt_persistent_issues_getattr() -> None:
+    """Sparse persistent-issue objects must not AttributeError during prompt build."""
+    from types import SimpleNamespace
+
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent_with_guidelines()
+    plan = make_content_plan(
+        overarching_topic="X",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    sparse = SimpleNamespace()  # no optional attrs
+    complete = SimpleNamespace(
+        severity="major",
+        category="clarity",
+        location="intro",
+        issue="vague opening",
+        suggestion="add concrete example",
+        occurrence_count=3,
+    )
+    revise_input = ReviseWriterInput.model_construct(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        content_plan=plan,
+        persistent_issues=[sparse, complete],
+        length_guidance="",
+        target_word_count=1000,
+    )
+    prompt = a._build_revise_all_items_prompt(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        revision_plan="Fix persistent issues.",
+        style_guide_text="Style Guide",
+        revise_input=revise_input,
+    )
+    assert "PERSISTENT ISSUES" in prompt
+    assert "[unknown]" in prompt
+    assert "(flagged 0 times)" in prompt
+    assert "REQUIRED FIX" in prompt
+    assert "[intro]" in prompt
+    assert "add concrete example" in prompt
+    # Sparse line: no location bracket segment and no REQUIRED FIX tied to item 1 alone —
+    # complete item supplies REQUIRED FIX / [intro]; sparse must still render defaults.
+    assert "1. [unknown]" in prompt
+    assert "2. [major] clarity [intro] (flagged 3 times): vague opening" in prompt
+
+
+def test_writer_format_feedback_item_line_missing_required_raises() -> None:
+    """Duck-typed items missing severity/category/issue raise ValueError, not AttributeError."""
+    from types import SimpleNamespace
+
+    a = _make_agent_with_guidelines()
+    incomplete = SimpleNamespace(location="para 1", suggestion="fix it")
+    with pytest.raises(ValueError, match="missing required fields"):
+        a._format_feedback_item_line(incomplete, 1)
+
+
+def test_writer_format_feedback_item_line_duck_typed() -> None:
+    """Non-FeedbackItem objects with the required attributes format successfully."""
+    from types import SimpleNamespace
+
+    a = _make_agent_with_guidelines()
+    item = SimpleNamespace(
+        severity="must_fix",
+        category="clarity",
+        issue="unclear antecedent",
+        location="para 3",
+        suggestion="name the subject",
+    )
+    line = a._format_feedback_item_line(item, 2)
+    assert line.startswith("2. [must_fix] clarity [para 3]: unclear antecedent")
+    assert "Suggestion: name the subject" in line
 
 
 def test_writer_revise_empty_draft() -> None:

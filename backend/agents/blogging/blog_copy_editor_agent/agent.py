@@ -11,25 +11,20 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 from strands.types.exceptions import EventLoopException
-
-from llm_service import (
-    LLMJsonParseError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    extract_json_from_response,
-)
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# Per-round JSON parse attempts: the raw prompt first, then one strict-JSON re-prompt.
-_MAX_JSON_PARSE_ATTEMPTS = 2
 # For technical deep dives, a draft below this fraction of soft_min_words is flagged as thin.
 _THIN_DRAFT_RATIO = 0.88
+
+# Soft JSON instruction baked into the base prompt for call_json_with_retry (attempt 0).
+COPY_EDITOR_SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
 
 
 def _fallback_editor_data(summary: str) -> Dict[str, Any]:
@@ -228,91 +223,68 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         on_llm_request: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Run the LLM once (with a single strict-JSON re-prompt) and return the parsed dict.
+        Invoke the editor LLM via the shared JSON-retry helper (up to two attempts).
 
-        The LLM client already exhausts its own 429 / transient-transport retry budgets
-        before raising, so the copy editor adds no second blocking retry: a transient LLM
-        error (LLMRateLimitError/LLMTemporaryError — including when strands wraps it in an
-        EventLoopException) re-raises so the Temporal activity funnel retries the whole
-        stage (thread mode fails the job). A JSON-parse failure gets one cheap strict
-        re-prompt then a manual-review fallback; any other unexpected error also fails
-        closed with that fallback so a single bad copy-edit never crashes the draft stage.
+        This method wires the agent factory, soft/strict JSON prompt suffixes, the
+        ``EventLoopException`` unwrap hook, and fallback factories into
+        ``call_json_with_retry``. Attempt-count, soft-then-strict re-prompt, and
+        transient-vs-unexpected classification are owned by that helper's contract;
+        this method does not re-implement them.
+
+        Args:
+            prompt: Fully assembled per-request editor context (style/brand/draft).
+            on_llm_request: Optional progress callback invoked once before the helper
+                runs (status text: "Reviewing draft for style and clarity...").
 
         Preconditions:
-            - prompt is the fully assembled per-request editor context.
+            - ``prompt`` is the fully assembled per-request editor context.
         Postconditions:
-            - Returns a dict with at least "summary" and "feedback_items"; on JSON-parse
-              exhaustion or an unexpected error it returns a ``_fallback_editor_data`` dict.
-            - Re-raises only genuinely transient LLM errors (unwrapped from
-              ``EventLoopException``); never returns None.
+            - Returns a non-None ``dict`` on successful parse or on a fallback path
+              (JSON-parse exhaustion / unexpected error via ``on_exhausted`` /
+              ``on_unexpected_error``, or a parseable but empty ``{}`` normalized to
+              ``_fallback_editor_data``). A non-empty successful parse may omit keys;
+              callers in :meth:`run` supply defaults for missing ``summary`` /
+              ``feedback_items``. Fallback dicts include ``approved``, ``summary``,
+              and ``feedback_items``.
+            - Does **not** always return: transient LLM errors
+              (``LLMRateLimitError`` / ``LLMTemporaryError``, including when strands
+              wraps them in ``EventLoopException``) are re-raised by
+              ``call_json_with_retry`` after this method's unwrap hook classifies the
+              cause — they are never swallowed into a return value.
         """
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
-        agent = Agent(model=self._model, system_prompt=COPY_EDITOR_PROMPT)
-        data = None
-        base_prompt = prompt
-        working_prompt = prompt
         strict_json_suffix = (
             "\n\nRespond with a single JSON object only (no markdown, no code fence). "
             "Keys: approved (boolean), summary (string), feedback_items (array of objects with "
             "category, severity, location?, issue, suggestion?)."
         )
-        for json_attempt in range(_MAX_JSON_PARSE_ATTEMPTS):
-            try:
-                result = agent(
-                    working_prompt + "\n\nRespond with valid JSON only, no markdown fences."
-                )
-                data = extract_json_from_response(str(result).strip())
-                break
-            except LLMJsonParseError as e:
-                if json_attempt == 0:
-                    logger.warning(
-                        "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
-                        e,
-                    )
-                    working_prompt = base_prompt + strict_json_suffix
-                else:
-                    logger.warning(
-                        "Copy editor JSON parse failed after retry; using fallback output: %s",
-                        e,
-                    )
-                    data = _fallback_editor_data(
-                        "Copy editor could not parse the model response. Please review the draft manually."
-                    )
-                    break
-            except Exception as e:
-                # strands wraps model failures in EventLoopException; unwrap to classify.
-                cause = e.original_exception if isinstance(e, EventLoopException) else e
-                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
-                    # Transient transport error after the client's own retries: re-raise the
-                    # UNWRAPPED cause so Temporal (or the caller) owns the retry rather than a
-                    # blocking sleep here. It must be the cause, not `e`: the Temporal stage
-                    # funnel (_run_stage) catches only LLMRateLimitError/LLMTemporaryError to
-                    # trigger a retry — re-raising the EventLoopException wrapper would slip
-                    # past it into the terminal-failure handler. `raise cause` inside this
-                    # except block still chains the wrapper via __context__ for debugging.
-                    # Log at the agent boundary so it is visible in thread mode too (outside
-                    # Temporal, which would otherwise be the only logger).
-                    logger.warning(
-                        "Copy editor hit a transient LLM error, re-raising for retry: %s", cause
-                    )
-                    raise cause
-                # Any other unexpected error (a non-transient LLM failure, or a bug like
-                # AttributeError) degrades to a manual-review fallback rather than crashing
-                # the draft stage. The traceback is logged at ERROR level so the root cause
-                # stays visible; see _fallback_editor_data for why the fallback approves
-                # (the copy editor is advisory — a tooling failure must not force a no-op
-                # rewrite, and the hard quality gates still run downstream).
-                logger.exception(
-                    "Copy editor LLM failed unexpectedly; using fallback output: %s", e
-                )
-                data = _fallback_editor_data(
-                    "Copy editor could not complete review. Please review the draft manually."
-                )
-                break
 
+        def _agent_factory():
+            return Agent(model=self._model, system_prompt=COPY_EDITOR_PROMPT)
+
+        def _unwrap(exc: Exception) -> Exception:
+            return exc.original_exception if isinstance(exc, EventLoopException) else exc
+
+        data = call_json_with_retry(
+            _agent_factory,
+            prompt + COPY_EDITOR_SOFT_JSON_INSTRUCTION,
+            max_attempts=2,
+            strict_json_suffix=strict_json_suffix,
+            unwrap_exception=_unwrap,
+            on_exhausted=lambda e: _fallback_editor_data(
+                "Copy editor could not parse the model response. Please review the draft manually."
+            ),
+            on_unexpected_error=lambda e: _fallback_editor_data(
+                "Copy editor could not complete review. Please review the draft manually."
+            ),
+            logger=logger,
+        )
+        # A parseable but empty dict ({}) is treated like tooling failure: the advisory
+        # fallback approves with no feedback so callers do not loop on approved=False
+        # with zero actionable items.
         if not data:
-            data = _fallback_editor_data(
+            return _fallback_editor_data(
                 "Copy editor could not parse the model response. Please review the draft manually."
             )
         return data
@@ -364,23 +336,32 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         target for must_fix / should_fix. Thin technical deep dives get a 'consider' hint.
 
         Preconditions:
-            - actual_word_count == len(draft.split()) for the reviewed draft.
+            - ``actual_word_count`` equals the word count of the reviewed draft
+              (e.g. computed as ``len(draft.split())`` by the caller).
+            - ``target_word_count > 0`` to inject any length items; non-positive
+              targets are treated as "no length target" and leave
+              ``feedback_items`` unchanged.
         Postconditions:
-            - Returns the same list object passed in, mutated with 0..2 length items:
-              an over-length item (must_fix inserted at the front, else should_fix
-              appended) when the draft is past the soft ceiling, and/or a 'consider'
-              under-length hint appended for thin technical deep dives.
+            - If target_word_count <= 0, returns the same list object unchanged.
+            - Otherwise returns the same list object passed in, mutated with 0..2
+              length items: an over-length item (must_fix inserted at the front,
+              else should_fix appended) when the draft is past the soft ceiling,
+              and/or a 'consider' under-length hint appended for thin technical
+              deep dives.
         Invariants:
             - Item ordering matches the pre-refactor behavior: must_fix is prepended;
               should_fix and the deep-dive hint are appended.
         """
         target_word_count = copy_editor_input.target_word_count
+        if target_word_count <= 0:
+            return feedback_items
+
         soft_min = copy_editor_input.soft_min_words
         soft_max = copy_editor_input.soft_max_words
         must_ratio = copy_editor_input.editor_must_fix_over_ratio
         should_ratio = copy_editor_input.editor_should_fix_over_ratio
 
-        over_ratio = actual_word_count / target_word_count if target_word_count > 0 else 1.0
+        over_ratio = actual_word_count / target_word_count
         cap_label = soft_max if soft_max is not None else target_word_count
         past_soft_ceiling = soft_max is None or actual_word_count > soft_max
 
@@ -474,9 +455,12 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         inject programmatic length feedback, derive approval, and return the output.
 
         Preconditions:
-            - copy_editor_input is a valid CopyEditorInput (draft non-empty).
+            - copy_editor_input is a CopyEditorInput instance.
+            - The draft may be empty; if so, a minimal output is returned without calling the LLM.
         Postconditions:
             - Returns CopyEditorOutput with summary and feedback_items.
+            - If the draft is empty (or whitespace-only), returns a minimal output with an
+              explanatory summary and no feedback items, without invoking the LLM.
             - If feedback_output_path is set, best-effort writes the same output to
               that path before returning. This write may silently fail (e.g. permission
               denied or disk-full); such failures are logged at WARNING and never raised,
