@@ -55,19 +55,40 @@ def relevant_code_for_issue(
     """Return code context for a single issue: prefer issue's file, else all files.
 
     Preconditions: ``current_files`` maps path -> content.
-    Postconditions: returns a non-empty string with full file content; falls
-        back to ``"(no code)"`` when no content can be included. ``max_chars``
-        is retained for call-site compatibility and is not applied.
+    Postconditions: returns a non-empty string bounded by ``max_chars``; falls
+        back to ``"(no code)"`` when no content can be included. Truncated
+        context carries an explicit marker so the fix agent does not mistake a
+        prefix for the complete file or submission.
     """
-    _ = max_chars
+    if max_chars <= 0:
+        return "(no code)"
     if issue.file_path and issue.file_path in current_files:
-        content = current_files[issue.file_path]
-        return f"--- {issue.file_path} ---\n{content}"
+        candidates = [(issue.file_path, current_files[issue.file_path])]
+    else:
+        candidates = list(current_files.items())
+    if not candidates:
+        return "(no code)"
+
     parts: List[str] = []
-    for path, content in list(current_files.items()):
+    used = 0
+    truncated = False
+    for path, content in candidates:
         chunk = f"--- {path} ---\n{content}\n"
-        parts.append(chunk)
-    return "\n".join(parts) if parts else "(no code)"
+        remaining = max_chars - used
+        if remaining <= 0:
+            truncated = True
+            break
+        parts.append(chunk[:remaining])
+        used += min(len(chunk), remaining)
+        if len(chunk) > remaining:
+            truncated = True
+            break
+
+    rendered = "".join(parts)
+    if truncated:
+        marker = "\n[truncated; select or retrieve additional file context before editing]"
+        rendered = rendered[: max(0, max_chars - len(marker))] + marker[:max_chars]
+    return rendered.rstrip("\n") or "(no code)"
 
 
 def lenient_json_object(

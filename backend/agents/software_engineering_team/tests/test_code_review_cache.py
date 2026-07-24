@@ -434,20 +434,18 @@ def test_half_sibling_surface_falls_back_without_map() -> None:
     assert mapping._half_sibling_surface(half, surface, "parent surface") == "app/b.py: foo"
 
 
-def test_sibling_surface_is_returned_in_full() -> None:
-    """A large sibling surface is returned in full so the cache key hashes the
-    same bytes the prompt will carry."""
+def test_sibling_surface_is_bounded_to_prompt_budget() -> None:
+    """A large sibling surface cannot exceed the bytes reserved in the prompt."""
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
     chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
     out = coord._sibling_surface(chunk, surface)
-    assert len(out) > compute_code_review_sibling_surface_chars()
-    assert "app/f0.py:" in out and "app/f199.py:" in out
+    assert len(out) == compute_code_review_sibling_surface_chars()
+    assert "app/f0.py:" in out
 
 
-def test_sibling_surface_ignores_legacy_env_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CODE_REVIEW_SIBLING_SURFACE_CHARS no longer truncates the sibling surface."""
+def test_sibling_surface_honors_env_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
@@ -455,11 +453,10 @@ def test_sibling_surface_ignores_legacy_env_cap(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "50")
     out = coord._sibling_surface(chunk, surface)
-    assert len(out) > 50
-    assert "app/f0.py:" in out
+    assert len(out) == 50
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "0")
-    assert "app/f0.py:" in coord._sibling_surface(chunk, surface)
+    assert coord._sibling_surface(chunk, surface) == ""
 
 def test_surface_by_path_skips_headerless_and_symbolless() -> None:
     """Only named blocks with a non-empty surface appear in the map."""

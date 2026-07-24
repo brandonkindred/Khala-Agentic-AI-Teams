@@ -92,14 +92,13 @@ def _build_prompt(
     """Render the single user prompt for this pass.
 
     Postconditions:
-        - Inlines the architecture document in full (folding in the rendered
-          ``overview``/``components``/``decisions`` alongside it, or in its
-          place when no full document is set), then the submission's changed
-          files up to a combined ``max_inline_chars`` budget; any files/content
-          beyond the file budget are named as reachable via the attached tools
-          rather than silently dropped.
+        - Inlines the architecture document up to ``max_arch_doc_chars``
+          (folding in the rendered ``overview``/``components``/``decisions``
+          alongside it, or in its place when no full document is set), then the
+          submission's changed files up to a combined ``max_inline_chars``
+          budget; omitted content is identified as reachable via the attached
+          tools rather than silently dropped.
     """
-    _ = max_arch_doc_chars  # retained for call-site budget bookkeeping
     parts: List[str] = []
 
     arch_doc = "\n\n".join(
@@ -110,12 +109,17 @@ def _build_prompt(
         )
         if p
     )
-    inlined_doc = arch_doc
+    inlined_doc = arch_doc[:max_arch_doc_chars]
     doc_fence = _code_fence_for(inlined_doc)
     parts.append("**Architecture document:**")
     parts.append(doc_fence)
     parts.append(inlined_doc or "(no architecture document provided)")
     parts.append(doc_fence)
+    if len(arch_doc) > len(inlined_doc):
+        parts.append(
+            f"(Only the first {len(inlined_doc)} characters of the architecture document "
+            "are shown above; use the attached repository tools for additional context.)"
+        )
     parts.append("")
 
     changed_files = list(index.files.items())

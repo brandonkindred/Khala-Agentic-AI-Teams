@@ -66,7 +66,10 @@ from llm_service import (
 )
 from shared.concurrency import parallel_map
 from shared.env_config import env_bool
-from software_engineering_team.shared.context_sizing import parse_env_int
+from software_engineering_team.shared.context_sizing import (
+    compute_code_review_sibling_surface_chars,
+    parse_env_int,
+)
 
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
@@ -787,11 +790,11 @@ def _sibling_surface(chunk: ReviewChunk, surface_by_path: Dict[str, List[str]]) 
 
     Postconditions:
         - Returns a deterministic, path-sorted ``"path: name1, name2"``-per-line
-          string covering every changed file whose path is not one of this
-          chunk's own paths. Empty when no sibling file has a surface. Because
-          it is derived only from sibling files, editing a file's *body* without
-          changing its top-level symbols leaves this string (and any cache key
-          built from it) unchanged.
+          string covering changed files outside this chunk, bounded by the
+          configured sibling-surface prompt budget. A zero budget disables the
+          block. Because it is derived only from sibling files, editing a file's
+          *body* without changing its top-level symbols leaves this string (and
+          any cache key built from it) unchanged.
     """
     own_paths = {seg.path for seg in chunk.segments if seg.path}
     lines = [
@@ -799,7 +802,7 @@ def _sibling_surface(chunk: ReviewChunk, surface_by_path: Dict[str, List[str]]) 
         for path in sorted(surface_by_path)
         if path not in own_paths
     ]
-    return "\n".join(lines)
+    return "\n".join(lines)[: compute_code_review_sibling_surface_chars()]
 
 
 def _half_sibling_surface(

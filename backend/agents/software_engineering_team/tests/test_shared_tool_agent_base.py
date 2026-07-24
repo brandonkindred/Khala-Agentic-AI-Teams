@@ -30,12 +30,13 @@ def test_relevant_code_prefers_issue_file():
     assert out == "--- a.ts ---\ncode"
 
 
-def test_relevant_code_includes_large_issue_file_in_full():
+def test_relevant_code_bounds_large_issue_file():
     issue = ReviewIssue(file_path="a.ts")
     big = "x" * (DEFAULT_MAX_RELEVANT_CODE_CHARS + 100)
     out = relevant_code_for_issue(issue, {"a.ts": big})
-    assert "[truncated]" not in out
-    assert big in out
+    assert len(out) == DEFAULT_MAX_RELEVANT_CODE_CHARS
+    assert "[truncated;" in out
+    assert big not in out
 
 
 def test_relevant_code_falls_back_to_first_files():
@@ -44,13 +45,14 @@ def test_relevant_code_falls_back_to_first_files():
     assert "a.ts" in out and "b.ts" in out
 
 
-def test_relevant_code_multifile_includes_all():
+def test_relevant_code_multifile_honors_budget():
     issue = ReviewIssue(file_path="")
     files = {f"f{i}.ts": "y" * 3000 for i in range(10)}
     out = relevant_code_for_issue(issue, files, max_chars=5000)
-    assert "[truncated]" not in out
-    for path in files:
-        assert path in out
+    assert len(out) == 5000
+    assert "[truncated;" in out
+    assert "f0.ts" in out
+    assert "f9.ts" not in out
 
 
 def test_relevant_code_empty_returns_placeholder():

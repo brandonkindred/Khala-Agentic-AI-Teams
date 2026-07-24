@@ -323,8 +323,9 @@ def test_be_relevant_code_for_issue_with_large_file():
     issue = ReviewIssue(file_path="a.py")
     big = "x" * (MAX_RELEVANT_CODE_CHARS + 5000)
     out = _relevant_code_for_issue(issue, {"a.py": big})
-    assert "[truncated]" not in out
-    assert big in out
+    assert len(out) == MAX_RELEVANT_CODE_CHARS
+    assert "[truncated;" in out
+    assert big not in out
 
 
 def test_be_relevant_code_for_issue_no_file():
@@ -351,8 +352,7 @@ def test_be_relevant_code_for_issue_empty_files():
     assert out == "(no code)"
 
 
-def test_be_relevant_code_includes_all_files():
-    """Big multi-file concatenation is returned in full (no truncation)."""
+def test_be_relevant_code_bounds_multifile_context():
     from software_engineering_team.backend_code_v2_team.models import ReviewIssue
     from software_engineering_team.backend_code_v2_team.tool_agents.documentation.agent import (
         _relevant_code_for_issue,
@@ -361,9 +361,9 @@ def test_be_relevant_code_includes_all_files():
     issue = ReviewIssue()
     files = {f"f{i}.py": "x" * 2000 for i in range(20)}
     out = _relevant_code_for_issue(issue, files)
-    assert "[truncated]" not in out
-    for path in files:
-        assert path in out
+    assert "[truncated;" in out
+    assert "f0.py" in out
+    assert "f19.py" not in out
 
 
 # ---------------------------------------------------------------------------

@@ -153,8 +153,9 @@ def test_fe_doc_relevant_code_for_issue_includes_large_file():
     issue = ReviewIssue(file_path="a.ts")
     big = "x" * (MAX_RELEVANT_CODE_CHARS + 5000)
     out = _relevant_code_for_issue(issue, {"a.ts": big})
-    assert "[truncated]" not in out
-    assert big in out
+    assert len(out) == MAX_RELEVANT_CODE_CHARS
+    assert "[truncated;" in out
+    assert big not in out
 
 
 def test_fe_doc_relevant_code_for_issue_fallback_multifile():

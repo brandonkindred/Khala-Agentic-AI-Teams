@@ -119,13 +119,13 @@ def test_build_prompt_includes_components_and_decisions_with_no_document() -> No
     assert "auth-service" in prompt
 
 
-def test_build_prompt_includes_architecture_document_in_full() -> None:
-    """An oversized architecture document is inlined in full with no truncation note."""
+def test_build_prompt_honors_architecture_document_budget() -> None:
     arch = _arch(architecture_document="X" * 10_000)
     index = CodebaseIndex.from_input(_input(architecture=arch))
     prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100)
-    assert "X" * 10_000 in prompt
-    assert "Only the first 100 characters of the architecture document are shown" not in prompt
+    assert "X" * 100 in prompt
+    assert "X" * 101 not in prompt
+    assert "Only the first 100 characters of the architecture document are shown" in prompt
 
 
 def test_build_prompt_omits_files_beyond_inline_budget() -> None:
