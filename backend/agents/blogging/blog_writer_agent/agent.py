@@ -1134,9 +1134,12 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``revise_input`` is a ``ReviseWriterInput``.
             - Writing guidelines have been loaded (``_assert_guidelines_present``).
         Postconditions:
-            - Returns a ``WriterOutput`` whose draft is the revised text, the original
-              when feedback is empty / draft is blank, or the original when the text
-              path and JSON fallback both fail to produce a usable draft.
+            - Strips leading/trailing whitespace from ``revise_input.draft`` before
+              revision. If the result is empty, returns ``revise_input.draft``
+              unchanged (preserves the caller's original whitespace-only text).
+            - Otherwise returns a ``WriterOutput`` whose draft is the revised text,
+              the stripped draft when feedback is empty, or the stripped draft when
+              the text path and JSON fallback both fail to produce a usable draft.
             - During batch execute retries, only unwrapped ``LLMRateLimitError`` /
               ``LLMTemporaryError`` (including ``EventLoopException`` wrappers) are
               retried with backoff; unexpected exceptions propagate immediately.
