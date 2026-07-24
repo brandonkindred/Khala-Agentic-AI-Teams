@@ -34,6 +34,15 @@ _STORE = "branding_conversations"
 
 
 def _default_mission() -> BrandingMission:
+    """Return a placeholder ``BrandingMission`` when none is stored yet.
+
+    Preconditions:
+        None — safe to call with no arguments.
+    Postconditions:
+        Returns a ``BrandingMission`` whose ``company_name`` and
+        ``target_audience`` are ``MISSION_PLACEHOLDER_TBD`` and whose
+        ``company_description`` is ``MISSION_PLACEHOLDER_TO_BE_DISCUSSED``.
+    """
     return BrandingMission(
         company_name=MISSION_PLACEHOLDER_TBD,
         company_description=MISSION_PLACEHOLDER_TO_BE_DISCUSSED,
@@ -42,6 +51,16 @@ def _default_mission() -> BrandingMission:
 
 
 def _row_ts(value: Any) -> str:
+    """Convert a Postgres timestamp cell to a string for API responses.
+
+    Preconditions:
+        ``value`` is a ``datetime``, a string, or ``None`` (other types are
+        coerced via ``str``). Strings are not validated as ISO timestamps.
+    Postconditions:
+        Returns ``value.isoformat()`` when ``value`` is a ``datetime``;
+        otherwise returns ``str(value)`` unchanged when truthy, or ``""``
+        when ``value`` is ``None`` or otherwise falsy (no format check).
+    """
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value or "")
@@ -49,6 +68,17 @@ def _row_ts(value: Any) -> str:
 
 @dataclass
 class _StoredMessage:
+    """A single chat message as persisted and loaded from Postgres.
+
+    Invariants:
+        ``role`` and ``content`` are strings that may be empty (schema is
+        ``TEXT NOT NULL`` only); ``timestamp`` is the string from
+        ``_row_ts`` (ISO only when the cell was a ``datetime``; other
+        values are preserved/coerced without format validation). Rows with
+        ``role is None`` are LEFT-JOIN placeholders and are never
+        constructed as ``_StoredMessage``.
+    """
+
     role: str
     content: str
     timestamp: str

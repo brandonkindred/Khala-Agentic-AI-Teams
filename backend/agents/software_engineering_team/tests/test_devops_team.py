@@ -129,10 +129,15 @@ def _base_task_spec(**overrides) -> DevOpsTaskSpec:
     return DevOpsTaskSpec(**defaults)
 
 
-def _scripted_llm_for_happy_path() -> _ScriptedClient:
+def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _ScriptedClient:
     """Script a full DevOps pipeline run: one response per sub-agent call in
     orchestrator order (task_clarifier, iac, cicd, deployment, infra_debug,
-    devsecops, change_review, test_validation, doc_runbook)."""
+    devsecops, change_review, test_validation, doc_runbook).
+
+    ``alerting_configured`` is set only on the deployment-strategy response.
+    The doc_runbook LLM payload intentionally omits it — the doc agent uses a
+    Python-side ``False`` placeholder that Phase 5 overwrites from deploy output.
+    """
     return _ScriptedClient(
         [
             {"approved_for_execution": True, "checklist": []},
@@ -151,7 +156,7 @@ def _scripted_llm_for_happy_path() -> _ScriptedClient:
                 "summary": "deploy ok",
                 "strategy": "rolling",
                 "rollback_plan": ["helm rollback"],
-                "alerting_configured": True,
+                "alerting_configured": alerting_configured,
             },
             # Debug agent (execution tools fail because terraform CLI is not installed)
             {
@@ -766,6 +771,33 @@ class TestDeploymentStrategyAgent:
         out = agent.build_output(
             DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
             {"alerting_configured": True},
+        )
+        assert out.alerting_configured is True
+
+    def test_build_output_alerting_configured_string_false_is_false(self) -> None:
+        """Schema-drift ``\"false\"`` must not become True via Python truthiness."""
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": "false"},
+        )
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_string_true_is_true(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": "TRUE"},
         )
         assert out.alerting_configured is True
 
@@ -1431,6 +1463,16 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert pkg.release_readiness.rollback_available
         assert "manual_prod_approval" in pkg.release_readiness.required_approvals
         assert pkg.release_readiness.alerting_configured is True
+
+    @pytest.mark.parametrize("alerting_configured", [True, False])
+    def test_release_readiness_alerting_follows_deploy_result(
+        self, alerting_configured: bool
+    ) -> None:
+        """Phase 5 copies deploy output, overwriting the doc-agent False placeholder."""
+        mock_llm = _scripted_llm_for_happy_path(alerting_configured=alerting_configured)
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        pkg = agent.run(_base_task_spec())
+        assert pkg.release_readiness.alerting_configured is alerting_configured
 
     def test_completion_package_has_git_operations(self) -> None:
         # A model-only run (``run`` → write_changes=False) performs no git work,

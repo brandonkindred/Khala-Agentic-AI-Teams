@@ -10,6 +10,28 @@ from .models import DeploymentStrategyAgentInput, DeploymentStrategyAgentOutput
 from .prompts import DEPLOYMENT_STRATEGY_PROMPT
 
 
+def _as_bool(value: Any) -> bool:
+    """Coerce an LLM-provided flag to a strict boolean.
+
+    JSON booleans already parse to ``bool``; this guards the common schema drift
+    where a model emits the STRING ``"false"``/``"true"``. ``bool("false")`` is
+    True, so a naive cast would report alerting as configured when the model
+    said the opposite. Only a real ``True`` or an explicit true-like string
+    (``true``/``1``/``yes``, case-insensitive) counts.
+
+    Preconditions:
+        - ``value`` is arbitrary parsed-JSON content (bool, str, number, None, ...).
+    Postconditions:
+        - Returns a bool; anything not unambiguously true (including
+          ``"false"``/``"0"``/``"no"``/None/other strings/numbers) returns False.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return False
+
+
 class DeploymentStrategyAgent(DevOpsSingleShotAgent):
     """Produce deployment strategy artifacts via a single structured LLM call.
 
@@ -44,7 +66,8 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
         Postconditions: returns ``DeploymentStrategyAgentOutput`` with the same
         field defaults as the pre-migration agent, including
         ``rollout_timeout_minutes=int(data.get(..., 15) or 15)`` and
-        ``alerting_configured=bool(data.get(..., False))`` (absent → False).
+        ``alerting_configured=_as_bool(data.get("alerting_configured"))``
+        (absent / ``"false"`` / other non-true values → False).
         """
         return DeploymentStrategyAgentOutput(
             artifacts=data.get("artifacts") or {},
@@ -52,6 +75,6 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
             rollback_plan=data.get("rollback_plan") or [],
             health_checks=data.get("health_checks") or [],
             rollout_timeout_minutes=int(data.get("rollout_timeout_minutes", 15) or 15),
-            alerting_configured=bool(data.get("alerting_configured", False)),
+            alerting_configured=_as_bool(data.get("alerting_configured")),
             summary=data.get("summary", ""),
         )

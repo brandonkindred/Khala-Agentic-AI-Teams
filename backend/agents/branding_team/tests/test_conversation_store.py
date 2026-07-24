@@ -206,3 +206,18 @@ def test_list_conversations_with_and_without_brand_filter(fake_pg: dict) -> None
     assert by_a[0].brand_id == "brand_a"
     assert by_a[0].message_count == 1
     assert store.list_conversations(brand_id="brand_absent") == []
+
+
+def test_list_conversations_matcher_rejects_loose_fragments(fake_pg: dict) -> None:
+    """Loose FROM/ORDER fragments alone must not dispatch as list_conversations."""
+    from branding_team._db import get_conn
+
+    decoy = """
+        SELECT c.conversation_id
+        FROM branding_conversations c
+        ORDER BY c.updated_at DESC
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            with pytest.raises(AssertionError, match="unexpected SQL"):
+                cur.execute(decoy)

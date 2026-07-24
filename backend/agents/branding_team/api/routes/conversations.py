@@ -9,9 +9,10 @@ this router at the bottom of its own import (after ``app`` and its globals are
 defined), so a module-scope ``from branding_team.api import main`` here would
 form a load-time cycle — this module would be re-entered by main before
 ``router`` (line below) is even defined. The function-local import keeps this
-router importable in any order. ``background``/``conversation`` have no such
-restriction — neither imports ``main`` at module scope — so they stay imported
-at module scope here.
+router importable in any order. ``background`` and the conversation helper
+functions used by the handlers have no such restriction — ``background`` and
+``conversation`` do not import ``main`` at module scope — so they stay
+imported at module scope here.
 """
 
 from __future__ import annotations
