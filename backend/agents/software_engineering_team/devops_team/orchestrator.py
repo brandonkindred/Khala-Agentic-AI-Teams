@@ -1051,7 +1051,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 or task_spec.constraints.deployment.strategy
                 or "rolling",
                 rollback_available=bool(deploy_result.rollback_plan),
-                alerting_configured=True,
+                alerting_configured=bool(deploy_result.alerting_configured),
                 required_approvals=["manual_prod_approval"]
                 if "production" in task_spec.platform_scope.environments
                 else [],
