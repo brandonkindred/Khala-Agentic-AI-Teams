@@ -55,12 +55,10 @@ def test_write_draft_to_path_creates_parents(tmp_path: Path) -> None:
 
 
 def test_writer_agent_requires_guidelines() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    # Initialised without guidelines is allowed; only revise/draft enforces.
-    agent = BlogWriterAgent(llm_client=DummyLLMClient())
+    # Empty guidelines preserve constructor-default behavior (factory defaults are non-empty).
+    agent = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     with pytest.raises(ValueError, match="brand"):
         agent._assert_guidelines_present()
 
@@ -68,17 +66,15 @@ def test_writer_agent_requires_guidelines() -> None:
 def test_writer_agent_assertion_on_none_llm() -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
+    # Direct construction intentional: make_writer_agent() replaces None with DummyLLMClient.
     with pytest.raises(AssertionError):
         BlogWriterAgent(llm_client=None)
 
 
 def test_writer_agent_style_prompt_merge() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    a = BlogWriterAgent(
-        llm_client=DummyLLMClient(),
+    a = make_writer_agent(
         writing_style_guide_content="Style A",
         brand_spec_content="Brand B",
     )
@@ -88,11 +84,9 @@ def test_writer_agent_style_prompt_merge() -> None:
 
 
 def test_writer_agent_deterministic_self_check() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    a = BlogWriterAgent(llm_client=DummyLLMClient())
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     # Em-dash, banned phrase, vague citation, few 'you', staccato prose
     bad = (
         "In today's fast-paced world—as we navigate change. "
@@ -107,11 +101,9 @@ def test_writer_agent_deterministic_self_check() -> None:
 
 
 def test_writer_agent_deterministic_self_check_clean_draft() -> None:
-    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from .conftest import make_writer_agent
 
-    from llm_service import DummyLLMClient
-
-    a = BlogWriterAgent(llm_client=DummyLLMClient())
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
     clean = (
         "# Header\n\n"
         "You are reading something. You will learn. You will see. "
