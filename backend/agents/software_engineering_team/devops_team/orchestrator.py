@@ -710,6 +710,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         deploy_result: Any = None
         aggregated_artifacts: Dict[str, str] = {}
         quality_gates: Dict[str, str] = {}
+        acceptance_trace: List[Dict[str, object]] = []
 
         def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
             """Phase 1: environment policy + task clarification gates.
@@ -838,7 +839,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
               gate or build-verifier failure via ``_run_phase_gates``; otherwise
               returns ``None`` so Phase 5 runs.
             """
-            nonlocal aggregated_artifacts, quality_gates
+            nonlocal aggregated_artifacts, quality_gates, acceptance_trace
 
             # Phase 4: tool validation + independent reviews
             self._report_status(
@@ -924,6 +925,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                     },
                 )
             )
+            acceptance_trace = list(val.acceptance_trace)
 
             quality_gates = dict(val.quality_gates)
             # The infra security gate routes both the DevSecOps LLM review and the
@@ -1017,14 +1019,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         )
 
         completion = doc.completion_package
-        completion.acceptance_criteria_trace = [
-            CriterionTrace(
-                criterion=c,
-                implementation_refs=sorted(aggregated_artifacts.keys()),
-                tests=[{"validation": "pass"}],
-            )
-            for c in task_spec.acceptance_criteria
-        ]
+        completion.acceptance_criteria_trace = _criterion_traces_from_phase4(
+            list(task_spec.acceptance_criteria),
+            acceptance_trace,
+            list(aggregated_artifacts.keys()),
+        )
         completion.release_readiness = ReleaseReadiness(
             deployment_strategy=deploy_result.strategy
             or task_spec.constraints.deployment.strategy

@@ -165,7 +165,13 @@ def _scripted_llm_for_happy_path() -> _ScriptedClient:
             {
                 "approved": True,
                 "quality_gates": {"iac_validate": "pass", "policy_checks": "pass"},
-                "acceptance_trace": [],
+                "acceptance_trace": [
+                    {
+                        "criterion": "Pipeline runs tests and scan before deploy",
+                        "implementation_refs": ["infra/main.tf"],
+                        "tests": [{"iac_validate": "pass"}],
+                    }
+                ],
                 "summary": "validation ok",
             },
             {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
@@ -1444,14 +1450,46 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package.quality_gates["security_review"] == "fail"
 
     def test_completion_package_has_acceptance_trace(self) -> None:
+        from software_engineering_team.devops_team.test_validation_agent.models import (
+            DevOpsTestValidationOutput,
+        )
+
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
+        # Stub Phase 4 validation output directly. The DummyLLM + Strands
+        # structured-output path reuses the prior change-review payload for the
+        # QA acceptance_evidence call, so a scripted ``acceptance_trace`` on the
+        # LLM client does not reach the orchestrator. This test targets Phase 5
+        # wiring, not that adapter quirk.
+        agent.test_validation_agent.run = (  # type: ignore[method-assign]
+            lambda _inp: DevOpsTestValidationOutput(
+                approved=True,
+                quality_gates={"iac_validate": "pass", "policy_checks": "pass"},
+                acceptance_trace=[
+                    {
+                        "criterion": "Pipeline runs tests and scan before deploy",
+                        "implementation_refs": ["infra/main.tf"],
+                        "tests": [{"iac_validate": "pass"}],
+                    }
+                ],
+                summary="validation ok",
+            )
+        )
         pkg = agent.run(spec)
         assert len(pkg.acceptance_criteria_trace) == len(spec.acceptance_criteria)
+
+        by_criterion = {t.criterion: t for t in pkg.acceptance_criteria_trace}
+        matched = by_criterion["Pipeline runs tests and scan before deploy"]
+        assert matched.implementation_refs == ["infra/main.tf"]
+        assert matched.tests == [{"iac_validate": "pass"}]
+
+        unmatched = by_criterion["Prod deploy requires explicit approval"]
+        assert unmatched.tests == []
+        assert len(unmatched.implementation_refs) > 0
+
         for trace in pkg.acceptance_criteria_trace:
-            assert trace.criterion
-            assert len(trace.implementation_refs) > 0
+            assert {"validation": "pass"} not in trace.tests
 
     def test_completion_package_has_release_readiness(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
