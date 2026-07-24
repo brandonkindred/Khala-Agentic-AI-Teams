@@ -570,6 +570,12 @@ def test_ghost_writer_no_experience_phrase() -> None:
     assert _is_no_experience("I can't think of a story") is True
     assert _is_no_experience("Yes I have a great one") is False
 
+    # Qualified experience refusals (optional adjective between "no" and "experience")
+    assert _is_no_experience("I have no direct experience with that") is True
+    assert _is_no_experience("I have no personal experience here") is True
+    assert _is_no_experience("I have no relevant experiences in this area") is True
+    assert _is_no_experience("I have no prior experience") is True
+
     # Ambiguous substrings / incidental short-word uses must NOT skip
     assert _is_no_experience("I have no idea what you mean") is False
     assert _is_no_experience("I haven't thought about it that way") is False

@@ -196,7 +196,6 @@ _NO_EXPERIENCE_PHRASES = frozenset(
         "i don't have",
         "i don't have a story",
         "no story",
-        "i have no experience",
         "i have no story",
         "i can't think of a story",
         "i can't think of any",
@@ -207,6 +206,11 @@ _NO_EXPERIENCE_PHRASE_RE = tuple(
     re.compile(r"\b" + re.escape(phrase) + r"\b") for phrase in _NO_EXPERIENCE_PHRASES
 )
 
+# "I have no [direct/personal/…] experience(s)" — bounded so "I have no idea" stays False.
+_NO_EXPERIENCE_QUALIFIED_RE = re.compile(
+    r"\bi have no (?:direct |personal |relevant |real |prior )?experiences?\b"
+)
+
 
 def _is_no_experience(message: str) -> bool:
     """Return True if the user's message indicates they have no relevant experience.
@@ -215,8 +219,9 @@ def _is_no_experience(message: str) -> bool:
         - ``message`` is a string (may be empty or whitespace-only).
     Postconditions:
         - Returns True for exact whole-message refusals (``_NO_EXPERIENCE_EXACT``),
-          leading skip/pass/n/a command prefixes, or word-boundary matches against
-          ``_NO_EXPERIENCE_PHRASES``; otherwise False.
+          leading skip/pass/n/a command prefixes, qualified ``i have no … experience``
+          patterns, or word-boundary matches against ``_NO_EXPERIENCE_PHRASES``;
+          otherwise False.
         - Does not mutate ``message``.
     """
     text = message.strip().lower().rstrip(".!?")
@@ -225,6 +230,8 @@ def _is_no_experience(message: str) -> bool:
     if text in _NO_EXPERIENCE_EXACT:
         return True
     if _NO_EXPERIENCE_COMMAND_PREFIX_RE.match(text):
+        return True
+    if _NO_EXPERIENCE_QUALIFIED_RE.search(text):
         return True
     return any(pattern.search(text) for pattern in _NO_EXPERIENCE_PHRASE_RE)
 
