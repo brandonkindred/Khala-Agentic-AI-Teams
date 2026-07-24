@@ -92,6 +92,53 @@ def test_writer_run_no_marker_returns_placeholder(monkeypatch) -> None:
     assert "No draft was generated" in out.draft
 
 
+def test_writer_run_placeholder_skips_self_review(monkeypatch) -> None:
+    """Empty draft uses ``_PLACEHOLDER_DRAFT`` and does not invoke self-review."""
+    from agents.blogging.blog_writer_agent.agent import (
+        _PLACEHOLDER_DRAFT,
+        BlogWriterAgent,
+    )
+
+    a = _agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": "no marker text",
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_self_review",
+        lambda self, d: calls.append(d) or d,
+    )
+    out = a.run(_writer_input())
+    assert out.draft == _PLACEHOLDER_DRAFT
+    assert calls == []
+
+
+def test_writer_run_old_short_prefix_still_self_reviews(monkeypatch) -> None:
+    """A draft matching only the old short prefix still runs self-review."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _agent()
+    body = "# Draft\n\nNo draft yet — waiting on research."
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": f'{{"draft": 0}}\n---DRAFT---\n{body}',
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_self_review",
+        lambda self, d: calls.append(d) or d,
+    )
+    out = a.run(_writer_input())
+    assert out.draft == body
+    assert calls == [body]
+
+
 def test_writer_run_call_agent_throws_then_json_fallback(monkeypatch) -> None:
     """_call_agent raises; _call_agent_json succeeds with a draft."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
