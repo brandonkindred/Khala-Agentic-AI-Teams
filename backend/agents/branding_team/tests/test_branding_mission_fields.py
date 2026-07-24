@@ -98,3 +98,38 @@ def test_branding_mission_fields_constructs_independently() -> None:
     )
     assert fields.company_name == "Acme"
     assert "color_inspiration" not in fields.model_dump()
+
+
+def test_mission_placeholders_tuple_contents() -> None:
+    from branding_team.models import (
+        MISSION_PLACEHOLDER_TBD,
+        MISSION_PLACEHOLDER_TO_BE_DISCUSSED,
+        MISSION_PLACEHOLDERS,
+    )
+
+    assert MISSION_PLACEHOLDER_TBD == "TBD"
+    assert MISSION_PLACEHOLDER_TO_BE_DISCUSSED == "To be discussed."
+    assert MISSION_PLACEHOLDERS == (
+        MISSION_PLACEHOLDER_TBD,
+        MISSION_PLACEHOLDER_TO_BE_DISCUSSED,
+        "—",
+        "",
+    )
+
+
+def test_default_mission_and_detection_use_shared_placeholders() -> None:
+    from branding_team.api.state import _is_real_value
+    from branding_team.assistant.store import _default_mission
+    from branding_team.models import (
+        MISSION_PLACEHOLDER_TBD,
+        MISSION_PLACEHOLDER_TO_BE_DISCUSSED,
+        MISSION_PLACEHOLDERS,
+    )
+
+    mission = _default_mission()
+    assert mission.company_name == MISSION_PLACEHOLDER_TBD
+    assert mission.company_description == MISSION_PLACEHOLDER_TO_BE_DISCUSSED
+    assert mission.target_audience == MISSION_PLACEHOLDER_TBD
+    for sentinel in MISSION_PLACEHOLDERS:
+        assert _is_real_value(sentinel) is False
+    assert _is_real_value("Acme Corp") is True

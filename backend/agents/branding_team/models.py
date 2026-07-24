@@ -82,6 +82,18 @@ class ColorPalette(BaseModel):
     sentiment: str = ""  # e.g. "warm and energetic", "cool and professional"
 
 
+# Sentinel strings for mission fields that have no real value yet.
+# Used by default-mission construction and placeholder detection.
+MISSION_PLACEHOLDER_TBD = "TBD"
+MISSION_PLACEHOLDER_TO_BE_DISCUSSED = "To be discussed."
+MISSION_PLACEHOLDERS = (
+    MISSION_PLACEHOLDER_TBD,
+    MISSION_PLACEHOLDER_TO_BE_DISCUSSED,
+    "—",
+    "",
+)
+
+
 class BrandingMissionFields(BaseModel):
     """Shared required/defaulted mission fields for branding domain + future API DTOs.
 

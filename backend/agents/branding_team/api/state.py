@@ -22,7 +22,12 @@ from branding_team.api.models import (
     BrandingSession,
     BrandingSessionResponse,
 )
-from branding_team.models import BrandingMission, BrandPhase, TeamOutput
+from branding_team.models import (
+    MISSION_PLACEHOLDERS,
+    BrandingMission,
+    BrandPhase,
+    TeamOutput,
+)
 from shared.postgres.metrics import timed_query
 
 # ---------------------------------------------------------------------------
@@ -124,10 +129,6 @@ def _parse_target_phase(raw: Optional[str]) -> Optional[BrandPhase]:
         raise HTTPException(status_code=400, detail=f"Invalid target_phase: {raw}")
 
 
-# Sentinel strings the assistant/UI use for a field that has no real value yet.
-_MISSION_PLACEHOLDERS = ("TBD", "To be discussed.", "—", "")
-
-
 def _is_real_value(value: Optional[str]) -> bool:
     """True when *value* is a real (non-placeholder) string.
 
@@ -135,9 +136,9 @@ def _is_real_value(value: Optional[str]) -> bool:
         ``value`` is a string or None.
     Postconditions:
         Returns True iff the stripped value is non-empty and not one of the
-        known placeholder sentinels (``_MISSION_PLACEHOLDERS``).
+        known placeholder sentinels (``MISSION_PLACEHOLDERS``).
     """
-    return (value or "").strip() not in _MISSION_PLACEHOLDERS
+    return (value or "").strip() not in MISSION_PLACEHOLDERS
 
 
 def _mission_has_brand_name(mission: BrandingMission) -> bool:
