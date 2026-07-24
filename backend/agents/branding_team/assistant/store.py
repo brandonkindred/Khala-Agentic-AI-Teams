@@ -71,9 +71,10 @@ class _StoredMessage:
     """A single chat message as persisted and loaded from Postgres.
 
     Invariants:
-        ``role`` is a non-empty string for real message rows; ``content`` is a
-        string that may be empty (schema is ``TEXT NOT NULL`` only);
-        ``timestamp`` is an ISO-formatted string (via ``_row_ts``).
+        ``role`` and ``content`` are strings that may be empty (schema is
+        ``TEXT NOT NULL`` only); ``timestamp`` is an ISO-formatted string
+        (via ``_row_ts``). Rows with ``role is None`` are LEFT-JOIN
+        placeholders and are never constructed as ``_StoredMessage``.
     """
 
     role: str
