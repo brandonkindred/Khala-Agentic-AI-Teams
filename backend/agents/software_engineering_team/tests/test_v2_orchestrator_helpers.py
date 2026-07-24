@@ -122,6 +122,36 @@ def test_fe_build_tool_agents():
     assert ToolAgentKind.UX_USABILITY in agents
 
 
+class TestAssembleToolAgents:
+    """Unit tests for BaseV2DevelopmentAgent._assemble_tool_agents."""
+
+    def test_empty_returns_empty_dict(self):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        assert BaseV2DevelopmentAgent._assemble_tool_agents() == {}
+
+    def test_single_entry(self):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        agent = object()
+        out = BaseV2DevelopmentAgent._assemble_tool_agents(("k1", agent))
+        assert out == {"k1": agent}
+
+    def test_multiple_entries(self):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        a, b = object(), object()
+        out = BaseV2DevelopmentAgent._assemble_tool_agents(("k1", a), ("k2", b))
+        assert out == {"k1": a, "k2": b}
+
+    def test_duplicate_kind_last_wins(self):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        first, second = object(), object()
+        out = BaseV2DevelopmentAgent._assemble_tool_agents(("k", first), ("k", second))
+        assert out == {"k": second}
+
+
 def test_fe_development_agent_init():
     from software_engineering_team.frontend_code_v2_team.orchestrator import (
         FrontendDevelopmentAgent,
