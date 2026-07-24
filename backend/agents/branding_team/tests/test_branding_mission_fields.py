@@ -260,6 +260,31 @@ def test_mission_fields_method_omits_run_request_api_extras() -> None:
     assert "human_feedback" not in dumped
 
 
+def test_mission_from_payload_builds_mission_from_shared_fields_only() -> None:
+    from branding_team.api.state import _mission_from_payload
+
+    req = CreateBrandRequest(
+        company_name="Acme",
+        company_description="We build widgets for teams",
+        target_audience="B2B buyers",
+        values=["clarity"],
+        name="Display Name",
+        conversation_id="conv-1",
+    )
+    mission = _mission_from_payload(req)
+    assert isinstance(mission, BrandingMission)
+    assert mission.company_name == "Acme"
+    assert mission.company_description == "We build widgets for teams"
+    assert mission.target_audience == "B2B buyers"
+    assert mission.values == ["clarity"]
+    assert mission.desired_voice == "clear, confident, human"
+    assert mission.visual_style == ""
+    assert mission.color_inspiration == []
+    assert mission.selected_palette_index is None
+    assert "name" not in BrandingMission.model_fields
+    assert "conversation_id" not in BrandingMission.model_fields
+
+
 def test_mission_placeholders_tuple_contents() -> None:
     from branding_team.models import (
         MISSION_PLACEHOLDER_TBD,
