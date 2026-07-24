@@ -67,6 +67,7 @@ class QueryBuilderAgent:
                 temperature=0.3,
                 system_prompt=QUERY_BUILDER_SYSTEM_PROMPT,
                 objective="build job search queries",
+                think=False,
             )
             raw = data.get("queries", []) if isinstance(data, dict) else []
             # The model occasionally returns a single string instead of a list;
