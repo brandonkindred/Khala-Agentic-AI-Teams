@@ -826,7 +826,6 @@ class TestRunPlanningAndBranchSetup:
         assert failure_reason is None
 
 
-
 class _FakeMicrotask:
     def __init__(self, status: str):
         self.status = status
