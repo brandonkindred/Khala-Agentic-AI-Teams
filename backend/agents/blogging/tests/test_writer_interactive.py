@@ -291,6 +291,52 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
     assert "# Fallback" in out.draft
 
 
+def test_revise_from_user_feedback_programming_error_propagates(monkeypatch) -> None:
+    """Non-transient text-path errors must propagate from user-feedback revise."""
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise RuntimeError("programmer bug")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(RuntimeError, match="programmer bug"):
+        a.revise_from_user_feedback(
+            draft="# Original", user_feedback="tighten", content_plan_text="cp"
+        )
+
+
+def test_revise_from_user_feedback_transient_retries_then_fallback(monkeypatch) -> None:
+    """LLMTemporaryError on the text path is retried; JSON fallback may recover."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise LLMTemporaryError("503")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# User Feedback Recovered",
+    )
+    out = a.revise_from_user_feedback(
+        draft="# Original", user_feedback="tighten", content_plan_text="cp"
+    )
+    assert "User Feedback Recovered" in out.draft
+
+
 # ---------------------------------------------------------------------------
 # generate_escalation_summary
 # ---------------------------------------------------------------------------

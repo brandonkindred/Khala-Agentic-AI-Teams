@@ -1447,11 +1447,16 @@ class BlogWriterAgent(_BlogAgentBase):
                     break
             except LLMJsonParseError as e:
                 logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
-            except Exception:
-                logger.warning(
-                    "User-feedback revision transient error (attempt %s/3); retrying.", attempt + 1
-                )
-                time.sleep(2.0 * (2**attempt))
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "User-feedback revision transient error (attempt %s/3); retrying.",
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 * (2**attempt))
+                    continue
+                raise
 
         if not primary_succeeded:
             try:
