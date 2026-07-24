@@ -8,7 +8,10 @@ into first-person narrative snippets passed to the draft agent.
 
 Architecture:
   - **Evaluator** (`_evaluate_sufficiency`): Assesses whether the conversation has enough
-    material for a compelling story. Uses `chat_json_round` with native message history.
+    material for a compelling story. Delegates JSON extraction/retry to
+    ``call_json_with_retry()`` and falls back to a default-dict result on exhausted
+    parse retries, unexpected errors, and transient LLM transport errors (so the
+    story-phase wrapper cannot silently abandon an in-progress interview).
   - **Interviewer** (`_generate_follow_up`): Generates a single conversational follow-up
     question when the evaluator says "insufficient".
   - **Narrator** (`_compile_narrative`): Compiles a vivid first-person narrative from
@@ -22,9 +25,10 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from agents.blogging.shared.content_plan import ContentPlan
+from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
-from llm_service import LLMJsonParseError, extract_json_from_response
+from llm_service import LLMRateLimitError, LLMTemporaryError, extract_json_from_response
 
 from .models import StoryElicitationResult, StoryGap
 
@@ -183,6 +187,37 @@ def _is_no_experience(message: str) -> bool:
     return any(phrase in text for phrase in _NO_EXPERIENCE_PHRASES)
 
 
+def _empty_list_fallback(_exc: Exception) -> list:
+    """
+    Shared JSON-retry fallback for gap finding.
+
+    Preconditions:
+        - ``_exc`` is the failure that exhausted retries or was unexpected.
+    Postconditions:
+        - Returns a new empty list (never ``None``).
+    """
+    return []
+
+
+def _default_sufficiency_fallback(_exc: Exception) -> Dict[str, Any]:
+    """
+    Shared JSON-retry fallback for the sufficiency evaluator.
+
+    Preconditions:
+        - ``_exc`` is the failure that exhausted retries or was unexpected.
+    Postconditions:
+        - Returns a fresh default result dictionary with ``sufficient``/
+          ``no_experience`` false and ``story_context``/``missing`` null
+          (never ``None``). Plain ``dict``, not ``collections.defaultdict``.
+    """
+    return {
+        "sufficient": False,
+        "no_experience": False,
+        "story_context": None,
+        "missing": None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Agent class
 # ---------------------------------------------------------------------------
@@ -194,7 +229,7 @@ class GhostWriterElicitationAgent:
     to elicit personal anecdotes from the author.
 
     Uses three specialised LLM roles:
-      - Evaluator: assesses story sufficiency via ``chat_json_round``
+      - Evaluator: assesses story sufficiency via ``call_json_with_retry``
       - Interviewer: generates conversational follow-up questions
       - Narrator: compiles vivid first-person narratives
     """
@@ -293,47 +328,62 @@ class GhostWriterElicitationAgent:
         ]
 
     def _find_gaps_via_llm(self, content_plan: ContentPlan) -> List[StoryGap]:
-        """Fallback: use LLM to identify story gaps when plan lacks story_opportunity fields."""
+        """
+        Fallback: use LLM to identify story gaps when plan lacks story_opportunity fields.
+
+        Preconditions:
+            - ``content_plan`` is a populated ``ContentPlan``.
+        Postconditions:
+            - Returns at most 3 ``StoryGap`` objects.
+            - Uses ``call_json_with_retry`` with ``max_attempts=2``.
+            - On parse exhaustion, unexpected helper errors, or transient LLM
+              transport errors, returns ``[]`` via ``_empty_list_fallback``.
+            - Non-object array items are skipped; missing/blank ``seed_question``
+              values get a generic seed. Field values are coerced to ``str``.
+        """
         outline_text = self._plan_to_text(content_plan)
         prompt = f"Content plan:\n\n{outline_text}\n\nIdentify story gaps."
 
-        agent = Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
-        for attempt in range(2):
-            try:
-                working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
-                result = agent(working_prompt)
-                data = extract_json_from_response(str(result).strip())
-                if not isinstance(data, list):
-                    logger.warning("Ghost writer: no JSON array in gap-finding response")
-                    return []
-                gaps = []
-                for item in data[:3]:
-                    ctx = item.get("section_context", "")
-                    seed = (item.get("seed_question") or "").strip()
-                    if not seed:
-                        seed = f"I'd love to hear about a time you dealt with {ctx.lower().rstrip('.')}. What comes to mind?"
-                    gaps.append(
-                        StoryGap(
-                            section_title=item.get("section_title", ""),
-                            section_context=ctx,
-                            seed_question=seed,
-                        )
-                    )
-                logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
-                return gaps
-            except LLMJsonParseError as e:  # pragma: no cover - JSON parse retry/exit branch in gap-finder; covered by integration tests with a flaky model.
-                if attempt == 0:
-                    logger.warning("Ghost writer gap-finding JSON parse failed, retrying: %s", e)
-                    continue
-                logger.warning("Ghost writer gap-finding JSON parse failed after retry: %s", e)
-                return []
-            except Exception as e:  # pragma: no cover - generic LLM-failure retry/exit branch; covered by integration tests with a flaky model.
-                logger.warning("Ghost writer gap-finding error: %s", e)
-                if attempt == 0:
-                    time.sleep(2.0)
-                    continue
-                return []
-        return []
+        def _agent_factory():
+            return Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
+
+        # Transient LLM errors re-raise from the helper; map them to the same empty
+        # fallback here so planning_stage's broad except cannot abandon elicitation
+        # mid-flight without clearing interactive story state.
+        try:
+            data = call_json_with_retry(
+                _agent_factory,
+                prompt,
+                max_attempts=2,
+                strict_json_suffix=_JSON_RETRY_SUFFIX,
+                on_exhausted=_empty_list_fallback,
+                on_unexpected_error=_empty_list_fallback,
+                logger=logger,
+            )
+        except (LLMRateLimitError, LLMTemporaryError) as e:
+            logger.warning("Ghost writer gap-finding transient LLM error, falling back: %s", e)
+            return _empty_list_fallback(e)
+        if not isinstance(data, list):
+            logger.warning("Ghost writer: no JSON array in gap-finding response")
+            return []
+        gaps = []
+        for item in data[:3]:
+            if not isinstance(item, dict):
+                logger.warning("Ghost writer: skipping non-object gap item: %r", item)
+                continue
+            ctx = str(item.get("section_context") or "")
+            seed = str(item.get("seed_question") or "").strip()
+            if not seed:
+                seed = f"I'd love to hear about a time you dealt with {ctx.lower().rstrip('.')}. What comes to mind?"
+            gaps.append(
+                StoryGap(
+                    section_title=str(item.get("section_title") or ""),
+                    section_context=ctx,
+                    seed_question=seed,
+                )
+            )
+        logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
+        return gaps
 
     # ------------------------------------------------------------------
     # Interview loop
@@ -351,7 +401,7 @@ class GhostWriterElicitationAgent:
         Conduct a multi-turn interview for a single story gap.
 
         Uses the event bus to wait for user responses instead of polling.
-        Posts questions to the job store, waits for each user response,
+        Posts follow-up questions to the job store, waits for each user response,
         evaluates sufficiency, and compiles a first-person narrative when ready.
 
         The interview ends when one of these happens:
@@ -361,8 +411,17 @@ class GhostWriterElicitationAgent:
         4. The job is cancelled/failed.
         5. Safety cap (*max_rounds*) is reached → narrator compiles from history.
 
-        The pipeline must have already posted the seed question and set
-        ``waiting_for_story_input=True`` before calling this method.
+        Preconditions:
+            - ``gap.seed_question`` is the opening turn used for the local conversation
+              history (this method does not re-read a seed from the job store).
+        Postconditions:
+            - Returns a ``StoryElicitationResult`` for this gap.
+        Notes:
+            - Callers should post the same seed to the job store and set
+              ``waiting_for_story_input=True`` for UI consistency so the wait loop
+              can receive replies; those steps are not enforced here. If the wait
+              flag is already false, the wait loop is skipped and the last stored
+              user message (if any) is used.
         """
         from agents.blogging.shared.blog_job_store import (
             add_story_agent_message,
@@ -497,13 +556,25 @@ class GhostWriterElicitationAgent:
         gap: StoryGap,
         conversation: List[Dict[str, str]],
     ) -> Dict[str, Any]:
-        """Use the LLM evaluator to assess whether the conversation has enough material."""
+        """
+        Use the LLM evaluator to assess whether the conversation has enough material.
+
+        Preconditions:
+            - ``gap`` identifies the section under discussion.
+            - ``conversation`` is a list of ``{"role", "content"}`` turns.
+        Postconditions:
+            - Returns a dict with keys ``sufficient``, ``no_experience``,
+              ``story_context``, and ``missing``.
+            - Uses ``call_json_with_retry``; on parse exhaustion, unexpected
+              helper errors, transient LLM transport errors, or a non-dict
+              payload, returns ``_default_sufficiency_fallback`` so the
+              interview loop can continue safely.
+        """
         system = (
             _EVALUATE_SUFFICIENCY_SYSTEM
             + f"\n\nSection: {gap.section_title}\nContext: {gap.section_context}"
         )
 
-        # Build a text representation of the conversation
         conv_text = ""
         for msg in conversation:
             role = "Ghost writer" if msg["role"] == "agent" else "Author"
@@ -514,36 +585,27 @@ class GhostWriterElicitationAgent:
             + "\nEvaluate the conversation above. Respond with the JSON object only, no markdown fences."
         )
 
-        default = {
-            "sufficient": False,
-            "no_experience": False,
-            "story_context": None,
-            "missing": None,
-        }
-        agent = Agent(model=self._model, system_prompt=system)
+        def _agent_factory():
+            return Agent(model=self._model, system_prompt=system)
 
-        for attempt in range(2):
-            try:
-                working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
-                result = agent(working_prompt)
-                data = extract_json_from_response(str(result).strip())
-                if isinstance(data, dict):
-                    return data
-                return default
-            except LLMJsonParseError as e:
-                if attempt == 0:
-                    logger.warning("Ghost writer evaluator JSON parse failed, retrying: %s", e)
-                    continue
-                logger.warning("Ghost writer evaluator JSON parse failed after retry: %s", e)
-                return default
-            except Exception as e:
-                if attempt == 0:
-                    logger.warning("Ghost writer evaluator error, retrying: %s", e)
-                    time.sleep(2.0)
-                    continue
-                logger.warning("Ghost writer evaluator error after retry: %s", e)
-                return default
-        return default
+        # Same rationale as ``_find_gaps_via_llm``: keep soft fallbacks at this site so
+        # transient errors do not escape into planning_stage's skip-on-Exception path.
+        try:
+            data = call_json_with_retry(
+                _agent_factory,
+                prompt,
+                max_attempts=2,
+                strict_json_suffix=_JSON_RETRY_SUFFIX,
+                on_exhausted=_default_sufficiency_fallback,
+                on_unexpected_error=_default_sufficiency_fallback,
+                logger=logger,
+            )
+        except (LLMRateLimitError, LLMTemporaryError) as e:
+            logger.warning("Ghost writer evaluator transient LLM error, falling back: %s", e)
+            return _default_sufficiency_fallback(e)
+        if isinstance(data, dict):
+            return data
+        return _default_sufficiency_fallback(ValueError("non-dict sufficiency payload"))
 
     # ------------------------------------------------------------------
     # Interviewer: generate a conversational follow-up question
