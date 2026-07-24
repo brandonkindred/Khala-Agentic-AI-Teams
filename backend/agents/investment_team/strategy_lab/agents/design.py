@@ -40,6 +40,7 @@ from ...strategy_lab_context import (
 )
 from ..exceptions import StrategyLabLLMError
 from ..market_regime import RegimeSummary, regime_to_prompt_block
+from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import run_structured_agent
@@ -50,11 +51,9 @@ from ._parse_helpers import (
     parse_retry_budget,
     validate_structured_rules,
 )
-from ._response_schemas import DESIGN_SPEC_SCHEMA
-from ._structured_output import structured_output_available as _structured_output_available
+from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
 from .design_review import (
     _coerce_critique,
-    _invoke_structured_critique,
     _sizing_owned_by_gate,
     format_prior_critiques,
 )
@@ -363,64 +362,6 @@ class DesignAgent:
             regression_notice=regression_notice,
         )
 
-    def _invoke_structured(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        """Request provider-enforced schema-conformant decoding for one design round.
-
-        Bypasses ``strands.Agent`` (whose ``stream()``/``structured_output()``
-        do not forward a ``schema`` to the backing client) and calls
-        ``LLMClient.complete_json(..., schema=DESIGN_SPEC_SCHEMA)`` directly,
-        still routed through :func:`run_structured_agent` for the same
-        charge/invoke/timeout/parse envelope every other call site uses.
-
-        Preconditions: ``_structured_output_available()`` is True (checked by
-        the caller, :meth:`_invoke_and_parse`); ``system_prompt`` /
-        ``user_prompt`` are non-empty strings.
-        Postconditions: returns the parsed JSON dict on success (JSON-shape
-        conformant; DSL semantic validity is NOT guaranteed — the caller
-        still runs :func:`validate_structured_rules`). Raises
-        :class:`~..exceptions.StrategyLabLLMError` on any transport/parse
-        failure — including a ``schema_forced`` semantic-exhaustion
-        starvation signal (``LLMSemanticExhaustionError.schema_forced``),
-        which the caller inspects to decide whether to degrade to the
-        unconstrained parse-retry loop. This method never falls back itself
-        and never retries. ``charge=True``: the legacy loop below charges the
-        design-phase budget on every real LLM call including retries, so this
-        pre-flight call must charge too for budget-accounting parity. Mirrors
-        :meth:`RefinementAgent._invoke_structured`, which also charges.
-        """
-        assert _structured_output_available(), (
-            "precondition: caller must verify _structured_output_available() before "
-            "invoking (only that path exposes an adapter with a .client)"
-        )
-        assert system_prompt and user_prompt, (
-            "precondition: system_prompt and user_prompt must be non-empty"
-        )
-        client = get_strands_model("strategy_design").client
-
-        def _call(prompt: str) -> str:
-            result = client.complete_json(
-                prompt,
-                objective="strategy design (structured)",
-                system_prompt=system_prompt,
-                schema=DESIGN_SPEC_SCHEMA,
-            )
-            # invoke_agent unconditionally does str(result) on whatever this
-            # callable returns before handing it to `parse` — a raw dict
-            # would come back as Python repr (single-quoted, True/False/None),
-            # which extract_json_object cannot parse. json.dumps re-renders
-            # it as valid JSON so the round trip is exact.
-            return json.dumps(result)
-
-        return run_structured_agent(
-            _call,
-            user_prompt,
-            agent_key="strategy_design",
-            phase="design_generate_structured",
-            parse=extract_json_object,
-            charge=True,
-            logger=logger,
-        )
-
     def _invoke_and_parse(self, system_prompt: str, user_prompt: str) -> Tuple[Dict[str, Any], str]:
         """Call the LLM, parse JSON, strip any stray ``strategy_code``, validate rules.
 
@@ -440,23 +381,21 @@ class DesignAgent:
         contract. This method's own contract — inputs, outputs, exceptions
         — is unchanged by the split.
         """
-        structured_attempted = _structured_output_available()
+        structured_available = so.structured_output_available()
         prompt = user_prompt
-        if structured_attempted:
+        if structured_available:
             finalized, prompt = self._structured_preflight(system_prompt, user_prompt)
             if finalized is not None:
                 return finalized
 
-        return self._legacy_parse_retry_loop(
-            system_prompt, prompt, user_prompt, structured_attempted
-        )
+        return self._legacy_parse_retry_loop(system_prompt, prompt, user_prompt)
 
     def _structured_preflight(
         self, system_prompt: str, user_prompt: str
     ) -> Tuple[Optional[Tuple[Dict[str, Any], str]], str]:
         """Attempt one provider-enforced schema-constrained design call.
 
-        Pre: ``_structured_output_available()`` is True (checked by the
+        Pre: :func:`so.structured_output_available` is True (checked by the
         caller, :meth:`_invoke_and_parse`); ``system_prompt`` / ``user_prompt``
         are non-empty strings.
         Post: returns ``(finalized, prompt)``.
@@ -489,7 +428,16 @@ class DesignAgent:
         structured happy path.
         """
         try:
-            parsed = self._invoke_structured(system_prompt, user_prompt)
+            parsed = so.invoke_structured_with_schema(
+                "strategy_design",
+                system_prompt,
+                user_prompt,
+                phase="design_generate_structured",
+                schema=DESIGN_SPEC_SCHEMA,
+                charge=True,
+                objective="strategy design (structured)",
+                logger=logger,
+            )
         except StrategyLabLLMError as exc:
             cause = exc.cause
             if not (isinstance(cause, LLMSemanticExhaustionError) and cause.schema_forced):
@@ -517,20 +465,21 @@ class DesignAgent:
         return finalized, user_prompt
 
     def _legacy_parse_retry_loop(
-        self, system_prompt: str, prompt: str, user_prompt: str, structured_attempted: bool
+        self, system_prompt: str, prompt: str, user_prompt: str
     ) -> Tuple[Dict[str, Any], str]:
         """Unconstrained JSON-and-DSL retry loop, delegated to the shared parse-retry driver.
 
         Pre: ``system_prompt`` / ``user_prompt`` are non-empty strings;
         ``prompt`` is the prompt to send on the first attempt — either
         ``user_prompt`` unchanged, or a DSL-correction prompt handed off by
-        :meth:`_structured_preflight`; ``structured_attempted`` is unused
-        here (kept for call-site symmetry with :meth:`_invoke_and_parse`).
+        :meth:`_structured_preflight`.
         Post: returns ``(parsed, rationale)`` on success. Raises
-        ``ValueError`` on malformed JSON, or
-        :class:`StrategySpecParseError` on prose/off-shape rules, once the
+        ``ValueError`` on malformed JSON,
+        :class:`StrategySpecParseError` on prose/off-shape rules once the
         retry budget (``STRATEGY_LAB_DESIGN_PARSE_RETRIES``, default 2
-        retries → 3 attempts total; ``0`` disables retry) is exhausted.
+        retries → 3 attempts total; ``0`` disables retry) is exhausted, or
+        :class:`~..exceptions.StrategyLabLLMError` when the LLM envelope
+        exhausts its transport retries / budget.
 
         On :class:`StrategySpecParseError` the agent re-prompts the LLM
         with the offending field and pydantic error as feedback (the model
@@ -553,13 +502,20 @@ class DesignAgent:
         has always done.
         """
         retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
+        # ``run_json_with_parse_retry`` only returns the validated dict; the
+        # rationale is smuggled out via this mutable box because ``_validate``
+        # must still return a plain ``Dict`` to match the driver's callback
+        # contract. Do not read ``rationale_box`` until after the driver returns.
         rationale_box: Dict[str, str] = {}
 
         def _on_parse_error(_base_prompt: str, exc: ValueError) -> str:
             return build_json_correction_prompt(user_prompt, exc)
 
         def _on_validation_error(_base_prompt: str, exc: Exception) -> str:
-            return _build_correction_prompt(user_prompt, exc)  # type: ignore[arg-type]
+            assert isinstance(exc, StrategySpecParseError), (
+                f"expected StrategySpecParseError, got {type(exc)}"
+            )
+            return _build_correction_prompt(user_prompt, exc)
 
         def _validate(parsed: Dict[str, Any]) -> Dict[str, Any]:
             finalized, rationale = _finalize_parsed(parsed)
@@ -740,14 +696,17 @@ class DesignAgent:
                 logger=logger,
             )
 
-        if _structured_output_available():
+        if so.structured_output_available():
             try:
-                parsed = _invoke_structured_critique(
-                    agent_key="strategy_design",
-                    system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
+                parsed = so.invoke_structured_with_schema(
+                    "strategy_design",
+                    _SELF_REVIEW_SYSTEM_PROMPT,
+                    user_prompt,
                     phase="design_self_review_structured",
+                    schema=CRITIQUE_SCHEMA,
                     charge=True,
+                    objective="strategy design review (structured)",
+                    logger=logger,
                 )
             except StrategyLabLLMError as exc:
                 cause = exc.cause
@@ -878,7 +837,10 @@ def _finalize_parsed(parsed: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
 
     Pre: ``parsed`` is a JSON-shape-valid dict (JSON-schema-conformant via
     structured decoding, or brace-extracted via :func:`extract_json_object`).
-    Post: returns ``(parsed, rationale)`` with no ``strategy_code`` key.
+    Post: returns ``(parsed, rationale)`` where ``parsed`` is the **same dict
+    instance** mutated in place (``strategy_code`` and ``rationale`` popped)
+    and ``rationale`` defaults to ``""`` when absent. Callers that reuse the
+    input dict elsewhere will observe those keys removed.
     Raises :class:`StrategySpecParseError` when a rule-shaped field fails
     :func:`validate_structured_rules` — JSON-shape validity is a distinct
     guarantee from DSL semantic validity, and this is the one gate that
