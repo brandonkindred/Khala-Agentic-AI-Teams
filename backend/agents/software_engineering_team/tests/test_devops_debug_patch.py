@@ -290,7 +290,11 @@ class TestInfraPatchAgent:
 
 
 class TestDevOpsPipelineDebugPatchLoop:
-    """End-to-end Phase 4.6 bounded retry coverage on ``_run_pipeline``."""
+    """Pipeline-level tests for the Phase 4.6 debug-patch retry loop.
+
+    Covers termination at the iteration bound, soft-abort on unfixable
+    debug output, and convergence when a patch resolves the execution failure.
+    """
 
     def test_loop_terminates_after_max_iterations(self) -> None:
         """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts.

@@ -43,7 +43,7 @@ class DocumentationRunbookAgent:
             release_readiness=ReleaseReadiness(
                 deployment_strategy="rolling",
                 rollback_available=True,
-                alerting_configured=True,
+                alerting_configured=False,
             ),
             notes=input_data.notes,
             git_operations=GitOperationsMetadata(),

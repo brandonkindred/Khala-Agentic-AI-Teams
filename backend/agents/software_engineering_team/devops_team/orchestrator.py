@@ -98,6 +98,70 @@ def _git_ops() -> DeliverGitOps:
     )
 
 
+def _criterion_traces_from_phase4(
+    criteria: List[str],
+    acceptance_trace: List[Dict[str, object]],
+    artifact_keys: List[str],
+) -> List[CriterionTrace]:
+    """Map acceptance criteria onto Phase 4 validation evidence.
+
+    Preconditions:
+        - ``criteria`` is an iterable of criterion strings (may be empty).
+        - ``acceptance_trace`` is an iterable of dict-like Phase 4 entries
+          (may be empty); non-dict entries are ignored.
+        - ``artifact_keys`` is an iterable of artifact path strings used as
+          fallback ``implementation_refs`` when no Phase 4 match exists.
+
+    Postconditions:
+        - Returns one ``CriterionTrace`` per entry in ``criteria``, in order.
+        - A Phase 4 match (first entry whose ``criterion`` string-equals the
+          criterion) supplies coerced ``implementation_refs`` and ``tests``.
+        - Unmatched criteria get ``implementation_refs=sorted(artifact_keys)``
+          and ``tests=[]``.
+        - Never invents a fabricated ``{"validation": "pass"}`` entry.
+    """
+    by_criterion: Dict[str, Dict[str, object]] = {}
+    for entry in acceptance_trace:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("criterion", ""))
+        if key and key not in by_criterion:
+            by_criterion[key] = entry
+
+    fallback_refs = sorted(artifact_keys)
+    traces: List[CriterionTrace] = []
+    for criterion in criteria:
+        match = by_criterion.get(criterion)
+        if match is None:
+            traces.append(
+                CriterionTrace(
+                    criterion=criterion,
+                    implementation_refs=list(fallback_refs),
+                    tests=[],
+                )
+            )
+            continue
+
+        raw_refs = match.get("implementation_refs", [])
+        refs = [str(r) for r in raw_refs] if isinstance(raw_refs, list) else []
+
+        raw_tests = match.get("tests", [])
+        tests: List[Dict[str, str]] = []
+        if isinstance(raw_tests, list):
+            for item in raw_tests:
+                if isinstance(item, dict):
+                    tests.append({str(k): str(v) for k, v in item.items()})
+
+        traces.append(
+            CriterionTrace(
+                criterion=criterion,
+                implementation_refs=refs,
+                tests=tests,
+            )
+        )
+    return traces
+
+
 DEVOPS_REQUIRED_GATE_NAMES = [
     "iac_validate",
     "iac_validate_fmt",
@@ -669,6 +733,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         deploy_result: Any = None
         aggregated_artifacts: Dict[str, str] = {}
         quality_gates: Dict[str, str] = {}
+        acceptance_trace: List[Dict[str, object]] = []
         completion: Any = None  # filled by Phase 5 on success
 
         def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
@@ -796,7 +861,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
               gate or build-verifier failure via ``_run_phase_gates``; otherwise
               returns ``None`` so Phase 5 runs.
             """
-            nonlocal aggregated_artifacts, quality_gates
+            nonlocal aggregated_artifacts, quality_gates, acceptance_trace
 
             # Phase 4: tool validation + independent reviews
             self._report_status(
@@ -882,6 +947,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                     },
                 )
             )
+            acceptance_trace = list(val.acceptance_trace)
 
             quality_gates = dict(val.quality_gates)
             # The infra security gate routes both the DevSecOps LLM review and the
@@ -949,15 +1015,15 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             """Phase 5: completion package assembly + deliver/merge.
 
             Preconditions: Phases 1–4 returned ``None``; ``quality_gates``,
-              ``aggregated_artifacts``, and Phase 2 results are set (artifacts may
-              be empty).
+              ``acceptance_trace``, ``aggregated_artifacts``, and Phase 2 results
+              are set (artifacts / trace may be empty).
             Postconditions: on merge failure returns a failed ``DevOpsTeamResult``
               via ``build_team_failure_result`` with the blocked completion
               package; otherwise assigns nonlocal ``completion`` (completed status,
               git ops, handoff, quality gates) and returns ``None`` so the thin
               success envelope after the sequencer runs.
             """
-            nonlocal completion
+            nonlocal completion, acceptance_trace
 
             # Phase 5: commit, merge, release readiness
             self._report_status(
@@ -975,20 +1041,17 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             )
 
             completion = doc.completion_package
-            completion.acceptance_criteria_trace = [
-                CriterionTrace(
-                    criterion=c,
-                    implementation_refs=sorted(aggregated_artifacts.keys()),
-                    tests=[{"validation": "pass"}],
-                )
-                for c in task_spec.acceptance_criteria
-            ]
+            completion.acceptance_criteria_trace = _criterion_traces_from_phase4(
+                list(task_spec.acceptance_criteria),
+                acceptance_trace,
+                list(aggregated_artifacts.keys()),
+            )
             completion.release_readiness = ReleaseReadiness(
                 deployment_strategy=deploy_result.strategy
                 or task_spec.constraints.deployment.strategy
                 or "rolling",
                 rollback_available=bool(deploy_result.rollback_plan),
-                alerting_configured=True,
+                alerting_configured=bool(deploy_result.alerting_configured),
                 required_approvals=["manual_prod_approval"]
                 if "production" in task_spec.platform_scope.environments
                 else [],
