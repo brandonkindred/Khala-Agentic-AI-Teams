@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 
 import httpx
 import pytest
@@ -180,91 +179,128 @@ def test_close_pool_swallows_client_close_errors(monkeypatch):
     assert shared.http._clients == {}  # noqa: SLF001 — verify teardown cleared state
 
 
+def test_async_requires_running_event_loop():
+    with pytest.raises(AssertionError, match="running event loop"):
+        get_pooled_async_client(30.0)
+
+
 def test_async_same_timeout_returns_same_instance():
-    a = get_pooled_async_client(30.0)
-    b = get_pooled_async_client(30.0)
-    assert a is b
-    assert isinstance(a, httpx.AsyncClient)
+    async def _run():
+        a = get_pooled_async_client(30.0)
+        b = get_pooled_async_client(30.0)
+        assert a is b
+        assert isinstance(a, httpx.AsyncClient)
+
+    asyncio.run(_run())
 
 
 def test_async_close_terminates_and_replaces_on_next_get():
-    a = get_pooled_async_client(30.0)
+    async def _grab():
+        return get_pooled_async_client(30.0)
+
+    a = asyncio.run(_grab())
     close_async_pool()
     assert a.is_closed
-    b = get_pooled_async_client(30.0)
-    assert b is not a
-    assert not b.is_closed
+
+    async def _second():
+        b = get_pooled_async_client(30.0)
+        assert b is not a
+        assert not b.is_closed
+
+    asyncio.run(_second())
 
 
 def test_async_different_timeout_buckets_are_isolated():
-    fast = get_pooled_async_client(5.0)
-    slow = get_pooled_async_client(30.0)
-    assert fast is not slow
+    async def _run():
+        fast = get_pooled_async_client(5.0)
+        slow = get_pooled_async_client(30.0)
+        assert fast is not slow
+
+    asyncio.run(_run())
 
 
 def test_async_near_equal_timeouts_share_bucket():
-    a = get_pooled_async_client(30.0)
-    b = get_pooled_async_client(30.0001)
-    assert a is b
+    async def _run():
+        a = get_pooled_async_client(30.0)
+        b = get_pooled_async_client(30.0001)
+        assert a is b
+
+    asyncio.run(_run())
 
 
 def test_async_replaces_externally_closed_client():
-    a = get_pooled_async_client(7.0)
-    asyncio.run(a.aclose())
-    b = get_pooled_async_client(7.0)
-    assert b is not a
-    assert not b.is_closed
+    async def _run():
+        a = get_pooled_async_client(7.0)
+        await a.aclose()
+        b = get_pooled_async_client(7.0)
+        assert b is not a
+        assert not b.is_closed
+
+    asyncio.run(_run())
 
 
 def test_async_close_pool_is_idempotent():
-    get_pooled_async_client(9.0)
+    async def _grab():
+        return get_pooled_async_client(9.0)
+
+    asyncio.run(_grab())
     close_async_pool()
     close_async_pool()
-    assert get_pooled_async_client(9.0) is not None
+    assert asyncio.run(_grab()) is not None
 
 
 def test_async_invalid_timeout_rejected():
-    with pytest.raises(AssertionError):
-        get_pooled_async_client(0)
-    with pytest.raises(AssertionError):
-        get_pooled_async_client(-5)
+    async def _run():
+        with pytest.raises(AssertionError):
+            get_pooled_async_client(0)
+        with pytest.raises(AssertionError):
+            get_pooled_async_client(-5)
+
+    asyncio.run(_run())
 
 
 def test_async_non_finite_timeout_rejected():
-    with pytest.raises(AssertionError):
-        get_pooled_async_client(float("inf"))
-    with pytest.raises(AssertionError):
-        get_pooled_async_client(float("nan"))
+    async def _run():
+        with pytest.raises(AssertionError):
+            get_pooled_async_client(float("inf"))
+        with pytest.raises(AssertionError):
+            get_pooled_async_client(float("nan"))
+
+    asyncio.run(_run())
 
 
 def test_async_close_pool_swallows_client_close_errors(monkeypatch):
-    client = get_pooled_async_client(15.0)
-
     def _boom(_client: httpx.AsyncClient) -> None:
         raise RuntimeError("close failed")
 
-    monkeypatch.setattr(shared.http, "_sync_close_async_client", _boom)
-    close_async_pool()  # must not raise
-    # Client could not be closed; remains in pool (not falsely cleared).
-    assert list(shared.http._async_clients.keys()) == [(15.0, 0)]  # noqa: SLF001
-    assert shared.http._async_clients[(15.0, 0)].client is client  # noqa: SLF001
-    assert not client.is_closed
+    monkeypatch.setattr(shared.http, "_force_close_async_client", _boom)
+
+    async def _body():
+        client = get_pooled_async_client(15.0)
+        close_async_pool()  # must not raise
+        # Client could not be closed; remains tracked (not silently orphaned).
+        assert any(
+            entry.client is client
+            for entry in shared.http._async_clients.values()  # noqa: SLF001
+        )
+        assert not client.is_closed
+
+    asyncio.run(_body())
 
 
-def test_async_close_pool_leaves_clients_open_when_loop_running(caplog):
-    client = get_pooled_async_client(15.0)
+def test_async_close_pool_closes_even_when_caller_has_running_loop():
+    """close_async_pool must not no-op-orphan when invoked under a live loop."""
 
-    async def _close_from_running_loop() -> None:
-        with caplog.at_level(logging.WARNING):
-            close_async_pool()
+    async def _body():
+        client = get_pooled_async_client(15.0)
+        close_async_pool()
+        assert client.is_closed
+        assert client not in [
+            e.client
+            for e in shared.http._async_clients.values()  # noqa: SLF001
+        ]
 
-    asyncio.run(_close_from_running_loop())
-    assert any(
-        entry.client is client
-        for entry in shared.http._async_clients.values()  # noqa: SLF001
-    )
-    assert not client.is_closed
-    assert any("event loop is running" in record.message.lower() for record in caplog.records)
+    asyncio.run(_body())
 
 
 def test_async_clients_isolated_across_sequential_event_loops():
@@ -276,11 +312,19 @@ def test_async_clients_isolated_across_sequential_event_loops():
     first = asyncio.run(_grab())
     second = asyncio.run(_grab())
     assert first is not second
-    # Prior loop's entry should have been purged (closed loop / finalize).
-    assert first.is_closed or first not in [
-        e.client
-        for e in shared.http._async_clients.values()  # noqa: SLF001
-    ]
+    assert first.is_closed
+
+
+def test_async_purge_closes_stale_client_before_dropping_entry():
+    """A new loop's get must close the prior loop's client, not orphan it."""
+
+    async def _grab() -> httpx.AsyncClient:
+        return get_pooled_async_client(30.0)
+
+    first = asyncio.run(_grab())
+    second = asyncio.run(_grab())
+    assert first is not second
+    assert first.is_closed
 
 
 def test_async_pool_does_not_accumulate_across_many_asyncio_runs():
@@ -292,10 +336,11 @@ def test_async_pool_does_not_accumulate_across_many_asyncio_runs():
     for _ in range(8):
         asyncio.run(_grab())
 
-    # Purge-on-access drops closed-loop entries from prior runs.
-    get_pooled_async_client(30.0)
-    loop_scoped = [k for k in shared.http._async_clients if k[0] == 30.0 and k[1] != 0]  # noqa: SLF001
-    assert loop_scoped == []
+    async def _count_after_purge() -> int:
+        get_pooled_async_client(30.0)
+        return len([k for k in shared.http._async_clients if k[0] == 30.0])  # noqa: SLF001
+
+    assert asyncio.run(_count_after_purge()) == 1
 
 
 def test_async_same_loop_reuses_client():
@@ -307,13 +352,16 @@ def test_async_same_loop_reuses_client():
 
 
 def test_async_pooled_client_applies_limits_and_timeout():
-    client = get_pooled_async_client(12.0)
-    assert isinstance(client, httpx.AsyncClient)
-    assert client.timeout.read == 12.0
-    pool = getattr(getattr(client, "_transport", None), "_pool", None)  # noqa: SLF001
-    if pool is not None and hasattr(pool, "_max_connections"):
-        assert pool._max_connections == DEFAULT_LIMITS.max_connections  # noqa: SLF001
-        assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections  # noqa: SLF001
-        assert pool._keepalive_expiry == DEFAULT_LIMITS.keepalive_expiry  # noqa: SLF001
-    else:  # pragma: no cover
-        pytest.skip("httpx pool internals unavailable; public timeout asserted above")
+    async def _run():
+        client = get_pooled_async_client(12.0)
+        assert isinstance(client, httpx.AsyncClient)
+        assert client.timeout.read == 12.0
+        pool = getattr(getattr(client, "_transport", None), "_pool", None)  # noqa: SLF001
+        if pool is not None and hasattr(pool, "_max_connections"):
+            assert pool._max_connections == DEFAULT_LIMITS.max_connections  # noqa: SLF001
+            assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections  # noqa: SLF001
+            assert pool._keepalive_expiry == DEFAULT_LIMITS.keepalive_expiry  # noqa: SLF001
+        else:  # pragma: no cover
+            pytest.skip("httpx pool internals unavailable; public timeout asserted above")
+
+    asyncio.run(_run())

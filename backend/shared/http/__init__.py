@@ -17,8 +17,9 @@ Invariants:
     - Exactly one ``httpx.Client`` exists per (rounded) timeout bucket for the
       lifetime of the process (or until :func:`close_pool`).
     - Exactly one ``httpx.AsyncClient`` exists per ``(timeout bucket, event
-      loop)`` while that loop is alive; entries are dropped (and clients
-      closed) when their owning loop is closed or garbage-collected.
+      loop)`` while that loop is alive. ``get_pooled_async_client`` requires a
+      running loop (no sentinel / sync-setup bucket). Stale entries are closed
+      then dropped when their owning loop is closed or garbage-collected.
     - All accessors are safe to call from multiple threads concurrently.
     - Idle keep-alive sockets are recycled after ``keepalive_expiry`` seconds
       (``HTTP_KEEPALIVE_EXPIRY_S``, default ``15.0``) so the client drops them
@@ -172,28 +173,46 @@ def close_pool() -> None:
 atexit.register(close_pool)
 
 
-def _sync_close_async_client(client: httpx.AsyncClient) -> None:
-    """Best-effort sync teardown for a pooled ``httpx.AsyncClient``.
+def _force_close_async_client(client: httpx.AsyncClient) -> None:
+    """Best-effort close for a pooled ``httpx.AsyncClient``.
 
     Preconditions:
         - ``client`` is an ``httpx.AsyncClient``.
     Postconditions:
-        - When no event loop is running, ``client`` is closed via
+        - When no event loop is running in this thread, closes via
           ``asyncio.run(client.aclose())``.
-        - When an event loop is already running, logs a warning and returns
-          without closing (callers in async context must ``await client.aclose()``).
+        - When an event loop *is* running in this thread (so nested
+          ``asyncio.run`` is unsafe), closes on a short-lived side thread with
+          its own event loop — required when purging a client whose *owning*
+          loop is already closed while the caller holds a different live loop.
+        - Failures are logged; the client may remain open if teardown fails.
     """
     if client.is_closed:
         return
+
+    def _close_in_fresh_loop() -> None:
+        try:
+            asyncio.run(client.aclose())
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            logger.warning("Failed to aclose pooled AsyncClient", exc_info=True)
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(client.aclose())
-    else:
-        logger.warning(
-            "Cannot sync-close pooled AsyncClient while event loop is running; "
-            "leaving client in pool (use await client.aclose() in async context)"
-        )
+        _close_in_fresh_loop()
+        return
+
+    thread = threading.Thread(
+        target=_close_in_fresh_loop,
+        name="shared-http-aclose",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(timeout=5.0)
+
+
+# Back-compat alias used by close_async_pool / tests.
+_sync_close_async_client = _force_close_async_client
 
 
 _async_lock = threading.Lock()
@@ -204,10 +223,10 @@ class _AsyncPoolEntry:
     """One pooled async client plus a weak reference to its owning event loop."""
 
     client: httpx.AsyncClient
-    loop_ref: weakref.ref | None  # None for the no-running-loop sentinel key
+    loop_ref: weakref.ref
 
 
-# Keyed by (timeout bucket, id(running loop) or 0 when no loop is running).
+# Keyed by (timeout bucket, id(running event loop)).
 _async_clients: dict[tuple[float, int], _AsyncPoolEntry] = {}
 
 
@@ -219,37 +238,54 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
         return None
 
 
+def _dispose_async_pool_entry(entry: _AsyncPoolEntry) -> bool:
+    """Close ``entry.client``; return True if the client is closed afterward.
+
+    Must not be called while holding ``_async_lock`` (close may join a helper
+    thread that must not contend on the same lock via finalize callbacks).
+    """
+    try:
+        _force_close_async_client(entry.client)
+    except Exception:  # noqa: BLE001 — best-effort teardown
+        logger.warning("Failed to dispose pooled AsyncClient", exc_info=True)
+    return entry.client.is_closed
+
+
 def _evict_async_pool_key(key: tuple[float, int]) -> None:
-    """Remove and best-effort-close the pooled client for ``key`` (if present).
+    """Close and remove the pooled client for ``key`` (if present).
 
     Safe to call from a ``weakref.finalize`` callback after the owning loop is
-    collected. Acquires ``_async_lock``.
+    collected. Only removes the entry once the client is actually closed —
+    otherwise leaves it for a later purge/close attempt.
     """
     with _async_lock:
-        entry = _async_clients.pop(key, None)
+        entry = _async_clients.get(key)
     if entry is None:
         return
-    try:
-        _sync_close_async_client(entry.client)
-    except Exception:  # noqa: BLE001 — best-effort teardown
-        pass
+    if not _dispose_async_pool_entry(entry):
+        return
+    with _async_lock:
+        if _async_clients.get(key) is entry:
+            _async_clients.pop(key, None)
 
 
-def _purge_stale_async_clients_locked() -> None:
-    """Drop entries whose owning loop is gone or closed. Caller holds ``_async_lock``."""
-    stale: list[tuple[float, int]] = []
-    for key, entry in _async_clients.items():
-        if key[1] == 0:
-            continue  # no-loop sentinel — only cleared by close_async_pool
-        loop = entry.loop_ref() if entry.loop_ref is not None else None
-        if loop is None or loop.is_closed():
-            stale.append(key)
-    for key in stale:
-        entry = _async_clients.pop(key)
-        try:
-            _sync_close_async_client(entry.client)
-        except Exception:  # noqa: BLE001 — best-effort teardown
-            pass
+def _purge_stale_async_clients() -> None:
+    """Close+drop entries whose owning loop is gone or closed.
+
+    Must not be called while holding ``_async_lock``.
+    """
+    with _async_lock:
+        stale = [
+            (key, entry)
+            for key, entry in _async_clients.items()
+            if (loop := entry.loop_ref()) is None or loop.is_closed()
+        ]
+    for key, entry in stale:
+        if not _dispose_async_pool_entry(entry):
+            continue
+        with _async_lock:
+            if _async_clients.get(key) is entry:
+                _async_clients.pop(key, None)
 
 
 def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
@@ -262,6 +298,7 @@ def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
     :func:`close_async_pool` at shutdown.
 
     Preconditions:
+        - A running asyncio event loop in this thread (call from async code).
         - ``timeout`` is a positive, finite number of seconds.
     Postconditions:
         - Returns a live (non-closed) ``httpx.AsyncClient`` configured with
@@ -271,25 +308,26 @@ def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
         - Calls from a different event loop (including sequential
           ``asyncio.run`` invocations) receive a distinct client, avoiding
           ``RuntimeError: Event loop is closed`` on keep-alive reuse.
-        - Entries for closed/collected loops are evicted so sequential
-          ``asyncio.run`` calls do not leak unbounded clients (and so a
-          recycled ``id(loop)`` cannot resurrect a dead client's transport).
+        - Entries for closed/collected loops are closed then evicted so
+          sequential ``asyncio.run`` calls do not leak clients or resurrect a
+          dead transport via a recycled ``id(loop)``.
     """
     loop = _running_loop()
-    loop_key = id(loop) if loop is not None else 0
-    key = (_bucket(timeout), loop_key)
+    assert loop is not None, (
+        "get_pooled_async_client requires a running event loop; "
+        "call it from async code (e.g. via async_post_json / async_get_json)"
+    )
+    key = (_bucket(timeout), id(loop))
+    _purge_stale_async_clients()
     with _async_lock:
-        _purge_stale_async_clients_locked()
         entry = _async_clients.get(key)
         if entry is None or entry.client.is_closed:
             client = httpx.AsyncClient(timeout=timeout, limits=DEFAULT_LIMITS)
-            loop_ref = weakref.ref(loop) if loop is not None else None
-            _async_clients[key] = _AsyncPoolEntry(client=client, loop_ref=loop_ref)
-            if loop is not None:
-                # Evict when the loop object is garbage-collected (after
-                # asyncio.run / explicit loop.close). Purge-on-access covers
-                # the closed-but-not-yet-collected window.
-                weakref.finalize(loop, _evict_async_pool_key, key)
+            _async_clients[key] = _AsyncPoolEntry(client=client, loop_ref=weakref.ref(loop))
+            # Evict when the loop object is garbage-collected (after
+            # asyncio.run / explicit loop.close). Purge-on-access covers
+            # the closed-but-not-yet-collected window.
+            weakref.finalize(loop, _evict_async_pool_key, key)
         else:
             client = entry.client
         return client
@@ -299,27 +337,23 @@ def close_async_pool() -> None:
     """Close and drop all pooled async clients.
 
     Idempotent: safe to call when the pool is already empty. Intended for
-    process shutdown and test teardown. Uses :func:`_sync_close_async_client`
-    for best-effort teardown (including from ``atexit``).
+    process shutdown and test teardown. Uses :func:`_force_close_async_client`
+    for best-effort teardown (including from ``atexit`` and from a running
+    event loop via a side-thread ``asyncio.run``).
 
     Postconditions:
-        - Closed clients are removed from the pool; clients that could not be
-          sync-closed (e.g. event loop already running) remain until a later
-          close attempt, loop eviction, or replacement via
-          :func:`get_pooled_async_client`.
-        - When no event loop is running, the pool is empty after this call.
+        - Clients that close successfully are removed from the pool.
+        - Clients that remain open after a failed teardown stay tracked so a
+          later close/purge can retry (never silently orphaned).
     """
     with _async_lock:
-        remaining: dict[tuple[float, int], _AsyncPoolEntry] = {}
-        for key, entry in _async_clients.items():
-            try:
-                _sync_close_async_client(entry.client)
-            except Exception:  # noqa: BLE001 — best-effort teardown
-                pass
-            if not entry.client.is_closed:
-                remaining[key] = entry
-        _async_clients.clear()
-        _async_clients.update(remaining)
+        snapshot = list(_async_clients.items())
+    for _key, entry in snapshot:
+        _dispose_async_pool_entry(entry)
+    with _async_lock:
+        for key, entry in snapshot:
+            if entry.client.is_closed and _async_clients.get(key) is entry:
+                _async_clients.pop(key, None)
 
 
 atexit.register(close_async_pool)
