@@ -334,21 +334,37 @@ def test_async_close_pool_closes_even_when_caller_has_running_loop():
     asyncio.run(_body())
 
 
+def test_async_aclose_pool_drops_stopped_owner_loop_without_hanging():
+    """A client owned by a stopped-but-not-closed loop must be dropped without a
+    cross-loop aclose (which would queue on the inactive loop and hang)."""
+    owner_loop = asyncio.new_event_loop()
+    try:
+        owner_loop.run_until_complete(_grab_async_client(15.0))
+        # owner_loop is now stopped but NOT closed; its client is still pooled.
+        assert any(
+            not entry.client.is_closed
+            for entry in shared.http._async_clients.values()  # noqa: SLF001
+        )
+
+        async def _teardown_from_other_loop():
+            # Must return promptly (not hang on the stopped owner loop) and drop
+            # the stale entry.
+            await asyncio.wait_for(aclose_async_pool(), timeout=5.0)
+
+        asyncio.run(_teardown_from_other_loop())
+        assert shared.http._async_clients == {}  # noqa: SLF001
+    finally:
+        owner_loop.close()
+
+
+async def _grab_async_client(timeout: float) -> httpx.AsyncClient:
+    return get_pooled_async_client(timeout)
+
+
 def test_async_clients_isolated_across_sequential_event_loops():
-    """Sequential asyncio.run calls must not reuse an AsyncClient across loops."""
-
-    async def _grab() -> httpx.AsyncClient:
-        return get_pooled_async_client(30.0)
-
-    first = asyncio.run(_grab())
-    second = asyncio.run(_grab())
-    assert first is not second
-    # Owning loop is dead: entry is dropped without foreign-loop aclose, so the
-    # prior client must not be reused even if httpx still reports it open.
-
-
-def test_async_purge_drops_stale_entry_without_foreign_aclose():
-    """A new loop's get must drop the prior loop's entry, not reuse it."""
+    """Sequential asyncio.run calls must get distinct clients, and the prior
+    (dead-loop) entry must be dropped on the next access without a foreign-loop
+    aclose — never reused even if httpx still reports it open."""
 
     async def _grab() -> httpx.AsyncClient:
         return get_pooled_async_client(30.0)

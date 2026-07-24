@@ -203,14 +203,22 @@ def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
     Preconditions:
         - ``entry`` references the client to close.
     Postconditions:
-        - If the owning loop is still alive, ``aclose()`` is run on *that* loop
-          (via ``run_coroutine_threadsafe``, or ``await`` when called through
-          :func:`aclose_async_pool`). Never runs ``asyncio.run(aclose)`` on a
-          foreign loop — that is unsafe for keep-alive transports.
-        - If the owning loop is already closed or collected, skips ``aclose``
-          (the transport died with the loop) and returns True so the pool can
-          drop the entry without a false "closed" mark from a wrong-loop close.
-        - Returns True when the client is closed or the owning loop is gone.
+        - If the owning loop is the *currently running* loop, schedules
+          ``aclose()`` on it as a task (blocking here would deadlock) and
+          returns True — meaning "safe to drop the entry", not "already
+          closed"; the client closes asynchronously on this loop. Prefer
+          :func:`aclose_async_pool` when the caller can ``await`` completion.
+        - If the owning loop is a *different* loop that is still running, runs
+          ``aclose()`` on that loop via ``run_coroutine_threadsafe`` (bounded
+          by a 5s wait). Never runs ``asyncio.run(aclose)`` on a foreign loop —
+          that is unsafe for keep-alive transports.
+        - If the owning loop is closed, collected, or *stopped but not running*
+          (e.g. after ``run_until_complete`` returns), skips ``aclose`` (a
+          coroutine cannot run there, and blocking on it would hang) and
+          returns True so the pool can drop the entry without a false "closed"
+          mark from a wrong-loop close.
+        - Returns True when the client is closed, safe to drop, or the owning
+          loop is gone.
     """
     client = entry.client
     if client.is_closed:
@@ -229,6 +237,11 @@ def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
         # Schedule aclose on this loop and drop the pool entry immediately —
         # returning True means "safe to remove", not "already closed".
         running.create_task(_aclose_quietly(client), name="shared.http.aclose")
+        return True
+    if not loop.is_running():
+        # Owner loop is stopped but not closed: run_coroutine_threadsafe would
+        # queue the close on an inactive loop and block forever. Drop the entry
+        # without a foreign-loop aclose rather than hang.
         return True
     try:
         fut = asyncio.run_coroutine_threadsafe(_aclose_quietly(client), loop)
@@ -344,11 +357,14 @@ async def aclose_async_pool() -> None:
 
     Prefer this from async code when teardown must finish before continuing.
     Clients owned by the current running loop are ``await``-ed directly; clients
-    owned by other live loops are closed via ``run_coroutine_threadsafe``.
-    Entries whose owning loop is already dead are dropped without ``aclose``.
+    owned by other *running* loops are closed via ``run_coroutine_threadsafe``.
+    Entries whose owning loop is dead, or stopped-but-not-closed, are dropped
+    without ``aclose`` (a coroutine cannot run there, and awaiting a submission
+    to an inactive loop would hang forever).
 
     Postconditions:
-        - Successfully closed / dead-loop entries are removed from the pool.
+        - Successfully closed, dead-loop, and stopped-loop entries are removed
+          from the pool.
         - Clients that remain open after a failed teardown stay tracked.
     """
     with _async_lock:
@@ -356,7 +372,14 @@ async def aclose_async_pool() -> None:
     running = asyncio.get_running_loop()
     for key, entry in snapshot:
         loop = entry.loop_ref()
-        if entry.client.is_closed or loop is None or loop.is_closed():
+        # Drop without aclose when the owner loop cannot safely run a coroutine:
+        # gone, closed, or another loop that is not currently running.
+        if (
+            entry.client.is_closed
+            or loop is None
+            or loop.is_closed()
+            or (loop is not running and not loop.is_running())
+        ):
             with _async_lock:
                 if _async_clients.get(key) is entry:
                     _async_clients.pop(key, None)

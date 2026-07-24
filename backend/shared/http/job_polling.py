@@ -65,6 +65,26 @@ class _BudgetExpired(Exception):
     """Internal: the overall ``total_timeout`` budget expired while awaiting."""
 
 
+def _discard_task_result(task: "asyncio.Task[Any]") -> None:
+    """Consume a detached task's result/exception so it is never orphaned.
+
+    Registered as a done-callback on a timed-out poll callback that suppressed
+    cancellation past the grace window. Retrieving the outcome here prevents an
+    "exception was never retrieved" warning and drops any late result.
+
+    Preconditions:
+        - ``task`` is done when this callback fires (asyncio guarantee).
+    Postconditions:
+        - Never raises; a late exception is logged at DEBUG, a late value is
+          dropped.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("Discarded exception from timed-out poll callback: %r", exc)
+
+
 async def _await_within_budget(awaitable: Awaitable[Any], remaining: float) -> Any:
     """Await ``awaitable`` within ``remaining`` seconds without ``wait_for`` overrun.
 
@@ -78,27 +98,35 @@ async def _await_within_budget(awaitable: Awaitable[Any], remaining: float) -> A
     Postconditions:
         - Returns the awaitable's result if it finishes within ``remaining``.
         - Raises :class:`_BudgetExpired` if the budget expires (including when
-          ``remaining <= 0`` before starting). A late terminal result after
-          expiry is discarded.
+          ``remaining <= 0`` before starting, or if the task is observed
+          cancelled). A late terminal result after expiry is discarded.
         - Propagates exceptions raised by the awaitable itself (including
           ``asyncio.TimeoutError`` from the callback) unchanged — those are
           not budget expiry.
+        - Leaves no undisposed task: a callback that suppresses cancellation
+          past the grace window is detached with :func:`_discard_task_result`
+          so the poller neither blocks on it nor leaks it as an unretrieved
+          task. (Such a callback may still run its own side effects to
+          completion — cooperative cancellation cannot be forced.)
     """
     if remaining <= 0:
         if asyncio.iscoroutine(awaitable):
             awaitable.close()
         raise _BudgetExpired()
     task = asyncio.ensure_future(awaitable)
-    try:
-        done, _pending = await asyncio.wait({task}, timeout=remaining)
-        if task in done:
-            return task.result()
-        task.cancel()
-        await asyncio.wait({task}, timeout=_BUDGET_CANCEL_GRACE_S)
-        raise _BudgetExpired()
-    finally:
-        if not task.done():
-            task.cancel()
+    done, _pending = await asyncio.wait({task}, timeout=remaining)
+    if task in done:
+        if task.cancelled():
+            raise _BudgetExpired()
+        return task.result()
+    # Budget expired: cancel and allow a short grace for cooperative cleanup.
+    task.cancel()
+    done, _pending = await asyncio.wait({task}, timeout=_BUDGET_CANCEL_GRACE_S)
+    if task not in done:
+        # Callback is suppressing cancellation; do not block the poller. Detach
+        # with a done-callback that consumes its eventual result/exception.
+        task.add_done_callback(_discard_task_result)
+    raise _BudgetExpired()
 
 
 def post_json(
@@ -229,9 +257,10 @@ def poll_until_terminal(
     Postconditions:
         - Returns the first status dict for which
           ``status.get(status_key)`` is in ``terminal_statuses``, unmodified.
-        - If ``status_fn()`` returns None, or raises any exception, on any
-          call, immediately returns ``{status_key: "failed", "error":
-          "Failed to get status"}`` — no further polling, no sleep.
+        - If ``status_fn()`` returns None, or ``status_fn`` / ``on_poll``
+          raises any exception, on any call, immediately returns
+          ``{status_key: "failed", "error": "Failed to get status"}`` — no
+          further polling, no sleep.
         - If no terminal status is observed within ``total_timeout`` seconds,
           returns ``{status_key: "failed", "error": f"Timed out waiting for
           {log_context}"}``.
@@ -252,7 +281,11 @@ def poll_until_terminal(
         if status.get(status_key) in terminal_statuses:
             return status
         if on_poll is not None:
-            on_poll(status)
+            try:
+                on_poll(status)
+            except Exception as e:
+                logger.warning("%s on_poll raised: %s", log_context, e)
+                return {status_key: "failed", "error": "Failed to get status"}
         time.sleep(poll_interval)
     return {status_key: "failed", "error": f"Timed out waiting for {log_context}"}
 

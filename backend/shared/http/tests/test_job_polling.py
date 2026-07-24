@@ -29,8 +29,32 @@ def _clean_pool():
     close_async_pool()
 
 
-def _mock_client(response=None, raise_for_status_error=None, request_error=None, json_error=None):
-    client = MagicMock()
+def _make_mock_client(
+    *,
+    is_async,
+    response=None,
+    raise_for_status_error=None,
+    request_error=None,
+    json_error=None,
+):
+    """Build a mock httpx client (sync or async) for job_polling tests.
+
+    Parameters:
+        is_async: When True, returns an ``AsyncMock`` whose ``post``/``get`` are
+            awaitables (mirrors ``httpx.AsyncClient``); otherwise a ``MagicMock``
+            mirroring ``httpx.Client``.
+        response: Value returned by ``resp.json()`` on success.
+        raise_for_status_error: If set, ``resp.raise_for_status()`` raises it
+            (simulates a non-2xx status).
+        request_error: If set, ``client.post``/``client.get`` raise it (simulates
+            a transport failure) instead of returning a response.
+        json_error: If set, ``resp.json()`` raises it (simulates an unparseable
+            body).
+
+    Returns:
+        A configured mock client whose ``post``/``get`` yield the response.
+    """
+    client = AsyncMock() if is_async else MagicMock()
     resp = MagicMock()
     if raise_for_status_error is not None:
         resp.raise_for_status.side_effect = raise_for_status_error
@@ -41,12 +65,17 @@ def _mock_client(response=None, raise_for_status_error=None, request_error=None,
     else:
         resp.json.return_value = response
     if request_error is not None:
-        client.post.side_effect = request_error
-        client.get.side_effect = request_error
+        client.post = AsyncMock(side_effect=request_error) if is_async else MagicMock(side_effect=request_error)
+        client.get = AsyncMock(side_effect=request_error) if is_async else MagicMock(side_effect=request_error)
     else:
-        client.post.return_value = resp
-        client.get.return_value = resp
+        client.post = AsyncMock(return_value=resp) if is_async else MagicMock(return_value=resp)
+        client.get = AsyncMock(return_value=resp) if is_async else MagicMock(return_value=resp)
     return client
+
+
+def _mock_client(**kwargs):
+    """Sync mock client (``httpx.Client`` shape). See :func:`_make_mock_client`."""
+    return _make_mock_client(is_async=False, **kwargs)
 
 
 # --- post_json -----------------------------------------------------------
@@ -182,6 +211,24 @@ def test_poll_short_circuits_on_status_fn_exception(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_poll_short_circuits_on_on_poll_exception(monkeypatch):
+    monkeypatch.setattr(
+        "shared.http.job_polling.time.sleep",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not sleep")),
+    )
+
+    def _on_poll(_status):
+        raise RuntimeError("progress sink failed")
+
+    result = poll_until_terminal(
+        lambda: {"status": "running"},
+        on_poll=_on_poll,
+        poll_interval=0.01,
+        total_timeout=10,
+    )
+    assert result == {"status": "failed", "error": "Failed to get status"}
+
+
 def test_poll_respects_custom_status_key_and_terminal_statuses():
     result = poll_until_terminal(
         lambda: {"state": "cancelled"},
@@ -205,24 +252,9 @@ def test_default_terminal_statuses_include_completed_failed_cancelled():
     assert DEFAULT_TERMINAL_STATUSES == frozenset({"completed", "failed", "cancelled"})
 
 
-def _mock_async_client(response=None, raise_for_status_error=None, request_error=None, json_error=None):
-    client = AsyncMock()
-    resp = MagicMock()
-    if raise_for_status_error is not None:
-        resp.raise_for_status.side_effect = raise_for_status_error
-    else:
-        resp.raise_for_status = MagicMock()
-    if json_error is not None:
-        resp.json.side_effect = json_error
-    else:
-        resp.json.return_value = response
-    if request_error is not None:
-        client.post = AsyncMock(side_effect=request_error)
-        client.get = AsyncMock(side_effect=request_error)
-    else:
-        client.post = AsyncMock(return_value=resp)
-        client.get = AsyncMock(return_value=resp)
-    return client
+def _mock_async_client(**kwargs):
+    """Async mock client (``httpx.AsyncClient`` shape). See :func:`_make_mock_client`."""
+    return _make_mock_client(is_async=True, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -455,6 +487,33 @@ async def test_async_poll_budget_timeout_ignores_late_success_after_cancel():
         log_context="late success",
     )
     assert result == {"status": "failed", "error": "Timed out waiting for late success"}
+    # Let the detached (cancellation-suppressing) task run to completion so its
+    # result is consumed by the discard callback rather than leaking.
+    await asyncio.sleep(0.3)
+
+
+@pytest.mark.asyncio
+async def test_async_poll_budget_timeout_discards_late_exception_from_detached_task():
+    """A cancellation-suppressing callback that later raises must not leak; the
+    poller returns the budget timeout and the late exception is discarded."""
+
+    async def _suppress_cancel_then_raise():
+        try:
+            await asyncio.sleep(60.0)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # longer than cancel grace
+            raise RuntimeError("late failure after deadline")
+        return {"status": "completed"}
+
+    result = await async_poll_until_terminal(
+        _suppress_cancel_then_raise,
+        poll_interval=0.01,
+        total_timeout=0.05,
+        log_context="late failure",
+    )
+    assert result == {"status": "failed", "error": "Timed out waiting for late failure"}
+    # Drain the detached task so its late exception is retrieved (not orphaned).
+    await asyncio.sleep(0.3)
 
 
 @pytest.mark.asyncio
@@ -474,16 +533,14 @@ async def test_async_poll_callback_timeout_error_is_status_failure_not_budget():
 
 
 @pytest.mark.asyncio
-async def test_async_poll_on_poll_timeout_error_is_status_failure_not_budget(monkeypatch):
-    async def _nosleep(*_):
-        return None
-
-    monkeypatch.setattr("shared.http.job_polling.asyncio.sleep", _nosleep)
+async def test_async_poll_on_poll_timeout_error_is_status_failure_not_budget():
+    """on_poll raising TimeoutError short-circuits before any sleep, so the
+    inter-poll sleep is never reached and does not need patching."""
 
     async def _status():
         return {"status": "running"}
 
-    async def _on_poll(_status: dict) -> None:
+    async def _on_poll(_ctx: dict) -> None:
         raise asyncio.TimeoutError("progress sink timed out")
 
     result = await async_poll_until_terminal(
@@ -506,7 +563,7 @@ async def test_async_poll_short_circuits_on_on_poll_exception(monkeypatch):
     async def _status():
         return {"status": "running"}
 
-    async def _on_poll(_status: dict) -> None:
+    async def _on_poll(_ctx: dict) -> None:
         raise RuntimeError("progress sink failed")
 
     result = await async_poll_until_terminal(_status, on_poll=_on_poll, poll_interval=0.01, total_timeout=10)
