@@ -727,6 +727,46 @@ class TestDeploymentStrategyAgent:
         assert out.strategy == "rolling"
         assert len(out.rollback_plan) == 1
         assert out.rollout_timeout_minutes == 10
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_missing_defaults_false(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"strategy": "rolling", "summary": "ok"},
+        )
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_false(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": False},
+        )
+        assert out.alerting_configured is False
+
+    def test_build_output_alerting_configured_true(self) -> None:
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        out = agent.build_output(
+            DeploymentStrategyAgentInput(task_spec=_base_task_spec()),
+            {"alerting_configured": True},
+        )
+        assert out.alerting_configured is True
 
 
 class TestDevSecOpsReviewAgent:

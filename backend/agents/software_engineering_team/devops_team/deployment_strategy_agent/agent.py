@@ -43,7 +43,8 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
         Preconditions: ``data`` is the dict from ``complete_json_with_continuation``.
         Postconditions: returns ``DeploymentStrategyAgentOutput`` with the same
         field defaults as the pre-migration agent, including
-        ``rollout_timeout_minutes=int(data.get(..., 15) or 15)``.
+        ``rollout_timeout_minutes=int(data.get(..., 15) or 15)`` and
+        ``alerting_configured=bool(data.get(..., False))`` (absent → False).
         """
         return DeploymentStrategyAgentOutput(
             artifacts=data.get("artifacts") or {},
@@ -51,5 +52,6 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
             rollback_plan=data.get("rollback_plan") or [],
             health_checks=data.get("health_checks") or [],
             rollout_timeout_minutes=int(data.get("rollout_timeout_minutes", 15) or 15),
+            alerting_configured=bool(data.get("alerting_configured", False)),
             summary=data.get("summary", ""),
         )
