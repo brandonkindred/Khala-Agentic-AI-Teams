@@ -145,6 +145,52 @@ def test_writer_llm_self_review_non_list_json_returns_draft(monkeypatch) -> None
     assert calls["n"] == 1
 
 
+def test_writer_llm_self_review_prose_prefixed_array_applies_fixes(monkeypatch) -> None:
+    """Unfenced prose before a valid issues array must still apply fixes."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "Here are the issues: "
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_markdown_link_before_unfenced_array(monkeypatch) -> None:
+    """Markdown links before an unfenced issues array must not block extraction."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "See [docs](https://example.com/guide) for context.\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
 def test_writer_llm_self_review_unexpected_error_propagates(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
@@ -445,7 +491,10 @@ def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) 
     assert any(r.exc_info is not None for r in caplog.records)
 
 
-def test_writer_llm_self_review_soft_fails_json_decode(monkeypatch, caplog) -> None:
+def test_writer_llm_self_review_malformed_bracket_text_returns_draft(
+    monkeypatch, caplog
+) -> None:
+    """Malformed bracket text is treated as no issues, not an exception soft-fail."""
     import logging
 
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
@@ -456,11 +505,13 @@ def test_writer_llm_self_review_soft_fails_json_decode(monkeypatch, caplog) -> N
         "_call_text",
         lambda self, prompt, system_prompt="": "[not-valid-json",
     )
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.INFO):
         out = a._llm_self_review("orig")
     assert out == "orig"
-    assert any("LLM self-review failed" in r.message for r in caplog.records)
-    assert any(r.exc_info is not None for r in caplog.records)
+    assert any(
+        "response was not a JSON array" in r.message for r in caplog.records
+    )
+    assert not any("LLM self-review failed" in r.message for r in caplog.records)
 
 
 def test_writer_fix_deterministic_violations_unwraps_wrapped_rate_limit(monkeypatch) -> None:

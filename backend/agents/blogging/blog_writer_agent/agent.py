@@ -149,6 +149,30 @@ def _extract_draft_after_marker(raw_response: str) -> str:
     return ""
 
 
+def _extract_json_array_from_text(text: str) -> Optional[list]:
+    """Parse a JSON array from ``text``, including when prefixed by prose.
+
+    Preconditions:
+        - ``text`` is a string (may be empty).
+    Postconditions:
+        - Returns the first value successfully decoded as a JSON array by scanning
+          for ``[`` and using ``json.JSONDecoder.raw_decode``, or ``None``.
+        - Does not use first-``[`` / last-``]`` slicing, so Markdown links such as
+          ``[label](url)`` are skipped when they are not valid JSON arrays.
+    """
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "[":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, list):
+            return value
+    return None
+
+
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
     """Write draft content to path; create parent dirs if needed. Log the saved path."""
     p = Path(path).resolve()
@@ -486,8 +510,17 @@ class BlogWriterAgent(_BlogAgentBase):
                 f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
             )
             cleaned = raw.strip()
-            issues = extract_json_from_response(cleaned)
-            if not isinstance(issues, list):
+            # Prefer the shared extractor (fenced / whole-response JSON); fall back
+            # to a Markdown-safe array scan for prose-prefixed ``[{...}]`` replies.
+            try:
+                parsed = extract_json_from_response(cleaned)
+            except LLMJsonParseError:
+                parsed = None
+            if isinstance(parsed, list):
+                issues = parsed
+            else:
+                issues = _extract_json_array_from_text(cleaned)
+            if issues is None:
                 logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft
             if not issues:
