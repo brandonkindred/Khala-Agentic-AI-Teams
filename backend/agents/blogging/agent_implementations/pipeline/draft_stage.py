@@ -114,7 +114,10 @@ def run_draft_stage(
     # Deferred imports (here and elsewhere in the stage bodies) keep this module's
     # import-time cheap and avoid pulling the full blog_writer_agent / job-store graph
     # when the Temporal worker imports this file to register activities.
-    from agents.blogging.blog_writer_agent.feedback_tracker import FeedbackTracker
+    from agents.blogging.blog_writer_agent.feedback_tracker import (
+        MAX_PREVIOUS_FEEDBACK_ITEMS,
+        FeedbackTracker,
+    )
 
     draft_result = None
     previous_feedback_items: list[FeedbackItem] = []
@@ -609,7 +612,7 @@ def run_draft_stage(
                     feedback_items=copy_editor_result.feedback_items,
                     feedback_summary=copy_editor_result.summary,
                     previous_feedback_items=feedback_tracker.get_capped_previous_feedback(
-                        max_items=15
+                        max_items=MAX_PREVIOUS_FEEDBACK_ITEMS
                     )
                     or None,
                     persistent_issues=persistent_issues or None,
@@ -622,7 +625,7 @@ def run_draft_stage(
                     elicited_stories=elicited_stories_text or None,
                 )
                 previous_feedback_items = feedback_tracker.get_capped_previous_feedback(
-                    max_items=15
+                    max_items=MAX_PREVIOUS_FEEDBACK_ITEMS
                 )
                 draft_output_path = (
                     (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None

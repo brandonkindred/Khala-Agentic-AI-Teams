@@ -87,7 +87,7 @@ def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> 
 
 
 def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
-    """LLM failure → empty list."""
+    """Non-transient LLM failure → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -97,6 +97,41 @@ def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     assert a.identify_uncertainty_questions("d", "p") == []
+
+
+def test_identify_uncertainty_questions_rate_limit_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a.identify_uncertainty_questions("d", "p")
+
+
+def test_identify_uncertainty_questions_wrapped_temporary_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent()
+    wrapped = LLMTemporaryError("temporary")
+
+    def boom(self, prompt, system_prompt=""):
+        raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMTemporaryError) as excinfo:
+        a.identify_uncertainty_questions("d", "p")
+    assert excinfo.value is wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +200,7 @@ def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
 
 
 def test_analyze_feedback_error(monkeypatch) -> None:
-    """LLM failure → empty list."""
+    """Non-transient LLM failure → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -175,6 +210,22 @@ def test_analyze_feedback_error(monkeypatch) -> None:
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
     assert a.analyze_user_feedback_for_guideline_updates("fb", "g") == []
+
+
+def test_analyze_feedback_rate_limit_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent()
+
+    def boom(self, p, **kw):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a.analyze_user_feedback_for_guideline_updates("fb", "g")
 
 
 # ---------------------------------------------------------------------------
@@ -223,19 +274,21 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
-    call_count = {"i": 0}
 
-    def fake(self, prompt, system_prompt=""):
-        call_count["i"] += 1
-        return "no marker here"
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
     monkeypatch.setattr(
-        BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {"draft": "# Fallback"}
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, prompt, system_prompt="": "no marker here",
     )
-    out = a.revise_from_user_feedback(draft="# Original", user_feedback="x", content_plan_text="cp")
-    # Should have either used fallback or kept original
-    assert out.draft  # Non-empty
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# Fallback",
+    )
+    out = a.revise_from_user_feedback(
+        draft="# Original", user_feedback="x", content_plan_text="cp"
+    )
+    assert "# Fallback" in out.draft
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +320,7 @@ def test_generate_escalation_summary_happy(monkeypatch) -> None:
 
 
 def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
-    """LLM failure still returns a string (fallback or empty)."""
+    """Non-transient LLM failure still returns a fallback string."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -283,6 +336,26 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
     )
     # Returns a fallback string (non-empty) or empty
     assert isinstance(out, str)
+
+
+def test_generate_escalation_summary_rate_limit_reraises(monkeypatch) -> None:
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent()
+
+    def boom(self, p, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a.generate_escalation_summary(
+            revision_count=10,
+            latest_feedback_items=[],
+            persistent_issues=[],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +407,54 @@ def test_revise_with_feedback_batches(monkeypatch, tmp_path) -> None:
     assert "Revised" in out.draft
 
 
+def test_revise_skips_json_fallback_when_primary_returns_identical_draft(monkeypatch) -> None:
+    """Primary success that yields the same text must not waste a JSON fallback call."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    original = "# Original\nBody"
+    fallback_calls = {"n": 0}
+
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_generate_revision_plan",
+        lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": f'{{"draft": 0}}\n---DRAFT---\n{original}',
+    )
+
+    def tracking_fallback(self, prompt):
+        fallback_calls["n"] += 1
+        return "# Should not be used"
+
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", tracking_fallback)
+
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    out = a.revise(
+        ReviseWriterInput(
+            draft=original,
+            feedback_items=[FeedbackItem(category="x", severity="minor", issue="y")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert out.draft == original
+    assert fallback_calls["n"] == 0
+
+
 def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
     """If all retries fail and json fallback fails, return original draft."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
@@ -359,11 +480,7 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
     monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
-
-    def fail_json(self, p, **kw):
-        raise ValueError("nope")
-
-    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", fail_json)
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
 
     plan = make_content_plan(
         overarching_topic="x",
@@ -379,8 +496,52 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
             content_plan=plan,
         ),
     )
-    # Should still return a WriterOutput; original draft preserved
     assert "Original" in out.draft
+
+
+def test_revise_batch_uses_json_fallback_when_text_fails(monkeypatch) -> None:
+    """Batch revise uses _fallback_draft_via_json when text path yields no draft."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_generate_revision_plan",
+        lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
+    )
+
+    def fail(self, *a, **kw):
+        raise RuntimeError("transient")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fail)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p: "# Batch Recovered",
+    )
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    out = a.revise(
+        ReviseWriterInput(
+            draft="# Original\nBody",
+            feedback_items=[FeedbackItem(category="x", severity="minor", issue="y")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert "Batch Recovered" in out.draft
 
 
 def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
@@ -428,6 +589,43 @@ def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
     assert out.summary == "Fix tone"
     assert len(out.changes) == 1
     assert out.risks == ["scope creep"]
+
+
+def test_revise_generate_revision_plan_rate_limit_reraises(monkeypatch) -> None:
+    """Transient LLM errors re-raise from structured planning (no unstructured fallback)."""
+    import pytest
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import LLMRateLimitError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+
+    def boom(self, p, **kw):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a._generate_revision_plan(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            revise_input=ReviseWriterInput(
+                draft="# x",
+                feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+                feedback_summary="s",
+                content_plan=plan,
+            ),
+        )
 
 
 def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:

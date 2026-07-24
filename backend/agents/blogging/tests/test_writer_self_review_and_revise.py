@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 
 def _make_agent_with_guidelines():
     from .conftest import make_writer_agent
@@ -35,17 +37,18 @@ def test_writer_fix_deterministic_violations(monkeypatch) -> None:
     assert "Fixed draft" in out
 
 
-def test_writer_fix_deterministic_violations_swallow_error(monkeypatch) -> None:
+def test_writer_fix_deterministic_violations_unexpected_error_propagates(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
 
     def boom(self, prompt, system_prompt=""):
-        raise RuntimeError("LLM down")
+        raise RuntimeError("programming bug")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
-    out = a._fix_deterministic_violations("orig", ["x"])
-    assert out == "orig"
+
+    with pytest.raises(RuntimeError, match="programming bug"):
+        a._fix_deterministic_violations("orig", ["x"])
 
 
 def test_writer_fix_deterministic_violations_empty_response(monkeypatch) -> None:
@@ -96,17 +99,18 @@ def test_writer_llm_self_review_no_array(monkeypatch) -> None:
     assert out == "draft text"
 
 
-def test_writer_llm_self_review_exception(monkeypatch) -> None:
+def test_writer_llm_self_review_unexpected_error_propagates(monkeypatch) -> None:
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
 
     def boom(self, prompt, system_prompt=""):
-        raise RuntimeError("LLM down")
+        raise RuntimeError("programming bug")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
-    out = a._llm_self_review("orig")
-    assert out == "orig"
+
+    with pytest.raises(RuntimeError, match="programming bug"):
+        a._llm_self_review("orig")
 
 
 def test_writer_self_review_combines_both(monkeypatch) -> None:
@@ -146,8 +150,35 @@ def test_writer_format_feedback_item_line() -> None:
 
     item_no_loc = FeedbackItem(category="x", severity="minor", issue="i")
     line2 = a._format_feedback_item_line(item_no_loc, 1)
-    assert "[" in line2  # No location bracket
+    assert line2 == "1. [minor] x: i"  # severity bracket present; location omitted
     assert "Suggestion:" not in line2
+
+
+def test_writer_format_feedback_item_line_missing_required_raises() -> None:
+    """Duck-typed items missing severity/category/issue raise ValueError, not AttributeError."""
+    from types import SimpleNamespace
+
+    a = _make_agent_with_guidelines()
+    incomplete = SimpleNamespace(location="para 1", suggestion="fix it")
+    with pytest.raises(ValueError, match="missing required fields"):
+        a._format_feedback_item_line(incomplete, 1)
+
+
+def test_writer_format_feedback_item_line_duck_typed() -> None:
+    """Non-FeedbackItem objects with the required attributes format successfully."""
+    from types import SimpleNamespace
+
+    a = _make_agent_with_guidelines()
+    item = SimpleNamespace(
+        severity="must_fix",
+        category="clarity",
+        issue="unclear antecedent",
+        location="para 3",
+        suggestion="name the subject",
+    )
+    line = a._format_feedback_item_line(item, 2)
+    assert line.startswith("2. [must_fix] clarity [para 3]: unclear antecedent")
+    assert "Suggestion: name the subject" in line
 
 
 def test_writer_revise_empty_draft() -> None:
@@ -212,3 +243,163 @@ def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
     )
     data = a._call_agent_json("prompt")
     assert data == {"a": 1}
+
+
+def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a._fix_deterministic_violations("orig", ["x"])
+
+
+def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMTemporaryError("temporary")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMTemporaryError, match="temporary"):
+        a._fix_deterministic_violations("orig", ["x"])
+
+
+def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a._llm_self_review("orig")
+
+
+def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMTemporaryError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMTemporaryError("temporary")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMTemporaryError, match="temporary"):
+        a._llm_self_review("orig")
+
+
+def test_writer_fix_deterministic_violations_soft_fails_permanent_error(
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMPermanentError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMPermanentError("permanent")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with caplog.at_level(logging.ERROR):
+        out = a._fix_deterministic_violations("orig", ["x"])
+    assert out == "orig"
+    assert any("Deterministic fix LLM call failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
+
+
+def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMPermanentError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise LLMPermanentError("permanent")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with caplog.at_level(logging.ERROR):
+        out = a._llm_self_review("orig")
+    assert out == "orig"
+    assert any("LLM self-review failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
+
+
+def test_writer_llm_self_review_soft_fails_json_decode(monkeypatch, caplog) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, prompt, system_prompt="": "[not-valid-json",
+    )
+    with caplog.at_level(logging.ERROR):
+        out = a._llm_self_review("orig")
+    assert out == "orig"
+    assert any("LLM self-review failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
+
+
+def test_writer_fix_deterministic_violations_unwraps_wrapped_rate_limit(monkeypatch) -> None:
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError
+
+    a = _make_agent_with_guidelines()
+    wrapped = LLMRateLimitError("rate limited")
+
+    def boom(self, prompt, system_prompt=""):
+        raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(LLMRateLimitError) as excinfo:
+        a._fix_deterministic_violations("orig", ["x"])
+    assert excinfo.value is wrapped
+    assert not isinstance(excinfo.value, EventLoopException)
+
+
+def test_writer_llm_self_review_unwraps_wrapped_permanent_error(monkeypatch, caplog) -> None:
+    import logging
+
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMPermanentError
+
+    a = _make_agent_with_guidelines()
+
+    def boom(self, prompt, system_prompt=""):
+        raise EventLoopException(LLMPermanentError("permanent"))
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with caplog.at_level(logging.ERROR):
+        out = a._llm_self_review("orig")
+    assert out == "orig"
+    assert any("LLM self-review failed" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)

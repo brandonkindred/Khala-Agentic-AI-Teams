@@ -14,6 +14,7 @@ from llm_service.compaction import (  # noqa: PLC2701 - internals are under test
     _model_fingerprint,
     clear_compaction_cache,
     compact_text,
+    supports_compaction,
 )
 
 
@@ -193,24 +194,36 @@ def test_chunked_success_is_cached() -> None:
     assert client.calls == calls_after_first  # fully served from cache
 
 
-def test_chunked_partial_failure_is_not_cached() -> None:
+def test_chunked_partial_failure_returns_original_and_is_not_cached() -> None:
     text = "d" * 4000 + "FAILME" + "d" * 4000
     client = _CountingClient(result="PART", ctx=1000, fail_on="FAILME")
-    compact_text(text, 2000, client, "existing codebase")
+    # Any degraded chunk must return the full original — never a truncated join.
+    assert compact_text(text, 2000, client, "existing codebase") == text
     calls_after_first = client.calls
     # A degraded chunked result must be retried, not frozen.
-    compact_text(text, 2000, client, "existing codebase")
+    assert compact_text(text, 2000, client, "existing codebase") == text
     assert client.calls > calls_after_first
 
 
-def test_chunked_empty_chunk_is_not_cached() -> None:
+def test_chunked_empty_chunk_returns_original_and_is_not_cached() -> None:
     text = "d" * 4000 + "EMPTYME" + "d" * 4000
     client = _CountingClient(result="PART", ctx=1000, empty_on="EMPTYME")
-    compact_text(text, 2000, client, "existing codebase")
+    assert compact_text(text, 2000, client, "existing codebase") == text
     calls_after_first = client.calls
     # An empty compaction for any chunk marks the aggregate un-cacheable.
-    compact_text(text, 2000, client, "existing codebase")
+    assert compact_text(text, 2000, client, "existing codebase") == text
     assert client.calls > calls_after_first
+
+
+def test_chunked_complete_only_failure_preserves_full_text() -> None:
+    """Default ctx sizing (no get_max_context_tokens) must not truncate on failure."""
+
+    class FailCompleteOnly:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            raise RuntimeError("boom")
+
+    text = "x" * 23000
+    assert compact_text(text, 8000, FailCompleteOnly(), "spec") == text
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +258,49 @@ def test_clear_compaction_cache_forces_cold_recompute() -> None:
     clear_compaction_cache()
     compact_text(text, 50, client, "spec")
     assert client.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# supports_compaction capability check
+# ---------------------------------------------------------------------------
+
+
+def test_supports_compaction_true_with_callable_complete_only() -> None:
+    class CompleteOnly:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            return prompt
+
+    assert supports_compaction(CompleteOnly()) is True
+
+
+def test_supports_compaction_true_with_complete_and_context() -> None:
+    class Full:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            return prompt
+
+        def get_max_context_tokens(self) -> int:
+            return 16384
+
+    assert supports_compaction(Full()) is True
+
+
+def test_supports_compaction_false_when_complete_missing() -> None:
+    class CtxOnly:
+        def get_max_context_tokens(self) -> int:
+            return 16384
+
+    assert supports_compaction(CtxOnly()) is False
+
+
+def test_supports_compaction_false_when_complete_not_callable() -> None:
+    class Bad:
+        complete = "not-a-function"
+
+    assert supports_compaction(Bad()) is False
+
+
+def test_supports_compaction_false_for_none() -> None:
+    assert supports_compaction(None) is False
 
 
 # ---------------------------------------------------------------------------

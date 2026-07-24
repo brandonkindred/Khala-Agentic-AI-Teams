@@ -14,6 +14,11 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 if TYPE_CHECKING:
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 
+# Upper bound on previous-feedback items included in revision prompts.
+# Shared by get_capped_previous_feedback, the draft-stage pipeline, and
+# BlogWriterAgent._build_revise_all_items_prompt.
+MAX_PREVIOUS_FEEDBACK_ITEMS = 15
+
 
 def _normalise_location(loc: Optional[str]) -> str:
     """Lowercase, strip whitespace, collapse numbers so location strings match across rounds."""
@@ -126,7 +131,9 @@ class FeedbackTracker:
             )
         return result
 
-    def get_capped_previous_feedback(self, max_items: int = 15) -> List["FeedbackItem"]:
+    def get_capped_previous_feedback(
+        self, max_items: int = MAX_PREVIOUS_FEEDBACK_ITEMS
+    ) -> List["FeedbackItem"]:
         """Return a bounded set of previous feedback for the revision prompt.
 
         Prioritises persistent issues (by occurrence count), then pads with

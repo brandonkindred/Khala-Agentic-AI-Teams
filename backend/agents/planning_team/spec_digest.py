@@ -21,7 +21,7 @@ import os
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from llm_service import compact_text
+from llm_service import compact_text, supports_compaction
 from shared.concurrency import parallel_map
 
 logger = logging.getLogger(__name__)
@@ -244,7 +244,7 @@ def map_reduce(
     def _process_one(item: tuple) -> Optional[Dict[str, Any]]:
         idx, section = item
         chunk = section
-        if len(chunk) > section_chars and _supports_compaction(llm):
+        if len(chunk) > section_chars and supports_compaction(llm):
             try:
                 chunk = compact_text(
                     chunk,
@@ -294,9 +294,3 @@ def map_reduce(
         return fallback
     return reduce_fn(results)
 
-
-def _supports_compaction(llm: Any) -> bool:
-    """True when ``llm`` exposes a *callable* compaction surface (``.complete`` + ctx size)."""
-    return callable(getattr(llm, "complete", None)) and callable(
-        getattr(llm, "get_max_context_tokens", None)
-    )
