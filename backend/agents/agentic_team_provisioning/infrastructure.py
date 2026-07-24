@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -175,31 +176,47 @@ class TeamInfrastructure:
 _infra_cache: Dict[str, TeamInfrastructure] = {}
 _infra_lock = threading.Lock()
 
+# team_id is interpolated into ``.../provisioned_teams/{team_id}/``. Restrict to
+# a single path component (alphanumerics, hyphen, underscore) so ``..``,
+# separators, and absolute segments cannot escape the provisioned_teams subtree.
+_TEAM_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
 
 def _require_team_id(team_id: str) -> None:
-    """Raise ``ValueError`` when ``team_id`` is empty or falsy.
+    """Raise ``ValueError`` when ``team_id`` is empty or unsafe for a path component.
 
     Preconditions:
-        - ``team_id`` is the caller-supplied team identifier (may be empty).
+        - ``team_id`` is the caller-supplied team identifier (may be empty or
+          contain arbitrary characters).
     Postconditions:
-        - Returns normally only when ``team_id`` is a non-empty string.
+        - Returns normally only when ``team_id`` is a non-empty string matching
+          ``[A-Za-z0-9_-]+`` (safe as a single filesystem path component).
         - Raises ``ValueError`` otherwise (always enforced; not an ``assert``,
           so not stripped by ``python -O``).
     """
     if not team_id:
         raise ValueError("team_id must be a non-empty string")
+    if _TEAM_ID_RE.fullmatch(team_id) is None:
+        raise ValueError("team_id contains unsafe characters")
 
 
 def _build_team_infrastructure(team_id: str) -> TeamInfrastructure:
     """Materialize directories and handles for ``team_id`` without touching the cache.
 
     Preconditions:
-        - ``team_id`` is a non-empty string (caller-enforced).
+        - ``team_id`` is a non-empty string matching ``[A-Za-z0-9_-]+``
+          (caller-enforced via ``_require_team_id``).
     Postconditions:
-        - ``assets_dir`` and ``runs_dir`` exist under the team base directory.
+        - ``assets_dir`` and ``runs_dir`` exist under the team base directory,
+          which resolves under ``Path(_AGENT_CACHE) / 'provisioned_teams'``.
         - Returns a new ``TeamInfrastructure``; does not read or write ``_infra_cache``.
     """
-    base = Path(_AGENT_CACHE) / "provisioned_teams" / team_id
+    provisioned_root = (Path(_AGENT_CACHE) / "provisioned_teams").resolve()
+    base = (provisioned_root / team_id).resolve()
+    # Defense in depth: charset validation should already prevent escapes, but
+    # refuse to mkdir if resolution still leaves the provisioned_teams subtree.
+    if not base.is_relative_to(provisioned_root):
+        raise ValueError("team_id escapes provisioned_teams directory")
     assets_dir = base / "assets"
     runs_dir = base / "runs"
 
@@ -220,7 +237,7 @@ def provision_team(team_id: str) -> TeamInfrastructure:
     """Create per-team directories and handles. Directory creation is idempotent.
 
     Preconditions:
-        - ``team_id`` is a non-empty string.
+        - ``team_id`` is a non-empty string matching ``[A-Za-z0-9_-]+``.
     Postconditions:
         - ``assets_dir`` and ``runs_dir`` exist under the team base directory.
         - The returned ``TeamInfrastructure`` is stored in the process-local
@@ -242,7 +259,7 @@ def get_team_infrastructure(team_id: str) -> TeamInfrastructure:
     """Return process-local infrastructure for a team, provisioning lazily if needed.
 
     Preconditions:
-        - ``team_id`` is a non-empty string.
+        - ``team_id`` is a non-empty string matching ``[A-Za-z0-9_-]+``.
     Postconditions:
         - Returns a ``TeamInfrastructure`` for ``team_id``.
         - Within a single process, repeated calls for the same ``team_id``
