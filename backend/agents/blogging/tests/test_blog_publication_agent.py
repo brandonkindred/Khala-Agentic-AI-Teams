@@ -8,6 +8,8 @@ from agents.blogging.blog_publication_agent import (
 
 from llm_service import DummyLLMClient
 
+from .conftest import make_writer_agent
+
 
 @pytest.fixture
 def temp_blog_root(tmp_path):
@@ -66,7 +68,6 @@ def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
     actually revised instead of clearing the rejection with zero iterations.
     """
     from agents.blogging.blog_copy_editor_agent import BlogCopyEditorAgent
-    from agents.blogging.blog_writer_agent import BlogWriterAgent
 
     result = agent.submit_draft(
         SubmitDraftInput(
@@ -81,8 +82,7 @@ def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
     )
     assert rejection.ready_to_revise
 
-    draft_agent = BlogWriterAgent(
-        llm_client=DummyLLMClient(),
+    draft_agent = make_writer_agent(
         writing_style_guide_content="Use clear sentence flow and plain language.",
         brand_spec_content="Brand voice: practical and trustworthy.",
     )
@@ -160,8 +160,7 @@ def test_revision_loop_stops_after_editor_approval(agent, temp_blog_root, monkey
         lambda _text: {"feedback_items": []},
     )
 
-    draft_agent = BlogWriterAgent(
-        llm_client=DummyLLMClient(),
+    draft_agent = make_writer_agent(
         writing_style_guide_content="clear",
         brand_spec_content="brand",
     )
