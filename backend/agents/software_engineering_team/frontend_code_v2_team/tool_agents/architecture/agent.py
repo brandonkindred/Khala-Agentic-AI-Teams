@@ -7,8 +7,6 @@ from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this mod
 from ...models import ToolAgentPhaseInput
 from .._plan_base import PlanGeneratorToolAgent
 
-MAX_SPEC_CHARS = 6_000
-
 FRONTEND_ARCHITECT_PROMPT = """You are an expert Frontend Architect Agent. Your job is to define app architecture and long-term maintainability. You stop the codebase from turning into a spaghetti museum.
 
 **Your expertise:**

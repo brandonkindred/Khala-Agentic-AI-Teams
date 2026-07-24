@@ -27,7 +27,7 @@ class InfraDebugAgent:
     def run(self, input_data: IaCDebugInput) -> IaCDebugOutput:
         artifacts_snippet = ""
         for fname, content in list(input_data.artifacts.items()):
-            artifacts_snippet += f"\n### {fname} ###\n{contentn"
+            artifacts_snippet += f"\n### {fname} ###\n{content}\n"
 
         context = (
             f"Tool: {input_data.tool_name}\n"

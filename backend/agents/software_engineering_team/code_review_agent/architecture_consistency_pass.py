@@ -92,14 +92,14 @@ def _build_prompt(
     """Render the single user prompt for this pass.
 
     Postconditions:
-        - Inlines the architecture document (folding in the rendered
+        - Inlines the architecture document in full (folding in the rendered
           ``overview``/``components``/``decisions`` alongside it, or in its
-          place when no full document is set) up to ``max_arch_doc_chars``,
-          then the submission's changed files up to a combined
-          ``max_inline_chars`` budget; any files/content beyond either budget
-          are named as reachable via the attached tools rather than silently
-          dropped.
+          place when no full document is set), then the submission's changed
+          files up to a combined ``max_inline_chars`` budget; any files/content
+          beyond the file budget are named as reachable via the attached tools
+          rather than silently dropped.
     """
+    _ = max_arch_doc_chars  # retained for call-site budget bookkeeping
     parts: List[str] = []
 
     arch_doc = "\n\n".join(

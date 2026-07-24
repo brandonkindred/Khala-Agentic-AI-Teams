@@ -66,10 +66,7 @@ from llm_service import (
 )
 from shared.concurrency import parallel_map
 from shared.env_config import env_bool
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_sibling_surface_chars,
-    parse_env_int,
-)
+from software_engineering_team.shared.context_sizing import parse_env_int
 
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
@@ -737,10 +734,6 @@ _TS_EXPORT_RE = re.compile(
 )
 _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
 
-# Cap per file so one huge file can't dominate a chunk's sibling-surface context.
-_MAX_SYMBOLS_PER_FILE = 60
-
-
 def _symbol_surface(content: str) -> List[str]:
     """Extract a file's top-level defined/exported symbol names.
 
@@ -748,8 +741,8 @@ def _symbol_surface(content: str) -> List[str]:
         - Returns a sorted, de-duplicated list of Python ``def``/``class`` names
           and TS/JS ``export`` binding names (including names inside
           ``export { a, b as c }``, where the exported name ``c`` is taken).
-          Capped at ``_MAX_SYMBOLS_PER_FILE``. Heuristic and best-effort — used
-          only as reviewer context, never to gate a verdict.
+          Heuristic and best-effort — used only as reviewer context, never to
+          gate a verdict.
     """
     names: set[str] = set()
     for match in _PY_SYMBOL_RE.finditer(content):
@@ -795,14 +788,10 @@ def _sibling_surface(chunk: ReviewChunk, surface_by_path: Dict[str, List[str]]) 
     Postconditions:
         - Returns a deterministic, path-sorted ``"path: name1, name2"``-per-line
           string covering every changed file whose path is not one of this
-          chunk's own paths, truncated to ``CODE_REVIEW_SIBLING_SURFACE_CHARS``.
-          Empty when no sibling file has a surface. Because it is derived only
-          from sibling files, editing a file's *body* without changing its
-          top-level symbols leaves this string (and any cache key built from it)
-          unchanged. Capping here (rather than only in the prompt builder) keeps
-          the cache key hashing the exact bytes the reviewer sees, so an edit
-          past the cap can't cause a spurious miss on an otherwise-identical
-          prompt.
+          chunk's own paths. Empty when no sibling file has a surface. Because
+          it is derived only from sibling files, editing a file's *body* without
+          changing its top-level symbols leaves this string (and any cache key
+          built from it) unchanged.
     """
     own_paths = {seg.path for seg in chunk.segments if seg.path}
     lines = [

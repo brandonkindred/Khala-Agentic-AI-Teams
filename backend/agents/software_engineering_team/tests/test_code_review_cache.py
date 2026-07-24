@@ -434,30 +434,32 @@ def test_half_sibling_surface_falls_back_without_map() -> None:
     assert mapping._half_sibling_surface(half, surface, "parent surface") == "app/b.py: foo"
 
 
-def test_sibling_surface_is_capped_to_the_shared_limit() -> None:
-    """A large sibling surface is truncated to the shared cap, so the cache key
-    hashes exactly the (capped) bytes the prompt will carry."""
+def test_sibling_surface_is_returned_in_full() -> None:
+    """A large sibling surface is returned in full so the cache key hashes the
+    same bytes the prompt will carry."""
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
     chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
     out = coord._sibling_surface(chunk, surface)
-    assert len(out) <= compute_code_review_sibling_surface_chars()
+    assert len(out) > compute_code_review_sibling_surface_chars()
+    assert "app/f0.py:" in out and "app/f199.py:" in out
 
 
-def test_sibling_surface_cap_is_env_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CODE_REVIEW_SIBLING_SURFACE_CHARS tunes the cap without code changes."""
+def test_sibling_surface_ignores_legacy_env_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CODE_REVIEW_SIBLING_SURFACE_CHARS no longer truncates the sibling surface."""
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
     chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "50")
-    assert len(coord._sibling_surface(chunk, surface)) <= 50
+    out = coord._sibling_surface(chunk, surface)
+    assert len(out) > 50
+    assert "app/f0.py:" in out
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "0")
-    assert coord._sibling_surface(chunk, surface) == ""  # 0 drops the block
-
+    assert "app/f0.py:" in coord._sibling_surface(chunk, surface)
 
 def test_surface_by_path_skips_headerless_and_symbolless() -> None:
     """Only named blocks with a non-empty surface appear in the map."""

@@ -17,9 +17,6 @@ import re
 from pathlib import Path
 from typing import Optional
 
-# Scan first N chars of spec for framework mentions to avoid false positives in long docs
-_SPEC_SCAN_CHARS = 16_000
-
 # Word-boundary patterns for framework names (case-insensitive)
 _REACT_PATTERN = re.compile(
     r"\b(?:react(?:\s+(?:app|application|frontend|ui|framework))?|use\s+react)\b",
@@ -94,7 +91,7 @@ def get_frontend_framework_from_spec(spec_content: str) -> Optional[str]:
 
     Returns "angular", "react", "vue", or None. Uses word-boundary and phrase
     checks to avoid false positives (e.g. "reaction" does not set React).
-    Scans the first _SPEC_SCAN_CHARS of the spec.
+    Scans the full spec content.
     """
     if not spec_content or not spec_content.strip():
         return None

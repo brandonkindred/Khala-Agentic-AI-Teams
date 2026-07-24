@@ -12,7 +12,6 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from software_engineering_team.shared.context_sizing import compute_prd_snippet_chars
 from software_engineering_team.shared.json_utils import (
     default_decompose_by_sections,
     parse_json_with_recovery,

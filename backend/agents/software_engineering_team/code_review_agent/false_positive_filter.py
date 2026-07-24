@@ -63,11 +63,6 @@ logger = logging.getLogger(__name__)
 # leaves it enabled.
 _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 
-# How many file paths to enumerate inline in the verification prompt before
-# deferring the rest to the ``list_files`` tool. A manifest is a convenience so
-# the model knows what it can read; it is never the only way to discover files.
-_MANIFEST_LIMIT = 300
-
 # Cap on substring matches returned by ``search_codebase`` so a common token
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
@@ -803,18 +798,17 @@ def _build_group_prompt(
 ) -> str:
     """Render the user prompt for verifying one file's findings.
 
-    The prompt inlines the cited file's full content up to ``max_inline_chars``
-    (so the model has the primary evidence even without a tool call) and lists
-    the other available paths; everything beyond the budget — the rest of a huge
-    file, every other file, the existing-codebase excerpt — is reachable through
-    the tools. The wording is a stable anchor for the verdict contract: it names
+    The prompt inlines the cited file's full content (so the model has the
+    primary evidence even without a tool call) and lists every available path;
+    other files and the existing-codebase excerpt remain reachable through the
+    tools. The wording is a stable anchor for the verdict contract: it names
     the file, indexes each finding, and asks for a ``verdicts`` array.
 
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order) and never exceeds the inline budget for the
-          primary file body.
+          matching ``issues`` order) and the full primary file body.
     """
+    _ = max_inline_chars  # retained for call-site compatibility
     parts: List[str] = []
     task = input_data.task_description.strip()
     if task:

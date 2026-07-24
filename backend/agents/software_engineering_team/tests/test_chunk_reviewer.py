@@ -401,10 +401,10 @@ def test_run_forwards_think_override(monkeypatch) -> None:
     assert captured["think"] is None
 
 
-def test_shared_context_is_hard_capped_deterministically() -> None:
-    """Spec/arch/existing excerpts are sliced to budget here — no LLM
-    compaction calls — so an upstream compaction failure can never balloon the
-    chunk prompt."""
+def test_shared_context_is_passed_through_in_full() -> None:
+    """Spec/arch/existing excerpts are forwarded verbatim — no hard cap, no
+    extra LLM compaction calls — so an upstream compaction failure cannot
+    silently drop context from the chunk prompt."""
     from software_engineering_team.shared.context_sizing import (
         compute_code_review_spec_excerpt_chars,
     )
@@ -415,5 +415,5 @@ def test_shared_context_is_hard_capped_deterministically() -> None:
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input(spec_excerpt=oversized_spec))
     assert len(client.prompts) == 1  # exactly one LLM call: the review itself
-    assert "TAIL_BEYOND_BUDGET" not in client.prompts[0]
+    assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
     assert "S" * 100 in client.prompts[0]

@@ -9,10 +9,8 @@ single bounded review pass.
 Preconditions:
     - The caller (the coordinator) has already bounded the chunk: the
       ``code_chunk`` carries at most ``compute_code_review_map_chunk_chars`` of
-      code, and any spec/architecture/existing-codebase context has been
-      compacted to its absolute cap. This module re-applies those caps to the
-      context excerpts defensively but never to the code, which is reviewed
-      verbatim.
+      code. Spec/architecture/existing-codebase context is passed through in
+      full; this module never mutates the code under review.
 
 Postconditions:
     - Returns the LLM's findings for this chunk only (``approved``, ``issues``,
@@ -34,11 +32,7 @@ from typing import List, Optional, Union
 
 from llm_service import LLMClient, LLMJsonParseError
 from software_engineering_team.shared.context_sizing import (
-    compute_code_review_arch_overview_chars,
-    compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
-    compute_code_review_sibling_surface_chars,
-    compute_code_review_spec_excerpt_chars,
 )
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
@@ -210,9 +204,6 @@ def _run_chunk_review(
             unchanged from ``complete_json_with_continuation``.
     """
     max_chunk_chars = compute_code_review_map_chunk_chars(llm)
-    max_spec = compute_code_review_spec_excerpt_chars(llm)
-    max_arch = compute_code_review_arch_overview_chars(llm)
-    max_existing = compute_code_review_existing_codebase_chars(llm)
     code_chunk = input_data.code_chunk
     if len(code_chunk) > max_chunk_chars:
         # Coordinator invariant violation (e.g. a single line longer than the
@@ -224,7 +215,7 @@ def _run_chunk_review(
         )
     spec_excerpt = input_data.spec_excerpt
     architecture_overview = input_data.architecture_overview
-    existing_codebase_excerpt = (input_data.existing_codebase_excerpt or "")
+    existing_codebase_excerpt = input_data.existing_codebase_excerpt or ""
 
     language = input_data.language.strip().lower() if input_data.language else ""
     if not language:
@@ -271,12 +262,7 @@ def _run_chunk_review(
         )
     if architecture_overview:
         context_parts.extend(["", "**Architecture:**", architecture_overview])
-    # Defensive slice: the coordinator already caps the surface to this same
-    # env-configurable length before hashing/passing it, so this is a no-op for
-    # coordinator-built inputs and a guard for any direct ChunkReviewInput caller.
-    sibling_surface = (input_data.sibling_surface or "")[
-        : compute_code_review_sibling_surface_chars()
-    ]
+    sibling_surface = input_data.sibling_surface or ""
     if sibling_surface:
         context_parts.extend(
             [

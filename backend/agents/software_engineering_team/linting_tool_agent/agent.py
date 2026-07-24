@@ -17,8 +17,6 @@ from .prompts import LINT_FIX_PROMPT
 
 logger = logging.getLogger(__name__)
 
-MAX_AFFECTED_FILES = 15
-MAX_AFFECTED_CODE_CHARS = 12_000
 MAX_ISSUES_FOR_LLM = 30
 
 

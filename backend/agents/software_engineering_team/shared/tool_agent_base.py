@@ -52,12 +52,14 @@ def relevant_code_for_issue(
     current_files: Dict[str, str],
     max_chars: int = DEFAULT_MAX_RELEVANT_CODE_CHARS,
 ) -> str:
-    """Return code context for a single issue: prefer issue's file, else first files.
+    """Return code context for a single issue: prefer issue's file, else all files.
 
-    Preconditions: ``current_files`` maps path -> content; ``max_chars`` > 0.
-    Postconditions: returns a non-empty string; falls back to ``"(no code)"``
-    when no content can be included.
+    Preconditions: ``current_files`` maps path -> content.
+    Postconditions: returns a non-empty string with full file content; falls
+        back to ``"(no code)"`` when no content can be included. ``max_chars``
+        is retained for call-site compatibility and is not applied.
     """
+    _ = max_chars
     if issue.file_path and issue.file_path in current_files:
         content = current_files[issue.file_path]
         return f"--- {issue.file_path} ---\n{content}"
