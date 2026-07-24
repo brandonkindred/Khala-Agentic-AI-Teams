@@ -283,6 +283,26 @@ def test_critic_transient_error_reraises(err_cls) -> None:
             )
 
 
+def test_critic_agent_construction_failure_falls_back() -> None:
+    """Agent(...) construction errors fail closed via the FAIL fallback report."""
+
+    class _BoomCtor:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("rejected model config")
+
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", _BoomCtor):
+        report = critic.run(
+            plan=_minimal_plan(),
+            brand_spec_prompt="b",
+            writing_guidelines="g",
+        )
+    assert report.status == "FAIL"
+    assert report.approved is False
+    assert report.notes is not None
+    assert "rejected model config" in (report.notes or "")
+
+
 @pytest.mark.parametrize("err_cls", [LLMRateLimitError, LLMTemporaryError])
 def test_critic_event_loop_exception_unwraps_transient(err_cls) -> None:
     """strands EventLoopException must re-raise the unwrapped transient cause."""
