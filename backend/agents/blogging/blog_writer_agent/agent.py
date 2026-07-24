@@ -177,6 +177,22 @@ def _extract_json_array_from_text(text: str) -> Optional[list]:
     return None
 
 
+def _looks_like_top_level_json_object(text: str) -> bool:
+    """Return True when ``text``'s JSON payload appears to be a top-level object.
+
+    Preconditions:
+        - ``text`` is a string (may be empty).
+    Postconditions:
+        - Returns True if the stripped text (or its first fenced code block body)
+          begins with ``{``; otherwise False.
+    """
+    candidate = text.strip()
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", candidate, flags=re.IGNORECASE)
+    if fence:
+        candidate = fence.group(1).strip()
+    return candidate.startswith("{")
+
+
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
     """Write draft content to path; create parent dirs if needed. Log the saved path."""
     p = Path(path).resolve()
@@ -514,16 +530,25 @@ class BlogWriterAgent(_BlogAgentBase):
                 f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
             )
             cleaned = raw.strip()
-            # Prefer the shared extractor (fenced / whole-response JSON); fall back
-            # to a Markdown-safe array scan for prose-prefixed ``[{...}]`` replies.
+            # Prefer the shared extractor for fenced / whole-response JSON.
+            # Fall back to a Markdown-safe array scan only when extraction fails,
+            # or when a non-list parse looks like salvage from prose (not a
+            # top-level object response — those must not be rescanned for
+            # nested arrays).
             try:
                 parsed = extract_json_from_response(cleaned)
             except LLMJsonParseError:
-                parsed = None
-            if isinstance(parsed, list):
-                issues = parsed
-            else:
                 issues = _extract_json_array_from_text(cleaned)
+            else:
+                if isinstance(parsed, list):
+                    issues = parsed
+                elif _looks_like_top_level_json_object(cleaned):
+                    logger.info(
+                        "LLM self-review: no issues found (response was not a JSON array)"
+                    )
+                    return draft
+                else:
+                    issues = _extract_json_array_from_text(cleaned)
             if issues is None:
                 logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft

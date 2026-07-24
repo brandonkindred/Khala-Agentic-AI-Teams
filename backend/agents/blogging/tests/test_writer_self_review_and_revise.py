@@ -145,6 +145,30 @@ def test_writer_llm_self_review_non_list_json_returns_draft(monkeypatch) -> None
     assert calls["n"] == 1
 
 
+def test_writer_llm_self_review_object_with_nested_arrays_returns_draft(monkeypatch) -> None:
+    """A parsed JSON object with nested arrays must not be rescanned as issues."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    calls = {"n": 0}
+    payload = json.dumps(
+        {
+            "status": "ok",
+            "references": [{"title": "source"}],
+            "warnings": [],
+        }
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        calls["n"] += 1
+        return payload
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert out == "draft text"
+    assert calls["n"] == 1
+
+
 def test_writer_llm_self_review_prose_prefixed_array_applies_fixes(monkeypatch) -> None:
     """Unfenced prose before a valid issues array must still apply fixes."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
