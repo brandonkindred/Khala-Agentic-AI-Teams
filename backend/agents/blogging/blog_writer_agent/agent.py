@@ -1075,14 +1075,18 @@ class BlogWriterAgent(_BlogAgentBase):
                     return revised.strip()
             except LLMJsonParseError as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
-            except Exception:
-                logger.warning(
-                    "Revise item %s/%s: transient error (attempt %s/2); retrying.",
-                    item_index,
-                    total_items,
-                    attempt + 1,
-                )
-                time.sleep(2.0 + attempt)
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "Revise item %s/%s: transient error (attempt %s/2); retrying.",
+                        item_index,
+                        total_items,
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 + attempt)
+                    continue
+                raise
         # Fallback — keep original on unexpected failure; re-raise transient LLM
         # errors so the draft-stage retry funnel can own backoff.
         try:
@@ -1200,12 +1204,16 @@ class BlogWriterAgent(_BlogAgentBase):
                     break
             except LLMJsonParseError as e:
                 logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
-            except Exception:
-                logger.warning(
-                    "Batch revise transient error (attempt %s/3); retrying.",
-                    attempt + 1,
-                )
-                time.sleep(2.0 * (2**attempt))
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "Batch revise transient error (attempt %s/3); retrying.",
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 * (2**attempt))
+                    continue
+                raise
         if not primary_succeeded:
             try:
                 fallback = self._fallback_draft_via_json(prompt)
@@ -1452,11 +1460,16 @@ class BlogWriterAgent(_BlogAgentBase):
                     break
             except LLMJsonParseError as e:
                 logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
-            except Exception:
-                logger.warning(
-                    "User-feedback revision transient error (attempt %s/3); retrying.", attempt + 1
-                )
-                time.sleep(2.0 * (2**attempt))
+            except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    logger.warning(
+                        "User-feedback revision transient error (attempt %s/3); retrying.",
+                        attempt + 1,
+                    )
+                    time.sleep(2.0 * (2**attempt))
+                    continue
+                raise
 
         if not primary_succeeded:
             try:

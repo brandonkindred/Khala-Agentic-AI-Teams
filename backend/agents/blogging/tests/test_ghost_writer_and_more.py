@@ -44,6 +44,21 @@ def _gap():
 
 
 # ---------------------------------------------------------------------------
+# _JSON_RETRY_SUFFIX — shape neutrality
+# ---------------------------------------------------------------------------
+
+
+def test_json_retry_suffix_is_shape_agnostic() -> None:
+    """Retry suffix must not demand a JSON object (gap-finding returns an array)."""
+    from agents.blogging.ghost_writer_agent.agent import _JSON_RETRY_SUFFIX
+
+    assert _JSON_RETRY_SUFFIX == (
+        "\n\nRespond with valid JSON only (no markdown, no code fences)."
+    )
+    assert "object" not in _JSON_RETRY_SUFFIX.lower()
+
+
+# ---------------------------------------------------------------------------
 # _plan_to_text
 # ---------------------------------------------------------------------------
 
@@ -505,7 +520,21 @@ def test_ghost_generate_friendly_seeds_dict_with_questions(monkeypatch) -> None:
 
 
 def test_ghost_generate_friendly_seeds_dict_wrong_len_fallback(monkeypatch) -> None:
-    """Mismatched length → falls back to generic seeds."""
+    """LLM returns a dict whose questions list has the wrong length → falls back to generic seeds."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    _patch_agent(monkeypatch, [json.dumps({"questions": ["only-one"]})])
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    out = agent._generate_friendly_seeds(["topic a", "topic b"])
+    # Fallback: generic seeds (one per opp)
+    assert len(out) == 2
+    assert all("topic" in s.lower() for s in out)
+
+
+def test_ghost_generate_friendly_seeds_list_wrong_len_fallback(monkeypatch) -> None:
+    """LLM returns a JSON list of wrong length → falls back to generic seeds."""
     from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
 
     from llm_service import DummyLLMClient
@@ -515,6 +544,7 @@ def test_ghost_generate_friendly_seeds_dict_wrong_len_fallback(monkeypatch) -> N
     out = agent._generate_friendly_seeds(["topic a", "topic b"])
     # Fallback: generic seeds (one per opp)
     assert len(out) == 2
+    assert all("topic" in s.lower() for s in out)
 
 
 # ---------------------------------------------------------------------------
