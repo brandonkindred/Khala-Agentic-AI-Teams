@@ -28,6 +28,7 @@ from llm_service import (
     get_client,
     llm_attribution,
 )
+from shared.observability import bind_trace_id, new_trace_id
 from shared.repo_context.repo_utils import (
     read_repo_code,
     truncate_for_context,
@@ -851,6 +852,7 @@ def run_orchestrator(
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
     sprint_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> None:
     """
     Main orchestration loop. Runs in background thread.
@@ -867,8 +869,32 @@ def run_orchestrator(
       product_delivery sprint's stories and synthesize requirements
       directly — Discovery's LLM spec-parse and the PRA agent are
       skipped. Mutually exclusive with ``spec_content_override``.
+    - trace_id: caller-supplied trace id (e.g. from a Temporal activity) to bind
+      for this run instead of generating a fresh one; every phase — Discovery,
+      Design, Execution, Integration — shares the single id bound here.
     """
     path = Path(repo_path).resolve()
+    with bind_trace_id(trace_id or new_trace_id()):
+        _run_orchestrator_body(
+            job_id,
+            path,
+            spec_content_override=spec_content_override,
+            resolved_questions_override=resolved_questions_override,
+            planning_only=planning_only,
+            sprint_id=sprint_id,
+        )
+
+
+def _run_orchestrator_body(
+    job_id: str,
+    path: Path,
+    *,
+    spec_content_override: Optional[str],
+    resolved_questions_override: Optional[List[Dict[str, Any]]],
+    planning_only: bool,
+    sprint_id: Optional[str],
+) -> None:
+    """Body of :func:`run_orchestrator`, run inside its ``bind_trace_id`` block."""
     try:  # pragma: no cover  # integration-only: end-to-end 4-phase orchestration pipeline (LLM + git + npm/pytest)
         # Check for cancellation at start
         _check_cancellation(job_id)
@@ -1164,7 +1190,7 @@ def _run_coding_and_finalize(
     _finalize_from_coding_snapshot(job_id)
 
 
-def run_failed_tasks(job_id: str) -> None:
+def run_failed_tasks(job_id: str, *, trace_id: Optional[str] = None) -> None:
     """Retry the FAILED tasks of a prior coding-team run.
 
     Resumes the run's persisted task graph (``task_graph_snapshot``) with FAILED tasks demoted to
@@ -1183,7 +1209,15 @@ def run_failed_tasks(job_id: str) -> None:
     Postconditions:
         - The coding-team orchestrator has run to a terminal status for ``job_id`` (or a terminal
           cancelled/failed status was written on interruption).
+        - ``trace_id`` (caller-supplied, or freshly generated) is bound for the Execution/Integration
+          re-entry the retry performs, matching ``run_orchestrator``'s per-job trace id.
     """
+    with bind_trace_id(trace_id or new_trace_id()):
+        _run_failed_tasks_body(job_id)
+
+
+def _run_failed_tasks_body(job_id: str) -> None:
+    """Body of :func:`run_failed_tasks`, run inside its ``bind_trace_id`` block."""
     from software_engineering_team.shared.job_store import get_job
 
     job_data = get_job(job_id)

@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 from temporalio import activity
 
 from shared.concurrency import BackgroundHeartbeat
+from shared.observability import bind_trace_id, new_trace_id
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
@@ -36,12 +37,15 @@ def run_orchestrator_activity(
     spec_content_override: Optional[str] = None,
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
+    trace_id: str = "",
 ) -> None:
     """Execute the main Tech Lead orchestrator (run_orchestrator).
 
     Postconditions:
         On failure the job is marked FAILED and the exception is re-raised so
         Temporal can retry (per the workflow retry policy) and fail the workflow.
+        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
+        forwarded to ``run_orchestrator``, which binds it for the whole 4-phase run.
     """
     try:
         from software_engineering_team.orchestrator import run_orchestrator
@@ -52,6 +56,7 @@ def run_orchestrator_activity(
             spec_content_override=spec_content_override,
             resolved_questions_override=resolved_questions_override,
             planning_only=planning_only,
+            trace_id=trace_id or new_trace_id(),
         )
     except Exception as e:
         logger.exception("Orchestrator activity failed")
@@ -60,7 +65,7 @@ def run_orchestrator_activity(
 
 
 @activity.defn(name="retry_failed")
-def retry_failed_activity(job_id: str) -> None:
+def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
     """Re-run failed tasks for a job (run_failed_tasks).
 
     Postconditions:
@@ -70,7 +75,7 @@ def retry_failed_activity(job_id: str) -> None:
     try:
         from software_engineering_team.orchestrator import run_failed_tasks
 
-        run_failed_tasks(job_id)
+        run_failed_tasks(job_id, trace_id=trace_id or new_trace_id())
     except Exception as e:
         logger.exception("Retry failed activity failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
@@ -323,11 +328,25 @@ def parse_spec_activity(
     job_id: str,
     repo_path: str,
     spec_content_override: Optional[str] = None,
+    trace_id: str = "",
 ) -> Dict[str, Any]:
     """Phase 1: Parse spec + run Product Requirements Analysis.
 
-    Returns SpecParseResult as a dict.
+    Returns SpecParseResult as a dict. ``trace_id`` (workflow-supplied, or freshly
+    generated when blank) is bound for the duration of this activity — this activity
+    runs in its own process/thread, so unlike the thread-mode orchestrator the id
+    must be passed explicitly rather than inherited via contextvars.
     """
+    with bind_trace_id(trace_id or new_trace_id()):
+        return _parse_spec_activity_body(job_id, repo_path, spec_content_override)
+
+
+def _parse_spec_activity_body(
+    job_id: str,
+    repo_path: str,
+    spec_content_override: Optional[str],
+) -> Dict[str, Any]:
+    """Body of :func:`parse_spec_activity`, run inside its ``bind_trace_id`` block."""
     from software_engineering_team.temporal.phase_models import SpecParseResult
 
     try:
@@ -418,11 +437,25 @@ def plan_project_activity(
     job_id: str,
     repo_path: str,
     spec_parse_result: Dict[str, Any],
+    trace_id: str = "",
 ) -> Dict[str, Any]:
     """Phase 2: Run Planning workflow.
 
-    Returns PlanResult as a dict.
+    Returns PlanResult as a dict. ``trace_id`` (workflow-supplied, or freshly
+    generated when blank) is bound for the duration of this activity — see
+    ``parse_spec_activity`` for why it must be passed explicitly here rather than
+    inherited via contextvars.
     """
+    with bind_trace_id(trace_id or new_trace_id()):
+        return _plan_project_activity_body(job_id, repo_path, spec_parse_result)
+
+
+def _plan_project_activity_body(
+    job_id: str,
+    repo_path: str,
+    spec_parse_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block."""
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
 
     try:
@@ -539,11 +572,28 @@ def execute_coding_team_activity(
     repo_path: str,
     plan_result: Dict[str, Any],
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
+    trace_id: str = "",
 ) -> Dict[str, Any]:
     """Phase 3: Build CodingTeamPlanInput and run coding team.
 
-    Returns ExecutionResult as a dict.
+    Returns ExecutionResult as a dict. ``trace_id`` (workflow-supplied, or freshly
+    generated when blank) is bound for the duration of this activity, including the
+    ``parallel_map`` fan-out inside ``run_coding_team_orchestrator`` (integration
+    finalize still runs on the thread-mode path only — see issue tracking notes).
     """
+    with bind_trace_id(trace_id or new_trace_id()):
+        return _execute_coding_team_activity_body(
+            job_id, repo_path, plan_result, resolved_questions_override
+        )
+
+
+def _execute_coding_team_activity_body(
+    job_id: str,
+    repo_path: str,
+    plan_result: Dict[str, Any],
+    resolved_questions_override: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Body of :func:`execute_coding_team_activity`, run inside its ``bind_trace_id`` block."""
     from software_engineering_team.temporal.phase_models import ExecutionResult
     from software_engineering_team.temporal.phase_models import PlanResult as PlanResultModel
 
