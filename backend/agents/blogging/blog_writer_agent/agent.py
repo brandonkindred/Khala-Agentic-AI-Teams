@@ -706,6 +706,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 cause2 = _unwrap_llm_cause(e2)
                 if not isinstance(cause2, LLMJsonParseError):
                     raise
+                logger.warning("JSON draft fallback also failed: %s", cause2)
 
         if not draft:
             logger.warning("LLM returned no draft content; returning placeholder.")
