@@ -25,6 +25,7 @@ import pytest
 from investment_team.models import StrategySpec
 from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import design_review as design_review_mod
+from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
 from investment_team.strategy_lab.agents._response_schemas import CRITIQUE_SCHEMA
 from investment_team.strategy_lab.agents.design_review import DesignReviewAgent
 from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate, SignalExitRule
@@ -251,13 +252,20 @@ def test_schema_forced_starvation_degrades_to_legacy_call_and_succeeds(
     monkeypatch.setattr(design_review_mod, "Agent", lambda **_k: agent)
 
     logger_name = "investment_team.strategy_lab.agents.design_review"
+    budget = LLMCallBudget(limit=10)
     with caplog.at_level(logging.WARNING, logger=logger_name):
-        critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+        with use_budget(budget):
+            critique = DesignReviewAgent().run(_spec(), readiness_results=[])
 
     assert critique.ready is True
     assert agent.calls == 1
     starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
     assert len(starvation_warnings) == 1
+    # 3 real provider calls happen on this path (the structured attempt's
+    # reasoning + formatting calls, then the legacy fallback's single call) —
+    # all 3 must be charged against the per-cycle budget, not just the 2
+    # pre-charged for the structured attempt.
+    assert budget.calls_made == 3
 
 
 # ---------------------------------------------------------------------------

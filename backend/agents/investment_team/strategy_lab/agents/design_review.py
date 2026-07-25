@@ -30,7 +30,7 @@ from ...models import StrategySpec
 from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
 from . import _structured_output as so
-from ._llm_budget import charge_active_budget
+from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import coerce_strict_bool as _shared_coerce_strict_bool
 from ._parse_helpers import extract_json_object
@@ -543,6 +543,13 @@ class DesignReviewAgent:
                         "structured design-review decode starved (schema_forced); "
                         "degrading to the legacy single-shot call."
                     )
+                    # The schema_forced degrade path makes a THIRD real
+                    # provider call (the structured attempt's reasoning +
+                    # formatting calls were already charged above; this legacy
+                    # fallback is a further, only-now-known call) — charge for
+                    # it here, before invoking it, so total charges match
+                    # total real calls even on this less-common path.
+                    charge_active_budget()
                     parsed = _invoke_legacy()
                 else:
                     logger.info(
@@ -551,6 +558,11 @@ class DesignReviewAgent:
                     )
             else:
                 parsed = _invoke_legacy()
+        except DesignBudgetExhausted:
+            # Must propagate uncaught — same rationale as the pre-try charges
+            # above (a per-cycle budget trip is a cycle-level stop, not a
+            # reviewer/transport hiccup to fail closed on).
+            raise
         except Exception as exc:  # noqa: BLE001 — fail-closed on any LLM/parse fault
             logger.warning("DesignReviewAgent failed to produce parseable JSON: %s", exc)
             return _fail_closed_critique(exc, readiness_findings)

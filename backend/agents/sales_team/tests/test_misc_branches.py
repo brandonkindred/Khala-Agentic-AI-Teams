@@ -42,6 +42,29 @@ class _CannedLLM(LLMClient):
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str = "",
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+    ) -> str:
+        # The critics' think=True reasoning pass (complete_validated_via_reasoning)
+        # calls this before the real verdict call. Override the LLMClient base's
+        # default (which would otherwise route through complete_json and silently
+        # consume a queued response meant for the real formatting call) with a
+        # harmless placeholder that doesn't touch the response queue — mirrors
+        # CannedLLMClient in test_critics.py. The critic's built prompt (with
+        # any dossier-truncation marker) lands here, not in complete_json's
+        # prompt, so record it separately for tests that inspect it.
+        self.reasoning_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        return "Reasoning: proceeding as configured by the test fixture."
 
     def complete_json(
         self,
@@ -142,11 +165,13 @@ def test_outreach_critic_truncates_oversize_dossier_in_prompt() -> None:
     )
     critic = OutreachCriticAgent(llm_client=llm)
     critic.review(seq, dossier, icp)
-    # The critic's prompt should contain the truncation marker because the
-    # dossier JSON exceeds the cap.
-    assert any("dossier truncated" in (c["prompt"] or "") for c in llm.calls)
+    # The critic's built prompt (with the truncation marker, since the dossier
+    # JSON exceeds the cap) is sent as the reasoning-pass prompt, not the
+    # formatting call's prompt (which is "convert this prose" + the reasoning
+    # call's output) — inspect reasoning_calls.
+    assert any("dossier truncated" in (c["prompt"] or "") for c in llm.reasoning_calls)
     # And the prompt should be capped near _DOSSIER_CHAR_CAP for the dossier slice.
-    assert _DOSSIER_CHAR_CAP < len(llm.calls[0]["prompt"])  # full prompt > cap, sanity
+    assert _DOSSIER_CHAR_CAP < len(llm.reasoning_calls[0]["prompt"])  # full prompt > cap, sanity
 
 
 def test_outreach_critic_emits_no_dossier_marker_when_dossier_none() -> None:
@@ -160,7 +185,7 @@ def test_outreach_critic_emits_no_dossier_marker_when_dossier_none() -> None:
     )
     critic = OutreachCriticAgent(llm_client=llm)
     critic.review(seq, None, icp)
-    assert any("(no dossier supplied)" in (c["prompt"] or "") for c in llm.calls)
+    assert any("(no dossier supplied)" in (c["prompt"] or "") for c in llm.reasoning_calls)
 
 
 def test_proposal_critic_truncates_oversize_dossier_in_prompt() -> None:
@@ -191,7 +216,9 @@ def test_proposal_critic_truncates_oversize_dossier_in_prompt() -> None:
     )
     critic = ProposalCriticAgent(llm_client=llm)
     critic.review(proposal, dossier, qual)
-    assert any("dossier truncated" in (c["prompt"] or "") for c in llm.calls)
+    # See test_outreach_critic_truncates_oversize_dossier_in_prompt: the
+    # truncation marker lands in the reasoning-pass prompt, not complete_json's.
+    assert any("dossier truncated" in (c["prompt"] or "") for c in llm.reasoning_calls)
 
 
 # ---------------------------------------------------------------------------

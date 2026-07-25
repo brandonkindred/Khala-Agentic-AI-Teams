@@ -55,19 +55,21 @@ app = create_team_app(
     on_startup=_start_temporal_worker_backstop,
 )
 
-# The decomposed Temporal pipeline (temporal/workflows.py) can go up to an
-# hour between job-row touches while a criterion fan-out or report-writing
+# The decomposed Temporal pipeline (temporal/workflows.py) can go up to 90
+# minutes between job-row touches while a criterion fan-out or report-writing
 # activity is queued/running (AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT /
-# REPORT_SCHEDULE_TO_CLOSE_TIMEOUT) — Temporal's own per-activity timeouts are
-# the primary "is this stuck" detector on that path, feeding a genuine
-# failure into mark_failed_activity. This monitor is a backstop for what
-# Temporal can't self-heal (e.g. thread-mode, or the whole worker process
-# dying), so its threshold must stay comfortably above those ceilings —
-# otherwise it can mark a legitimate long-running Temporal audit
-# "failed (stale)" before it gets a chance to complete, and
-# _update_job_terminal's first-writer-wins guard would then treat that false
-# failure as authoritative and silently discard the real completion.
-_STALE_JOB_THRESHOLD_SECONDS = 90 * 60
+# REPORT_SCHEDULE_TO_CLOSE_TIMEOUT — doubled from the original 1-hour ceiling
+# since each activity now issues two sequential LLM calls instead of one) —
+# Temporal's own per-activity timeouts are the primary "is this stuck"
+# detector on that path, feeding a genuine failure into mark_failed_activity.
+# This monitor is a backstop for what Temporal can't self-heal (e.g.
+# thread-mode, or the whole worker process dying), so its threshold must stay
+# comfortably above those ceilings — otherwise it can mark a legitimate
+# long-running Temporal audit "failed (stale)" before it gets a chance to
+# complete, and _update_job_terminal's first-writer-wins guard would then
+# treat that false failure as authoritative and silently discard the real
+# completion.
+_STALE_JOB_THRESHOLD_SECONDS = 120 * 60
 
 _stale_monitor_stop = start_stale_job_monitor(
     job_store._job_manager,
