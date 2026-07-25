@@ -24,7 +24,7 @@ from branding_team.models import (
     WorkflowStatus,
 )
 from branding_team.postgres import SCHEMA as BRANDING_SCHEMA
-from branding_team.store import BrandingStore
+from branding_team.store import AttachConversationResult, BrandingStore
 from branding_team.tests.conftest import make_mission
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_postgres]
@@ -122,3 +122,68 @@ def test_conversation_sql_real_postgres() -> None:
     match = next((s for s in summaries if s.conversation_id == cid), None)
     assert match is not None
     assert match.message_count == 2
+
+
+def test_attach_conversation_real_postgres() -> None:
+    """attach_conversation's SELECT ... FOR UPDATE + cross-table transaction
+    (branding_conversations + branding_brands) works against real Postgres."""
+    conv_store = BrandingConversationStore()
+    brand_store = BrandingStore()
+    client = brand_store.create_client(f"RealPGAttach {uuid.uuid4().hex[:8]}")
+    brand = brand_store.create_brand(
+        client.id,
+        make_mission(
+            company_name="AttachRealCo",
+            company_description="A real company description long enough.",
+            target_audience="developers",
+        ),
+    )
+    assert brand is not None
+    cid = conv_store.create(
+        mission=make_mission(
+            company_name="AttachRealCo",
+            company_description="A real company description long enough.",
+            target_audience="developers",
+        )
+    )
+
+    updated_mission = make_mission(
+        company_name="AttachRealCo v2",
+        company_description="A real, updated company description.",
+        target_audience="operators",
+    )
+    result, updated_brand = brand_store.attach_conversation(client.id, brand.id, cid, updated_mission)
+    assert result is AttachConversationResult.OK
+    assert updated_brand is not None
+    assert updated_brand.conversation_id == cid
+
+    assert conv_store.get_conversation_brand_id(cid) == brand.id
+    state = conv_store.get_state(cid)
+    assert state is not None
+    assert state.mission.company_name == "AttachRealCo v2"
+
+    # Already-attached conflict: a second brand cannot claim the same conversation.
+    other_brand = brand_store.create_brand(
+        client.id,
+        make_mission(
+            company_name="OtherRealCo",
+            company_description="A real company description long enough.",
+            target_audience="developers",
+        ),
+    )
+    assert other_brand is not None
+    conflict_result, conflict_brand = brand_store.attach_conversation(
+        client.id, other_brand.id, cid, updated_mission
+    )
+    assert conflict_result is AttachConversationResult.ALREADY_ATTACHED
+    assert conflict_brand is None
+
+    # Brand-not-found rolls back: a fresh, unattached conversation must not be
+    # left pointing at a brand id that doesn't exist.
+    orphan_cid = conv_store.create(mission=updated_mission)
+    missing_result, missing_brand = brand_store.attach_conversation(
+        client.id, "brand_does_not_exist", orphan_cid, updated_mission
+    )
+    assert missing_result is AttachConversationResult.BRAND_NOT_FOUND
+    assert missing_brand is None
+    assert conv_store.get_conversation_brand_id(orphan_cid) is None
