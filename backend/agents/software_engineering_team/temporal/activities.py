@@ -71,6 +71,8 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
     Postconditions:
         On failure the job is marked FAILED and the exception is re-raised so
         Temporal can retry (per the workflow retry policy) and fail the workflow.
+        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
+        forwarded to ``run_failed_tasks``, which binds it for the retry.
     """
     try:
         from software_engineering_team.orchestrator import run_failed_tasks
@@ -590,8 +592,10 @@ def execute_coding_team_activity(
 
     Returns ExecutionResult as a dict. ``trace_id`` (workflow-supplied, or freshly
     generated when blank) is bound for the duration of this activity, including the
-    ``parallel_map`` fan-out inside ``run_coding_team_orchestrator`` (integration
-    finalize still runs on the thread-mode path only — see issue tracking notes).
+    ``parallel_map`` fan-out inside ``run_coding_team_orchestrator``. Note the V2
+    workflow defines no Phase-4 activity, so the integration finalize step
+    (``_emit_coding_team_metrics`` / ``_finalize_from_coding_snapshot``) runs on the
+    thread-mode path only and is not covered by this activity's bound id.
     """
     with bind_trace_id(trace_id or new_trace_id()):
         return _execute_coding_team_activity_body(
