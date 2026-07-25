@@ -19,7 +19,14 @@ Invariants:
     - Exactly one ``httpx.AsyncClient`` exists per ``(timeout bucket, event
       loop)`` while that loop is alive. ``get_pooled_async_client`` requires a
       running loop (no sentinel / sync-setup bucket). Stale entries are closed
-      then dropped when their owning loop is closed or garbage-collected.
+      then dropped when their owning loop is closed or garbage-collected. A
+      client whose owning loop has stopped but is not yet closed is closed on
+      that loop (``run_until_complete``) rather than dropped open.
+    - An entry is removed from the async pool before its client is closed, so
+      teardown and a concurrent ``get_pooled_async_client`` can never disagree
+      about which client is live; a client that fails to close is restored.
+    - Exactly one ``weakref.finalize`` handle exists per live async pool entry;
+      it is detached whenever the entry leaves or is replaced in the pool.
     - All accessors are safe to call from multiple threads concurrently.
     - Idle keep-alive sockets are recycled after ``keepalive_expiry`` seconds
       (``HTTP_KEEPALIVE_EXPIRY_S``, default ``15.0``) so the client drops them
@@ -179,14 +186,36 @@ _async_lock = threading.Lock()
 
 @dataclass
 class _AsyncPoolEntry:
-    """One pooled async client plus a weak reference to its owning event loop."""
+    """One pooled async client plus a weak reference to its owning event loop.
+
+    ``finalizer`` is the ``weakref.finalize`` handle that evicts this entry when
+    the owning loop is collected. It is detached whenever the entry leaves the
+    pool so repeated create/close cycles on one loop cannot accumulate live
+    finalizers in the weakref registry.
+    """
 
     client: httpx.AsyncClient
     loop_ref: weakref.ref
+    finalizer: weakref.finalize | None = None
 
 
 # Keyed by (timeout bucket, id(running event loop)).
 _async_clients: dict[tuple[float, int], _AsyncPoolEntry] = {}
+
+# Bound on how many re-scan rounds ``aclose_async_pool`` performs to catch
+# clients repooled by concurrent ``get_pooled_async_client`` calls during its
+# await points. Teardown must terminate even under a caller that repools in a
+# tight loop.
+_ACLOSE_POOL_MAX_ROUNDS = 5
+
+# Upper bound on waiting for a close submitted to another (running) loop. A
+# wedged or saturated foreign loop must not hang process shutdown.
+_CROSS_LOOP_CLOSE_TIMEOUT_S = 5.0
+
+# Strong references to fire-and-forget aclose tasks scheduled on the caller's
+# own loop. asyncio holds only a weak reference to a running task, so without
+# this an unreferenced close can be garbage-collected before it completes.
+_pending_aclose_tasks: set[asyncio.Task] = set()
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -195,6 +224,56 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
         return asyncio.get_running_loop()
     except RuntimeError:
         return None
+
+
+def _detach_finalizer(entry: _AsyncPoolEntry) -> None:
+    """Detach ``entry``'s loop finalizer so it cannot fire or leak.
+
+    Postconditions:
+        - ``entry.finalizer`` is detached (a no-op if already dead) and cleared,
+          so an entry that has left the pool holds no registry slot.
+    """
+    finalizer = entry.finalizer
+    entry.finalizer = None
+    if finalizer is not None:
+        finalizer.detach()
+
+
+def _take_async_pool_entry(key: tuple[float, int], entry: _AsyncPoolEntry) -> bool:
+    """Remove ``entry`` from the pool, taking ownership of its teardown.
+
+    Removing *before* closing (rather than after) is what makes teardown safe
+    against a concurrent ``get_pooled_async_client``: once taken, no other
+    caller can hand this client out, and a racing caller creates a fresh entry
+    under the same key that the teardown loop picks up on its next round.
+
+    Postconditions:
+        - Returns True and detaches the finalizer if ``entry`` was still the
+          pooled value for ``key``; returns False if another caller already
+          replaced or removed it (in which case the caller must not close it).
+    """
+    with _async_lock:
+        if _async_clients.get(key) is not entry:
+            return False
+        _async_clients.pop(key, None)
+    _detach_finalizer(entry)
+    return True
+
+
+def _restore_async_pool_entry(key: tuple[float, int], entry: _AsyncPoolEntry) -> None:
+    """Put a still-open ``entry`` back in the pool after a failed teardown.
+
+    Postconditions:
+        - ``entry`` is re-pooled (with a fresh finalizer) only when ``key`` is
+          still vacant; otherwise the newer entry wins and this one is dropped.
+    """
+    loop = entry.loop_ref()
+    with _async_lock:
+        if key in _async_clients:
+            return
+        if loop is not None and not loop.is_closed():
+            entry.finalizer = weakref.finalize(loop, _evict_async_pool_key, key)
+        _async_clients[key] = entry
 
 
 def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
@@ -212,11 +291,14 @@ def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
           ``aclose()`` on that loop via ``run_coroutine_threadsafe`` (bounded
           by a 5s wait). Never runs ``asyncio.run(aclose)`` on a foreign loop —
           that is unsafe for keep-alive transports.
-        - If the owning loop is closed, collected, or *stopped but not running*
-          (e.g. after ``run_until_complete`` returns), skips ``aclose`` (a
-          coroutine cannot run there, and blocking on it would hang) and
-          returns True so the pool can drop the entry without a false "closed"
-          mark from a wrong-loop close.
+        - If the owning loop is *stopped but not closed* (e.g. after
+          ``run_until_complete`` returns), drives ``aclose()`` on that same loop
+          via ``run_until_complete`` so the transport's sockets are released
+          rather than leaked. ``run_coroutine_threadsafe`` cannot be used there:
+          it would queue the close on an inactive loop and block forever.
+        - If the owning loop is closed or collected, skips ``aclose`` (a
+          coroutine cannot run there) and returns True so the pool can drop the
+          entry without a false "closed" mark from a wrong-loop close.
         - Returns True when the client is closed, safe to drop, or the owning
           loop is gone.
     """
@@ -236,18 +318,52 @@ def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
         # Prefer ``await aclose_async_pool()`` when the caller can await.
         # Schedule aclose on this loop and drop the pool entry immediately —
         # returning True means "safe to remove", not "already closed".
-        running.create_task(_aclose_quietly(client), name="shared.http.aclose")
+        # Hold a strong reference until the task finishes: asyncio only keeps a
+        # weak one, so an unreferenced task can be garbage-collected mid-flight.
+        task = running.create_task(_aclose_quietly(client), name="shared.http.aclose")
+        _pending_aclose_tasks.add(task)
+        task.add_done_callback(_pending_aclose_tasks.discard)
         return True
     if not loop.is_running():
-        # Owner loop is stopped but not closed: run_coroutine_threadsafe would
-        # queue the close on an inactive loop and block forever. Drop the entry
-        # without a foreign-loop aclose rather than hang.
-        return True
+        return _close_client_on_stopped_loop(client, loop)
     try:
         fut = asyncio.run_coroutine_threadsafe(_aclose_quietly(client), loop)
-        fut.result(timeout=5.0)
+        fut.result(timeout=_CROSS_LOOP_CLOSE_TIMEOUT_S)
     except Exception:  # noqa: BLE001 — best-effort teardown
         logger.warning("Failed to aclose pooled AsyncClient on owning loop", exc_info=True)
+    return client.is_closed
+
+
+def _close_client_on_stopped_loop(client: httpx.AsyncClient, loop: asyncio.AbstractEventLoop) -> bool:
+    """Drive ``client.aclose()`` to completion on a stopped-but-open owning loop.
+
+    A loop that is neither running nor closed still owns the client's keep-alive
+    transport, so the close must happen *there*. Since nothing is driving that
+    loop, ``run_until_complete`` is the only way to advance it —
+    ``run_coroutine_threadsafe`` would queue work no one ever runs.
+
+    Preconditions:
+        - ``loop`` is not closed and not currently running.
+    Postconditions:
+        - Returns True when the client ends up closed (so the pool may drop the
+          entry), False when the close could not be performed and the entry
+          should stay tracked for a later attempt.
+        - Never raises. If another thread concurrently starts the loop,
+          ``run_until_complete`` raises and this reports failure rather than
+          leaving a half-closed client silently dropped.
+        - Returns False without attempting anything when the calling thread
+          already drives a running loop: Python forbids running a second loop
+          there, and dropping the entry would strand an open transport. Keeping
+          it pooled lets the sync/atexit teardown (which has no running loop)
+          close it later.
+    """
+    if _running_loop() is not None:
+        logger.debug("Deferring close of pooled AsyncClient owned by a stopped loop (caller loop is running)")
+        return False
+    try:
+        loop.run_until_complete(_aclose_quietly(client))
+    except Exception:  # noqa: BLE001 — best-effort teardown
+        logger.warning("Failed to aclose pooled AsyncClient on stopped owning loop", exc_info=True)
     return client.is_closed
 
 
@@ -283,11 +399,10 @@ def _evict_async_pool_key(key: tuple[float, int]) -> None:
         entry = _async_clients.get(key)
     if entry is None:
         return
-    if not _dispose_async_pool_entry(entry):
+    if not _take_async_pool_entry(key, entry):
         return
-    with _async_lock:
-        if _async_clients.get(key) is entry:
-            _async_clients.pop(key, None)
+    if not _dispose_async_pool_entry(entry):
+        _restore_async_pool_entry(key, entry)
 
 
 def _purge_stale_async_clients() -> None:
@@ -303,11 +418,10 @@ def _purge_stale_async_clients() -> None:
             if (loop := entry.loop_ref()) is None or loop.is_closed()
         ]
     for key, entry in stale:
-        if not _dispose_async_pool_entry(entry):
+        if not _take_async_pool_entry(key, entry):
             continue
-        with _async_lock:
-            if _async_clients.get(key) is entry:
-                _async_clients.pop(key, None)
+        if not _dispose_async_pool_entry(entry):
+            _restore_async_pool_entry(key, entry)
 
 
 def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
@@ -344,9 +458,14 @@ def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
     with _async_lock:
         entry = _async_clients.get(key)
         if entry is None or entry.client.is_closed:
+            if entry is not None:
+                # Replacing a closed client: retire its finalizer instead of
+                # stacking a second one on the same loop for the same key.
+                _detach_finalizer(entry)
             client = httpx.AsyncClient(timeout=timeout, limits=DEFAULT_LIMITS)
-            _async_clients[key] = _AsyncPoolEntry(client=client, loop_ref=weakref.ref(loop))
-            weakref.finalize(loop, _evict_async_pool_key, key)
+            new_entry = _AsyncPoolEntry(client=client, loop_ref=weakref.ref(loop))
+            new_entry.finalizer = weakref.finalize(loop, _evict_async_pool_key, key)
+            _async_clients[key] = new_entry
         else:
             client = entry.client
         return client
@@ -357,45 +476,80 @@ async def aclose_async_pool() -> None:
 
     Prefer this from async code when teardown must finish before continuing.
     Clients owned by the current running loop are ``await``-ed directly; clients
-    owned by other *running* loops are closed via ``run_coroutine_threadsafe``.
-    Entries whose owning loop is dead, or stopped-but-not-closed, are dropped
-    without ``aclose`` (a coroutine cannot run there, and awaiting a submission
-    to an inactive loop would hang forever).
+    owned by other *running* loops are closed via ``run_coroutine_threadsafe``,
+    bounded by ``_CROSS_LOOP_CLOSE_TIMEOUT_S`` so a wedged foreign loop cannot
+    hang shutdown. A stopped-but-open owning loop is driven with
+    ``run_until_complete`` rather than leaked; only dead/collected loops are
+    dropped without ``aclose``.
+
+    Each entry is removed from the pool *before* being closed, so a concurrent
+    ``get_pooled_async_client`` during an await point cannot have its fresh
+    client silently discarded; the loop re-scans for such repooled clients up to
+    ``_ACLOSE_POOL_MAX_ROUNDS`` times.
 
     Postconditions:
-        - Successfully closed, dead-loop, and stopped-loop entries are removed
-          from the pool.
+        - Successfully closed and dead-loop entries are removed from the pool.
         - Clients that remain open after a failed teardown stay tracked.
     """
-    with _async_lock:
-        snapshot = list(_async_clients.items())
     running = asyncio.get_running_loop()
-    for key, entry in snapshot:
-        loop = entry.loop_ref()
-        # Drop without aclose when the owner loop cannot safely run a coroutine:
-        # gone, closed, or another loop that is not currently running.
-        if (
-            entry.client.is_closed
-            or loop is None
-            or loop.is_closed()
-            or (loop is not running and not loop.is_running())
-        ):
-            with _async_lock:
-                if _async_clients.get(key) is entry:
-                    _async_clients.pop(key, None)
-            continue
-        try:
-            if loop is running:
-                await _aclose_quietly(entry.client)
-            else:
-                fut = asyncio.run_coroutine_threadsafe(_aclose_quietly(entry.client), loop)
-                await asyncio.wrap_future(fut)
-        except Exception:  # noqa: BLE001 — best-effort teardown
-            logger.warning("Failed to aclose pooled AsyncClient", exc_info=True)
-        if entry.client.is_closed:
-            with _async_lock:
-                if _async_clients.get(key) is entry:
-                    _async_clients.pop(key, None)
+    for _round in range(_ACLOSE_POOL_MAX_ROUNDS):
+        with _async_lock:
+            snapshot = list(_async_clients.items())
+        if not snapshot:
+            return
+        for key, entry in snapshot:
+            if not _take_async_pool_entry(key, entry):
+                continue
+            if not await _aclose_entry(entry, running):
+                _restore_async_pool_entry(key, entry)
+        with _async_lock:
+            still_pooled = {key: id(entry) for key, entry in _async_clients.items()}
+        # A round that closed nothing and saw nothing repooled will not do
+        # better on the next pass — stop instead of spinning.
+        if still_pooled == {key: id(entry) for key, entry in snapshot}:
+            break
+    with _async_lock:
+        remaining = len(_async_clients)
+    if remaining:
+        logger.warning("aclose_async_pool left %d pooled AsyncClient(s) tracked after teardown", remaining)
+
+
+async def _aclose_entry(entry: _AsyncPoolEntry, running: asyncio.AbstractEventLoop) -> bool:
+    """Close one taken-ownership pool entry; return True if safe to drop.
+
+    Preconditions:
+        - ``entry`` has already been removed from the pool by the caller.
+        - ``running`` is the caller's running event loop.
+    Postconditions:
+        - Returns True when the client is closed or its owning loop is dead
+          (nothing left to close); False when the client is still open and the
+          entry should be restored to the pool for a later attempt.
+        - Never raises.
+    """
+    client = entry.client
+    if client.is_closed:
+        return True
+    loop = entry.loop_ref()
+    if loop is None or loop.is_closed():
+        # Transport bound to a dead loop; closing it from here is unsafe.
+        return True
+    try:
+        if loop is running:
+            await _aclose_quietly(client)
+        elif loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(_aclose_quietly(client), loop)
+            wrapped = asyncio.wrap_future(fut)
+            try:
+                await asyncio.wait_for(wrapped, timeout=_CROSS_LOOP_CLOSE_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                # A wedged foreign loop must not hang shutdown.
+                fut.cancel()
+                logger.warning("Timed out closing pooled AsyncClient on foreign loop")
+        else:
+            return _close_client_on_stopped_loop(client, loop)
+    except Exception:  # noqa: BLE001 — best-effort teardown
+        logger.warning("Failed to aclose pooled AsyncClient", exc_info=True)
+    return client.is_closed
 
 
 def close_async_pool() -> None:
@@ -405,7 +559,12 @@ def close_async_pool() -> None:
     ``run_coroutine_threadsafe``. When called from that owning loop's thread,
     schedules ``aclose`` as a task (cannot block without deadlock) — prefer
     :func:`aclose_async_pool` from async code when you need awaited completion.
-    Dead-loop entries are dropped without foreign-loop ``aclose``.
+    A stopped-but-open owning loop is driven with ``run_until_complete``; only
+    dead-loop entries are dropped without ``aclose``.
+
+    Entries are taken out of the pool before being closed so a concurrent
+    ``get_pooled_async_client`` cannot hand out a client this teardown is about
+    to close; a still-open client is restored to the pool afterwards.
 
     Postconditions:
         - Dead-loop and successfully closed entries are removed.
@@ -414,10 +573,10 @@ def close_async_pool() -> None:
     with _async_lock:
         snapshot = list(_async_clients.items())
     for key, entry in snapshot:
-        if _dispose_async_pool_entry(entry):
-            with _async_lock:
-                if _async_clients.get(key) is entry:
-                    _async_clients.pop(key, None)
+        if not _take_async_pool_entry(key, entry):
+            continue
+        if not _dispose_async_pool_entry(entry):
+            _restore_async_pool_entry(key, entry)
 
 
 atexit.register(close_async_pool)
