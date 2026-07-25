@@ -21,8 +21,8 @@ free at import. The mutable planning ``context`` crosses the activity boundary a
 a **JSON-native dict** (Temporal's default converter is used repo-wide, so no
 pydantic value may cross): each activity re-uses the phase functions (which
 re-hydrate models from dicts defensively) and normalizes any returned
-``ClientContext``/``HandoffPackage`` back to a dict via :func:`_json_safe` on the
-way out. Job-store bookkeeping (progress, RUNNING → COMPLETED, FAILED-on-error)
+``ClientContext``/``HandoffPackage`` back to a dict via :func:`_merge_context`
+(``shared.temporal.activity_helpers.json_safe`` under the hood) on the way out. Job-store bookkeeping (progress, RUNNING → COMPLETED, FAILED-on-error)
 is written to the durable ``JobServiceClient`` store so a completed run survives a
 worker/process restart and the API can keep polling status.
 """
@@ -35,6 +35,9 @@ from typing import Any, Callable, Dict, Optional
 from temporalio import activity
 
 from planning_team.temporal.constants import RETRYABLE_MAX_ATTEMPTS, SINGLE_ATTEMPT
+from shared.temporal.activity_helpers import fail_job as _shared_fail_job
+from shared.temporal.activity_helpers import guarded as _shared_guarded
+from shared.temporal.activity_helpers import merge_context as _merge_context
 
 logger = logging.getLogger(__name__)
 
@@ -44,48 +47,11 @@ logger = logging.getLogger(__name__)
 _POLL_HEARTBEAT_INTERVAL_S = 30.0
 
 
-def _json_safe(value: Any) -> Any:
-    """Return ``value`` with any pydantic model rendered to a JSON-native dict.
-
-    Preconditions:
-        - ``value`` is a phase ``context`` value: a scalar, list, dict, or a
-          pydantic model (e.g. ``ClientContext``/``HandoffPackage``/``OpenQuestion``).
-    Postconditions:
-        - Models become ``model_dump(mode="json")`` dicts; lists and dict values
-          are converted element-wise (recursively, so a model nested inside a dict
-          is normalized too); everything else is returned unchanged. The result is
-          JSON-serializable so it can cross the Temporal activity boundary under
-          the default data converter.
-    """
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
-    return value
-
-
-def _merge_context(context: Dict[str, Any], context_update: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge a phase's ``context_update`` into ``context``, JSON-normalizing values.
-
-    Preconditions:
-        - ``context`` is the JSON-native context dict received by the activity.
-        - ``context_update`` is the first element of a phase function's
-          ``(context_update, artifacts)`` return.
-    Postconditions:
-        - Returns a new dict = ``context`` overlaid with ``context_update``, with
-          every overlaid value passed through :func:`_json_safe` so the returned
-          context stays JSON-serializable (no pydantic objects survive).
-    """
-    merged = dict(context)
-    for key, value in context_update.items():
-        merged[key] = _json_safe(value)
-    return merged
-
-
 def _fail(job_id: str, exc: BaseException) -> None:
     """Mark the planning job FAILED after an activity error (before re-raising).
+
+    Thin planning_team wrapper around :func:`shared.temporal.activity_helpers.fail_job`
+    that supplies planning_team's own job-store ``mark_job_failed``.
 
     Preconditions:
         - ``job_id`` refers to an existing job record; ``exc`` is the caught error.
@@ -96,26 +62,7 @@ def _fail(job_id: str, exc: BaseException) -> None:
     """
     from planning_team.shared.job_store import mark_job_failed
 
-    activity.logger.exception("Planning activity failed for job %s", job_id)
-    mark_job_failed(job_id, error=str(exc))
-
-
-def _is_final_attempt(max_attempts: int) -> bool:
-    """Return True when the current activity attempt is the last one allowed.
-
-    Preconditions:
-        - ``max_attempts`` is the ``maximum_attempts`` of the phase's RetryPolicy
-          (>= 1). It MUST match the policy the workflow assigns this activity, or
-          the FAILED marking fires on the wrong attempt.
-    Postconditions:
-        - Inside a Temporal worker, returns ``activity.info().attempt >= max_attempts``
-          — i.e. Temporal will not retry after this attempt.
-        - Outside a worker (direct call in unit tests), returns True so a failure
-          still surfaces the FAILED marking rather than being silently swallowed.
-    """
-    if not activity.in_activity():
-        return True
-    return activity.info().attempt >= max_attempts
+    _shared_fail_job(job_id, exc, mark_job_failed=mark_job_failed)
 
 
 def _guarded(
@@ -130,6 +77,9 @@ def _guarded(
 ) -> Any:
     """Report phase progress, run ``work``, and mark the job FAILED on final failure.
 
+    Thin planning_team wrapper around :func:`shared.temporal.activity_helpers.guarded`
+    that supplies planning_team's own job-store ``update_job``/``mark_job_failed``.
+
     Preconditions:
         - ``job_id`` refers to an existing job; ``progress`` is 0..100; ``work`` is
           a zero-arg callable performing the phase's work and returning its result.
@@ -138,38 +88,35 @@ def _guarded(
     Postconditions:
         - Updates ``current_phase``/``progress``/``status_text``, and writes
           ``status`` only when supplied (only intake supplies it, PENDING → RUNNING).
+          Only intake supplies status; later phases leave it untouched so they never
+          clobber a concurrent ``cancelled``. Accepted narrow race: a cancel landing
+          in the create_job→intake window is overwritten — no planning caller cancels
+          jobs today, and a real canceller should also send a Temporal cancel to the
+          workflow.
         - The progress write is inside the guard, so a failing progress write still
-          marks the job FAILED rather than leaving it stuck non-terminal.
+          marks the job FAILED rather than leaving it stuck non-terminal. Trade-off:
+          on terminal failure current_phase/progress point at the phase that was
+          *attempted* when it failed (a best-effort hint, not a completed-phase
+          record).
         - On error, the job is marked FAILED only on the *final* Temporal attempt
-          (``_is_final_attempt``); a retry that later succeeds therefore never leaves
-          a transient FAILED status or a stale ``error`` behind. The exception is
-          always re-raised so Temporal's RetryPolicy governs re-attempts.
+          (``shared.temporal.activity_helpers.is_final_attempt``); a retry that later
+          succeeds therefore never leaves a transient FAILED status or a stale
+          ``error`` behind. The exception is always re-raised so Temporal's
+          RetryPolicy governs re-attempts.
     """
-    from planning_team.shared.job_store import update_job
+    from planning_team.shared.job_store import mark_job_failed, update_job
 
-    fields: Dict[str, Any] = {
-        "current_phase": phase,
-        "progress": progress,
-        "status_text": status_text,
-    }
-    if status is not None:
-        # Only intake supplies status (PENDING → RUNNING); later phases leave it
-        # untouched so they never clobber a concurrent ``cancelled``. Accepted narrow
-        # race: a cancel landing in the create_job→intake window is overwritten — no
-        # planning caller cancels jobs today, and a real canceller should also send a
-        # Temporal cancel to the workflow.
-        fields["status"] = status
-    try:
-        # Progress is written BEFORE work(), inside the guard, so a failing progress
-        # write is still marked FAILED. Trade-off: on terminal failure
-        # current_phase/progress point at the phase that was *attempted* when it
-        # failed (a best-effort hint, not a completed-phase record).
-        update_job(job_id, **fields)
-        return work()
-    except Exception as exc:
-        if _is_final_attempt(max_attempts):
-            _fail(job_id, exc)
-        raise
+    return _shared_guarded(
+        job_id,
+        phase,
+        progress,
+        status_text,
+        work,
+        max_attempts=max_attempts,
+        status=status,
+        update_job=update_job,
+        mark_job_failed=mark_job_failed,
+    )
 
 
 @activity.defn(name="planning_intake")

@@ -9,9 +9,17 @@ Public API:
         get_temporal_client, is_temporal_enabled, connect_temporal_client,
         start_team_worker, run_team_job,
         save_checkpoint, load_checkpoint, wait_for_input, submit_input,
+        json_safe, merge_context, is_final_attempt, fail_job, guarded,
     )
 """
 
+from shared.temporal.activity_helpers import (
+    fail_job,
+    guarded,
+    is_final_attempt,
+    json_safe,
+    merge_context,
+)
 from shared.temporal.activity_utils import (
     is_cancelled,
     is_last_attempt,
@@ -53,6 +61,8 @@ __all__ = [
     "connect_temporal_client",
     "execute_workflow_async",
     "execute_workflow_sync",
+    "fail_job",
+    "guarded",
     "signal_workflow_sync",
     "start_all_team_workers",
     "get_temporal_address",
@@ -60,9 +70,12 @@ __all__ = [
     "get_temporal_loop",
     "get_temporal_namespace",
     "is_cancelled",
+    "is_final_attempt",
     "is_last_attempt",
     "is_temporal_enabled",
+    "json_safe",
     "load_checkpoint",
+    "merge_context",
     "raise_if_cancelled",
     "run_team_job",
     "save_checkpoint",
