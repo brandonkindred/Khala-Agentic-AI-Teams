@@ -804,7 +804,7 @@ def _fill_story_placeholders(
         )
         job_updater(
             phase="story_elicitation",
-            progress=35 + idx,
+            progress=min(35 + idx, 39),
             status_text=f"Chatting about your experience with: {gap.section_title}",
         )
 
