@@ -260,7 +260,11 @@ def run_coding_team_orchestrator(
     job service on every real update — see job_service/db.py — so plain ``_update``
     writes count as activity while the 120s liveness heartbeat does not.
     """
-    assert 0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100
+    if not (0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100):
+        raise ValueError(
+            f"progress_base ({progress_base}) and progress_span ({progress_span}) "
+            "must be non-negative and sum to <= 100"
+        )
     # The implementation engines (v2 team leads, quality gates, code review) are injected, not
     # imported: prefer the provider passed explicitly (the software-engineering team supplies one
     # per call) and fall back to the process-wide default the standalone service installs at
