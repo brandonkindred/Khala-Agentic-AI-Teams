@@ -958,33 +958,40 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 any_satisfied = True
 
         if any_satisfied:
-            # At least one matching entry predicate fires — the entry
-            # is aligned. Emit a single info finding citing the
-            # satisfied rule.
-            satisfied = next(o for o in rule_evaluations if o["status"] == "satisfied")
-            # ``lhs`` / ``rhs`` are populated for a leaf predicate and ``None``
-            # for a combinator (``all_of`` / ``any_of`` — no single scalar
-            # pair); render the scalar tail only when both are available.
-            scalar_tail = (
-                f" → lhs={satisfied['lhs']:.6g}, rhs={satisfied['rhs']:.6g}."
-                if satisfied["lhs"] is not None and satisfied["rhs"] is not None
-                else "."
-            )
-            finding = AlignmentFinding(
-                trade_num=trade.trade_num,
-                rule_id=satisfied["rule_id"],
-                check_name="entry_signal",
-                passed=True,
-                severity="info",
-                details=(
-                    f"Trade #{trade.trade_num} entry satisfied by "
-                    f"{satisfied['rule_id']}: {satisfied['predicate_repr']}{scalar_tail}"
-                ),
-                computed_value=satisfied.get("lhs"),
-                expected_value=satisfied.get("rhs"),
-            )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            # At least one matching entry predicate fires — the entry is
+            # aligned. Emit an info finding for EVERY matching rule whose
+            # predicate is satisfied at the signal bar, not just the
+            # first: two entry rules can legitimately overlap (both
+            # satisfied on the same bar), and crediting only one would
+            # under-report the other across the whole ledger for any
+            # rule-level consumer (e.g. RuleFiringRateGate's custom-code
+            # correlation signal), which would then misread a rule that
+            # only ever co-fires with another as dead code.
+            for satisfied in (o for o in rule_evaluations if o["status"] == "satisfied"):
+                # ``lhs`` / ``rhs`` are populated for a leaf predicate and
+                # ``None`` for a combinator (``all_of`` / ``any_of`` — no
+                # single scalar pair); render the scalar tail only when
+                # both are available.
+                scalar_tail = (
+                    f" → lhs={satisfied['lhs']:.6g}, rhs={satisfied['rhs']:.6g}."
+                    if satisfied["lhs"] is not None and satisfied["rhs"] is not None
+                    else "."
+                )
+                finding = AlignmentFinding(
+                    trade_num=trade.trade_num,
+                    rule_id=satisfied["rule_id"],
+                    check_name="entry_signal",
+                    passed=True,
+                    severity="info",
+                    details=(
+                        f"Trade #{trade.trade_num} entry satisfied by "
+                        f"{satisfied['rule_id']}: {satisfied['predicate_repr']}{scalar_tail}"
+                    ),
+                    computed_value=satisfied.get("lhs"),
+                    expected_value=satisfied.get("rhs"),
+                )
+                findings.append(finding)
+                gate_results.append(self._emit_for_finding(finding))
             return
 
         # No matching rule was satisfied. Find the tightest near-miss
@@ -1087,8 +1094,21 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             critical
           - first SignalExitRule whose predicate fires → info pass
         """
+        # Preserve each rule's original index in ``spec.exit_rules`` (not
+        # a renumbered index into this filtered subset) so ``rule_id``
+        # values like ``exit:signal_exit[N]`` line up with the engine's
+        # own ``engine_exit:signal_exit[N]`` stamp (``service.py``, which
+        # indexes off the unfiltered ``exit_rules`` list) and with
+        # ``RuleFiringRateGate``'s custom-code correlation, which counts
+        # hits by that same absolute index. A spec that mixes exit-rule
+        # kinds (e.g. ``[StopLossRule, SignalExitRule]``) would otherwise
+        # renumber ``SignalExitRule`` to index 0 here while every other
+        # consumer expects index 1, misattributing the finding to the
+        # wrong spec rule.
         signal_exit_rules = [
-            r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, SignalExitRule)
+            (orig_idx, r)
+            for orig_idx, r in enumerate(getattr(spec, "exit_rules", []) or [])
+            if isinstance(r, SignalExitRule)
         ]
         if not signal_exit_rules:
             return
@@ -1184,7 +1204,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         # shared ``evaluate_tree`` handles leaf predicates, ``all_of`` /
         # ``any_of`` combinators, cross-op previous-bar state, and warmup
         # uniformly, so this loop is agnostic to the rule's ``when`` shape.
-        for rule_idx, rule in enumerate(signal_exit_rules):
+        for rule_idx, rule in signal_exit_rules:
             result = _evaluate_tree(rule.when, view, signal_idx)
             if result.status != "satisfied":
                 continue  # miss or warmup — try next rule

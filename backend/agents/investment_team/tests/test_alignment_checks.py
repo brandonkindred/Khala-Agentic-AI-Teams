@@ -1160,6 +1160,35 @@ def test_entry_signal_rule_id_uses_original_spec_index() -> None:
     assert entry.rule_id == "entry[1]"
 
 
+def test_entry_signal_emits_one_finding_per_satisfied_rule() -> None:
+    """Two same-side entry rules both satisfied on the same signal bar
+    must EACH get a passed ``entry_signal`` finding, not just the first.
+    Regression for the under-counting bug raised in PR review on #2625:
+    crediting only the first satisfied rule starves a rule-level
+    consumer (``RuleFiringRateGate``'s custom-code correlation) of any
+    hit for the second rule, which would then misreport it as dead
+    code even though its predicate held on every trade."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(
+        entry_rules=[
+            _rsi_lt_30(side="long"),  # entry[0]
+            _rsi_lt_30(side="long", rhs=100.0),  # entry[1] — trivially true whenever entry[0] is
+        ],
+    )
+    trade = _trade(side="long", entry_date="2023-02-01")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=_market_data_rsi_oversold(),
+        initial_capital=100_000.0,
+    )
+    entry_findings = [
+        f for f in result.findings if f.check_name == "entry_signal" and f.passed is True
+    ]
+    rule_ids = {f.rule_id for f in entry_findings}
+    assert rule_ids == {"entry[0]", "entry[1]"}
+
+
 def test_entry_signal_missing_bars_flagged_critical() -> None:
     gate = DeterministicAlignmentChecker()
     spec = _spec(entry_rules=[_rsi_lt_30()])
@@ -1415,6 +1444,40 @@ def test_signal_exit_critical_when_no_predicate_fires_at_exit_bar() -> None:
     assert signal_exit.passed is False
     assert signal_exit.severity == "critical"
     assert "no SignalExitRule predicate fires" in signal_exit.details
+
+
+def test_signal_exit_rule_id_uses_original_spec_index() -> None:
+    """Mixed exit-rule-kind spec: the SignalExitRule's finding must cite
+    its index in ``spec.exit_rules``, not its position in the
+    kind-filtered subset. Regression for the index-renumbering bug
+    raised in PR review on #2625 (mirrors the entry-side fix in
+    ``test_entry_signal_rule_id_uses_original_spec_index``) — the
+    engine's own ``engine_exit:signal_exit[N]`` stamp and
+    ``RuleFiringRateGate``'s custom-code correlation both expect the
+    absolute ``spec.exit_rules`` index."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(
+        exit_rules=[
+            StopLossRule(pct=0.05),  # spec.exit_rules[0]
+            _rsi_gt_70_signal_exit(),  # spec.exit_rules[1]
+        ],
+    )
+    md = _market_data_rsi_overbought()
+    last_date = md["AAPL"][-1].date
+    trade = _trade(
+        entry_date=md["AAPL"][20].date,
+        exit_date=last_date,
+        exit_reason=None,
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    signal_exit = next(f for f in result.findings if f.check_name == "signal_exit")
+    assert signal_exit.passed is True
+    assert signal_exit.rule_id == "exit:signal_exit[1]"
 
 
 def test_signal_exit_critical_when_exit_bar_missing_from_market_data() -> None:
