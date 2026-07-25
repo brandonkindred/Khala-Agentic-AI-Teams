@@ -409,8 +409,13 @@ def test_analyse_activity_injects_knowledge_summary():
     captured: dict = {}
 
     class _CapturingLLM(_FakeLLM):
-        def complete_json(self, user, *a, **k):
+        # The knowledge_summary now reaches the analysis reasoning-pass
+        # system prompt (the .complete() call), not the formatting call's.
+        def complete(self, user, *a, **k):
             captured["system"] = k.get("system_prompt", "")
+            return "TXT"
+
+        def complete_json(self, *a, **k):
             return {"can_answer_directly": True, "direct_answer": "ok", "confidence": 0.5}
 
     payload = AnalysePayload(

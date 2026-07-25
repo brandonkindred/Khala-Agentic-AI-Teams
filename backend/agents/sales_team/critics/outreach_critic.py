@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from llm_service import LLMClient, complete_validated
+from llm_service import LLMClient, complete_validated_via_reasoning
 
 from ..llm import get_sales_llm_client
 from ..models import (
@@ -97,6 +97,57 @@ OUTPUT contract:
  - Return JSON only. No markdown fences. No prose outside the object.
 """
 
+# Reasoning-only variant: same role/rubric, but ends with a prose instruction
+# instead of the JSON output contract. Used for the think=True first pass of
+# the two-call split — the formatting pass (think=False) transcribes this
+# prose into the OutreachCriticReport schema.
+_OUTREACH_CRITIC_SYSTEM_PROMPT_REASONING = """\
+You are an independent Sales Outreach Reviewer. You did NOT write the sequence \
+under review; your job is to score it against the rubric below and the \
+authoritative dossier + ICP supplied by the user.
+
+REJECT the sequence (status=FAIL) if ANY must_fix violation is present. For \
+every violation, identify a concrete suggested_fix the agent can apply on retry.
+
+RUBRIC (use these rule_id slugs verbatim):
+
+ 1. outreach.citation.fabricated — every non-`fallback` variant whose \
+    `email_sequence[0]` includes a personalization claim must cite at least \
+    one source URL that appears in the supplied dossier `sources` allowlist. \
+    Cited URLs that aren't in the allowlist FAIL.
+
+ 2. outreach.email.contact_address — `prospect.contact_email` should be \
+    `null` unless it appears verbatim in the dossier's `personal_site`, \
+    `executive_summary`, `notes`, or `other_social` fields. Pattern \
+    fabrications like `firstname.lastname@company.com` with no dossier \
+    backing FAIL. The dossier `sources` field is a list of URLs and never \
+    contains an email address — do not check there.
+
+ 3. outreach.day1.cta — the first email in every variant's email_sequence \
+    must contain a clear call-to-action: a specific question, a meeting ask, \
+    or a link. "Let me know if interested" alone is not a CTA.
+
+ 4. outreach.day1.subject_length — the first email subject line must be \
+    60 characters or fewer.
+
+ 5. outreach.forbidden_tokens — no leftover template placeholders. FAIL on \
+    any of: `{first_name}`, `{firstName}`, `[FIRST_NAME]`, `[COMPANY]`, \
+    `[NAME]`, `<NAME>`, `REPLACE_ME`, `TODO`, `XXXX`, `Lorem ipsum`.
+
+ 6. outreach.personalization.icp_alignment — at least one variant must tie \
+    the product to a concrete ICP `pain_point`. Generic value-prop \
+    restatement does not qualify.
+
+Think this through rule by rule, then answer in structured prose (not JSON):
+ - Your overall status (PASS only when no must_fix violations exist) and approved verdict.
+ - For each violation found: the rubric rule_id, severity (must_fix/should_fix/consider), the
+   section it's in (e.g. 'variants[0].day1' or 'overall'), a short quoted evidence excerpt
+   (under ~120 chars), what is wrong and why, and a concrete suggested fix.
+ - Whether you'd override the personalization grade (high/medium/low/fallback), and why, if
+   applicable.
+ - Any other short notes.
+"""
+
 
 @dataclass
 class OutreachCriticAgent:
@@ -123,11 +174,12 @@ class OutreachCriticAgent:
         """
         prompt = self._build_prompt(sequence, dossier, icp)
         try:
-            report = complete_validated(
+            report = complete_validated_via_reasoning(
                 self._llm,
-                prompt,
                 schema=OutreachCriticReport,
-                system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT,
+                reasoning_prompt=prompt,
+                reasoning_system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT_REASONING,
+                formatting_system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT,
                 temperature=0.0,
                 correction_attempts=2,
                 objective="critique outreach sequence",

@@ -15,11 +15,40 @@ def _make_orchestrator(mock_llm, budget=50, cache=None):
     )
 
 
+def _reasoning_stub(*args, **kwargs):
+    """Generic placeholder for _analyse's think=True reasoning-pass .complete() call.
+
+    Content doesn't matter to these tests — only the downstream .complete_json()
+    formatting call (mocked separately) determines the analysis outcome.
+    """
+    return "Reasoning: proceeding as configured by the test fixture."
+
+
+def _complete_side_effect(*classification_values):
+    """Route ``mock_llm.complete`` calls by objective.
+
+    ``_analyse`` issues a think=True reasoning-pass ``.complete()`` call
+    (objective "analyze specialist question (reasoning)") independent of
+    strategy classification (objective "classify question strategy") —
+    resolve by objective, not call position, so both can be exercised (or
+    the reasoning pass alone, when classification is skipped) without
+    tripping over each other.
+    """
+    it = iter(classification_values)
+
+    def _side_effect(*args, **kwargs):
+        if kwargs.get("objective", "").startswith("analyze specialist question"):
+            return _reasoning_stub(*args, **kwargs)
+        return next(it)
+
+    return _side_effect
+
+
 def test_simple_direct_answer():
     """Orchestrator handles a simple question that needs no decomposition."""
     llm = MagicMock()
     # Strategy classification call
-    llm.complete.side_effect = ['{"strategy": "none", "reasoning": "simple"}']
+    llm.complete.side_effect = _complete_side_effect('{"strategy": "none", "reasoning": "simple"}')
     llm.complete_json.return_value = {
         "summary": "Simple question",
         "can_answer_directly": True,
@@ -218,8 +247,15 @@ def test_explicit_strategy_skips_classification():
         "confidence": 0.9,
         "skill_requirements": [],
     }
-    # complete should NOT be called for classification
-    llm.complete.side_effect = RuntimeError("Should not be called for classification")
+    # complete should NOT be called for classification (it's still legitimately
+    # called for _analyse's think=True reasoning pass, which _complete_side_effect
+    # handles separately).
+    def _no_classification_calls(*args, **kwargs):
+        if not kwargs.get("objective", "").startswith("analyze specialist question"):
+            raise RuntimeError("Should not be called for classification")
+        return _reasoning_stub(*args, **kwargs)
+
+    llm.complete.side_effect = _no_classification_calls
 
     orch = _make_orchestrator(llm)
     req = DeepthoughtRequest(
@@ -253,9 +289,15 @@ def test_conversation_history_passed_through():
     )
     orch.process_message(req)
 
-    # The analysis prompt should contain conversation history
-    call_args = llm.complete_json.call_args_list[0]
-    user_prompt = call_args.args[0]
+    # The analysis prompt should contain conversation history. It's now the
+    # reasoning-pass .complete() call that carries the user-facing prompt.
+    analyse_calls = [
+        c
+        for c in llm.complete.call_args_list
+        if c.kwargs.get("objective", "").startswith("analyze specialist question")
+    ]
+    assert analyse_calls, "expected at least one reasoning-pass call"
+    user_prompt = analyse_calls[0].args[0]
     assert "Mars" in user_prompt
 
 

@@ -24,7 +24,8 @@ from deepthought.models import (
     SkillRequirement,
 )
 from deepthought.prompts import (
-    ANALYSIS_SYSTEM_PROMPT,
+    ANALYSIS_FORMAT_INSTRUCTIONS,
+    ANALYSIS_SYSTEM_PROMPT_REASONING,
     ANALYSIS_USER_PROMPT,
     DELIBERATION_SYSTEM_PROMPT,
     DELIBERATION_USER_PROMPT,
@@ -53,6 +54,7 @@ from deepthought.reasoning import (
     results_to_dicts,
 )
 from deepthought.result_cache import ResultCache
+from llm_service import complete_json_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +228,7 @@ class DeepthoughtAgent:
             strategy_key, STRATEGY_INSTRUCTIONS["auto"]
         )
 
-        system = ANALYSIS_SYSTEM_PROMPT.format(
+        reasoning_system = ANALYSIS_SYSTEM_PROMPT_REASONING.format(
             role_description=self.spec.role_description,
             depth=self.spec.depth,
             max_depth=max_depth,
@@ -246,11 +248,12 @@ class DeepthoughtAgent:
         )
 
         try:
-            data = self.llm.complete_json(
-                user,
+            data = complete_json_via_reasoning(
+                self.llm,
+                reasoning_prompt=user,
+                reasoning_system_prompt=reasoning_system,
+                formatting_instructions=ANALYSIS_FORMAT_INSTRUCTIONS,
                 temperature=0.3,
-                system_prompt=system,
-                think=False,
                 objective="analyze specialist question",
             )
             return self._parse_analysis(data)

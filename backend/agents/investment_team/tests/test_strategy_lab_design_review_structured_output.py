@@ -81,6 +81,11 @@ class _StubClient:
         self._result = result
         self.calls: List[Dict[str, Any]] = []
 
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        # invoke_structured_with_schema's think=True reasoning pass, run
+        # before the schema-conformant complete_json call below.
+        return "reasoning prose"
+
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         self.calls.append({"prompt": prompt, **kwargs})
         return self._result
@@ -91,6 +96,9 @@ class _FailingClient:
 
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         raise self._exc

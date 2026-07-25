@@ -14,6 +14,13 @@ class _StubClient:
     def __init__(self, payload: Dict[str, Any]) -> None:
         self.payload = payload
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        # invoke_structured_with_schema's think=True reasoning pass, run
+        # before the schema-conformant complete_json call below.
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
+        return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         self.calls.append({"prompt": prompt, **kwargs})
@@ -39,13 +46,24 @@ def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatc
         charge=False,
         objective="strategy design review (structured)",
         logger=logging.getLogger("test.so"),
+        reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
     )
 
     assert result == {"ready": True, "rationale": "ok", "issues": []}
+    assert len(client.reasoning_calls) == 1
+    assert client.reasoning_calls[0]["think"] is True
+    assert client.reasoning_calls[0]["objective"] == "strategy design review (structured) (reasoning)"
+    assert client.reasoning_calls[0]["system_prompt"] == "sys" + so_mod.REASONING_MODE_SUFFIX
+
     assert len(client.calls) == 1
     assert client.calls[0]["schema"] == {"type": "object"}
-    assert client.calls[0]["objective"] == "strategy design review (structured)"
+    assert client.calls[0]["objective"] == "strategy design review (structured) (format)"
     assert client.calls[0]["system_prompt"] == "sys"
+    assert client.calls[0]["think"] is False
+    # The formatting prompt carries both the original user prompt and the
+    # reasoning-pass prose.
+    assert "user" in client.calls[0]["prompt"]
+    assert "reasoning prose" in client.calls[0]["prompt"]
 
 
 def test_invoke_structured_with_schema_requires_availability(
@@ -62,6 +80,7 @@ def test_invoke_structured_with_schema_requires_availability(
             charge=True,
             objective="strategy design (structured)",
             logger=logging.getLogger("test.so"),
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
         )
 
 
@@ -80,6 +99,7 @@ def test_invoke_structured_with_schema_rejects_empty_inputs(
         "charge": True,
         "objective": "strategy design (structured)",
         "logger": logging.getLogger("test.so"),
+        "reasoning_system_prompt": "sys" + so_mod.REASONING_MODE_SUFFIX,
     }
     kwargs[field] = ""
     with pytest.raises(AssertionError, match="precondition"):
@@ -100,4 +120,5 @@ def test_invoke_structured_with_schema_rejects_empty_schema(
             charge=True,
             objective="strategy design (structured)",
             logger=logging.getLogger("test.so"),
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
         )

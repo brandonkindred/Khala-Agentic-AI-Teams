@@ -13,7 +13,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from llm_service import compact_text
+from llm_service import compact_text, complete_json_via_reasoning
 
 from .models import (
     FindingSeverity,
@@ -44,6 +44,19 @@ Respond with a single JSON object only. No markdown or explanation outside JSON.
 - "compliant": boolean (true only if there are no critical or high severity findings)
 
 Be specific and cite repo content where possible. If the repo has no relevant evidence (e.g. no auth code for Security), report that as a finding (e.g. "No authentication/authorization implementation found"). Do not invent file paths.
+"""
+
+_TSC_REASONING_INSTRUCTION = """
+Think through this carefully, then write your audit as structured prose (not JSON): a short
+summary of your audit for this criterion, followed by one entry per finding covering severity
+(critical/high/medium/low/informational), title, description, location (file path, module, or
+area — empty if general), recommendation, and the evidence you observed. Finally, state whether
+the repo is compliant for this criterion (compliant only if there are no critical or high
+severity findings).
+
+Be specific and cite repo content where possible. If the repo has no relevant evidence (e.g. no
+auth code for Security), report that as a finding (e.g. "No authentication/authorization
+implementation found"). Do not invent file paths.
 """
 
 
@@ -78,7 +91,7 @@ def _run_tsc_agent(
     total_chars = int((ctx_tokens - 8000) * 3.5)
     readme_budget = min(total_chars // 4, 200_000)
     code_budget = total_chars - readme_budget
-    prompt = f"""You are a SOC2 auditor specializing in the **{criterion_name}** Trust Service Criterion.
+    reasoning_prompt = f"""You are a SOC2 auditor specializing in the **{criterion_name}** Trust Service Criterion.
 Your task is to review the following repository content and identify compliance gaps or risks.
 
 **Criterion focus:** {focus_areas}
@@ -99,9 +112,16 @@ Your task is to review the following repository content and identify compliance 
 ```
 
 Identify any gaps, missing controls, or risks relative to this criterion. If the codebase does not address this criterion (e.g. no backup/monitoring for Availability), report that as a finding.
-{_TSC_OUTPUT_FORMAT}"""
+{_TSC_REASONING_INSTRUCTION}"""
 
-    data = llm.complete_json(prompt, temperature=0.1, think=False, objective="evaluate soc2 control")
+    data = complete_json_via_reasoning(
+        llm,
+        reasoning_prompt=reasoning_prompt,
+        reasoning_system_prompt=None,
+        formatting_instructions=_TSC_OUTPUT_FORMAT,
+        temperature=0.1,
+        objective="evaluate soc2 control",
+    )
     summary = data.get("summary") or ""
     findings_raw = data.get("findings") or []
     findings = []
@@ -243,7 +263,7 @@ class ReportWriterAgent:
     ) -> SOC2ComplianceReport:
         """Generate full SOC2 compliance audit report with executive summary and recommendations."""
         summaries = "\n".join(f"- **{r.category.value}**: {r.summary}" for r in tsc_results)
-        prompt = f"""You are a SOC2 lead auditor. Produce a **SOC2 Compliance Audit Report** for the following audit results.
+        reasoning_prompt = f"""You are a SOC2 lead auditor. Produce a **SOC2 Compliance Audit Report** for the following audit results.
 
 **Repository:** {repo_path}
 
@@ -253,16 +273,27 @@ class ReportWriterAgent:
 **Findings by category (JSON):**
 {json.dumps(findings_by_tsc, indent=2)}
 
-Write a single JSON object with:
-- "executive_summary": string (2–5 paragraphs: scope, overall posture, key risks, and high-level recommendation)
-- "scope": string (one paragraph: what was in scope)
-- "recommendations_summary": array of strings (prioritized remediation steps, ordered by impact)
-- "raw_markdown": string (full report in markdown: title, executive summary, scope, findings by TSC with severity and recommendation, then recommendations summary)
+Think this through, then write the report as structured prose covering: an executive summary
+(scope, overall posture, key risks, and high-level recommendation), the scope of what was
+audited, prioritized remediation recommendations (ordered by impact), and the full report body
+(title, executive summary, scope, findings by TSC with severity and recommendation, then the
+recommendations)."""
 
-Respond with valid JSON only. No text outside JSON."""
-
-        data = llm.complete_json(
-            prompt, temperature=0.2, think=False, objective="generate soc2 report"
+        data = complete_json_via_reasoning(
+            llm,
+            reasoning_prompt=reasoning_prompt,
+            reasoning_system_prompt=None,
+            formatting_instructions=(
+                'Write a single JSON object with:\n'
+                '- "executive_summary": string (2–5 paragraphs: scope, overall posture, key risks, and high-level recommendation)\n'
+                '- "scope": string (one paragraph: what was in scope)\n'
+                '- "recommendations_summary": array of strings (prioritized remediation steps, ordered by impact)\n'
+                '- "raw_markdown": string (full report in markdown: title, executive summary, scope, '
+                'findings by TSC with severity and recommendation, then recommendations summary)\n\n'
+                "Respond with valid JSON only. No text outside JSON."
+            ),
+            temperature=0.2,
+            objective="generate soc2 report",
         )
         findings_typed: Dict[str, List[TSCFinding]] = {}
         for cat, list_dicts in findings_by_tsc.items():
@@ -286,24 +317,36 @@ Respond with valid JSON only. No text outside JSON."""
     ) -> NextStepsDocument:
         """Generate next steps for SOC2 certification when no material issues were found."""
         summaries = "\n".join(f"- **{r.category.value}**: {r.summary}" for r in tsc_results)
-        prompt = f"""You are a SOC2 advisor. The following code repository was audited and **no material SOC2 compliance issues** were found. Produce a short document: "Next Steps for SOC2 Certification".
+        reasoning_prompt = f"""You are a SOC2 advisor. The following code repository was audited and **no material SOC2 compliance issues** were found. Produce a short document: "Next Steps for SOC2 Certification".
 
 **Repository:** {repo_path}
 
 **Audit summaries per criterion:**
 {summaries}
 
-Write a single JSON object with:
-- "title": string (e.g. "Next Steps for SOC2 Certification")
-- "introduction": string (2–4 sentences: codebase audit result and what this document covers)
-- "steps": array of objects, each with "title" and "description" (and optionally "resources"), e.g. engage CPA firm, scope examination, document controls, collect evidence, Type I then Type II
-- "recommended_timeline": string (high-level timeline, e.g. "3–6 months readiness, then 2–4 months for Type I/II examination")
-- "raw_markdown": string (full document in markdown for display/saving)
+Think this through, then write the document as structured prose: a title, a short introduction
+(2-4 sentences on the audit result and what this document covers), the recommended steps (e.g.
+engage CPA firm, scope examination, document controls, collect evidence, Type I then Type II —
+each with a title and description, and optionally resources), and a high-level recommended
+timeline."""
 
-Respond with valid JSON only. No text outside JSON."""
-
-        data = llm.complete_json(
-            prompt, temperature=0.2, think=False, objective="produce soc2 next steps"
+        data = complete_json_via_reasoning(
+            llm,
+            reasoning_prompt=reasoning_prompt,
+            reasoning_system_prompt=None,
+            formatting_instructions=(
+                'Write a single JSON object with:\n'
+                '- "title": string (e.g. "Next Steps for SOC2 Certification")\n'
+                '- "introduction": string (2–4 sentences: codebase audit result and what this document covers)\n'
+                '- "steps": array of objects, each with "title" and "description" (and optionally "resources"), '
+                'e.g. engage CPA firm, scope examination, document controls, collect evidence, Type I then Type II\n'
+                '- "recommended_timeline": string (high-level timeline, e.g. "3–6 months readiness, then 2–4 months '
+                'for Type I/II examination")\n'
+                '- "raw_markdown": string (full document in markdown for display/saving)\n\n'
+                "Respond with valid JSON only. No text outside JSON."
+            ),
+            temperature=0.2,
+            objective="produce soc2 next steps",
         )
         steps = data.get("steps") or []
         if not isinstance(steps, list):

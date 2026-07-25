@@ -12,6 +12,27 @@ from deepthought.models import AgentEvent, AgentSpec
 from deepthought.result_cache import ResultCache
 
 
+def _complete_side_effect(*deliberation_and_synthesis_values):
+    """Route ``mock_llm.complete`` calls by objective.
+
+    ``_analyse`` now issues a think=True reasoning-pass ``.complete()`` call
+    before its ``.complete_json()`` formatting call; that reasoning call gets
+    a generic placeholder (its content doesn't matter to these tests) so it
+    doesn't consume slots meant for deliberation/synthesis. Values are pulled
+    in call order for anything else (deliberation, then synthesis) —
+    resolved by objective rather than by position so this is robust to
+    child-agent thread scheduling.
+    """
+    it = iter(deliberation_and_synthesis_values)
+
+    def _side_effect(*args, **kwargs):
+        if kwargs.get("objective", "").startswith("analyze specialist question"):
+            return "Reasoning: proceeding as configured by the test fixture."
+        return next(it)
+
+    return _side_effect
+
+
 @pytest.fixture()
 def root_spec():
     return AgentSpec(
@@ -177,12 +198,12 @@ def test_decomposition_with_deliberation(root_spec, mock_llm):
             "skill_requirements": [],
         },
     ]
-    # First complete call = deliberation, second = synthesis
-    mock_llm.complete.side_effect = [
+    # First non-reasoning complete call = deliberation, second = synthesis
+    mock_llm.complete.side_effect = _complete_side_effect(
         '{"contradictions": [], "gaps": [], "agreements": ["Both say 42"], '
         '"quality_flags": [], "synthesis_guidance": "Straightforward agreement"}',
         "Synthesised: both say 42",
-    ]
+    )
 
     spawned = []
 
@@ -339,10 +360,7 @@ def test_original_query_threaded_to_children(root_spec, mock_llm):
             "skill_requirements": [],
         },
     ]
-    mock_llm.complete.side_effect = [
-        "deliberation",
-        "synthesis",
-    ]
+    mock_llm.complete.side_effect = _complete_side_effect("deliberation", "synthesis")
 
     spawned_agents = []
 
@@ -358,9 +376,10 @@ def test_original_query_threaded_to_children(root_spec, mock_llm):
     )
     agent.execute(max_depth=10)
 
-    # Verify the original_query appears in the analysis system prompt
-    # by checking the LLM calls
-    first_call_kwargs = mock_llm.complete_json.call_args_list[0]
+    # Verify the original_query appears in the analysis reasoning-pass system
+    # prompt (the root's analyse call runs synchronously before any children
+    # are spawned, so it's the first .complete() call recorded).
+    first_call_kwargs = mock_llm.complete.call_args_list[0]
     system_prompt = first_call_kwargs.kwargs.get("system_prompt", "")
     assert original_msg in system_prompt
 
@@ -387,8 +406,10 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
     agent = _make_agent(root_spec, mock_llm, conversation_history=history)
     agent.execute(max_depth=10)
 
-    # The user prompt should contain the conversation history
-    first_call_args = mock_llm.complete_json.call_args_list[0]
+    # The user prompt should contain the conversation history. It's now the
+    # reasoning-pass .complete() call that carries the user-facing prompt;
+    # the .complete_json() formatting call only sees the reasoning prose.
+    first_call_args = mock_llm.complete.call_args_list[0]
     user_prompt = first_call_args.args[0] if first_call_args.args else ""
     assert "Mars" in user_prompt
 

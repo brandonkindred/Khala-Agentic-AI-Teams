@@ -24,8 +24,11 @@ class ScriptedLLM:
         self.calls.append((prompt, system_prompt or ""))
         return self._handler(prompt, system_prompt or "")
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:  # pragma: no cover - unused
-        return ""
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        # Used by the ranker's think=True reasoning pass (complete_json_via_reasoning).
+        # Echo the prompt back as "prose" so any content the formatting-call handler
+        # keys off (e.g. a company name) survives into the embedded analysis text.
+        return prompt
 
 
 @pytest.fixture

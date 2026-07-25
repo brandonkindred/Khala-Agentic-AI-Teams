@@ -279,7 +279,9 @@ def test_add_proposal_is_materialized_pending_derived_with_evidence(
         summaries=summaries,
     )
     report = reflection.reflect("a", _NOW)
-    assert report.proposed == 1 and report.llm_calls == 1
+    # The proposal call is now a reasoning pass (.complete) + a formatting
+    # pass (.complete_json), both counted by _CallCountingClient.
+    assert report.proposed == 1 and report.llm_calls == 2
     (proposal,) = created
     assert proposal.action == ProposalAction.ADD
     assert proposal.target_rule_id is None
@@ -588,8 +590,9 @@ def test_llm_calls_counts_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     canned, created = _wire(monkeypatch, proposals=[{"action": "add", "text": "x"}])
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1 and len(created) == 1
-    # 1 compaction call (input over budget) + 1 proposal call.
-    assert report.llm_calls == 2 and canned.text_calls
+    # 1 compaction call (input over budget) + the proposal call's reasoning
+    # pass (.complete) + formatting pass (.complete_json).
+    assert report.llm_calls == 3 and canned.text_calls
 
 
 def test_priority_out_of_int32_range_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -85,6 +85,24 @@ class CannedLLMClient(LLMClient):
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
 
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+    ) -> str:
+        # Some callers now run a think=True reasoning pass (complete_json_via_reasoning /
+        # complete_validated_via_reasoning) before the real complete_json call. Override
+        # the LLMClient base's default (which would otherwise route through complete_json
+        # and consume a queued response) with a harmless placeholder — ``self.calls`` /
+        # ``self._responses`` keep tracking only the complete_json calls these tests assert on.
+        return "Reasoning: proceeding as configured by the test fixture."
+
     def complete_json(
         self,
         prompt: str,

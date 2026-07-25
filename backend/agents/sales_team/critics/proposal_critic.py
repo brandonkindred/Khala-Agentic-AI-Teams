@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from llm_service import LLMClient, complete_validated
+from llm_service import LLMClient, complete_validated_via_reasoning
 
 from ..llm import get_sales_llm_client
 from ..models import (
@@ -93,6 +93,56 @@ OUTPUT contract:
  - Return JSON only. No markdown fences. No prose outside the object.
 """
 
+# Reasoning-only variant: same role/rubric, but ends with a prose instruction
+# instead of the JSON output contract. Used for the think=True first pass of
+# the two-call split — the formatting pass (think=False) transcribes this
+# prose into the ProposalCriticReport schema.
+_PROPOSAL_CRITIC_SYSTEM_PROMPT_REASONING = """\
+You are an independent Sales Proposal Reviewer. You did NOT write the \
+proposal under review; your job is to score it against the rubric below \
+using the supplied dossier and qualification score as authoritative context.
+
+REJECT the proposal (status=FAIL) if ANY must_fix violation is present. For \
+every violation, identify a concrete suggested_fix the agent can apply on retry.
+
+RUBRIC (use these rule_id slugs verbatim):
+
+ 1. proposal.roi.arithmetic — the supplied roi_model numbers must internally \
+    reconcile. Compute payback_months = annual_cost_usd * 12 / \
+    estimated_annual_benefit_usd (when benefit > 0). If the proposal's \
+    payback_months differs by more than 10% from the computed value, FAIL. \
+    If estimated_annual_benefit_usd <= 0 but roi_percentage > 0, FAIL.
+
+ 2. proposal.investment_table.totals — if the investment_table lists \
+    individual line-items with prices, the totals row must equal the sum of \
+    line-items. Tolerance ±$1 for rounding. FAIL if missing or off.
+
+ 3. proposal.claims.founded — every quantitative claim ("our customers see \
+    3x pipeline lift", "average payback under 90 days", "30% reduction in \
+    churn") must either be marked as a ROI assumption OR be backed by one \
+    of the case studies the agent was given. Generic qualitative claims are \
+    OK; quantitative claims with no backing FAIL.
+
+ 4. proposal.discovery.referenced — at least one section \
+    (situation_analysis, proposed_solution, or executive_summary) must \
+    reference a concrete pain or metric from the qualification score's \
+    `meddic` block (`identify_pain`, `metrics_identified`) or BANT need. A \
+    proposal that ignores the discovery findings FAILs.
+
+ 5. proposal.next_steps.concrete — the next_steps list must contain at \
+    least one entry that includes either a date / timeframe ("within 7 \
+    days", "by 2026-05-15") or an explicit owner ("Buyer:", "Vendor:"). \
+    "We will follow up soon" alone FAILs.
+
+Think this through rule by rule — compute the ROI arithmetic yourself before flagging or
+clearing rule 1 — then answer in structured prose (not JSON):
+ - Your overall status (PASS only when no must_fix violations exist) and approved verdict.
+ - For each violation found: the rubric rule_id, severity (must_fix/should_fix/consider), the
+   section it's in (e.g. 'roi_model' or 'next_steps' or 'overall'), a short quoted evidence
+   excerpt (under ~120 chars), what is wrong and why, and a concrete suggested fix.
+ - Any other short notes.
+"""
+
 
 @dataclass
 class ProposalCriticAgent:
@@ -114,11 +164,12 @@ class ProposalCriticAgent:
         """Evaluate ``proposal`` and return a :class:`ProposalCriticReport`."""
         prompt = self._build_prompt(proposal, dossier, qualification)
         try:
-            report = complete_validated(
+            report = complete_validated_via_reasoning(
                 self._llm,
-                prompt,
                 schema=ProposalCriticReport,
-                system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT,
+                reasoning_prompt=prompt,
+                reasoning_system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT_REASONING,
+                formatting_system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT,
                 temperature=0.0,
                 correction_attempts=2,
                 objective="critique sales proposal",

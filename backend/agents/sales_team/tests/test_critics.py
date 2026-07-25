@@ -46,6 +46,30 @@ class CannedLLMClient(LLMClient):
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+    ) -> str:
+        # The critics' think=True reasoning pass (complete_json_via_reasoning /
+        # complete_validated_via_reasoning) calls this before the real verdict
+        # call. Override the LLMClient base's default (which would otherwise
+        # route through complete_json and silently consume a queued response)
+        # with a harmless placeholder that doesn't touch the response queue —
+        # ``self.calls`` and ``self._responses`` continue to track only the
+        # verdict-producing complete_json calls these tests assert on. Recorded
+        # separately in ``self.reasoning_calls`` for tests that need to inspect
+        # the reasoning-pass prompt itself.
+        self.reasoning_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        return "Reasoning: proceeding as configured by the test fixture."
 
     def complete_json(
         self,
@@ -385,8 +409,10 @@ class TestProposalCriticAgent:
         critic = ProposalCriticAgent(llm_client=llm)
         report = critic.review(sample_proposal, None, None)
         assert report.approved is True
-        assert "(no dossier supplied)" in llm.calls[0]["prompt"]
-        assert "(no qualification supplied)" in llm.calls[0]["prompt"]
+        # The dossier-fallback text is in the reasoning-pass prompt (the raw
+        # _build_prompt output); the formatting call only sees its prose.
+        assert "(no dossier supplied)" in llm.reasoning_calls[0]["prompt"]
+        assert "(no qualification supplied)" in llm.reasoning_calls[0]["prompt"]
 
 
 # ---------------------------------------------------------------------------

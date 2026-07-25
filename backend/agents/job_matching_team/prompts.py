@@ -75,3 +75,41 @@ Return STRICT JSON only in exactly this shape:
   "concerns": ["short concern", "..."]
 }
 """
+
+# Reasoning-only variant of RANKER_SYSTEM_PROMPT: same scoring dimensions,
+# but ends with a prose instruction instead of the JSON shape. Used for the
+# think=True first pass of the two-call split (RANKER_FORMAT_INSTRUCTIONS
+# is the think=False second pass that transcribes this into JSON).
+RANKER_SYSTEM_PROMPT_REASONING = """\
+You are a career advisor scoring how well an open role fits a specific job
+seeker. You will receive the seeker's criteria and one job posting.
+
+Score each dimension from 0.0 (no fit) to 1.0 (perfect fit):
+- title_fit: how well the role title/scope matches the target titles.
+- seniority_fit: alignment with the seeker's seniority levels.
+- location_fit: match against locations and remote preference.
+- comp_fit: does stated/likely compensation meet the salary floor? Use 0.5 when
+  compensation is unstated and cannot be inferred.
+- company_fit: stage/size/industry alignment; boost preferred companies.
+- skills_fit: coverage of must-have (heavily weighted) and nice-to-have skills.
+
+Think this through, then answer in structured prose (not JSON): give each dimension's score
+(0.0-1.0) with a one-line justification, then your overall recommendation (apply/maybe/skip)
+with a 1-2 sentence rationale, and any concerns.
+"""
+
+RANKER_FORMAT_INSTRUCTIONS = """\
+Return STRICT JSON only in exactly this shape:
+{
+  "title_fit": 0.0,
+  "seniority_fit": 0.0,
+  "location_fit": 0.0,
+  "comp_fit": 0.0,
+  "company_fit": 0.0,
+  "skills_fit": 0.0,
+  "recommendation": "apply" | "maybe" | "skip",
+  "rationale": "1-2 sentences explaining the overall fit",
+  "concerns": ["short concern", "..."]
+}
+Transcribe the analysis below faithfully — do not add or invent information beyond it.
+"""

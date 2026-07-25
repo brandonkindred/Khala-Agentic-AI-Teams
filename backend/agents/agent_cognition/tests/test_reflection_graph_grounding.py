@@ -104,7 +104,7 @@ def test_propose_prepends_graph_block(monkeypatch):
     monkeypatch.setattr(reflection, "compact_text", _capture_compact)
     monkeypatch.setattr(
         reflection,
-        "complete_validated",
+        "complete_validated_via_reasoning",
         lambda *a, **k: reflection._ReflectionResult(proposals=[]),
     )
 
@@ -123,7 +123,7 @@ def test_propose_without_graph_block_unchanged(monkeypatch):
     )
     monkeypatch.setattr(
         reflection,
-        "complete_validated",
+        "complete_validated_via_reasoning",
         lambda *a, **k: reflection._ReflectionResult(proposals=[]),
     )
     reflection._propose([_summary()], [], _DummyLLM())
@@ -229,7 +229,7 @@ def test_reflect_end_to_end_grounds_prompt_and_preserves_hitl(monkeypatch):
     monkeypatch.setattr(reflection, "compact_text", _capture_compact)
     monkeypatch.setattr(
         reflection,
-        "complete_validated",
+        "complete_validated_via_reasoning",
         lambda *a, **k: reflection._ReflectionResult(
             proposals=[{"action": "add", "text": "derived"}]
         ),
@@ -268,7 +268,7 @@ def test_reflect_baseline_evidence_unchanged_when_graph_disabled(monkeypatch):
     monkeypatch.setattr(reflection, "compact_text", lambda text, *a, **k: text)
     monkeypatch.setattr(
         reflection,
-        "complete_validated",
+        "complete_validated_via_reasoning",
         lambda *a, **k: reflection._ReflectionResult(
             proposals=[{"action": "add", "text": "derived"}]
         ),

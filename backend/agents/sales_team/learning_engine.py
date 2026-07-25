@@ -22,7 +22,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from llm_service import LLMClient, complete_validated
+from llm_service import LLMClient, complete_validated_via_reasoning
 
 from .llm import get_sales_llm_client
 from .models import DealOutcome, LearningInsights, StageOutcome
@@ -123,6 +123,61 @@ Each string in arrays should be a specific, actionable insight — not generic a
 Recommendations must reference specific numbers from the data when available.
 """
 
+# Reasoning-only variant: same analytical framework, but ends with a prose
+# instruction instead of the JSON output contract. Used for the think=True
+# first pass of the two-call split — the formatting pass (think=False)
+# transcribes this prose into the _LearningInsightsBody schema.
+_LEARNING_SYSTEM_PROMPT_REASONING = """You are a Sales Analytics Expert who analyzes historical sales pipeline data
+to extract patterns that help sales teams improve their win rates and process efficiency.
+
+## Your Analytical Framework
+
+### Win/Loss Pattern Analysis (Gong Labs)
+Identify which behaviors, deal traits, and timing patterns correlate with wins vs. losses:
+- Multi-threading (multiple contacts engaged) → higher win rate
+- Champion present + EB on a call → 3× win rate
+- Proposal sent within 24h of discovery → faster cycle
+- No next step booked → 80% stall rate
+
+### ICP Signal Evaluation (Jeb Blount / Sales Hacker)
+Score which firmographic traits predicted deal success:
+- Industries with win rate > 50% are tier-1 ICP targets
+- ICP match score thresholds that correlated with closed-won deals
+- Trigger events (funding, hiring, leadership change) that predicted faster cycles
+
+### Outreach Effectiveness (Salesfolk / Gong Labs)
+Identify which outreach patterns drove replies and meetings:
+- Which email touch number got the most replies (Gong: #2 or #3 most common)
+- Subject line patterns with high open/reply correlation
+- Channels that drove conversion at each stage
+
+### Qualification Accuracy (Anthony Iannarino / MEDDIC)
+Assess whether the qualification signals were reliable predictors:
+- Did high BANT scores reliably predict wins?
+- Which MEDDIC signals were present in won deals but absent in lost deals?
+- What was the average qualification score for won vs. lost deals?
+
+### Objection Intelligence (Zig Ziglar / Jeb Blount)
+Map objections to outcomes:
+- Which objections were successfully overcome (led to close)?
+- Which objections were consistent loss predictors?
+- Which close techniques had highest win rates?
+
+### Pipeline Velocity (HubSpot)
+Identify velocity bottlenecks:
+- Average stage duration for won vs. lost deals
+- Which stage had the lowest conversion rate (biggest leak in the funnel)?
+- How does sales cycle length correlate with deal size?
+
+Think through each dimension of the framework above against the data you were given, then
+answer in structured prose (not JSON) covering: total outcomes analyzed, win rate,
+stage-by-stage conversion rates, top performing industries, top ICP signals, best outreach
+angles, common objections, best close techniques, winning patterns, losing patterns, average
+deal size won (if inferable), average sales cycle length (if inferable), and actionable
+recommendations. Each insight should be specific and reference actual numbers from the data —
+not generic advice.
+"""
+
 
 def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -218,14 +273,15 @@ class LearningEngine:
             f"{json.dumps(stage_data, indent=2)}\n\n"
             f"DEAL OUTCOMES ({len(deal_outcomes)} records):\n"
             f"{json.dumps(deal_data, indent=2)}\n\n"
-            "Return a single JSON object with the insights schema defined in your system prompt. "
+            "Analyze the data above per your analytical framework. "
             "All insights must be grounded in the specific data above — no generic advice."
         )
-        return complete_validated(
+        return complete_validated_via_reasoning(
             self._llm,
-            prompt,
             schema=_LearningInsightsBody,
-            system_prompt=_LEARNING_SYSTEM_PROMPT,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=_LEARNING_SYSTEM_PROMPT_REASONING,
+            formatting_system_prompt=_LEARNING_SYSTEM_PROMPT,
             temperature=0.0,
             correction_attempts=2,
             objective="extract sales learning insights",

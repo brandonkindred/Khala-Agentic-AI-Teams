@@ -52,7 +52,7 @@ from agent_cognition.models import (
 from agent_cognition.rules import store as rules_store
 from agent_cognition.rules.predicate import is_valid_predicate
 from agent_cognition.runtime_config import read_positive_int
-from llm_service import compact_text, complete_validated, get_client
+from llm_service import compact_text, complete_validated_via_reasoning, get_client
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,43 @@ _TASK_INSTRUCTION = (
     "- `priority`: integer, higher applies first (add default 0; on amend, omit "
     "to keep the existing priority).\n"
     "No other keys."
+)
+
+# Reasoning-only variants: same faculty framing / task, but ending with a
+# prose instruction instead of a JSON directive. Used for the think=True
+# first pass of the two-call split — the formatting pass (think=False)
+# transcribes this prose into the _ReflectionResult schema, guided by
+# _REFLECTION_SYSTEM_PROMPT + _TASK_INSTRUCTION (the original combined
+# prompt) as its system prompt.
+_REFLECTION_SYSTEM_PROMPT_REASONING = (
+    "You are the reflection faculty of an autonomous agent. You read the "
+    "agent's recent memory summaries and its current operating rules, then "
+    "propose changes to those rules: ADD a new guardrail, RETIRE one that no "
+    "longer serves, or AMEND one that should change. Propose a rule only when "
+    "the memory shows concrete, recurring evidence for it — repeated failures, "
+    "conflicting decisions, an emergent best practice, or a constraint that "
+    "would have prevented a real mistake. Do not restate rules that already "
+    "exist. Be conservative: an empty proposal list is the correct answer when "
+    "nothing in memory warrants a change. Every proposal is reviewed by a human "
+    "before it can take effect."
+)
+
+_TASK_INSTRUCTION_REASONING = (
+    "--- TASK ---\n"
+    "Think this through, then answer in structured prose (not JSON) listing your proposed "
+    "rule changes, if any (an empty list is a valid and often correct answer). For each "
+    "proposal, cover:\n"
+    '- The action: "add", "retire", or "amend".\n'
+    "- For retire/amend: the id of the EXISTING active rule you're targeting (listed above).\n"
+    "- For add/amend: the rule's instruction text.\n"
+    '- The mode: "advisory" (prompt guidance) or "enforced" (a hard, machine-checked '
+    'pre/postcondition) — for add, advisory unless you have reason to enforce; for amend, '
+    "state explicitly only if you're changing the existing rule's mode.\n"
+    '- If enforced: the machine-checkable predicate as {"phase": ..., "check": ...} — for an '
+    "amend that keeps an enforced rule enforced, state explicitly only if you're changing it.\n"
+    "- The rationale: a short why, citing what in the memory motivates it.\n"
+    "- The priority: higher applies first (add default 0; on amend, state explicitly only if "
+    "changing it from the existing priority)."
 )
 
 
@@ -384,13 +421,14 @@ def _propose(
     bounded = compact_text(
         text, _input_char_budget(), llm, content_description="agent memory and rules"
     )
-    prompt = f"{bounded}\n\n{_TASK_INSTRUCTION}"
-    return complete_validated(
+    prompt = f"{bounded}\n\n{_TASK_INSTRUCTION_REASONING}"
+    return complete_validated_via_reasoning(
         llm,
-        prompt,
         schema=_ReflectionResult,
+        reasoning_prompt=prompt,
+        reasoning_system_prompt=_REFLECTION_SYSTEM_PROMPT_REASONING,
+        formatting_system_prompt=f"{_REFLECTION_SYSTEM_PROMPT}\n\n{_TASK_INSTRUCTION}",
         objective="propose rule changes",
-        system_prompt=_REFLECTION_SYSTEM_PROMPT,
         temperature=0.0,
         correction_attempts=1,
     )

@@ -485,6 +485,7 @@ class DesignAgent:
                 charge=True,
                 objective="strategy design (structured)",
                 logger=logger,
+                reasoning_system_prompt=system_prompt + so.REASONING_MODE_SUFFIX,
             )
         except StrategyLabLLMError as exc:
             cause = exc.cause
@@ -757,6 +758,9 @@ class DesignAgent:
                     charge=True,
                     objective="strategy design review (structured)",
                     logger=logger,
+                    reasoning_system_prompt=(
+                        _get_self_review_system_prompt() + so.REASONING_MODE_SUFFIX
+                    ),
                 )
             except StrategyLabLLMError as exc:
                 cause = exc.cause

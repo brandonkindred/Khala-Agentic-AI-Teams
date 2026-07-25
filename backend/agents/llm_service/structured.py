@@ -232,4 +232,128 @@ def complete_validated(
     )
 
 
-__all__ = ["complete_validated"]
+def complete_json_via_reasoning(
+    client: LLMClient,
+    *,
+    reasoning_prompt: str,
+    reasoning_system_prompt: str | None,
+    formatting_instructions: str,
+    objective: str,
+    formatting_system_prompt: str | None = None,
+    reasoning_temperature: float = 0.3,
+    temperature: float = 0.0,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Two-call split for a JSON-response task that benefits from reasoning.
+
+    Call 1 (``think=True``): a plain-text ``client.complete`` asking the
+    model to think the problem through and answer in structured prose — no
+    JSON formatting instructions. Call 2 (``think=False``): a
+    ``client.complete_json`` that transcribes that prose into the target
+    JSON shape via ``formatting_instructions``.
+
+    Rationale: extended thinking competes with strict JSON decoding for the
+    content channel (see ``LLMSemanticExhaustionError.schema_forced`` in
+    ``interface.py``), so JSON-shaped calls should keep ``think=False`` —
+    but genuinely hard reasoning tasks (evaluation, critique, analysis)
+    lose quality with thinking off entirely. Splitting the reasoning out
+    into its own prose-only call lets it think, while the formatting call
+    stays a pure, thinking-off transcription.
+
+    Preconditions: ``objective`` is non-empty. ``formatting_instructions``
+    describes the target JSON shape (keys/types) — it is prepended to the
+    formatting prompt along with the reasoning call's prose output.
+    Postconditions: returns the JSON-decoded dict from the formatting call.
+    A step-1 exception propagates immediately (step 2 is never invoked) —
+    matching the failure behavior of the single-call form this replaces.
+
+    Args:
+        reasoning_prompt: The user prompt for the reasoning call.
+        reasoning_system_prompt: System prompt for the reasoning call — the
+            original system prompt with any "respond with JSON" tail
+            replaced by an instruction to answer in structured prose.
+        formatting_instructions: The JSON shape/schema instructions,
+            appended after the reasoning call's prose in the formatting
+            prompt.
+        formatting_system_prompt: Optional system prompt for the formatting
+            call (default ``None`` — the formatting prompt is normally
+            self-contained via ``formatting_instructions``).
+        reasoning_temperature: Temperature for the reasoning call (default
+            0.3 — some latitude for exploratory reasoning).
+        temperature: Temperature for the formatting call (default 0.0 —
+            pure transcription).
+        **kwargs: Forwarded to the formatting ``client.complete_json`` call
+            (e.g. ``schema=`` for provider-enforced decoding).
+    """
+    prose = client.complete(
+        reasoning_prompt,
+        objective=f"{objective} (reasoning)",
+        system_prompt=reasoning_system_prompt,
+        temperature=reasoning_temperature,
+        think=True,
+    )
+    format_prompt = f"{formatting_instructions}\n\n--- ANALYSIS ---\n{prose}\n--- END ANALYSIS ---"
+    return client.complete_json(
+        format_prompt,
+        objective=f"{objective} (format)",
+        system_prompt=formatting_system_prompt,
+        temperature=temperature,
+        think=False,
+        **kwargs,
+    )
+
+
+def complete_validated_via_reasoning(
+    client: LLMClient,
+    *,
+    schema: type[T],
+    reasoning_prompt: str,
+    reasoning_system_prompt: str | None,
+    objective: str,
+    formatting_system_prompt: str | None = None,
+    reasoning_temperature: float = 0.3,
+    temperature: float = 0.0,
+    correction_attempts: int = 1,
+    context: dict[str, Any] | None = None,
+    **kwargs: Any,
+) -> T:
+    """Same reasoning/formatting split as :func:`complete_json_via_reasoning`,
+    but the formatting call goes through :func:`complete_validated` (schema
+    validation + self-correction retry) instead of a bare ``complete_json``.
+
+    Preconditions/Postconditions/failure semantics: see
+    :func:`complete_json_via_reasoning`; the formatting call additionally
+    retries up to ``correction_attempts`` times on a parse/validation
+    failure, exactly as :func:`complete_validated` does today.
+    """
+    prose = client.complete(
+        reasoning_prompt,
+        objective=f"{objective} (reasoning)",
+        system_prompt=reasoning_system_prompt,
+        temperature=reasoning_temperature,
+        think=True,
+    )
+    format_prompt = (
+        "Convert the following analysis into a single JSON object matching "
+        "the required schema. Return JSON only — no markdown fences, no "
+        f"prose outside the object.\n\n--- ANALYSIS ---\n{prose}\n--- END ANALYSIS ---"
+    )
+    return complete_validated(
+        client,
+        format_prompt,
+        schema=schema,
+        objective=f"{objective} (format)",
+        system_prompt=formatting_system_prompt,
+        temperature=temperature,
+        correction_attempts=correction_attempts,
+        context=context,
+        think=False,
+        **kwargs,
+    )
+
+
+__all__ = [
+    "complete_validated",
+    "complete_json_via_reasoning",
+    "complete_validated_via_reasoning",
+]

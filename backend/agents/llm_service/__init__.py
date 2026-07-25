@@ -46,7 +46,11 @@ from .interface import (
 )
 from .pricing import estimate_cost_usd
 from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
-from .structured import complete_validated
+from .structured import (
+    complete_json_via_reasoning,
+    complete_validated,
+    complete_validated_via_reasoning,
+)
 from .telemetry import (
     get_recent_calls,
     get_usage_summary,
@@ -103,6 +107,8 @@ __all__ = [
     "bind_request_id",
     "complete_json_with_tool_loop",
     "complete_validated",
+    "complete_json_via_reasoning",
+    "complete_validated_via_reasoning",
     "call_llm_with_retries",
     "call_llm_with_retries_async",
     "compact_text",
