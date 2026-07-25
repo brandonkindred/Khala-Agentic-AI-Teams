@@ -23,6 +23,7 @@ uvicorn[standard]>=0.44,<1.0
 slack-sdk>=3.41,<4
 cryptography>=46.0,<47.0
 pytest>=9.0,<10.0
+pytest-asyncio>=1.0,<2.0
 pytest-cov>=7.1,<8.0
 pytest-xdist>=3.5,<4.0
 temporalio>=1.25,<2.0
