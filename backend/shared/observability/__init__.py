@@ -53,15 +53,23 @@ from shared.observability.process_health import (
     install_fault_diagnostics,
     start_memory_watchdog,
 )
+from shared.observability.trace_context import (
+    bind_trace_id,
+    current_trace_id,
+    new_trace_id,
+)
 
 __all__ = [
     "Watchdog",
+    "bind_trace_id",
+    "current_trace_id",
     "get_meter",
     "get_tracer",
     "init_otel",
     "install_fault_diagnostics",
     "instrument_fastapi_app",
     "is_otel_enabled",
+    "new_trace_id",
     "shutdown_otel",
     "start_memory_watchdog",
 ]

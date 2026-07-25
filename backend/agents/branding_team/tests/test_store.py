@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import pytest
 
+from branding_team.assistant.store import BrandingConversationStore
 from branding_team.models import (
     BrandPhase,
     BrandStatus,
     TeamOutput,
     WorkflowStatus,
 )
-from branding_team.store import BrandingStore
+from branding_team.store import AttachConversationResult, BrandingStore
 from branding_team.tests._fake_postgres import install_fake_postgres
 from branding_team.tests.conftest import make_mission
 
@@ -296,3 +297,110 @@ def test_list_brands_for_client_pagination(fake_pg: dict) -> None:
     assert len(store.list_brands_for_client(client.id)) == 3
     page = store.list_brands_for_client(client.id, limit=1, offset=1)
     assert len(page) == 1
+
+
+def test_attach_conversation_success(fake_pg: dict) -> None:
+    """attach_conversation atomically links an unattached conversation and the
+    brand's conversation_id, updating both rows in one call."""
+    store = BrandingStore()
+    conv_store = BrandingConversationStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(
+        client.id,
+        make_mission(
+            company_name="Acme Inc",
+            company_description="A great company",
+            target_audience="everyone",
+        ),
+    )
+    assert brand is not None
+    cid = conv_store.create(mission=make_mission(company_name="Acme Inc"))
+
+    updated_mission = make_mission(
+        company_name="Acme Rebrand",
+        company_description="Updated description",
+        target_audience="developers",
+    )
+    result, updated_brand = store.attach_conversation(client.id, brand.id, cid, updated_mission)
+    assert result is AttachConversationResult.OK
+    assert updated_brand is not None
+    assert updated_brand.conversation_id == cid
+
+    assert conv_store.get_conversation_brand_id(cid) == brand.id
+    state = conv_store.get_state(cid)
+    assert state is not None
+    assert state.mission.company_name == "Acme Rebrand"
+
+
+def test_attach_conversation_unknown_conversation(fake_pg: dict) -> None:
+    """attach_conversation reports CONVERSATION_NOT_FOUND without touching the brand."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, make_mission(company_name="Acme Inc"))
+    assert brand is not None
+
+    result, updated_brand = store.attach_conversation(
+        client.id, brand.id, "missing-conv", make_mission(company_name="Acme Inc")
+    )
+    assert result is AttachConversationResult.CONVERSATION_NOT_FOUND
+    assert updated_brand is None
+    assert store.get_brand(client.id, brand.id).conversation_id is None
+
+
+def test_attach_conversation_already_attached(fake_pg: dict) -> None:
+    """attach_conversation reports ALREADY_ATTACHED and leaves both rows unchanged
+    when the conversation is already linked to a different brand."""
+    store = BrandingStore()
+    conv_store = BrandingConversationStore()
+    client = store.create_client("Acme")
+    other_brand = store.create_brand(client.id, make_mission(company_name="Other Co"))
+    target_brand = store.create_brand(client.id, make_mission(company_name="Target Co"))
+    assert other_brand is not None and target_brand is not None
+    cid = conv_store.create(brand_id=other_brand.id, mission=make_mission(company_name="Other Co"))
+
+    result, updated_brand = store.attach_conversation(
+        client.id, target_brand.id, cid, make_mission(company_name="Other Co")
+    )
+    assert result is AttachConversationResult.ALREADY_ATTACHED
+    assert updated_brand is None
+    assert conv_store.get_conversation_brand_id(cid) == other_brand.id
+    assert store.get_brand(client.id, target_brand.id).conversation_id is None
+
+
+def test_attach_conversation_reattaching_same_brand_is_ok(fake_pg: dict) -> None:
+    """Re-attaching a conversation to the brand it's already on is allowed
+    (not a conflict) and refreshes the mission."""
+    store = BrandingStore()
+    conv_store = BrandingConversationStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, make_mission(company_name="Acme Inc"))
+    assert brand is not None
+    cid = conv_store.create(brand_id=brand.id, mission=make_mission(company_name="Acme Inc"))
+
+    result, updated_brand = store.attach_conversation(
+        client.id, brand.id, cid, make_mission(company_name="Acme Inc v2")
+    )
+    assert result is AttachConversationResult.OK
+    assert updated_brand is not None
+    assert updated_brand.conversation_id == cid
+
+
+def test_attach_conversation_unknown_brand(fake_pg: dict) -> None:
+    """attach_conversation reports BRAND_NOT_FOUND when the brand row doesn't
+    exist for the given client.
+
+    The rollback guarantee (the conversation write undoing when the brand
+    patch misses) is a real-transaction property the dict-backed fake can't
+    model — it's covered against a live Postgres in
+    ``test_store_real_postgres.py::test_attach_conversation_real_postgres``.
+    """
+    store = BrandingStore()
+    conv_store = BrandingConversationStore()
+    client = store.create_client("Acme")
+    cid = conv_store.create(mission=make_mission(company_name="Acme Inc"))
+
+    result, updated_brand = store.attach_conversation(
+        client.id, "brand_missing", cid, make_mission(company_name="Acme Inc")
+    )
+    assert result is AttachConversationResult.BRAND_NOT_FOUND
+    assert updated_brand is None
