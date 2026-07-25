@@ -27,6 +27,7 @@ from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents import _agent_runner
 from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import refinement as mod
+from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
 from llm_service.interface import LLMPermanentError, LLMSemanticExhaustionError
 
@@ -172,16 +173,21 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
     monkeypatch.setattr(so_mod, "run_structured_agent", _fake_run_structured_agent)
 
-    RefinementAgent().run(
-        spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
-    )
+    budget = LLMCallBudget(limit=5)
+    with use_budget(budget):
+        RefinementAgent().run(
+            spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+        )
 
     assert captured["agent_key"] == "strategy_refinement"
     assert captured["phase"] == "refinement_structured"
-    # RefinementAgent now charges the per-cycle LLM budget (#1569) — the
-    # orchestrator's ``_refine`` re-raises ``DesignBudgetExhausted`` instead
-    # of swallowing it, so charging here is safe.
-    assert captured["charge"] is True
+    # invoke_structured_with_schema now charges the per-cycle LLM budget
+    # itself (two units, since ``_call`` makes two provider calls) rather
+    # than forwarding ``charge=True`` to ``run_structured_agent`` (which only
+    # charges once) — so run_structured_agent always sees charge=False here...
+    assert captured["charge"] is False
+    # ...and the two units were charged directly against the bound budget.
+    assert budget.calls_made == 2
 
 
 # ---------------------------------------------------------------------------

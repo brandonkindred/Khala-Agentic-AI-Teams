@@ -31,6 +31,7 @@ import pytest
 from investment_team.strategy_lab.agents import _agent_runner as agent_runner_mod
 from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import design as design_mod
+from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
 from investment_team.strategy_lab.agents._response_schemas import (
     CRITIQUE_SCHEMA,
     DESIGN_SPEC_SCHEMA,
@@ -300,13 +301,19 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(so_mod, "run_structured_agent", _fake_run_structured_agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
-    DesignAgent().run(prior_records=[])
+    budget = LLMCallBudget(limit=5)
+    with use_budget(budget):
+        DesignAgent().run(prior_records=[])
 
     assert captured["agent_key"] == "strategy_design"
     assert captured["phase"] == "design_generate_structured"
     # Both DesignAgent and RefinementAgent charge every real LLM call
     # including retries — the structured pre-flight is a real call too.
-    assert captured["charge"] is True
+    # invoke_structured_with_schema now charges the budget itself (two units,
+    # since ``_call`` makes two provider calls) rather than forwarding
+    # charge=True to run_structured_agent (which only charges once).
+    assert captured["charge"] is False
+    assert budget.calls_made == 2
 
 
 def test_revise_also_uses_structured_path(monkeypatch: pytest.MonkeyPatch) -> None:

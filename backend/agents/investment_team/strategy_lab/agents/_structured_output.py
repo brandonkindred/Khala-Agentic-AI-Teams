@@ -30,6 +30,7 @@ from llm_service.config import resolve_provider, resolve_timeout
 from llm_service.interface import LLMSemanticExhaustionError
 from shared.env_config import env_float
 
+from ._llm_budget import charge_active_budget
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
 from .model_factory import get_strands_model
@@ -74,21 +75,32 @@ def invoke_structured_with_schema(
 ) -> Dict[str, Any]:
     """Reason (think=True, prose), then request schema-conformant JSON (think=False).
 
-    Routes through :func:`run_structured_agent` for the shared charge / invoke /
-    timeout / parse envelope, which wraps ONE blocking call — here, ``_call``
-    internally sequences two LLM calls (a think=True prose reasoning pass via
+    Routes through :func:`run_structured_agent` for the shared invoke / timeout /
+    parse envelope, which wraps ONE blocking call — here, ``_call`` internally
+    sequences two LLM calls (a think=True prose reasoning pass via
     ``client.complete``, then the think=False schema-conformant formatting
     pass via ``client.complete_json``) under that single envelope. A transport
     retry re-runs both sub-calls; this is a deliberate, documented tradeoff to
-    keep the existing charge/timeout/retry plumbing untouched. Since the
-    closure now performs two sequential provider calls instead of one, the
-    per-attempt ``timeout_s`` passed to the envelope is DOUBLED from the
-    resolved single-call default — otherwise two individually healthy calls
-    could exceed a budget sized for one, aborting the attempt (and abandoning
-    a still-running daemon thread, see ``_call_with_timeout``) even though
+    keep the existing timeout/retry plumbing untouched. Since the closure now
+    performs two sequential provider calls instead of one, the per-attempt
+    ``timeout_s`` passed to the envelope is DOUBLED from the resolved
+    single-call default — otherwise two individually healthy calls could
+    exceed a budget sized for one, aborting the attempt (and abandoning a
+    still-running daemon thread, see ``_call_with_timeout``) even though
     neither provider request was actually slow. ``total_budget_s`` is left
     unset so it scales off the doubled ``timeout_s`` automatically (see
     ``_resolve_config``).
+
+    Charging is handled entirely by this function rather than forwarded to
+    ``run_structured_agent``'s own ``charge=`` (which charges exactly once):
+    when ``charge`` is True, the design-phase budget is charged TWICE, both
+    up front before ``run_structured_agent`` is invoked — matching
+    ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``' per-*provider-call* accounting now
+    that ``_call`` makes two — and both charges happen before either
+    provider call runs, so a trip on the second charge stops the attempt
+    before wasting the first (reasoning) call. Callers that charge
+    explicitly and pass ``charge=False`` (see ``design_review.py``) must
+    likewise charge twice at their own call site.
 
     This helper does **not** run its own parse/validation retry loop and never
     falls back to legacy Agent decoding for the *formatting* call — callers
@@ -191,13 +203,21 @@ def invoke_structured_with_schema(
     # operator-approved latency/cost window — an explicit cap must be
     # honored as configured, even if that means fewer retry attempts fit
     # inside it now that each attempt takes longer.
+    if charge:
+        # Two provider calls happen per attempt now (reasoning + formatting)
+        # — charge both units up front, before run_structured_agent (and
+        # therefore before either provider call) runs, so DesignBudgetExhausted
+        # on the second charge stops the attempt before the first call is made.
+        charge_active_budget()
+        charge_active_budget()
+
     return run_structured_agent(
         _call,
         user_prompt,
         agent_key=agent_key,
         phase=phase,
         parse=extract_json_object,
-        charge=charge,
+        charge=False,
         logger=logger,
         timeout_s=timeout_s,
     )

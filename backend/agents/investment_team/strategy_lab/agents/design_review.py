@@ -511,10 +511,18 @@ class DesignReviewAgent:
         # Charge outside the fail-closed ``try`` so DesignBudgetExhausted
         # propagates to ``_run_design_loop`` instead of being converted into
         # a fail-closed critique that would let the loop continue past budget.
+        # The structured path makes two sequential provider calls per attempt
+        # (reasoning + formatting, via ``invoke_structured_with_schema``, which
+        # is invoked here with ``charge=False`` since charging happens
+        # entirely at this call site) — charge two units for it, one for the
+        # single-call legacy path.
+        structured_available = so.structured_output_available()
         charge_active_budget()
+        if structured_available:
+            charge_active_budget()
 
         try:
-            if so.structured_output_available():
+            if structured_available:
                 try:
                     parsed = so.invoke_structured_with_schema(
                         "strategy_design_review",
