@@ -193,7 +193,11 @@ class TestInfraDebugAgent:
                 artifacts={},
             )
         )
+        assert len(result.errors) == 2
+        assert result.errors[0].error_type == "syntax"
+        assert result.errors[1].error_type == "validation"
         assert result.fixable
+        assert result.summary == "Two fixable errors"
 
     def test_sets_fixable_false_when_runtime_present(self) -> None:
         """Marks results not fixable when any runtime error is mixed in."""

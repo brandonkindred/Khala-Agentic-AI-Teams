@@ -23,7 +23,7 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
 )
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
-from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
+from software_engineering_team.shared.security_service import infra_gate_passed
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
     TeamLeadSharedState,
@@ -193,6 +193,7 @@ ENV_POLICY = {
         "policy_strictness": "high",
     },
 }
+from . import tool_dispatch  # noqa: E402
 from .infra_debug_agent import IaCDebugInput, InfraDebugAgent  # noqa: E402
 from .infra_patch_agent import IaCPatchInput, InfraPatchAgent  # noqa: E402
 from .task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput  # noqa: E402
@@ -201,22 +202,15 @@ from .test_validation_agent import (  # noqa: E402
     DevOpsTestValidationInput,
 )
 from .tool_agents import (  # noqa: E402
-    CDKExecutionInput,
     CDKExecutionToolAgent,
-    CICDLintInput,
     CICDLintPipelineValidationToolAgent,
-    DeploymentDryRunInput,
     DeploymentDryRunPlanToolAgent,
-    DockerComposeExecutionInput,
     DockerComposeExecutionToolAgent,
-    HelmExecutionInput,
     HelmExecutionToolAgent,
-    IaCValidationInput,
     IaCValidationToolAgent,
     PolicyAsCodeToolAgent,
     RepoNavigatorInput,
     RepoNavigatorToolAgent,
-    TerraformExecutionInput,
     TerraformExecutionToolAgent,
 )
 
@@ -290,6 +284,10 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     # to ``self._run_gated_phases``, so that alias must exist on this class.
     _run_gated_phases = BaseTeamLead._run_gated_phases
     _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
+    # Tool-dispatch logic lives in ``tool_dispatch.py``; aliased here so
+    # ``self._run_execution_tools(...)`` keeps its existing bound-method call
+    # shape (see devops_team/tool_dispatch.py for the implementation).
+    _run_execution_tools = tool_dispatch.run_execution_tools
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
@@ -444,7 +442,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             max_iterations,
             devops_review_agent,
         )  # reserved for future routing
-        task_spec = self._build_legacy_spec(
+        task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id=task_id,
             task_description=task_description,
             requirements=requirements,
@@ -489,86 +487,6 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 completion_criteria=["strategy defined", "rollback steps documented"],
             ),
         ]
-
-    def _run_execution_tools(
-        self, repo_str: str, artifacts: Dict[str, str]
-    ) -> List[Dict[str, Any]]:
-        """Run applicable execution tools and return list of result dicts."""
-        results: List[Dict[str, Any]] = []
-        has_tf = any(k.endswith(".tf") for k in artifacts)
-        has_cdk = "cdk.json" in artifacts
-        has_compose = any(
-            k in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
-            for k in artifacts
-        )
-        has_chart = any(k.endswith("Chart.yaml") or k == "Chart.yaml" for k in artifacts)
-
-        if has_tf:
-            for cmd in ("init", "validate", "plan"):
-                r = self.terraform_exec_tool.run(
-                    TerraformExecutionInput(
-                        repo_path=repo_str,
-                        command=cmd,
-                    )
-                )
-                results.append(
-                    {
-                        "tool": "terraform",
-                        "command": cmd,
-                        "success": r.success,
-                        "checks": r.checks,
-                        "findings": r.findings,
-                        "failure_class": r.failure_class,
-                    }
-                )
-                if not r.success:
-                    break
-
-        if has_cdk:
-            r = self.cdk_exec_tool.run(CDKExecutionInput(repo_path=repo_str, command="synth"))
-            results.append(
-                {
-                    "tool": "cdk",
-                    "command": "synth",
-                    "success": r.success,
-                    "checks": r.checks,
-                    "findings": r.findings,
-                    "failure_class": r.failure_class,
-                }
-            )
-
-        if has_compose:
-            r = self.compose_exec_tool.run(
-                DockerComposeExecutionInput(
-                    repo_path=repo_str,
-                    command="config",
-                )
-            )
-            results.append(
-                {
-                    "tool": "compose",
-                    "command": "config",
-                    "success": r.success,
-                    "checks": r.checks,
-                    "findings": r.findings,
-                    "failure_class": r.failure_class,
-                }
-            )
-
-        if has_chart:
-            r = self.helm_exec_tool.run(HelmExecutionInput(repo_path=repo_str, command="lint"))
-            results.append(
-                {
-                    "tool": "helm",
-                    "command": "lint",
-                    "success": r.success,
-                    "checks": r.checks,
-                    "findings": r.findings,
-                    "failure_class": r.failure_class,
-                }
-            )
-
-        return results
 
     def _debug_patch_once(
         self,
@@ -868,18 +786,10 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 "phase4",
                 detail="DevOps team pipeline: phase 4 - validation and review",
             )
-            iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
-            policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
-            cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
-            dry_run_checks = self.deploy_dry_run_tool.run(
-                DeploymentDryRunInput(repo_path=str(repo_path))
-            )
-
-            tool_gate_map: Dict[str, str] = {}
-            tool_gate_map.update(iac_checks.checks)
-            tool_gate_map.update(policy_checks.checks)
-            tool_gate_map.update(cicd_checks.checks)
-            tool_gate_map.update(dry_run_checks.checks)
+            vt = tool_dispatch.run_validation_tools(self, repo_path)
+            iac_checks, policy_checks = vt.iac_checks, vt.policy_checks
+            cicd_checks, dry_run_checks = vt.cicd_checks, vt.dry_run_checks
+            tool_gate_map: Dict[str, str] = dict(vt.tool_gate_map)
 
             # Phase 4.5: Execution verification
             self._report_status(

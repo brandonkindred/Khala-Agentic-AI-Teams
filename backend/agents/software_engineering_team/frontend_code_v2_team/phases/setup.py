@@ -96,8 +96,8 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
             if test_script and "no test" not in test_script and "exit 1" not in test_script:
                 logger.info("Setup: testing already configured via package.json test script")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Setup: could not parse package.json for test script check: %s", e)
 
     # Create vitest config based on framework
     is_angular = (path / "angular.json").exists()

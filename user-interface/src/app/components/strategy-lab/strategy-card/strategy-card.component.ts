@@ -133,10 +133,12 @@ export class StrategyCardComponent implements OnDestroy {
    */
   copyStrategyCode(code: string): void {
     if (!code) return;
-    navigator.clipboard?.writeText(code).catch(() => {
-      // Clipboard write can reject (permission denied, insecure context); ignore — the user can
-      // still read/select the code manually.
-    });
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(code).catch(() => {
+        // Clipboard write can reject (permission denied, insecure context); ignore — the user can
+        // still read/select the code manually.
+      });
+    }
     this.strategyCodeCopied = true;
     if (this.copyResetTimer) clearTimeout(this.copyResetTimer);
     this.copyResetTimer = setTimeout(() => {
