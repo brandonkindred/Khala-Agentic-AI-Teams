@@ -66,6 +66,46 @@ def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatc
     assert "reasoning prose" in client.calls[0]["prompt"]
 
 
+def test_invoke_structured_with_schema_doubles_timeout_for_two_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_call`` now makes two sequential provider calls (reasoning + format)
+    under the envelope's single per-attempt timeout guard. Regression test
+    for a real Codex review finding: without doubling, two individually
+    healthy calls could together exceed a budget sized for one, aborting the
+    attempt and abandoning a still-running daemon thread even though neither
+    provider request was actually slow.
+    """
+    client = _StubClient({"ready": True, "rationale": "ok", "issues": []})
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
+    monkeypatch.setattr(so_mod, "resolve_timeout", lambda agent_key: 30.0)
+    monkeypatch.delenv("STRATEGY_LAB_LLM_TIMEOUT", raising=False)
+
+    captured: Dict[str, Any] = {}
+
+    def _spy_run_structured_agent(agent_callable, prompt, *, parse, **kwargs):
+        captured.update(kwargs)
+        return parse(agent_callable(prompt))
+
+    monkeypatch.setattr(so_mod, "run_structured_agent", _spy_run_structured_agent)
+
+    result = so_mod.invoke_structured_with_schema(
+        "strategy_design_review",
+        "sys",
+        "user",
+        phase="design_review_structured",
+        schema={"type": "object"},
+        charge=False,
+        objective="strategy design review (structured)",
+        logger=logging.getLogger("test.so"),
+        reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+    )
+
+    assert result == {"ready": True, "rationale": "ok", "issues": []}
+    assert captured["timeout_s"] == pytest.approx(60.0)
+
+
 def test_invoke_structured_with_schema_requires_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -26,7 +26,8 @@ import logging
 from typing import Any, Dict, Mapping
 
 from llm_service import provider_supports_structured_output
-from llm_service.config import resolve_provider
+from llm_service.config import resolve_provider, resolve_timeout
+from shared.env_config import env_float
 
 from ._llm_envelope import run_structured_agent
 from ._parse_helpers import extract_json_object
@@ -78,7 +79,15 @@ def invoke_structured_with_schema(
     ``client.complete``, then the think=False schema-conformant formatting
     pass via ``client.complete_json``) under that single envelope. A transport
     retry re-runs both sub-calls; this is a deliberate, documented tradeoff to
-    keep the existing charge/timeout/retry plumbing untouched.
+    keep the existing charge/timeout/retry plumbing untouched. Since the
+    closure now performs two sequential provider calls instead of one, the
+    per-attempt ``timeout_s`` passed to the envelope is DOUBLED from the
+    resolved single-call default — otherwise two individually healthy calls
+    could exceed a budget sized for one, aborting the attempt (and abandoning
+    a still-running daemon thread, see ``_call_with_timeout``) even though
+    neither provider request was actually slow. ``total_budget_s`` is left
+    unset so it scales off the doubled ``timeout_s`` automatically (see
+    ``_resolve_config``).
 
     This helper does **not** run its own parse/validation retry loop and never
     falls back to legacy Agent decoding for the *formatting* call — callers
@@ -147,6 +156,14 @@ def invoke_structured_with_schema(
         # JSON so the round trip is exact.
         return json.dumps(result)
 
+    # _call now makes two sequential provider calls (reasoning + formatting)
+    # under the envelope's single per-attempt timeout — double the resolved
+    # single-call default so two individually healthy calls can't trip a
+    # budget sized for one. Mirrors _resolve_config's own resolution order
+    # (explicit -> STRATEGY_LAB_LLM_TIMEOUT -> per-model default) so this
+    # stays in sync with an operator override of either env var.
+    single_call_timeout_s = max(0.001, env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key)))
+
     return run_structured_agent(
         _call,
         user_prompt,
@@ -155,4 +172,5 @@ def invoke_structured_with_schema(
         parse=extract_json_object,
         charge=charge,
         logger=logger,
+        timeout_s=single_call_timeout_s * 2,
     )
