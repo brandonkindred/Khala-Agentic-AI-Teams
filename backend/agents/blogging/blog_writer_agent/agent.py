@@ -787,7 +787,8 @@ class BlogWriterAgent(_BlogAgentBase):
         if revise_input.persistent_issues:
             pi_lines = []
             for i, pi in enumerate(revise_input.persistent_issues, 1):
-                loc = f" [{pi.location}]" if getattr(pi, "location", None) else ""
+                location = getattr(pi, "location", None)
+                loc = f" [{location}]" if location else ""
                 occurrence_count = getattr(pi, "occurrence_count", 0)
                 severity = getattr(pi, "severity", "unknown")
                 category = getattr(pi, "category", "")
@@ -795,8 +796,9 @@ class BlogWriterAgent(_BlogAgentBase):
                     f"{i}. [{severity}] {category}{loc} "
                     f"(flagged {occurrence_count} times): {getattr(pi, 'issue', '')}"
                 )
-                if getattr(pi, "suggestion", None):
-                    line += f'\n   REQUIRED FIX: "{pi.suggestion}"'
+                suggestion = getattr(pi, "suggestion", None)
+                if suggestion:
+                    line += f'\n   REQUIRED FIX: "{suggestion}"'
                 pi_lines.append(line)
             prompt_parts.extend(
                 [
