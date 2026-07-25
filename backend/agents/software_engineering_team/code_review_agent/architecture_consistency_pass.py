@@ -95,8 +95,11 @@ def _build_prompt(
           (folding in the rendered ``overview``/``components``/``decisions``
           alongside it, or in its place when no full document is set), then the
           submission's changed files up to a combined ``max_inline_chars``
-          budget; omitted content is identified as reachable via the attached
-          tools rather than silently dropped.
+          budget. A changed-file omission is identified as reachable via the
+          attached tools (``read_file``/``list_files``, which cover the
+          submission and repository); an architecture-document omission is
+          identified as unavailable, since no tool exposes the document
+          itself -- neither is silently dropped.
     """
     parts: List[str] = []
 
@@ -117,7 +120,8 @@ def _build_prompt(
     if len(arch_doc) > len(inlined_doc):
         parts.append(
             f"(Only the first {len(inlined_doc)} characters of the architecture document "
-            "are shown above; use the attached repository tools for additional context.)"
+            "are shown above; the rest is not available through the attached tools -- do not "
+            "flag a contradiction with content beyond this cutoff.)"
         )
     parts.append("")
 
