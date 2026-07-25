@@ -83,6 +83,17 @@ class ArchitectureToolAgent(PlanGeneratorToolAgent):
     )
 
     def _build_plan_prompt(self, inp: ToolAgentPhaseInput) -> str:
+        """Build the architecture-planning LLM prompt from task and spec context.
+
+        Preconditions:
+            ``inp`` is a :class:`ToolAgentPhaseInput`; all fields are optional.
+
+        Postconditions:
+            Returns ``FRONTEND_ARCHITECT_PROMPT`` formatted with the task description
+            (falling back to ``task_title``, then a default) and the spec content
+            truncated to :data:`MAX_SPEC_CHARS` characters (falling back to a
+            placeholder when blank).
+        """
         spec_excerpt = (inp.spec_context or "")[:MAX_SPEC_CHARS]
         task_desc = inp.task_description or inp.task_title or "Frontend application"
         return FRONTEND_ARCHITECT_PROMPT.format(
