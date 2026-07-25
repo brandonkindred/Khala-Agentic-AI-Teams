@@ -1273,21 +1273,27 @@ one of these variables today has no effect until that migration lands.
 Timeout (seconds) for `helm lint .` in the deployment dry-run tool-agent. Default `120`, floor `1`.
 
 ### DEVOPS_TERRAFORM_EXECUTION_TIMEOUT_S
-Timeout (seconds) for terraform apply/plan in the terraform execution tool-agent. Default `180`, floor `1`.
+Timeout (seconds) for `terraform init`/`validate`/`plan`/`apply`/`fmt` (the only commands
+`TerraformExecutionInput` accepts) in the terraform execution tool-agent. Default `180`, floor `1`.
 
 ### DEVOPS_HELM_EXECUTION_TIMEOUT_S
-Timeout (seconds) for helm install/upgrade in the helm execution tool-agent. Default `120`, floor `1`.
+Timeout (seconds) for `helm template`/`lint` — the only commands `HelmExecutionInput` accepts; this
+tool-agent is read-only and cannot install/upgrade a release — in the helm execution tool-agent.
+Default `120`, floor `1`.
 
 ### DEVOPS_CDK_EXECUTION_TIMEOUT_S
-Timeout (seconds) for `cdk deploy`/`cdk synth` in the CDK execution tool-agent. Default `180`, floor `1`.
+Timeout (seconds) for `cdk synth`/`cdk diff` — the only commands `CDKExecutionInput` accepts; this
+tool-agent is read-only and cannot deploy a stack — in the CDK execution tool-agent. Default `180`,
+floor `1`.
 
 ### DEVOPS_IAC_VALIDATION_TIMEOUT_S
 Timeout (seconds) for both `terraform fmt -check` and `terraform validate` in the IaC validation
 tool-agent. Default `120`, floor `1`.
 
 ### DEVOPS_DOCKER_COMPOSE_TIMEOUT_S
-Timeout (seconds) for `docker compose up`/`down` in the docker compose execution tool-agent. Default
-`120`, floor `1`.
+Timeout (seconds) for `docker compose config`/`build`/`ps`/`logs` — the only commands
+`DockerComposeExecutionInput` accepts; this tool-agent is read-only and cannot bring services up or
+down — in the docker compose execution tool-agent. Default `120`, floor `1`.
 
 ### DEVOPS_POLICY_AS_CODE_TIMEOUT_S
 Timeout (seconds) for the checkov scan in the policy-as-code tool-agent. Default `180`, floor `1`.

@@ -20,19 +20,19 @@ from shared.env_config import env_int
 # Helm dry-run (`helm lint .`) in the deployment dry-run tool-agent.
 DEVOPS_HELM_DRY_RUN_TIMEOUT_S = env_int("DEVOPS_HELM_DRY_RUN_TIMEOUT_S", 120, floor=1)
 
-# Terraform apply/plan in the terraform execution tool-agent.
+# `terraform init`/`validate`/`plan`/`apply`/`fmt` in the terraform execution tool-agent.
 DEVOPS_TERRAFORM_EXECUTION_TIMEOUT_S = env_int("DEVOPS_TERRAFORM_EXECUTION_TIMEOUT_S", 180, floor=1)
 
-# Helm install/upgrade in the helm execution tool-agent.
+# `helm template`/`lint` (read-only only) in the helm execution tool-agent.
 DEVOPS_HELM_EXECUTION_TIMEOUT_S = env_int("DEVOPS_HELM_EXECUTION_TIMEOUT_S", 120, floor=1)
 
-# `cdk deploy`/`cdk synth` in the CDK execution tool-agent.
+# `cdk synth`/`cdk diff` (read-only only) in the CDK execution tool-agent.
 DEVOPS_CDK_EXECUTION_TIMEOUT_S = env_int("DEVOPS_CDK_EXECUTION_TIMEOUT_S", 180, floor=1)
 
 # `terraform fmt -check` and `terraform validate` in the IaC validation tool-agent.
 DEVOPS_IAC_VALIDATION_TIMEOUT_S = env_int("DEVOPS_IAC_VALIDATION_TIMEOUT_S", 120, floor=1)
 
-# `docker compose up`/`down` in the docker compose execution tool-agent.
+# `docker compose config`/`build`/`ps`/`logs` (read-only only) in the docker compose execution tool-agent.
 DEVOPS_DOCKER_COMPOSE_TIMEOUT_S = env_int("DEVOPS_DOCKER_COMPOSE_TIMEOUT_S", 120, floor=1)
 
 # Checkov scan in the policy-as-code tool-agent.
