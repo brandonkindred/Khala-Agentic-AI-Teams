@@ -51,6 +51,27 @@ here (rather than duplicated per caller) since all four call sites
 (``design.py`` x2, ``design_review.py``, ``refinement.py``) need the same
 override."""
 
+_REASONING_USER_PROMPT_SUFFIX = (
+    "\n\n---\n"
+    "OVERRIDE FOR THIS PASS ONLY: ignore every instruction above that tells "
+    "you to return JSON (or to return ONLY JSON, without markdown) — those "
+    "describe a LATER pass. Right now, emit NO JSON at all: answer in "
+    "clearly labeled structured prose covering every field the JSON shape "
+    "above calls for, plus your reasoning for each choice.\n"
+)
+"""Appended to the reasoning call's USER prompt inside :func:`_call`.
+
+The four call sites embed their target JSON-shape instructions in the user
+prompt (not the system prompt), each ending with a "Return ONLY a JSON
+object" directive — which directly contradicts
+:data:`REASONING_MODE_SUFFIX`'s "do NOT emit JSON" on the system prompt.
+A model that follows the more specific / later-positioned user-turn
+directive would emit JSON in the reasoning pass, making the formatting
+pass a pure re-transcription: two provider calls and two budget units
+spent for none of the reasoning the split exists to buy. This suffix
+re-asserts the prose requirement last, where the conflicting directive
+would otherwise win."""
+
 
 def structured_output_available() -> bool:
     """Whether the active LLM provider supports provider-enforced schema-conformant decoding.
@@ -137,12 +158,16 @@ def invoke_structured_with_schema(
     def _call(prompt: str) -> str:
         # ``prompt`` (the caller's user_prompt) already carries the target
         # JSON-schema instructions for this module (embedded per-template,
-        # not in system_prompt) — reuse it unchanged for both calls rather
-        # than replacing it, so neither pass loses the task-specific content
+        # not in system_prompt) — reuse it for both calls rather than
+        # replacing it, so neither pass loses the task-specific content
         # guidance (DSL shape reminders, worked examples, etc.) baked into it.
+        # The reasoning pass gets _REASONING_USER_PROMPT_SUFFIX appended to
+        # neutralize the template's trailing "Return ONLY a JSON object"
+        # directive, which would otherwise outrank the system prompt's
+        # prose-only instruction (see that constant's docstring).
         try:
             prose = client.complete(
-                prompt,
+                prompt + _REASONING_USER_PROMPT_SUFFIX,
                 objective=f"{objective} (reasoning)",
                 system_prompt=reasoning_system_prompt,
                 temperature=0.3,
@@ -150,18 +175,37 @@ def invoke_structured_with_schema(
             )
         except LLMSemanticExhaustionError as exc:
             # The reasoning call is unconstrained (no schema=), so the client
-            # always raises this with schema_forced=False — but the caller's
-            # degrade check gates on schema_forced to decide whether to fall
-            # back to the legacy unconstrained parse-retry loop. From the
-            # pipeline's perspective, starving before the schema-constrained
-            # formatting call even runs is equally "structured decoding could
-            # not produce output", so mark it schema_forced=True here too —
-            # otherwise this now-reachable failure mode (impossible pre-split,
-            # when there was only one, schema-constrained call) would
-            # propagate as fatal instead of degrading like its formatting-call
-            # counterpart.
-            exc.schema_forced = True
-            raise
+            # raises this with schema_forced=False — but the caller's degrade
+            # check gates on schema_forced to decide whether to fall back to
+            # the legacy unconstrained parse-retry loop. From the pipeline's
+            # perspective, starving before the schema-constrained formatting
+            # call even runs is equally "structured decoding could not produce
+            # output", so this must present as schema_forced=True — otherwise
+            # this now-reachable failure mode (impossible pre-split, when
+            # there was only one, schema-constrained call) propagates as fatal
+            # instead of degrading like its formatting-call counterpart.
+            #
+            # Raise a NEW receipt rather than mutating ``exc``: interface.py
+            # documents schema_forced=True as implying
+            # ``retry_thinking_level is None`` (that path runs no
+            # thinking-downgrade ladder), and consumers rely on that pairing.
+            # The reasoning call's ladder DID run, so flipping the flag in
+            # place would emit an internally inconsistent receipt. The
+            # original — ladder level included — is preserved as ``cause``
+            # and named in the message for diagnostics.
+            raise LLMSemanticExhaustionError(
+                "structured reasoning pass starved before the schema-constrained "
+                f"formatting call (original retry_thinking_level={exc.retry_thinking_level!r}): "
+                f"{exc}",
+                attempts_used=exc.attempts_used,
+                original_thinking_level=exc.original_thinking_level,
+                retry_thinking_level=None,
+                content_bytes_seen=exc.content_bytes_seen,
+                payload_fingerprint=exc.payload_fingerprint,
+                finish_reason=exc.finish_reason,
+                schema_forced=True,
+                cause=exc,
+            ) from exc
         format_prompt = (
             f"{prompt}\n\n"
             "--- YOUR PRIOR ANALYSIS (produced under a separate reasoning pass) ---\n"

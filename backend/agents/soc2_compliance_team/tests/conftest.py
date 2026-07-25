@@ -39,6 +39,7 @@ class FakeLLM:
         self._response = response
         self._ctx_tokens = ctx_tokens
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
 
     def complete_json(
         self,
@@ -52,7 +53,16 @@ class FakeLLM:
         return self._response
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
-        return prompt[: kwargs.get("max_chars", 100)] if "max_chars" in kwargs else prompt
+        # ``complete`` serves two callers here: ``compact_text``, which passes
+        # ``max_chars`` and wants the text back, and the two-call split's
+        # think=True reasoning pass. Record the latter (no ``max_chars``) so
+        # tests can assert the criterion's reasoning temperature actually
+        # reaches the pass that does the analysis — ``self.calls`` only ever
+        # sees the think=False formatting call.
+        if "max_chars" in kwargs:
+            return prompt[: kwargs["max_chars"]]
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
+        return prompt
 
     def get_max_context_tokens(self) -> int:
         return self._ctx_tokens

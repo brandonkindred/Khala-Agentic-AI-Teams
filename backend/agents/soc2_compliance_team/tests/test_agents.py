@@ -124,11 +124,18 @@ def test_run_tsc_agent_parses_response_into_audit_result() -> None:
     call = llm.calls[0]
     assert "Security" in call["prompt"]
     assert "auth, encryption" in call["prompt"]
-    # The reasoning call now carries the criterion-specific temperature
-    # (0.1); FakeLLM.complete() doesn't record calls, so only the formatting
-    # call is observable here — it stays at the pure-transcription default.
+    # The formatting call stays at the pure-transcription default...
     assert call["temperature"] == 0.0
     assert call["think"] is False
+    # ...while the criterion-specific temperature (0.1) reaches the reasoning
+    # pass that actually performs the audit, with thinking enabled.
+    reasoning = llm.reasoning_calls[0]
+    assert reasoning["temperature"] == 0.1
+    assert reasoning["think"] is True
+    # The repo content and criterion focus go to the reasoning pass; the
+    # formatting pass sees only its prose output.
+    assert "Security" in reasoning["prompt"]
+    assert "auth, encryption" in reasoning["prompt"]
 
 
 def test_run_tsc_agent_skips_empty_findings_and_invents_compliance() -> None:

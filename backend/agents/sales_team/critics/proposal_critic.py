@@ -6,7 +6,9 @@ broken ROI math, line-item totals that don't reconcile, claims with no
 backing case study, and pro-forma "next steps" that aren't really steps.
 
 Same shape as :class:`OutreachCriticAgent` — uses
-:func:`llm_service.complete_validated`, fail-closed FAIL on any LLM exception.
+:func:`llm_service.complete_validated_via_reasoning` (a think=True prose
+reasoning pass, then a think=False ``complete_validated`` transcription),
+fail-closed FAIL on any LLM exception.
 """
 
 from __future__ import annotations

@@ -25,60 +25,12 @@ Respond: {{"strategy": "<category>", "reasoning": "<one sentence>"}}\
 # Analysis prompt — decides whether to answer directly or decompose
 # ---------------------------------------------------------------------------
 
-ANALYSIS_SYSTEM_PROMPT = """\
-You are a Deepthought analysis engine. Your role: "{role_description}"
-
-You are at recursion depth {depth} of a maximum {max_depth}.
-
-## Original user question (top-level)
-{original_query}
-
-## Decomposition strategy
-{strategy_instruction}
-
-Given a question, you must decide:
-1. Can you answer it directly with high confidence given your specialist role?
-2. Or does it require decomposition into sub-questions handled by different specialists?
-
-Rules:
-- If the question is narrow, well-defined, or you can provide a confident expert answer, \
-answer directly.
-- If the question is broad, multi-faceted, or requires expertise you lack, identify 1-5 \
-specialist sub-agents.
-- At depth {depth}/{max_depth}, prefer answering directly if at all possible.
-- Never create more than 5 sub-agents.
-- Each sub-agent should have a distinct, non-overlapping focus.
-- Sub-agent focus questions must be specific and self-contained.
-- IMPORTANT: Check the prior findings below — if a specialist has already covered a topic, \
-do NOT create a duplicate sub-agent for it. Reference the existing finding instead.
-
-## Prior findings from other agents
-{knowledge_summary}
-
-Respond with ONLY a JSON object (no markdown fencing) matching this schema:
-{{
-  "summary": "<concise restatement of the question>",
-  "can_answer_directly": true/false,
-  "direct_answer": "<your THOROUGH answer if can_answer_directly is true, else null>",
-  "confidence": <0.0-1.0>,
-  "skill_requirements": [
-    {{
-      "name": "<short_snake_case_identifier>",
-      "description": "<what this specialist knows/does>",
-      "focus_question": "<specific question for this specialist>",
-      "reasoning": "<why this specialist is needed>"
-    }}
-  ]
-}}
-
-If can_answer_directly is true, skill_requirements must be an empty list.
-If can_answer_directly is false, direct_answer must be null and confidence should be 0.0.\
-"""
-
-# Reasoning-only variant of ANALYSIS_SYSTEM_PROMPT: same context/rules, but
-# ends with a prose instruction instead of a JSON schema. Used for the
-# think=True first pass of the two-call split (see ANALYSIS_FORMAT_INSTRUCTIONS
-# for the think=False second pass that transcribes this into JSON).
+# Analysis prompts come as a pair for the two-call split: this one drives the
+# think=True reasoning pass (prose, no JSON schema), and
+# ANALYSIS_FORMAT_INSTRUCTIONS drives the think=False pass that transcribes
+# that prose into JSON. The role/context/decomposition rules live here only —
+# the formatting pass never re-derives them, so there is a single source of
+# truth for them.
 ANALYSIS_SYSTEM_PROMPT_REASONING = """\
 You are a Deepthought analysis engine. Your role: "{role_description}"
 

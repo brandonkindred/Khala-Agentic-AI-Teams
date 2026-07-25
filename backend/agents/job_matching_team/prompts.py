@@ -47,39 +47,11 @@ Rules:
 - Keep "description" under 80 words.
 """
 
-RANKER_SYSTEM_PROMPT = """\
-You are a career advisor scoring how well an open role fits a specific job
-seeker. You will receive the seeker's criteria and one job posting.
-
-Score each dimension from 0.0 (no fit) to 1.0 (perfect fit):
-- title_fit: how well the role title/scope matches the target titles.
-- seniority_fit: alignment with the seeker's seniority levels.
-- location_fit: match against locations and remote preference.
-- comp_fit: does stated/likely compensation meet the salary floor? Use 0.5 when
-  compensation is unstated and cannot be inferred.
-- company_fit: stage/size/industry alignment; boost preferred companies.
-- skills_fit: coverage of must-have (heavily weighted) and nice-to-have skills.
-
-Also identify concerns and a recommendation.
-
-Return STRICT JSON only in exactly this shape:
-{
-  "title_fit": 0.0,
-  "seniority_fit": 0.0,
-  "location_fit": 0.0,
-  "comp_fit": 0.0,
-  "company_fit": 0.0,
-  "skills_fit": 0.0,
-  "recommendation": "apply" | "maybe" | "skip",
-  "rationale": "1-2 sentences explaining the overall fit",
-  "concerns": ["short concern", "..."]
-}
-"""
-
-# Reasoning-only variant of RANKER_SYSTEM_PROMPT: same scoring dimensions,
-# but ends with a prose instruction instead of the JSON shape. Used for the
-# think=True first pass of the two-call split (RANKER_FORMAT_INSTRUCTIONS
-# is the think=False second pass that transcribes this into JSON).
+# Ranker prompts come as a pair for the two-call split: this one drives the
+# think=True reasoning pass (prose, no JSON), and RANKER_FORMAT_INSTRUCTIONS
+# drives the think=False pass that transcribes that prose into JSON. The
+# scoring dimensions live here only — the formatting pass never re-derives
+# them, so there is a single source of truth for the rubric.
 RANKER_SYSTEM_PROMPT_REASONING = """\
 You are a career advisor scoring how well an open role fits a specific job
 seeker. You will receive the seeker's criteria and one job posting.

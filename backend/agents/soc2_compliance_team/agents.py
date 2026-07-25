@@ -43,8 +43,21 @@ Respond with a single JSON object only. No markdown or explanation outside JSON.
   - "evidence_observed": string (what you saw in the repo that led to this finding)
 - "compliant": boolean (true only if there are no critical or high severity findings)
 
-Be specific and cite repo content where possible. If the repo has no relevant evidence (e.g. no auth code for Security), report that as a finding (e.g. "No authentication/authorization implementation found"). Do not invent file paths.
+Transcribe the analysis below faithfully — do not add or invent information
+beyond it. In particular: do not introduce findings it does not state, do not
+fill in file paths it does not name (leave "location" empty instead), and do
+not change its compliance verdict.
 """
+"""Formatting-pass (think=False) instructions: the JSON shape plus a
+transcribe-only guard.
+
+This pass receives ONLY the reasoning pass's prose — never the repository
+content — so it cannot audit anything. The investigative directives ("cite
+repo content", "report that as a finding", "do not invent file paths") live
+in :data:`_TSC_REASONING_INSTRUCTION`, which reaches the pass that actually
+sees the repo. Leaving them here invited a transcription-only call to invent
+a location or a spurious critical/high finding, which would flip
+``compliant``."""
 
 _TSC_REASONING_INSTRUCTION = """
 Think through this carefully, then write your audit as structured prose (not JSON): a short
@@ -290,7 +303,9 @@ recommendations)."""
                 '- "recommendations_summary": array of strings (prioritized remediation steps, ordered by impact)\n'
                 '- "raw_markdown": string (full report in markdown: title, executive summary, scope, '
                 'findings by TSC with severity and recommendation, then recommendations summary)\n\n'
-                "Respond with valid JSON only. No text outside JSON."
+                "Respond with valid JSON only. No text outside JSON. "
+                "Transcribe the analysis below faithfully — do not add or invent "
+                "information beyond it."
             ),
             reasoning_temperature=0.2,
             objective="generate soc2 report",
@@ -343,7 +358,9 @@ timeline."""
                 '- "recommended_timeline": string (high-level timeline, e.g. "3–6 months readiness, then 2–4 months '
                 'for Type I/II examination")\n'
                 '- "raw_markdown": string (full document in markdown for display/saving)\n\n'
-                "Respond with valid JSON only. No text outside JSON."
+                "Respond with valid JSON only. No text outside JSON. "
+                "Transcribe the analysis below faithfully — do not add or invent "
+                "information beyond it."
             ),
             reasoning_temperature=0.2,
             objective="produce soc2 next steps",

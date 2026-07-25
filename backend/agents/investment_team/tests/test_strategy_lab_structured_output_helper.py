@@ -66,6 +66,111 @@ def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatc
     assert "reasoning prose" in client.calls[0]["prompt"]
 
 
+def test_reasoning_prompt_overrides_the_templates_json_only_directive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The four call sites embed "Return ONLY a JSON object" in their USER
+    prompt, which would outrank the system prompt's prose-only instruction and
+    make the reasoning pass emit JSON (wasting a call and a budget unit for no
+    reasoning). The reasoning call's user prompt must re-assert prose last.
+    """
+    client = _StubClient({"ready": True, "rationale": "ok", "issues": []})
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
+
+    user_prompt = "Design a spec.\nReturn ONLY a JSON object with no markdown."
+    so_mod.invoke_structured_with_schema(
+        "strategy_design",
+        "sys",
+        user_prompt,
+        phase="design_generate_structured",
+        schema={"type": "object"},
+        charge=False,
+        objective="strategy design (structured)",
+        logger=logging.getLogger("test.so"),
+        reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+    )
+
+    reasoning_prompt = client.reasoning_calls[0]["prompt"]
+    # The task-specific content is preserved...
+    assert "Design a spec." in reasoning_prompt
+    # ...and the JSON directive is explicitly neutralized, after it.
+    assert reasoning_prompt.index("Return ONLY a JSON object") < reasoning_prompt.index(
+        "OVERRIDE FOR THIS PASS ONLY"
+    )
+    assert "emit NO JSON at all" in reasoning_prompt
+    # The formatting pass still gets the unmodified directive (no override).
+    assert "OVERRIDE FOR THIS PASS ONLY" not in client.calls[0]["prompt"]
+    assert "Return ONLY a JSON object" in client.calls[0]["prompt"]
+
+
+def test_reasoning_pass_starvation_presents_as_schema_forced_without_breaking_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reasoning-pass ``LLMSemanticExhaustionError`` must reach callers as
+    ``schema_forced=True`` (so their degrade check fires) while still honoring
+    ``interface.py``'s documented pairing that ``schema_forced=True`` implies
+    ``retry_thinking_level is None`` — so a fresh receipt is raised rather than
+    the original being mutated in place.
+    """
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+    from llm_service.interface import LLMSemanticExhaustionError
+
+    original = LLMSemanticExhaustionError(
+        "reasoning starved",
+        attempts_used=3,
+        original_thinking_level="max",
+        retry_thinking_level="high",  # the ladder DID run on this path
+        content_bytes_seen=True,
+        payload_fingerprint="fp-123",
+        finish_reason="length",
+        schema_forced=False,
+    )
+
+    class _StarvingClient(_StubClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            raise original
+
+    client = _StarvingClient({})
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
+
+    with pytest.raises(StrategyLabLLMError) as excinfo:
+        so_mod.invoke_structured_with_schema(
+            "strategy_design",
+            "sys",
+            "user",
+            phase="design_generate_structured",
+            schema={"type": "object"},
+            charge=False,
+            objective="strategy design (structured)",
+            logger=logging.getLogger("test.so"),
+            reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+        )
+
+    # The envelope wraps it; callers (design.py et al.) inspect ``.cause`` and
+    # gate their degrade on ``schema_forced`` — assert what they actually see.
+    raised = excinfo.value.cause
+    assert isinstance(raised, LLMSemanticExhaustionError)
+    assert raised is not original, "must not mutate the client's receipt in place"
+    assert raised.schema_forced is True
+    # The documented invariant: schema_forced=True => retry_thinking_level is None.
+    assert raised.retry_thinking_level is None
+    # Diagnostics from the original are preserved rather than dropped.
+    assert raised.cause is original
+    assert raised.attempts_used == 3
+    assert raised.original_thinking_level == "max"
+    assert raised.content_bytes_seen is True
+    assert raised.payload_fingerprint == "fp-123"
+    assert raised.finish_reason == "length"
+    assert "'high'" in str(raised)  # the original ladder level stays visible
+    # The original receipt is left untouched for any other holder of it.
+    assert original.schema_forced is False
+    assert original.retry_thinking_level == "high"
+    # The formatting call never ran.
+    assert client.calls == []
+
+
 def test_invoke_structured_with_schema_doubles_timeout_for_two_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

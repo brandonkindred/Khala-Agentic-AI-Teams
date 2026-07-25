@@ -5,10 +5,14 @@ fabricated emails, missing CTAs, bloated subject lines, leftover template
 tokens, ICP misalignment. The orchestrator wraps the critic in a one-shot
 refinement loop: emit -> critic -> on revise, re-emit with violations.
 
-The critic uses :func:`llm_service.complete_validated` so the same role-keyed
-client and self-correction guard the rest of the sales pod relies on apply
-here too. Tests inject a ``CannedLLMClient`` via ``llm_client=...`` so this
-file stays Strands-free and runs in CI without a network.
+The critic uses :func:`llm_service.complete_validated_via_reasoning` — a
+think=True prose reasoning pass over the rubric, then a think=False pass that
+transcribes it into :class:`OutreachCriticReport` through
+``complete_validated`` — so the same role-keyed client and self-correction
+guard the rest of the sales pod relies on apply here too. Tests inject a
+``CannedLLMClient`` via ``llm_client=...`` so this file stays Strands-free and
+runs in CI without a network; such doubles must implement ``complete()`` too,
+or the reasoning pass silently consumes a canned formatting response.
 """
 
 from __future__ import annotations
