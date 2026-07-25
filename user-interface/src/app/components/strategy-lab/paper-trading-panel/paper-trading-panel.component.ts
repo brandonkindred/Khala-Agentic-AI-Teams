@@ -7,7 +7,8 @@ import { MatDividerModule } from '@angular/material/divider';
 
 import { DateOnlyPipe } from '../../../shared/date-only.pipe';
 import { formatPct, formatRatio } from '../../../shared/number-format';
-import { verdictLabel, publishabilitySkipLabel } from '../strategy-lab.formatters';
+import { publishabilitySkipLabel } from '../../../shared/publishability';
+import { verdictLabel } from '../strategy-lab.formatters';
 import type { PaperTradingSession, PaperTradingComparison, StrategyLabRecord } from '../../../models';
 
 /** Precomputed comparison-table row — see `comparisonMetrics`. */

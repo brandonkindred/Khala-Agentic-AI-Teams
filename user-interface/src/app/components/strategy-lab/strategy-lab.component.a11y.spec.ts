@@ -8,11 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
-import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
-import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
-import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
+import { strategyLabProvidersOverride } from '../../testing/strategy-lab-component-providers';
 import type {
   StrategyLabRecord,
   StrategySpec,
@@ -28,24 +26,6 @@ function stubOf(fixture: ComponentFixture<StrategyLabComponent>): RunServiceStub
   return fixture.componentInstance.runService as unknown as RunServiceStub;
 }
 
-/**
- * The `overrideComponent(StrategyLabComponent, ...)` override every fixture
- * in this file uses: a fresh `StrategyLabRunService` stub (read back later via
- * `stubOf`), plus the real `StrategyLabActivityLogService`/
- * `StrategyLabPaperTradingService` — one shared definition instead of a
- * copy-pasted providers array per describe block.
- */
-function strategyLabProvidersOverride() {
-  return {
-    set: {
-      providers: [
-        { provide: StrategyLabRunService, useValue: createRunServiceStub() },
-        StrategyLabActivityLogService,
-        StrategyLabPaperTradingService,
-      ],
-    },
-  };
-}
 
 const STRATEGY: StrategySpec = {
   strategy_id: 'strat-1',
@@ -137,7 +117,7 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
     })
-      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride())
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(createRunServiceStub()))
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
@@ -237,7 +217,7 @@ describe('StrategyLabComponent a11y — root region labelling (showTitle input)'
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
     })
-      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride())
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(createRunServiceStub()))
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
@@ -363,7 +343,7 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
     })
-      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride())
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(createRunServiceStub()))
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
@@ -516,7 +496,7 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
     })
-      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride())
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(createRunServiceStub()))
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
@@ -1553,7 +1533,7 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
     })
-      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride())
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(createRunServiceStub()))
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
@@ -1786,7 +1766,7 @@ describe('StrategyLabComponent a11y — phase stepper state (WCAG 1.3.1 / 4.1.2)
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
     })
-      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride())
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(createRunServiceStub()))
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);
@@ -1894,7 +1874,7 @@ describe('StrategyLabComponent a11y — visible run progress (role=meter + curre
         { provide: IntegrationsApiService, useValue: integrationsSpy },
       ],
     })
-      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride())
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(createRunServiceStub()))
       .compileComponents();
 
     const fixture = TestBed.createComponent(StrategyLabComponent);

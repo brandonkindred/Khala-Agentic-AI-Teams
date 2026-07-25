@@ -16,7 +16,6 @@ import type {
 } from '../../models';
 import { COMPARISON_OP_OPTIONS } from '../../models';
 import { formatPct, formatUsd } from '../../shared/number-format';
-export { publishabilitySkipLabel } from '../../shared/publishability';
 
 /** Material icon per asset class, keyed by the lowercased category value. */
 export const ASSET_CLASS_ICONS: Record<string, string> = {

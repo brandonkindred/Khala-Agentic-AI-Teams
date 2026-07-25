@@ -26,7 +26,7 @@ import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import type { PageEvent } from '@angular/material/paginator';
 import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
-import { Observable, Subscription, of } from 'rxjs';
+import { Observable, of } from 'rxjs';
 import { finalize, map } from 'rxjs/operators';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
@@ -330,18 +330,19 @@ export class StrategyLabComponent implements OnInit {
    * Postconditions: every value `source$` emits — including `null`, which
    *   clears the banner — is set on `error` until the component is destroyed.
    */
-  private mirrorErrorsIntoBanner<T extends string | null>(source$: Observable<T>): Subscription {
-    return source$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((message) => this.error.set(message));
+  private mirrorErrorsIntoBanner<T extends string | null>(source$: Observable<T>): void {
+    source$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((message) => this.error.set(message));
   }
 
   /**
-   * Mirrors `paperTradingService.errors$` into the component's `error`
-   * signal. A field initializer (not wired inside `ngOnInit()`) so it's
-   * active the instant the component is constructed — `runPaperTrading()`
-   * can be called, and its guard/POST error surfaced, before `ngOnInit()`
-   * ever runs.
+   * Wires `paperTradingService.errors$` into the `error` signal from the
+   * constructor (not `ngOnInit()`) so it's active the instant the component
+   * is constructed — `runPaperTrading()` can be called, and its guard/POST
+   * error surfaced, before `ngOnInit()` ever runs.
    */
-  private readonly paperTradingErrorSub = this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
+  constructor() {
+    this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
+  }
 
   ngOnInit(): void {
     this.loadConfig();

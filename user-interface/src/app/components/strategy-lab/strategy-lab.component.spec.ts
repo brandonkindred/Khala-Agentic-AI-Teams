@@ -7,8 +7,6 @@ import { vi } from 'vitest';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { NotificationService } from '../../core/notification.service';
-import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
-import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
 import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
@@ -16,6 +14,7 @@ import {
   createPaperTradingServiceStub,
   type PaperTradingServiceStub,
 } from '../../testing/strategy-lab-paper-trading-service.stub';
+import { strategyLabProvidersOverride } from '../../testing/strategy-lab-component-providers';
 import type {
   PaperTradingSession,
   RunStrategyLabRequest,
@@ -88,15 +87,7 @@ describe('StrategyLabComponent — asset categories', () => {
       })
       // StrategyLabRunService is provided at the component level (see its
       // `providers` array); override that provider with the test double.
-      .overrideComponent(StrategyLabComponent, {
-        set: {
-          providers: [
-            { provide: StrategyLabRunService, useValue: runService },
-            StrategyLabActivityLogService,
-            StrategyLabPaperTradingService,
-          ],
-        },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     fixture = TestBed.createComponent(StrategyLabComponent);
@@ -295,15 +286,12 @@ describe('StrategyLabComponent — paper trading delegation', () => {
       .overrideProvider(MatDialog, {
         useValue: { open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }) },
       })
-      .overrideComponent(StrategyLabComponent, {
-        set: {
-          providers: [
-            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
-            StrategyLabActivityLogService,
-            { provide: StrategyLabPaperTradingService, useValue: paperTradingService },
-          ],
-        },
-      })
+      .overrideComponent(
+        StrategyLabComponent,
+        strategyLabProvidersOverride(createRunServiceStub(), [
+          { provide: StrategyLabPaperTradingService, useValue: paperTradingService },
+        ]),
+      )
       .compileComponents();
 
     component = TestBed.createComponent(StrategyLabComponent).componentInstance;
@@ -385,15 +373,7 @@ describe('StrategyLabComponent — destructive confirmations', () => {
       ],
     })
       .overrideProvider(MatDialog, { useValue: dialogSpy })
-      .overrideComponent(StrategyLabComponent, {
-        set: {
-          providers: [
-            { provide: StrategyLabRunService, useValue: runService },
-            StrategyLabActivityLogService,
-            StrategyLabPaperTradingService,
-          ],
-        },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     // No detectChanges(): keeps ngOnInit's data loads out of these focused tests.
@@ -557,15 +537,7 @@ describe('StrategyLabComponent — rendered template under OnPush', () => {
         },
       ],
     })
-      .overrideComponent(StrategyLabComponent, {
-        set: {
-          providers: [
-            { provide: StrategyLabRunService, useValue: runService },
-            StrategyLabActivityLogService,
-            StrategyLabPaperTradingService,
-          ],
-        },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     fixture = TestBed.createComponent(StrategyLabComponent);
@@ -700,15 +672,7 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
       .overrideProvider(MatDialog, {
         useValue: { open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }) },
       })
-      .overrideComponent(StrategyLabComponent, {
-        set: {
-          providers: [
-            { provide: StrategyLabRunService, useValue: runService },
-            StrategyLabActivityLogService,
-            StrategyLabPaperTradingService,
-          ],
-        },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     component = TestBed.createComponent(StrategyLabComponent).componentInstance;
@@ -819,12 +783,12 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
   // loadPaperTradingResults/runPaperTrading's own guard/dedupe/tracking logic
   // moved to strategy-lab-paper-trading.service.spec.ts; delegation (does the
   // component call the service?) is covered in the 'paper trading delegation'
-  // describe above using a stub. The two tests below are neither: this
+  // describe above using a stub. The three tests below are neither: this
   // describe block provides the REAL StrategyLabPaperTradingService (not a
   // stub), so they instead prove the live wiring between the real component
-  // and the real service — the field-initializer errors$ subscription
-  // (strategy-lab.component.ts's paperTradingErrorSub) actually reaches
-  // component.error(), and a successful POST actually reaches
+  // and the real service — the component's early errors$-to-error() wiring
+  // actually reaches component.error() for both the guard and POST-failure
+  // paths, and a successful POST actually reaches
   // runService.trackPaperTradingSession — which no other spec file checks
   // end-to-end for this pair of classes.
 
@@ -853,5 +817,14 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
       expect.objectContaining({ session_id: 'pt-1' }),
     );
     expect(component.error()).toBeNull();
+  });
+
+  it('runPaperTrading (real service, real component) surfaces a POST failure via error()', () => {
+    apiSpy.runPaperTrading.mockReturnValue(throwError(() => ({ error: { detail: 'worker unavailable' } })));
+    const record = { lab_record_id: 'rec-1', is_publishable: true } as unknown as StrategyLabRecord;
+
+    component.runPaperTrading(record);
+
+    expect(component.error()).toBe('worker unavailable');
   });
 });
