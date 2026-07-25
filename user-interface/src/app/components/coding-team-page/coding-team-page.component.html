@@ -577,7 +577,7 @@
             @if (jobStatus.github_pr_url) {
               <div class="github-job-panel__field github-job-panel__field--pr">
                 <mat-icon aria-hidden="true">merge_type</mat-icon>
-                <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener">
+                <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener noreferrer">
                   {{ jobStatus.github_pr_url }}
                 </a>
               </div>
