@@ -17,7 +17,10 @@ from typing import Any, Iterator, Optional
 
 import httpx
 
-logger = logging.getLogger(__name__)
+# Named to match the pre-split logger identity (`...github_source.client`), not this
+# module's own `__name__`: these log records are byte-identical carry-overs from client.py,
+# and keeping the same logger name preserves that history for anything filtering on it.
+logger = logging.getLogger(__name__.replace("client_http", "client"))
 
 DEFAULT_BASE_URL = "https://api.github.com"
 DEFAULT_TIMEOUT_S = 30.0
@@ -57,9 +60,14 @@ class GitHubAPIError(RuntimeError):
 class _GitHubHttpMixin:
     """Low-level request/pagination methods for `GitHubClient`.
 
-    Relies on instance attributes set up by `GitHubClient.__init__`:
-    ``self._token``, ``self._base_url``, ``self._timeout``,
-    ``self._max_retries``, ``self._sleep``, ``self._client``.
+    Preconditions:
+        - The inheriting class sets, before any method here is called (as
+          ``GitHubClient.__init__`` does): ``self._token`` (str), ``self._base_url``
+          (str, no trailing slash), ``self._max_retries`` (int, >= 1), ``self._sleep``
+          (callable, ``time.sleep``-compatible), and ``self._client`` (an ``httpx.Client``).
+          ``self._timeout`` is not read by any method here — it is stored by
+          ``GitHubClient.__init__`` for introspection only, since the actual per-request
+          timeout is already baked into ``self._client`` at construction time.
     """
 
     # ----- low-level request -------------------------------------------------

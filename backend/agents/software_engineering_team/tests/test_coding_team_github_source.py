@@ -33,8 +33,8 @@ from software_engineering_team.github_source import (
 from software_engineering_team.github_source.client import (
     MAX_ISSUES_TRAVERSED,
     _is_safe_ref,
-    _parse_next_link,
 )
+from software_engineering_team.github_source.client_http import _parse_next_link
 from software_engineering_team.models import CodingTeamPlanInput
 
 # ---------------------------------------------------------------------------

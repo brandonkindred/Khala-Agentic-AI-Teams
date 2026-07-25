@@ -20,19 +20,15 @@ from typing import Any, Iterator, Optional
 
 import httpx
 
-# RATE_LIMIT_CAP_S and _parse_next_link are unused in this module but re-exported for
-# backward compatibility: callers/tests import them from `github_source.client` directly.
-from .client_http import (  # noqa: F401
+from .client_http import (
     DEFAULT_BASE_URL,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT_S,
     MAX_ISSUES_TRAVERSED,
     MAX_REVIEW_COMMENTS_TRAVERSED,
     MAX_REVIEW_THREADS_TRAVERSED,
-    RATE_LIMIT_CAP_S,
     GitHubAPIError,
     _GitHubHttpMixin,
-    _parse_next_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -340,8 +336,6 @@ class GitHubClient(_GitHubHttpMixin):
         self._max_retries = max(1, max_retries)
         self._sleep = sleep
         self._client = httpx.Client(timeout=timeout)
-
-    # ----- public methods ----------------------------------------------------
 
     def get_repo(self, owner: str, repo: str) -> Repo:
         """Fetch repository metadata (``GET /repos/{owner}/{repo}``).
