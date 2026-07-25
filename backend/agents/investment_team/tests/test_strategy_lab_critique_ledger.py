@@ -182,6 +182,20 @@ def test_stall_threshold_floored_to_one() -> None:
     assert led.is_stalled(0) is True
 
 
+def test_two_cycle_oscillation_is_detected_as_stall_with_enough_history() -> None:
+    """An A/B/A/B... oscillating open-issue set is recognized as a period-2
+    stall once the window holds at least two full cycles (n >= 4)."""
+    led = CritiqueLedger()
+    issue_a = _issue("hypothesis", "vague-a")
+    issue_b = _issue("hypothesis", "vague-b")
+    for i in range(6):
+        critique = SpecCritique(ready=False, issues=[issue_a if i % 2 == 0 else issue_b])
+        led.record_round(critique)
+    assert led.is_stalled(2) is False
+    assert led.is_stalled(3) is False
+    assert led.is_stalled(4) is True
+
+
 def test_current_open_returns_copy() -> None:
     led = CritiqueLedger()
     led.record_round(SpecCritique(ready=False, issues=[_issue("hypothesis", "vague")]))
