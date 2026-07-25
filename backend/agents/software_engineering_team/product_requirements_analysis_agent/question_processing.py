@@ -442,8 +442,10 @@ def review_question_answer_alignment(
     Postconditions: returns the aligned list, or the unmodified list on empty input
         or a full-batch LLM/parse failure; never raises. This is a per-question
         review (ids are preserved), so an item that individually fails to parse
-        falls back to its original (unaligned) question by id rather than being
-        dropped from the batch.
+        falls back to its original (unaligned) question by id, and any original
+        question whose id never appears in the result (e.g. the failed item's id
+        was missing or unrecognized) is appended at the end — no original
+        question is ever dropped from the batch.
     """
     if len(open_questions) == 0:
         return []
@@ -488,16 +490,25 @@ def review_question_answer_alignment(
         if not isinstance(aligned, list) or len(aligned) == 0:
             return list(open_questions)
         result = []
+        seen_ids = set()
         for i, q_data in enumerate(aligned):
             try:
-                result.append(parse_open_question(q_data, i))
+                parsed = parse_open_question(q_data, i)
+                result.append(parsed)
+                seen_ids.add(parsed.id)
             except Exception as e:
                 logger.warning("Failed to parse aligned question %d: %s", i, e)
                 fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
                 original = original_by_id.get(fallback_id) if fallback_id else None
                 if original is not None:
                     result.append(original)
-        return result if result else list(open_questions)
+                    seen_ids.add(original.id)
+        if not result:
+            return list(open_questions)
+        for q in open_questions:
+            if q.id not in seen_ids:
+                result.append(q)
+        return result
     except Exception as e:
         logger.warning(
             "Question-answer alignment review failed, using original list: %s",

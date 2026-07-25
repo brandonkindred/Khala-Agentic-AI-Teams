@@ -935,8 +935,9 @@ def test_review_question_answer_alignment_retains_original_when_item_fails_to_pa
     assert result_by_id["q2"].question_text == "Which platform?"
 
 
-def test_review_question_answer_alignment_drops_unmatched_malformed_item() -> None:
-    """A malformed item whose id doesn't match any original question is skipped (no fallback available)."""
+def test_review_question_answer_alignment_restores_original_for_unmatched_malformed_item() -> None:
+    """A malformed item whose id doesn't match any original question still has its original
+    restored (appended), since alignment must never drop a question from the batch."""
     llm = _StubClient(
         {
             "aligned_questions": [
@@ -962,8 +963,38 @@ def test_review_question_answer_alignment_drops_unmatched_malformed_item() -> No
     ):
         result = agent._review_question_answer_alignment([q1, q2])
 
-    assert len(result) == 1
-    assert result[0].id == "q2"
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"].question_text == "Which platform?"
+
+
+def test_review_question_answer_alignment_restores_original_when_two_items_fail_one_unmatched() -> None:
+    """Regression for dropping an original question when one failed item matches by id and
+    another failed item has an unrecognized id: both originals must survive, not just the
+    id-matched fallback."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "q1", "question_text": "malformed"},
+                {"id": "unknown", "question_text": "also malformed"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=ValueError("simulated malformed item"),
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"] is q2
 
 
 def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> None:
