@@ -16,9 +16,7 @@ import ast
 import textwrap
 
 from investment_team.models import StrategySpec
-from investment_team.strategy_lab.quality_gates.code_conformance import (
-    CodeConformanceGate,
-)
+from investment_team.strategy_lab.quality_gates.code_conformance.gate import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.code_safety_ast import (
     _find_strategy_subclasses,
     _has_universe_constant,

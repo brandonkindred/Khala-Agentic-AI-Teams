@@ -29,7 +29,7 @@ from investment_team.strategy_lab.executor.strategy_indicators import (
     bollinger_bands,
     indicator_value,
 )
-from investment_team.strategy_lab.quality_gates.code_conformance import CodeConformanceGate
+from investment_team.strategy_lab.quality_gates.code_conformance.gate import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     _ShadowBar,
     _ShadowContext,
