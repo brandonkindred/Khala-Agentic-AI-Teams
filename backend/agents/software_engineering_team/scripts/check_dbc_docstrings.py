@@ -50,14 +50,17 @@ def _missing_sections(node: ast.AST) -> List[str]:
         - ``node`` is an ``ast.FunctionDef`` or ``ast.AsyncFunctionDef``.
     Postconditions:
         - Returns a list containing "docstring" when the function has no docstring
-          at all, else the subset of ``_REQUIRED_SECTIONS`` whose exact header text
-          does not appear in the docstring. Returns ``[]`` when the docstring
-          contains every required header (a fully-compliant function).
+          at all, else the subset of ``_REQUIRED_SECTIONS`` that does not appear as
+          its own line (ignoring surrounding whitespace) in the docstring. A section
+          name occurring only in prose (not on its own line) does not count — this
+          requires an actual header, not an incidental mention. Returns ``[]`` when
+          the docstring contains every required header (a fully-compliant function).
     """
     doc = ast.get_docstring(node)
     if not doc:
         return ["docstring"]
-    return [section for section in _REQUIRED_SECTIONS if section not in doc]
+    header_lines = {line.strip() for line in doc.splitlines()}
+    return [section for section in _REQUIRED_SECTIONS if section not in header_lines]
 
 
 def _iter_function_defs(tree: ast.Module) -> Iterable[ast.AST]:

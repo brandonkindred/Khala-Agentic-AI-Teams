@@ -82,6 +82,20 @@ def test_missing_both_sections_is_flagged(tmp_path: Path) -> None:
     assert "missing Preconditions:, Postconditions:" in violations[0]
 
 
+def test_prose_only_mention_is_not_accepted_as_a_header(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        '''
+        def do_thing(x):
+            """Do a thing. No Preconditions: or Postconditions: apply here, just prose."""
+            return x
+        ''',
+    )
+    violations = check_file(path)
+    assert len(violations) == 1
+    assert "missing Preconditions:, Postconditions:" in violations[0]
+
+
 def test_private_function_without_sections_is_not_flagged(tmp_path: Path) -> None:
     path = _write(
         tmp_path,

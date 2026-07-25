@@ -266,11 +266,16 @@ def run_coding_team_orchestrator(
         - ``repo_path`` is a git checkout the pipeline can branch/merge in; ``plan_input`` carries
           the plan text (and any already-resolved HITL decisions) the Tech Lead plans from.
     Postconditions:
-        - Runs the coding-team pipeline to a terminal job status (completed, completed-with-failures,
-          already-complete, failed, or cancelled) via ``update_job_fn``/the default job store —
-          never raises for an in-pipeline failure, only for the precondition violation above.
-        - The task graph's persist/flush coordinator is always stopped before returning, on every
-          exit path including an unexpected exception.
+        - On a normal (non-raising) return, the pipeline has reached a terminal job status
+          (completed, completed-with-failures, already-complete, failed, or cancelled) via
+          ``update_job_fn``/the default job store, or ended early via a HITL pause whose own
+          cycle already recorded the terminal status. Only specific, individually-handled
+          failures (the progress-band precondition, worker construction) are guaranteed to end
+          this way; an exception from planning, job-store I/O, persistence, or ``swarm.run()``
+          itself is not caught here and propagates to the caller, which is then responsible for
+          recording/handling it — the job may be left without a terminal status in that case.
+        - The task graph's persist/flush coordinator is always stopped before this function exits,
+          on every exit path including an unexpected exception.
     """
     if not (0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100):
         raise ValueError(
