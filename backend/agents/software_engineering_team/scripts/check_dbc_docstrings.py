@@ -63,25 +63,43 @@ def _missing_sections(node: ast.AST) -> List[str]:
     return [section for section in _REQUIRED_SECTIONS if section not in header_lines]
 
 
-def _iter_function_defs(tree: ast.Module) -> Iterable[ast.AST]:
-    """Every module-level and class-level function/method definition in ``tree``.
+_STRUCTURAL_NODE_TYPES = tuple(
+    t
+    for t in (
+        ast.ClassDef,
+        ast.If,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.With,
+        ast.AsyncWith,
+        ast.Try,
+        getattr(ast, "TryStar", None),
+    )
+    if t is not None
+)
+
+
+def _iter_function_defs(node: ast.AST) -> Iterable[ast.AST]:
+    """Every function/method definition reachable from ``node`` without crossing a def boundary.
 
     Preconditions:
-        - ``tree`` is a parsed module (``ast.parse`` result).
+        - ``node`` is a parsed module (``ast.parse`` result) or, for the recursive calls this
+          function makes on itself, a class/structural-statement node found within one.
     Postconditions:
-        - Yields each ``FunctionDef``/``AsyncFunctionDef`` found at module scope or
-          directly inside a class body. Functions nested inside another function
-          (closures/local helpers) are never yielded — they are implementation
-          details of their enclosing function, not part of the module's public
-          contract surface.
+        - Yields each ``FunctionDef``/``AsyncFunctionDef`` reached by descending through the
+          module, class bodies (including nested classes), and structural statements
+          (``if``/``for``/``while``/``with``/``try`` and their branches) at any depth — so a
+          method hidden behind a class-level ``if`` or defined on a nested class is still found.
+          Functions nested inside another function (closures/local helpers) are never yielded —
+          this walk does not recurse into a function's own body — since they are implementation
+          details of their enclosing function, not part of the module's public contract surface.
     """
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield node
-        elif isinstance(node, ast.ClassDef):
-            for member in ast.iter_child_nodes(node):
-                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    yield member
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield child
+        elif isinstance(child, _STRUCTURAL_NODE_TYPES):
+            yield from _iter_function_defs(child)
 
 
 def check_file(path: Path) -> List[str]:

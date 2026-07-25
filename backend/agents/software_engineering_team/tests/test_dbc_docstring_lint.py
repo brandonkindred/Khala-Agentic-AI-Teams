@@ -134,6 +134,38 @@ def test_class_method_is_checked(tmp_path: Path) -> None:
     assert "do_thing" in violations[0]
 
 
+def test_method_in_nested_class_is_checked(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        class Outer:
+            class Inner:
+                def do_thing(self, x):
+                    return x
+        """,
+    )
+    violations = check_file(path)
+    assert len(violations) == 1
+    assert "do_thing" in violations[0]
+
+
+def test_method_behind_class_level_if_is_checked(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        import sys
+
+        class Foo:
+            if sys.version_info >= (3, 0):
+                def do_thing(self, x):
+                    return x
+        """,
+    )
+    violations = check_file(path)
+    assert len(violations) == 1
+    assert "do_thing" in violations[0]
+
+
 def test_nested_function_is_not_flagged(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
