@@ -46,12 +46,16 @@ runs five phases in strict order:
      pass **in the same outer cycle**.
    - **Frontend-only terminal edge**: the post-loop max-cycles check
      (`shared/phases/execution.py:1189-1191`) runs unconditionally after the loop
-     exits, even when the exit was a clean `break` on a fully-passing cycle. It only
-     skips marking the microtask `REVIEW_FAILED` when `still_failing` is false *or*
-     `gate_config.max_cycles_requires_failing_gate` is true. The backend config sets
-     `max_cycles_requires_failing_gate=True`, so a clean pass on the capped cycle
-     still proceeds to Documentation. The frontend config sets it to `False`
-     (`frontend_code_v2_team/phases/execution.py:278`), so on the frontend, passing
+     exits, even when the exit was a clean `break` on a fully-passing cycle. The
+     condition that marks `REVIEW_FAILED` is `still_failing or not
+     gate_config.max_cycles_requires_failing_gate` — so it is **skipped** (the
+     microtask proceeds) only when *both* `still_failing` is false **and**
+     `gate_config.max_cycles_requires_failing_gate` is true; either fact alone is
+     not sufficient. The backend config sets `max_cycles_requires_failing_gate=True`,
+     so a clean pass on the capped cycle still proceeds to Documentation there
+     (both conditions hold: not still_failing, and the flag is true). The frontend
+     config sets it to `False` (`frontend_code_v2_team/phases/execution.py:278`),
+     so on the frontend, passing
      every gate on the exact cycle that also happens to hit `max_total_cycles` is
      still marked `REVIEW_FAILED` and does **not** proceed to Documentation — a
      frontend-only terminal edge that any concurrency redesign must preserve or
@@ -71,8 +75,8 @@ the parent effort names it, but it has no live position in the sequence today.
 | Gate | Implementation | Reads | Writes |
 |---|---|---|---|
 | Coding | `_execute_coding_phase` (`execution.py:693-784`) | `mt` (id/title/description/tool_agent/depends_on), `task`, `planning_result.language`, `architecture`, `existing_code`, `repo_path`, running `all_files` | `mt.output_files`, `microtask_files`, disk writes, updates `all_files` in place |
-| Build verification | inside `run_code_review_phase_impl` (`review.py:45-187`) | `microtask_files`, `repo_path` (runs build against disk), `deps.build_verifier` | `ReviewIssue(source="build")` on failure (does not short-circuit lint/code-review) |
-| Lint | inside `run_code_review_phase_impl` | `microtask_files`, `deps.linting_tool_agent` | `ReviewIssue(source="lint")` |
+| Build verification | inside `run_code_review_phase_impl` (`review.py:45-187`) | `repo_path` (runs build against the on-disk worktree), `deps.build_verifier` | `ReviewIssue(source="build")` on failure; **also**, on failure, `_run_build_verification` → `_try_build_fix_one_at_a_time` writes repaired files directly to the worktree (`out_path.write_text`, `build_fix.py:542-547`) before re-checking — not a read-only step (does not short-circuit lint/code-review) |
+| Lint | inside `run_code_review_phase_impl` | `repo_path` (linter runs against the on-disk worktree via `LintToolInput(repo_path=...)`, `review.py:121-127`), `deps.linting_tool_agent`; `microtask_files` is used only afterward to filter which lint issues are kept | `ReviewIssue(source="lint")` |
 | Code review (agent) | `_code_review_step` via `run_code_review_phase_impl` | `microtask_files`, `review_context` (architecture/spec), `config.enable_llm_review_grounding` | `ReviewIssue(source="code_review", ...)`; combined `GateOutcome(passed, issues, summary, raw_issue_count)` (`execution.py:360-377`) |
 | QA (backend) | `run_qa_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:391-437`, body at `213-389`) | `microtask_files` (post-CR content), `deps.qa_agent`, `agent_review_cache`, and **only** `deps.tool_agents["testing_qa"]` — the shared body filters by `spec.tool_kind` (`review.py:294-296`) before calling any tool agent | `GateOutcome` with `source="qa"` issues |
 | Security (backend) | `run_security_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:439+`, same shared body) | `microtask_files`, `deps.security_agent`, `agent_review_cache`, and **only** `deps.tool_agents["security"]`, filtered the same way | `GateOutcome` with `source="security"` issues |
@@ -143,7 +147,7 @@ Edge classification:
 - **Build verification is not a read-only check**: on failure, the production
   verifier calls `_try_build_fix_one_at_a_time` (`build_fix.py`), which writes
   LLM-generated patches directly to the worktree (`out_path.write_text`,
-  `build_fix.py:539-544`) and re-runs the build in a repair loop, before returning
+  `build_fix.py:542-547`) and re-runs the build in a repair loop, before returning
   pass/fail. So build verification, lint, and the code-review-agent call do
   **not** necessarily read one immutable snapshot: running them concurrently could
   have lint inspect files during or before an in-place build repair, while code
@@ -183,7 +187,7 @@ Edge classification:
 - Build verification, lint, and the code-review-agent call inside the Code Review
   gate (`review.py:45-187`) are not read-only against a shared immutable snapshot:
   build verification's failure path mutates the worktree in place via
-  `_try_build_fix_one_at_a_time` (`build_fix.py:539-544`). Parallelizing these
+  `_try_build_fix_one_at_a_time` (`build_fix.py:542-547`). Parallelizing these
   three requires first separating read-only verification from in-place repair (or
   freezing the workspace for the gate's duration) — see the dependency-graph note
   above.
