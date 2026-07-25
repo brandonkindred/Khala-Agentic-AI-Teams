@@ -199,8 +199,24 @@ def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
     assert len(out) == 1
 
 
-def test_analyze_feedback_error(monkeypatch) -> None:
-    """Non-transient LLM failure → empty list."""
+def test_analyze_feedback_json_parse_error(monkeypatch) -> None:
+    """Expected LLMJsonParseError → soft-failed to empty list."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMJsonParseError
+
+    a = _make_agent()
+
+    def boom(self, p, **kw):
+        raise LLMJsonParseError("bad json", response_preview="x")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    assert a.analyze_user_feedback_for_guideline_updates("fb", "g") == []
+
+
+def test_analyze_feedback_unexpected_error_propagates(monkeypatch) -> None:
+    """Unexpected/programming-bug exceptions must propagate, not be swallowed."""
+    import pytest
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent()
@@ -209,7 +225,8 @@ def test_analyze_feedback_error(monkeypatch) -> None:
         raise RuntimeError("LLM")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
-    assert a.analyze_user_feedback_for_guideline_updates("fb", "g") == []
+    with pytest.raises(RuntimeError, match="LLM"):
+        a.analyze_user_feedback_for_guideline_updates("fb", "g")
 
 
 def test_analyze_feedback_rate_limit_reraises(monkeypatch) -> None:
