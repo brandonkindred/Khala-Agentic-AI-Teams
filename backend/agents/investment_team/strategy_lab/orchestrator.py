@@ -2281,6 +2281,13 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, Verif
 # orchestrator module re-exports them so existing call sites that import
 # from ``investment_team.strategy_lab.orchestrator`` keep working without
 # the helpers cluttering this file.
+#
+# ``publishability_skip_reason`` is deliberately excluded from this list:
+# two record-assembly parameters elsewhere in this file
+# (``publishability_skip_reason: Optional[str] = None``) share its name, so
+# re-exporting it here trips ruff F811 ("redefinition of unused import") on
+# those unrelated parameters. It remains importable from
+# ``_orchestrator_helpers`` (or ``orchestrator_verification``) directly.
 # ──────────────────────────────────────────────────────────────────────────
 from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     RefinementStallTracker,

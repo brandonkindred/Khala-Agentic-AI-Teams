@@ -267,23 +267,20 @@ def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
     from investment_team.strategy_lab import orchestrator_verification as orch_verification_mod
     from investment_team.strategy_lab import zero_trade_repair as zt_repair_mod
 
-    orch_sites = _collect_attribute_call_sites(
-        inspect.getsource(orch_mod),
-        owner_attr="anomaly_detector",
-        method_attr="check",
-    )
-    verification_sites = _collect_attribute_call_sites(
-        inspect.getsource(orch_verification_mod),
-        owner_attr="anomaly_detector",
-        method_attr="check",
-    )
-    zt_sites = _collect_attribute_call_sites(
-        inspect.getsource(zt_repair_mod),
-        owner_attr="anomaly_detector",
-        method_attr="check",
-        root_names=frozenset({"orch"}),
-    )
-    sites = orch_sites + verification_sites + zt_sites
+    sites: list[dict[str, Any]] = []
+    for module, root_names in (
+        (orch_mod, frozenset({"self"})),
+        (orch_verification_mod, frozenset({"self"})),
+        (zt_repair_mod, frozenset({"orch"})),
+    ):
+        sites.extend(
+            _collect_attribute_call_sites(
+                inspect.getsource(module),
+                owner_attr="anomaly_detector",
+                method_attr="check",
+                root_names=root_names,
+            )
+        )
     assert len(sites) == 3, (
         "expected exactly 3 anomaly_detector.check sites (main loop + "
         "alignment loop sharing _check_anomalies_cached's call site, "

@@ -3,9 +3,9 @@ extracted from :mod:`orchestrator`.
 
 Pure move: every method below is relocated verbatim from ``orchestrator.py``.
 No behavior changes. ``VerificationMixin`` is mixed into
-``StrategyLabOrchestrator``
-(``class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, VerificationMixin):``);
-its methods expect the attributes ``StrategyLabOrchestrator.__init__`` sets on
+``StrategyLabOrchestrator`` (see the class statement in ``orchestrator.py``
+for the current base order); its methods expect the attributes
+``StrategyLabOrchestrator.__init__`` sets on
 ``self`` (``self.acceptance_gate``, ``self.convergence_tracker``,
 ``self.anomaly_detector``), plus the ``self.record_gates`` /
 ``self._evaluate_walk_forward`` / ``self._run_realism_gates`` methods — all of
