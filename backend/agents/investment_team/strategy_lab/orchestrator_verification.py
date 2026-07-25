@@ -34,7 +34,7 @@ from ._orchestrator_helpers import (
 from .agents.alignment import TradeAlignmentReport
 from .quality_gates.acceptance_gate import summarize_acceptance_reason
 from .quality_gates.exit_rule_conformance import ExitRuleConformanceGate
-from .quality_gates.models import QualityGateResult
+from .quality_gates.models import QualityGateResult, join_gate_details
 
 logger = logging.getLogger(__name__)
 
@@ -371,7 +371,7 @@ class VerificationMixin:
             else:
                 fallback_reasons: List[str] = []
                 if fallback_criticals:
-                    fallback_reasons.append("; ".join(g.details for g in fallback_criticals))
+                    fallback_reasons.append(join_gate_details(fallback_criticals))
                 if not return_ok:
                     fallback_reasons.append(
                         f"annualized_return {metrics.annualized_return_pct:.2f}% < "
@@ -445,7 +445,7 @@ class VerificationMixin:
                 and not r.passed
                 and r.severity == "critical"
             ]
-            detail = "; ".join(r.details for r in conformance_criticals)
+            detail = join_gate_details(conformance_criticals)
             suffix = (
                 f"exit_rule_conformance_failed: {detail}"
                 if detail
@@ -456,7 +456,7 @@ class VerificationMixin:
             )
 
         if execution_succeeded and trades and not realism_passed:
-            detail = "; ".join(r.details for r in realism_critical)
+            detail = join_gate_details(realism_critical)
             suffix = (
                 f"realism_failed: {detail}"
                 if detail

@@ -53,7 +53,7 @@ from ._orchestrator_helpers import (
 from .agents._llm_budget import DesignBudgetExhausted
 from .agents.alignment import TradeAlignmentReport
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
-from .quality_gates.models import QualityGateResult
+from .quality_gates.models import QualityGateResult, join_gate_details
 
 logger = logging.getLogger(__name__)
 
@@ -534,7 +534,7 @@ class AlignmentMixin:
                 {
                     "sub_phase": "rejected_unsafe_code",
                     "alignment_round": align_round,
-                    "details": "; ".join(g.details for g in critical_safety),
+                    "details": join_gate_details(critical_safety),
                 },
             )
             logger.warning("Alignment-proposed code failed safety gate for %s", spec.strategy_id)
@@ -645,7 +645,7 @@ class AlignmentMixin:
             emit_payload: Dict[str, Any] = {
                 "sub_phase": "anomaly_detected",
                 "alignment_round": align_round,
-                "details": "; ".join(g.details for g in critical_anomalies),
+                "details": join_gate_details(critical_anomalies),
             }
             if diagnostics_block:
                 emit_payload["execution_diagnostics"] = diagnostics_block

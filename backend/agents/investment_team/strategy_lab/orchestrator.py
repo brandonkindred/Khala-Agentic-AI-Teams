@@ -891,7 +891,7 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, Verif
         phase_back_count: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
         is_publishable: bool = False,
-        publishability_skip_reason: Optional[str] = None,
+        publishability_skip_reason: Optional[str] = None,  # noqa: F811 — param, not the imported function
         refinement_stalled: bool = False,
     ) -> StrategyLabRecord:
         """Build the final ``StrategyLabRecord`` from a settled cycle.
@@ -1412,7 +1412,7 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, Verif
         execution_succeeded: bool,
         is_winning: bool,
         is_publishable: bool,
-        publishability_skip_reason: Optional[str],
+        publishability_skip_reason: Optional[str],  # noqa: F811 — param, not the imported function
         trades_aligned: bool,
         refinement_attempts: List[str],
         alignment_rounds: int,
@@ -2282,12 +2282,12 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, Verif
 # from ``investment_team.strategy_lab.orchestrator`` keep working without
 # the helpers cluttering this file.
 #
-# ``publishability_skip_reason`` is deliberately excluded from this list:
-# two record-assembly parameters elsewhere in this file
-# (``publishability_skip_reason: Optional[str] = None``) share its name, so
-# re-exporting it here trips ruff F811 ("redefinition of unused import") on
-# those unrelated parameters. It remains importable from
-# ``_orchestrator_helpers`` (or ``orchestrator_verification``) directly.
+# ``publishability_skip_reason`` shares its name with two unrelated
+# record-assembly parameters below (``publishability_skip_reason:
+# Optional[str] = None``), which trips ruff's F811 "redefinition of unused
+# import" check on those parameter definitions even though they're in a
+# different scope. Each of those two parameters carries a suppression
+# comment with the explanation.
 # ──────────────────────────────────────────────────────────────────────────
 from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     RefinementStallTracker,
@@ -2319,6 +2319,7 @@ from ._orchestrator_helpers import (  # noqa: E402,F401  — keep at file end
     _SynthesisFetchResult,
     _SynthesisLoopOutcome,
     _VerificationOutcome,
+    publishability_skip_reason,
 )
 
 # ──────────────────────────────────────────────────────────────────────────
