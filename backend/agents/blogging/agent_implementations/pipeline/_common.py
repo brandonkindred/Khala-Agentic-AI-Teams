@@ -800,7 +800,7 @@ def _fill_story_placeholders(
             story_gaps=[gap.model_dump()],
             current_story_gap_index=0,
             current_gap_round=idx,
-            waiting_for_story_input=False,
+            waiting_for_story_input=True,
         )
         job_updater(
             phase="story_elicitation",
