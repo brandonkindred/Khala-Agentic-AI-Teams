@@ -226,7 +226,7 @@ def test_poll_short_circuits_on_on_poll_exception(monkeypatch):
         poll_interval=0.01,
         total_timeout=10,
     )
-    assert result == {"status": "failed", "error": "Failed to get status"}
+    assert result == {"status": "failed", "error": "Progress callback failed"}
 
 
 def test_poll_respects_custom_status_key_and_terminal_statuses():
@@ -533,9 +533,10 @@ async def test_async_poll_callback_timeout_error_is_status_failure_not_budget():
 
 
 @pytest.mark.asyncio
-async def test_async_poll_on_poll_timeout_error_is_status_failure_not_budget():
-    """on_poll raising TimeoutError short-circuits before any sleep, so the
-    inter-poll sleep is never reached and does not need patching."""
+async def test_async_poll_on_poll_timeout_error_is_callback_failure_not_budget():
+    """on_poll raising TimeoutError is a callback failure, not budget expiry,
+    and short-circuits before any sleep — so the inter-poll sleep is never
+    reached and does not need patching."""
 
     async def _status():
         return {"status": "running"}
@@ -550,7 +551,7 @@ async def test_async_poll_on_poll_timeout_error_is_status_failure_not_budget():
         total_timeout=10.0,
         log_context="should not appear",
     )
-    assert result == {"status": "failed", "error": "Failed to get status"}
+    assert result == {"status": "failed", "error": "Progress callback failed"}
 
 
 @pytest.mark.asyncio
@@ -567,7 +568,7 @@ async def test_async_poll_short_circuits_on_on_poll_exception(monkeypatch):
         raise RuntimeError("progress sink failed")
 
     result = await async_poll_until_terminal(_status, on_poll=_on_poll, poll_interval=0.01, total_timeout=10)
-    assert result == {"status": "failed", "error": "Failed to get status"}
+    assert result == {"status": "failed", "error": "Progress callback failed"}
 
 
 def test_default_terminal_statuses_shared_singleton_for_async_default():
@@ -578,3 +579,160 @@ def test_default_terminal_statuses_shared_singleton_for_async_default():
 
     sig = inspect.signature(jp.async_poll_until_terminal)
     assert sig.parameters["terminal_statuses"].default is DEFAULT_TERMINAL_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_async_poll_cancellation_does_not_strand_status_fn():
+    """Cancelling the poller must cancel the in-flight status_fn, not leave it
+    running detached with an unretrieved outcome."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _status():
+        started.set()
+        try:
+            await asyncio.sleep(60.0)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return {"status": "completed"}
+
+    poll = asyncio.ensure_future(async_poll_until_terminal(_status, poll_interval=0.01, total_timeout=30.0))
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    poll.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await poll
+    await asyncio.wait_for(cancelled.wait(), timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_async_poll_cancellation_discards_late_callback_exception():
+    """A status_fn that raises while being cancelled must not surface an
+    'exception was never retrieved' orphan after the poller is cancelled."""
+    started = asyncio.Event()
+    done = asyncio.Event()
+
+    async def _status():
+        started.set()
+        try:
+            await asyncio.sleep(60.0)
+        except asyncio.CancelledError:
+            done.set()
+            raise RuntimeError("late failure during cancellation")
+        return {"status": "completed"}
+
+    poll = asyncio.ensure_future(async_poll_until_terminal(_status, poll_interval=0.01, total_timeout=30.0))
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    poll.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await poll
+    await asyncio.wait_for(done.wait(), timeout=5.0)
+    await asyncio.sleep(0)  # let the discard done-callback consume the exception
+
+
+@pytest.mark.asyncio
+async def test_async_get_json_returns_none_when_client_closed_mid_flight():
+    """httpx raises RuntimeError (not HTTPError) on a closed client; the
+    never-raises contract must still hold."""
+    client = _mock_async_client()
+    client.get = AsyncMock(side_effect=RuntimeError("Cannot send a request, as the client has been closed."))
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        assert await async_get_json("http://x/status/1") is None
+
+
+def test_get_json_returns_none_when_client_closed_mid_flight():
+    """Sync counterpart: a closed pooled client must not raise out of get_json."""
+    client = _mock_client()
+    client.get = MagicMock(side_effect=RuntimeError("Cannot send a request, as the client has been closed."))
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
+        assert get_json("http://x/status/1") is None
+
+
+def test_poll_on_poll_failure_is_distinct_from_status_failure():
+    """A broken progress sink must not be reported as an unreadable status."""
+
+    def _on_poll(_status):
+        raise RuntimeError("progress sink failed")
+
+    on_poll_result = poll_until_terminal(
+        lambda: {"status": "running"},
+        on_poll=_on_poll,
+        poll_interval=0.01,
+        total_timeout=10,
+    )
+    status_result = poll_until_terminal(
+        lambda: None,
+        poll_interval=0.01,
+        total_timeout=10,
+    )
+    assert on_poll_result["error"] != status_result["error"]
+    assert on_poll_result == {"status": "failed", "error": "Progress callback failed"}
+    assert status_result == {"status": "failed", "error": "Failed to get status"}
+
+
+@pytest.mark.asyncio
+async def test_async_poll_discards_exception_raised_inside_cancel_grace():
+    """A callback that raises *within* the 0.05s cancel grace must still have its
+    exception consumed — it lands in `done`, so the detach path is not taken.
+
+    An unretrieved task exception is only reported when the task is garbage
+    collected, so this forces a collection and asserts the loop's exception
+    handler never saw it.
+    """
+    import gc
+
+    handled: list[dict] = []
+    asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: handled.append(ctx))
+
+    async def _raise_during_cancel():
+        try:
+            await asyncio.sleep(60.0)
+        except asyncio.CancelledError:
+            raise RuntimeError("raised inside the grace window") from None
+
+    result = await async_poll_until_terminal(
+        _raise_during_cancel,
+        poll_interval=0.01,
+        total_timeout=0.05,
+        log_context="grace raise",
+    )
+    assert result == {"status": "failed", "error": "Timed out waiting for grace raise"}
+
+    gc.collect()
+    await asyncio.sleep(0)
+    assert not [c for c in handled if "never retrieved" in c.get("message", "")], handled
+
+
+def test_get_json_propagates_unrelated_runtime_error():
+    """Only httpx's closed-client RuntimeError is swallowed; a genuine bug in the
+    helper must not be reported as a benign request failure."""
+    client = _mock_client()
+    client.get = MagicMock(side_effect=RuntimeError("something is actually broken"))
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
+        with pytest.raises(RuntimeError, match="actually broken"):
+            get_json("http://x/status/1")
+
+
+@pytest.mark.asyncio
+async def test_async_get_json_propagates_unrelated_runtime_error():
+    client = _mock_async_client()
+    client.get = AsyncMock(side_effect=RuntimeError("something is actually broken"))
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        with pytest.raises(RuntimeError, match="actually broken"):
+            await async_get_json("http://x/status/1")
+
+
+def test_post_json_propagates_unrelated_runtime_error():
+    client = _mock_client()
+    client.post = MagicMock(side_effect=RuntimeError("something is actually broken"))
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
+        with pytest.raises(RuntimeError, match="actually broken"):
+            post_json("http://x/run", {})
+
+
+@pytest.mark.asyncio
+async def test_async_post_json_returns_none_when_client_closed_mid_flight():
+    client = _mock_async_client()
+    client.post = AsyncMock(side_effect=RuntimeError("Cannot send a request, as the client has been closed."))
+    with patch("shared.http.job_polling.get_pooled_async_client", return_value=client):
+        assert await async_post_json("http://x/run", {}) is None
