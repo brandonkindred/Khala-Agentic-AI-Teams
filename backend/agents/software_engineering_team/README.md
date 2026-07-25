@@ -118,6 +118,10 @@ flowchart LR
 
 **Frontend internal pipeline order:** UX Designer → UI Designer → Design System → Frontend Architect → Feature Implementation → UX Engineer → Performance Engineer → Build/Release
 
+Data and control-flow dependencies between these gates (which are safe to
+parallelize vs. which require a redesign) are mapped in
+[`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md).
+
 ## Plan folder
 
 All planning artifacts are written to a `plan/` folder at the project root (work path). The folder is created when the spec is first ingested successfully. The main pipeline uses the Planning team, which writes context and handoff artifacts under `plan/`. Artifacts include:
