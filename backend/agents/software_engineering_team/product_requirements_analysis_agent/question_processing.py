@@ -378,7 +378,9 @@ def consolidate_open_questions(
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the consolidated list, or the unmodified list on <=1
-        input or any LLM/parse failure; never raises.
+        input or a full-batch LLM/parse failure; never raises. Items that
+        individually fail to parse are skipped and logged rather than discarding
+        the whole batch.
     """
     if len(open_questions) <= 1:
         return list(open_questions)
@@ -416,8 +418,11 @@ def consolidate_open_questions(
             return list(open_questions)
         result = []
         for i, q_data in enumerate(consolidated):
-            result.append(parse_open_question(q_data, i))
-        return result
+            try:
+                result.append(parse_open_question(q_data, i))
+            except Exception as e:
+                logger.warning("Failed to parse consolidated question %d: %s", i, e)
+        return result if result else list(open_questions)
     except Exception as e:
         logger.warning(
             "Question consolidation failed, using original list: %s",
@@ -433,7 +438,8 @@ def review_question_answer_alignment(
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the aligned list, or the unmodified list on empty input
-        or any LLM/parse failure; never raises.
+        or a full-batch LLM/parse failure; never raises. Items that individually
+        fail to parse are skipped and logged rather than discarding the whole batch.
     """
     if len(open_questions) == 0:
         return []
@@ -478,8 +484,11 @@ def review_question_answer_alignment(
             return list(open_questions)
         result = []
         for i, q_data in enumerate(aligned):
-            result.append(parse_open_question(q_data, i))
-        return result
+            try:
+                result.append(parse_open_question(q_data, i))
+            except Exception as e:
+                logger.warning("Failed to parse aligned question %d: %s", i, e)
+        return result if result else list(open_questions)
     except Exception as e:
         logger.warning(
             "Question-answer alignment review failed, using original list: %s",
