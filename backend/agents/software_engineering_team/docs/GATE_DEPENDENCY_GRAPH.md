@@ -44,6 +44,18 @@ runs five phases in strict order:
      failure; can force a hard stop via `config.security_failure_always_stops`.
    - The loop only `break`s to phase 5 once Code Review, then QA, then Security all
      pass **in the same outer cycle**.
+   - **Frontend-only terminal edge**: the post-loop max-cycles check
+     (`shared/phases/execution.py:1387-1393`) runs unconditionally after the loop
+     exits, even when the exit was a clean `break` on a fully-passing cycle. It only
+     skips marking the microtask `REVIEW_FAILED` when `still_failing` is false *or*
+     `gate_config.max_cycles_requires_failing_gate` is true. The backend config sets
+     `max_cycles_requires_failing_gate=True`, so a clean pass on the capped cycle
+     still proceeds to Documentation. The frontend config sets it to `False`
+     (`frontend_code_v2_team/phases/execution.py:278`), so on the frontend, passing
+     every gate on the exact cycle that also happens to hit `max_total_cycles` is
+     still marked `REVIEW_FAILED` and does **not** proceed to Documentation — a
+     frontend-only terminal edge that any concurrency redesign must preserve or
+     deliberately change.
 3. **Documentation** — `_run_documentation_phase`
    (`shared/phases/execution.py:1422-1546`). Only runs `if not phase_failed`, i.e.
    only after Code Review + QA + Security all passed together.
@@ -113,11 +125,18 @@ Edge classification:
   either before the review cycle (so its edits get reviewed like any other code
   change) or as an additional review pass after it — not a "no dependency,
   run-whenever" classification.
-- **Independent sub-steps, currently serialized**: within Code Review, build
-  verification, lint, and the code-review-agent call each read the same static
-  `microtask_files` snapshot and don't consume each other's output — they are run
-  one after another today (`review.py:45-187`) purely as an implementation
-  artifact, not because of a data dependency.
+- **Build verification is not a read-only check**: on failure, the production
+  verifier calls `_try_build_fix_one_at_a_time` (`build_fix.py`), which writes
+  LLM-generated patches directly to the worktree (`out_path.write_text`,
+  `build_fix.py:539-544`) and re-runs the build in a repair loop, before returning
+  pass/fail. So build verification, lint, and the code-review-agent call do
+  **not** necessarily read one immutable snapshot: running them concurrently could
+  have lint inspect files during or before an in-place build repair, while code
+  review evaluates a stale in-memory `files` map, merging verdicts computed
+  against different versions of the source. Treating these three as
+  parallelizable requires first separating verification (read-only) from repair
+  (mutating), or freezing/isolating the workspace for the duration of the gate —
+  it is not a drop-in change as currently structured.
 
 ## Parallelization boundary conclusions
 
@@ -136,15 +155,26 @@ Edge classification:
   (`quality_gate_tools.py:261-294`), so it cannot run concurrently with the other
   gates (worktree race) nor as an independent pass after them (its edits would
   bypass review) — see the dependency-graph note above.
+- The frontend's post-loop max-cycles check: because
+  `max_cycles_requires_failing_gate=False`
+  (`frontend_code_v2_team/phases/execution.py:278`), a redesign that changes when
+  or how the cap is evaluated must explicitly decide whether to preserve today's
+  behavior (a fully-passing capped cycle is still `REVIEW_FAILED` on frontend) or
+  change it — this is a behavioral edge, not a parallelization opportunity, but it
+  constrains how Documentation's gating can be restructured.
 
-**Safe to parallelize as-is, or with modest restructuring, with no change to what
-gets checked:**
+**Needs restructuring before it can be parallelized (not a drop-in change):**
 
 - Build verification, lint, and the code-review-agent call inside the Code Review
-  gate (`review.py:45-187`) — they read one immutable file snapshot and produce
-  independent `ReviewIssue` lists that are already merged after the fact. Running
-  them concurrently and merging results is a pure latency win with no ordering
-  change.
+  gate (`review.py:45-187`) are not read-only against a shared immutable snapshot:
+  build verification's failure path mutates the worktree in place via
+  `_try_build_fix_one_at_a_time` (`build_fix.py:539-544`). Parallelizing these
+  three requires first separating read-only verification from in-place repair (or
+  freezing the workspace for the gate's duration) — see the dependency-graph note
+  above.
+
+**Safe to parallelize with modest restructuring:**
+
 - QA and Security **analysis calls** — if both gates' checks were run against the
   same immutable post-Code-Review snapshot before any fix is applied (collect QA's
   and Security's issues together, batch-fix once, then re-run Code Review once),
@@ -152,8 +182,11 @@ gets checked:**
   concurrently. This is a real pipeline change (today Security only starts once QA
   has already passed), not a drop-in optimization — it changes the retry/restart
   semantics described above and needs its own design before implementation.
-The follow-up implementation issue should scope itself to the two "modest
-restructuring" items above (Code-Review sub-steps, and QA/Security analysis
-concurrency) rather than attempting to parallelize the full sequential chain. DbC
-is out of scope for parallelization — if it is wired in, it needs an explicit
-serialized position in the sequence, not a concurrent or independent one.
+
+The follow-up implementation issue should scope itself to the QA/Security analysis
+concurrency item above, and, only after isolating build verification's repair path
+from its read-only checks, the Code-Review sub-steps item — rather than attempting
+to parallelize the full sequential chain. DbC is out of scope for parallelization —
+if it is wired in, it needs an explicit serialized position in the sequence, not a
+concurrent or independent one. Any redesign must also preserve (or deliberately
+revisit) the frontend-only terminal edge at the cycle cap noted above.
