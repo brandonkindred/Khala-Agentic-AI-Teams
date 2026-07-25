@@ -24,8 +24,8 @@ def test_make_run_deliver_reads_git_ns_at_call_time(monkeypatch, tmp_path: Path)
         create_feature_branch=_noop,
         delete_branch=_noop,
         merge_branch=_noop,
-        write_agent_output=_noop,
     )
+    output_ns = types.SimpleNamespace(write_agent_output=_noop)
 
     captured: Dict[str, Any] = {}
 
@@ -38,6 +38,7 @@ def test_make_run_deliver_reads_git_ns_at_call_time(monkeypatch, tmp_path: Path)
     models = types.SimpleNamespace()  # unused by stubbed impl
     run_deliver = deliver_mod.make_run_deliver(
         git_ns=git_ns,
+        output_ns=output_ns,
         models=models,
         commit_msg_template="[{scope}] {summary}",
         logger=logging.getLogger("test_make_run_deliver"),
