@@ -11,16 +11,18 @@ export interface ActivityNarrativeLine {
 
 export interface ActivityNarrativeState {
   readonly lines: readonly ActivityNarrativeLine[];
-  /** Join of display candidate lines from the last applied status snapshot. */
+  /** Join of display candidate lines from the last applied status snapshot (cheap no-op check only). */
   readonly fingerprint: string;
+  /** Structural display candidate lines from the last applied status snapshot, used for diffing. */
+  readonly candidates: readonly string[];
 }
 
 /**
  * Preconditions: none.
- * Postconditions: returns a state with empty `lines` and empty `fingerprint`.
+ * Postconditions: returns a state with empty `lines`, `fingerprint`, and `candidates`.
  */
 export function emptyActivityNarrative(): ActivityNarrativeState {
-  return { lines: [], fingerprint: '' };
+  return { lines: [], fingerprint: '', candidates: [] };
 }
 
 /**
@@ -75,15 +77,17 @@ export function statusActivityFingerprint(status: CodingTeamJobStatus): string {
 
 /**
  * Preconditions: `at` is the timestamp to stamp on any new lines.
- * Postconditions: returns one `{ at, text }` per candidate display line not present in `prevFp`
- * (split on `\n`). When `prevFp` is empty, every current candidate line is returned. Never mutates inputs.
+ * Postconditions: returns one `{ at, text }` per candidate display line not present in
+ * `prevCandidates`. `prevCandidates` is compared structurally (not via a joined/split string), so a
+ * candidate line that itself contains a newline is never mistaken for multiple entries. When
+ * `prevCandidates` is empty, every current candidate line is returned. Never mutates inputs.
  */
 export function diffActivityLines(
-  prevFp: string,
+  prevCandidates: readonly string[],
   status: CodingTeamJobStatus,
   at: string,
 ): ActivityNarrativeLine[] {
-  const prev = new Set(prevFp ? prevFp.split('\n') : []);
+  const prev = new Set(prevCandidates);
   return candidateLines(status)
     .filter((text) => !prev.has(text))
     .map((text) => ({ at, text }));
@@ -92,30 +96,31 @@ export function diffActivityLines(
 /**
  * Preconditions: `receiveTimeIso` is non-empty.
  * Postconditions: when the status fingerprint matches `state.fingerprint`, returns `state`
- * unchanged (same reference). Otherwise appends `diffActivityLines(...)` and caps to
- * `ACTIVITY_NARRATIVE_MAX_LINES` newest lines; new `fingerprint` equals
- * `statusActivityFingerprint(status)`.
+ * unchanged (same reference). Otherwise appends `diffActivityLines(...)` (diffed against
+ * `state.candidates`, not a joined/split fingerprint) and caps to `ACTIVITY_NARRATIVE_MAX_LINES`
+ * newest lines; new `fingerprint`/`candidates` reflect this snapshot's `candidateLines(status)`.
  */
 export function appendActivityNarrative(
   state: ActivityNarrativeState,
   status: CodingTeamJobStatus,
   receiveTimeIso: string,
 ): ActivityNarrativeState {
-  const fingerprint = statusActivityFingerprint(status);
+  const candidates = candidateLines(status);
+  const fingerprint = candidates.join('\n');
   if (fingerprint === state.fingerprint) {
     return state;
   }
   const at = activityTimestamp(status, receiveTimeIso);
-  const added = diffActivityLines(state.fingerprint, status, at);
+  const added = diffActivityLines(state.candidates, status, at);
   if (added.length === 0) {
-    return { lines: state.lines, fingerprint };
+    return { lines: state.lines, fingerprint, candidates };
   }
   const lines = [...state.lines, ...added];
   const capped =
     lines.length > ACTIVITY_NARRATIVE_MAX_LINES
       ? lines.slice(lines.length - ACTIVITY_NARRATIVE_MAX_LINES)
       : lines;
-  return { lines: capped, fingerprint };
+  return { lines: capped, fingerprint, candidates };
 }
 
 /**

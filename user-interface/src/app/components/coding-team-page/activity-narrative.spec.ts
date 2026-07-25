@@ -86,6 +86,33 @@ describe('activity-narrative', () => {
     expect(state.lines.at(-1)?.text).toBe(`Status: tick ${ACTIVITY_NARRATIVE_MAX_LINES + 4}`);
   });
 
+  it('appendActivityNarrative does not duplicate an unchanged multiline candidate when another field changes', () => {
+    let state = emptyActivityNarrative();
+    const multilineStatusText = 'Building task graph\nStep 2 of 5';
+    state = appendActivityNarrative(
+      state,
+      status({ phase: 'task_graph', status_text: multilineStatusText, updated_at: '2026-07-24T15:00:00Z' }),
+      '2026-07-24T15:00:01Z',
+    );
+    expect(state.lines.map((l) => l.text)).toEqual([
+      'Phase → task_graph',
+      `Status: ${multilineStatusText}`,
+    ]);
+
+    // Only the phase changes; the multiline status_text candidate is unchanged and must not
+    // be re-appended just because splitting a joined fingerprint on '\n' would fragment it.
+    state = appendActivityNarrative(
+      state,
+      status({ phase: 'design', status_text: multilineStatusText, updated_at: '2026-07-24T15:01:00Z' }),
+      '2026-07-24T15:01:01Z',
+    );
+    expect(state.lines.map((l) => l.text)).toEqual([
+      'Phase → task_graph',
+      `Status: ${multilineStatusText}`,
+      'Phase → design',
+    ]);
+  });
+
   it('appendActivityNarrative records a terminal status even when status_text/current_activity are cleared', () => {
     let state = emptyActivityNarrative();
     state = appendActivityNarrative(
