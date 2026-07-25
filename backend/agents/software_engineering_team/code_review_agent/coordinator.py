@@ -650,7 +650,8 @@ def run_coordinator(
                 not_reviewed_ranges,
             )
         deduped = _dedupe_issues([*verified, *skipped_issues])
-    all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
+    assert outcome.approved_flags, "unreachable: guarded by the total-failure check above"
+    all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
     merged_summary, spec_notes = _merge_narrative(

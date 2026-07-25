@@ -44,6 +44,8 @@ def _format_all_code(
         Returns a code block within ``max_chars`` (a trailing file is marked
         truncated); ``"(no code)"`` when empty. Pure.
     """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be greater than 0")
     parts: List[str] = []
     total = 0
     for path, content in current_files.items():

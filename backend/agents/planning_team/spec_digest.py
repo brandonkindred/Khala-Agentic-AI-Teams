@@ -27,7 +27,7 @@ from shared.concurrency import parallel_map
 logger = logging.getLogger(__name__)
 
 
-def _env_positive_int(name: str, default: int) -> int:
+def _env_positive_int_or_default(name: str, default: int) -> int:
     """Read a positive int from the environment, falling back to ``default``.
 
     Garbage or non-positive values fall back to ``default`` (defensive parsing,
@@ -50,8 +50,8 @@ CHARS_PER_TOKEN = 3.5
 # Token reserves carved out of the model context before sizing a section (phase prompt
 # template + headers, and the model's response). Conservative defaults; overridable per
 # deployment/model via env (see docs/ENV_VARS.md).
-_RESERVED_PROMPT_TOKENS = _env_positive_int("PLANNING_RESERVED_PROMPT_TOKENS", 6000)
-_RESERVED_RESPONSE_TOKENS = _env_positive_int("PLANNING_RESERVED_RESPONSE_TOKENS", 4096)
+_RESERVED_PROMPT_TOKENS = _env_positive_int_or_default("PLANNING_RESERVED_PROMPT_TOKENS", 6000)
+_RESERVED_RESPONSE_TOKENS = _env_positive_int_or_default("PLANNING_RESERVED_RESPONSE_TOKENS", 4096)
 _MIN_SECTION_CHARS = 8000
 _DEFAULT_CONTEXT_TOKENS = 16384
 
@@ -60,7 +60,7 @@ _DEFAULT_CONTEXT_TOKENS = 16384
 # content — the very thing this module exists to avoid); we only warn so callers
 # are aware of an unusually large digest. Overridable via env for cost-sensitive
 # deployments (``PLANNING_MANY_SECTIONS_WARN``; see docs/ENV_VARS.md).
-_MANY_SECTIONS_WARN = _env_positive_int("PLANNING_MANY_SECTIONS_WARN", 50)
+_MANY_SECTIONS_WARN = _env_positive_int_or_default("PLANNING_MANY_SECTIONS_WARN", 50)
 
 # Max concurrent per-section map-phase LLM calls (see ``map_reduce``). Overridable via
 # env for deployments that need a different concurrency/cost tradeoff (see docs/ENV_VARS.md).
@@ -68,7 +68,7 @@ _DEFAULT_MAP_PARALLELISM = 4  # PLANNING_MAP_PARALLELISM, floor 1
 
 
 def _map_parallelism() -> int:
-    return _env_positive_int("PLANNING_MAP_PARALLELISM", _DEFAULT_MAP_PARALLELISM)
+    return _env_positive_int_or_default("PLANNING_MAP_PARALLELISM", _DEFAULT_MAP_PARALLELISM)
 
 
 def compute_section_chars(llm: Any) -> int:

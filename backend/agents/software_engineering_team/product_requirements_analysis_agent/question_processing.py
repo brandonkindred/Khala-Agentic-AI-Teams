@@ -16,6 +16,8 @@ import logging
 from difflib import SequenceMatcher
 from typing import Any, List
 
+from strands.models.model import Model
+
 from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
 
 from .llm_io import call_llm_json
@@ -367,7 +369,7 @@ def dedupe_questions_by_answer_similarity(
 
 
 def consolidate_open_questions(
-    model: Any, open_questions: List[OpenQuestion]
+    model: Model, open_questions: List[OpenQuestion]
 ) -> List[OpenQuestion]:
     """Merge duplicate or semantically equivalent questions before sending to user.
 
@@ -426,7 +428,7 @@ def consolidate_open_questions(
 
 
 def review_question_answer_alignment(
-    model: Any, open_questions: List[OpenQuestion]
+    model: Model, open_questions: List[OpenQuestion]
 ) -> List[OpenQuestion]:
     """Ensure each question and its options make sense together (e.g. no Yes/No for open-ended questions).
 
@@ -488,7 +490,7 @@ def review_question_answer_alignment(
 
 
 def add_recommendations(
-    model: Any, open_questions: List[OpenQuestion], spec_content: str
+    model: Model, open_questions: List[OpenQuestion], spec_content: str
 ) -> List[OpenQuestion]:
     """Add a short recommendation (which option and why) to each question.
 
@@ -531,7 +533,7 @@ def add_recommendations(
         rec_by_id = {
             r.get("id"): str(r.get("recommendation", "") or "")
             for r in recs
-            if isinstance(r, dict) and r.get("id")
+            if isinstance(r, dict) and "id" in r
         }
         result = []
         for q in open_questions:
