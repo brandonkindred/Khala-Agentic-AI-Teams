@@ -25,6 +25,7 @@ from software_engineering_team.shared.repo_writer import (
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
+from software_engineering_team.shared.v2_review import _review_steps_run_sequentially
 
 logger = logging.getLogger(__name__)
 
@@ -437,27 +438,13 @@ def _terminal_failing_outcome(cr: GateOutcome, qa: GateOutcome, sec: GateOutcome
     return GateOutcome(passed=False, summary="Max cycles exceeded")
 
 
-def _qa_security_run_sequentially(llm: LLMClient) -> bool:
-    """True when the QA/Security gate fan-out must run one gate at a time.
-
-    Mirrors ``shared.v2_review._review_steps_run_sequentially`` exactly (kept as
-    a local duplicate rather than a cross-module import — matching this file's
-    existing pattern of per-team/per-module gate-adapter duplication rather than
-    adding a new coupling between ``shared/phases/execution.py`` and
-    ``shared/v2_review.py``): scripted ``DummyLLMClient`` doubles use a shared
-    non-thread-safe response index, so they are not safe under concurrent
-    fan-out.
-
-    Preconditions: ``llm`` is the LLM client that will be handed to the QA and
-        Security gate calls.
-    Postconditions: returns ``True`` iff ``llm`` is (or wraps, via a Strands
-        ``LLMClientModel.client``) a ``DummyLLMClient``. Pure.
-    """
-    from llm_service.clients.dummy import DummyLLMClient
-
-    if isinstance(llm, DummyLLMClient):
-        return True
-    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+# Reused (not duplicated) from ``shared.v2_review``, which already exports it
+# in ``__all__`` for exactly this cross-module use — both ``backend_code_v2_team``'s
+# and ``frontend_code_v2_team``'s ``phases/review.py`` already import it the same
+# way. ``DummyLLMClient`` doubles use a shared non-thread-safe scripted response
+# index, so they are not safe under concurrent fan-out; this same check gates
+# ``shared.v2_review``'s own code-review/QA/security ``parallel_map`` fan-out.
+_qa_security_run_sequentially = _review_steps_run_sequentially
 
 
 def _record_terminal_gate_failure(gate: str, outcome: Any, task_id: str) -> None:
@@ -697,6 +684,11 @@ class GatedExecutionConfig:
     run_documentation_self_review: Callable[..., Any]
     # ``mt.status`` set at each gate's entry (backend: distinct per phase;
     # frontend: ``IN_REVIEW`` for all three — a no-op re-assign after code review).
+    # When ``parallelize_qa_security`` is in effect, QA and Security run at once,
+    # so there is no per-gate entry point for Security to set ``status_security``
+    # at — ``mt.status`` is set to ``status_qa`` once for the whole combined
+    # phase and intentionally never reaches ``status_security`` (see
+    # ``_run_review_cycles``'s concurrent branch).
     status_code_review: Any
     status_qa: Any
     status_security: Any
@@ -1113,10 +1105,25 @@ def _run_review_cycles(
                 lambda fn: fn(),
                 max_workers=2,
                 skip_none=False,
+                # Both callables write into the shared ``agent_review_cache`` and
+                # report progress via ``detail_cb`` — never leave one straggling
+                # in the background after the other raises (see
+                # ``run_qa_gate``/``run_security_gate``'s "never raises"
+                # contract this relies on being upheld).
+                wait_for_stragglers=True,
             )
 
             if not qa_outcome.passed or not sec_outcome.passed:
-                combined_issues = list(qa_outcome.issues) + list(sec_outcome.issues)
+                # Only a *failing* gate's issues are fixable material — a
+                # passing gate's ``issues`` can still carry non-blocking
+                # (e.g. medium-severity) findings (``GateOutcome.passed``
+                # reflects only critical/high issues, per
+                # ``_run_agent_testing_phase``), and those were never sent to
+                # ``run_batch_coding_fixes`` in the old sequential path either.
+                combined_issues = (
+                    (list(qa_outcome.issues) if not qa_outcome.passed else [])
+                    + (list(sec_outcome.issues) if not sec_outcome.passed else [])
+                )
                 logger.info(
                     "[%s] Microtask %s: QA/security testing %s %d issue(s) (QA: %d, security: %d). "
                     "Batch fixing and restarting from code review.",

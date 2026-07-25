@@ -913,6 +913,77 @@ def test_parallel_qa_security_falls_back_to_sequential_for_dummy_llm(tmp_path):
     assert len(sec.calls_kwargs) == 1  # cycle 1 never reached security (QA restarted the cycle)
 
 
+def test_parallel_qa_security_unsafe_fix_breaks(tmp_path):
+    """Concurrent path's unsafe-write handling mirrors the sequential path's
+    (``test_qa_unsafe_fix_breaks``/``test_security_unsafe_fix_breaks``): an
+    unsafe fix write marks REVIEW_FAILED via the same
+    ``write_microtask_output_or_fail`` call, just reached through the combined
+    batch-fix branch instead of the QA-only or security-only one.
+    """
+    mt = _microtask()
+    cfg = _make_gate_config(
+        qa_gate=_fail_gate("qa"),
+        batch_fix=_batch_fix_unsafe,
+        parallelize_qa_security=True,
+    )
+    _run(
+        cfg,
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=1, sec=1, on_failure="skip_continue"),
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.REVIEW_FAILED
+
+
+def test_parallel_qa_security_only_batch_fixes_the_failing_gates_issues(tmp_path):
+    """A passing gate's (non-blocking) issues never reach the combined batch fix
+    -- only the failing gate's issues do, matching the sequential path's
+    per-gate behavior (a passing gate's issues were never sent to
+    ``run_batch_coding_fixes`` there either).
+    """
+    qa_medium_issue = ReviewIssue(
+        source="qa", severity="medium", description="qa non-blocking note", file_path="f"
+    )
+    sec_critical_issue = ReviewIssue(
+        source="security", severity="critical", description="security blocker", file_path="f"
+    )
+    # QA "passes" (no critical/high issues) but still reports a non-blocking issue;
+    # Security fails outright. Only the security issue should reach batch_fix.
+    qa = _ScriptedGate([GateOutcome(passed=True, issues=[qa_medium_issue], summary="qa")])
+    sec = _ScriptedGate(
+        [GateOutcome(passed=False, issues=[sec_critical_issue], summary="sec")]
+    )
+    batch_fix_calls: List[Dict[str, Any]] = []
+
+    def _batch_fix_capturing(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        batch_fix_calls.append(kwargs)
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(
+            qa_gate=qa,
+            security_gate=sec,
+            batch_fix=_batch_fix_capturing,
+            parallelize_qa_security=True,
+        ),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: None,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(batch_fix_calls) == 1
+    sources = {issue.source for issue in batch_fix_calls[0]["issues"]}
+    assert sources == {"security"}  # QA's non-blocking issue never reached the fixer
+
+
 # ---------------------------------------------------------------------------
 # Max-cycles semantics (the one genuine per-team behavioural fork)
 # ---------------------------------------------------------------------------
