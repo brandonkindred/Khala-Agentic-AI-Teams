@@ -89,7 +89,7 @@ from .phases import Phase, hash_code, hash_metrics_and_trades
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.alignment_checks import DeterministicAlignmentChecker
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
-from .quality_gates.code_conformance import CodeConformanceGate
+from .quality_gates.code_conformance.gate import CodeConformanceGate
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.cost_stress_realism import CostStressRealismGate
