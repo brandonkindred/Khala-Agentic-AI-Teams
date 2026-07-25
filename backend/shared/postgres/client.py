@@ -28,9 +28,12 @@ import os
 import threading
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Any, Literal, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Optional, TypeVar
 
 from shared.env import parse_int
+
+if TYPE_CHECKING:
+    from psycopg_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,7 @@ StorageStatus = Literal["available", "unconfigured", "unreachable"]
 # Per-database connection pools. Created lazily on first ``get_conn`` call
 # for that database name.
 _pools_lock = threading.Lock()
-_pools: dict[str, object] = {}  # database name -> ConnectionPool
+_pools: dict[str, ConnectionPool] = {}  # database name -> ConnectionPool
 
 
 def is_postgres_enabled() -> bool:
