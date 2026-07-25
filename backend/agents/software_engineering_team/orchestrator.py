@@ -865,7 +865,7 @@ def run_orchestrator(
     - spec_content_override: use this instead of loading spec from repo
     - resolved_questions_override: user-provided answers from clarification; passed to Tech Lead
     - planning_only: when True, run spec intake through conformance then stop (no execution)
-    - sprint_id: when set (#370), pull the planned scope from the
+    - sprint_id: when set, pull the planned scope from the
       product_delivery sprint's stories and synthesize requirements
       directly — Discovery's LLM spec-parse and the PRA agent are
       skipped. Mutually exclusive with ``spec_content_override``.
