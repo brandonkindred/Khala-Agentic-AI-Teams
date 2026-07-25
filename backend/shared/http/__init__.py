@@ -32,7 +32,16 @@ import threading
 
 import httpx
 
-__all__ = ["get_pooled_client", "close_pool", "DEFAULT_LIMITS"]
+from shared.http.retry import backoff_sleep, parse_retry_env_config, retry_delay
+
+__all__ = [
+    "get_pooled_client",
+    "close_pool",
+    "DEFAULT_LIMITS",
+    "backoff_sleep",
+    "parse_retry_env_config",
+    "retry_delay",
+]
 
 logger = logging.getLogger(__name__)
 

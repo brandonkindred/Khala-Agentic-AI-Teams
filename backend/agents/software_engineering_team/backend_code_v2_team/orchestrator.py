@@ -215,8 +215,8 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             if job_updater:
                 try:
                     job_updater(**kwargs)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("[%s] job_updater callback failed: %s", task_id, e)
 
         logger.info(
             "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id
