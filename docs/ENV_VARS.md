@@ -1265,7 +1265,9 @@ GitHub remote is available. Set to `false` to skip CI gate entirely without GitH
 Named, per-tool timeout constants for the devops team's stateless tool-agents (`shared/subprocess_timeouts.py`),
 each parsed via the shared `env_int` with `floor=1` (unset or unparseable → the documented default, with a
 warning on a set-but-unparseable value; a parsed value below `1` is clamped to `1`, not replaced by the
-default). These replace hardcoded `timeout=` literals in the individual tool-agent files.
+default). These are intended to replace the hardcoded `timeout=` literals in the individual tool-agent
+files; that call-site migration is tracked as a separate follow-up and has not landed yet, so setting
+one of these variables today has no effect until that migration lands.
 
 ### DEVOPS_HELM_DRY_RUN_TIMEOUT_S
 Timeout (seconds) for `helm lint .` in the deployment dry-run tool-agent. Default `120`, floor `1`.
