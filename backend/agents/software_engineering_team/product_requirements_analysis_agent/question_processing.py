@@ -438,11 +438,14 @@ def review_question_answer_alignment(
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the aligned list, or the unmodified list on empty input
-        or a full-batch LLM/parse failure; never raises. Items that individually
-        fail to parse are skipped and logged rather than discarding the whole batch.
+        or a full-batch LLM/parse failure; never raises. This is a per-question
+        review (ids are preserved), so an item that individually fails to parse
+        falls back to its original (unaligned) question by id rather than being
+        dropped from the batch.
     """
     if len(open_questions) == 0:
         return []
+    original_by_id = {q.id: q for q in open_questions}
     questions_payload = [
         {
             "id": q.id,
@@ -488,6 +491,10 @@ def review_question_answer_alignment(
                 result.append(parse_open_question(q_data, i))
             except Exception as e:
                 logger.warning("Failed to parse aligned question %d: %s", i, e)
+                fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
+                original = original_by_id.get(fallback_id) if fallback_id else None
+                if original is not None:
+                    result.append(original)
         return result if result else list(open_questions)
     except Exception as e:
         logger.warning(

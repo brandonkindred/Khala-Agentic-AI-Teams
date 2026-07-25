@@ -901,13 +901,14 @@ def test_consolidate_open_questions_falls_back_when_all_items_fail() -> None:
     assert result == [q1, q2]
 
 
-def test_review_question_answer_alignment_skips_malformed_item_keeps_valid_ones() -> None:
-    """A single unparseable item should be skipped, not discard the whole aligned batch."""
+def test_review_question_answer_alignment_retains_original_when_item_fails_to_parse() -> None:
+    """A single unparseable aligned item should fall back to its original question by id,
+    not be dropped from the batch (alignment is per-question; ids are preserved)."""
     llm = _StubClient(
         {
             "aligned_questions": [
-                {"id": "bad", "question_text": "malformed"},
-                {"id": "good", "question_text": "Which platform?"},
+                {"id": "q1", "question_text": "malformed"},
+                {"id": "q2", "question_text": "Which platform?"},
             ]
         }
     )
@@ -918,7 +919,40 @@ def test_review_question_answer_alignment_skips_malformed_item_keeps_valid_ones(
     real_parse = _real_parse_open_question
 
     def flaky_parse(q_data: Any, index: int) -> OpenQuestion:
-        if q_data.get("id") == "bad":
+        if q_data.get("id") == "q1":
+            raise ValueError("simulated malformed item")
+        return real_parse(q_data, index)
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=flaky_parse,
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"].question_text == "Which platform?"
+
+
+def test_review_question_answer_alignment_drops_unmatched_malformed_item() -> None:
+    """A malformed item whose id doesn't match any original question is skipped (no fallback available)."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "unknown", "question_text": "malformed"},
+                {"id": "q2", "question_text": "Which platform?"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    real_parse = _real_parse_open_question
+
+    def flaky_parse(q_data: Any, index: int) -> OpenQuestion:
+        if q_data.get("id") == "unknown":
             raise ValueError("simulated malformed item")
         return real_parse(q_data, index)
 
@@ -929,7 +963,7 @@ def test_review_question_answer_alignment_skips_malformed_item_keeps_valid_ones(
         result = agent._review_question_answer_alignment([q1, q2])
 
     assert len(result) == 1
-    assert result[0].id == "good"
+    assert result[0].id == "q2"
 
 
 def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> None:
