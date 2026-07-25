@@ -29,6 +29,7 @@ from software_engineering_team.shared.models import (
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
 from software_engineering_team.shared.phases import problem_solving as sh_ps
+from software_engineering_team.shared.phases import review_cycle as sh_review_cycle
 from software_engineering_team.shared.phases import rollback as sh_rollback
 from software_engineering_team.shared.phases import setup as sh_setup
 from software_engineering_team.shared.prompts import (
@@ -319,10 +320,10 @@ def test_dedup_issues_removes_repeats():
     a = SimpleNamespace(file_path="f.py", description="bug")
     b = SimpleNamespace(file_path="f.py", description="bug")
     c = SimpleNamespace(file_path="g.py", description="bug")
-    first = sh_exec._dedup_issues([a, b, c], seen)
+    first = sh_review_cycle._dedup_issues([a, b, c], seen)
     assert len(first) == 2  # b is a dup of a
     # seen persists across calls
-    assert sh_exec._dedup_issues([c], seen) == []
+    assert sh_review_cycle._dedup_issues([c], seen) == []
 
 
 def test_run_execution_impl_filters_and_handles_failure():
@@ -526,7 +527,7 @@ def test_ensure_readme_logs_when_commit_raises(tmp_path: Path, monkeypatch, capl
 
 def test_write_microtask_files_strips_leading_slash(tmp_path: Path):
     """Write microtask files strips leading slash."""
-    sh_exec._write_microtask_files(tmp_path, {"/pkg/mod.py": "content", "top.txt": "t"})
+    sh_review_cycle._write_microtask_files(tmp_path, {"/pkg/mod.py": "content", "top.txt": "t"})
     assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "content"
     assert (tmp_path / "top.txt").read_text(encoding="utf-8") == "t"
 

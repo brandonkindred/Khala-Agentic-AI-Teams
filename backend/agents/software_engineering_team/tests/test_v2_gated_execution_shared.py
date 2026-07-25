@@ -944,7 +944,7 @@ def test_documentation_unsafe_path_is_skipped(tmp_path):
 
 def test_terminal_failing_outcome_prefers_cr_then_qa_then_sec():
     """_terminal_failing_outcome returns the first still-failing gate in cr→qa→sec order."""
-    from software_engineering_team.shared.phases.execution import _terminal_failing_outcome
+    from software_engineering_team.shared.phases.review_cycle import _terminal_failing_outcome
 
     cr_fail = GateOutcome(passed=False, issues=[_issue("code_review")], summary="cr")
     qa_fail = GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")
@@ -963,7 +963,7 @@ def test_record_gate_outcome_on_code_review_retry_exhausted(tmp_path, monkeypatc
     """Code-review retry exhaustion records exactly one terminal gate outcome."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     mt = _microtask()
@@ -988,7 +988,7 @@ def test_record_gate_outcome_on_max_cycles(tmp_path, monkeypatch):
     """Max-cycles REVIEW_FAILED records exactly one outcome with gate=review_max_cycles."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     mt = _microtask()
@@ -1010,7 +1010,7 @@ def test_record_gate_outcome_not_called_on_success(tmp_path, monkeypatch):
     """Happy-path completion must not record a gate rejection."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda *a, **k: calls.append((a, k)) or True,
     )
     _run(_make_gate_config(), [_microtask()], tmp_path, review_config=_config())
@@ -1021,7 +1021,7 @@ def test_record_gate_outcome_not_called_on_qa_recovered(tmp_path, monkeypatch):
     """Mid-loop QA fail → fix → pass is not a terminal failure; no recording."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda *a, **k: calls.append((a, k)) or True,
     )
     qa = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
@@ -1038,7 +1038,7 @@ def test_record_gate_outcome_not_called_on_unsafe_cr_write(tmp_path, monkeypatch
     """Write-path failure during code-review retry must not record retry exhaustion."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda *a, **k: calls.append((a, k)) or True,
     )
     mt = _microtask()
@@ -1072,7 +1072,7 @@ def test_grounding_circuit_breaker_trips_before_max_cycles(tmp_path, monkeypatch
     but the streak already hit the limit, so the breaker preempts QA entirely."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     cr = _ScriptedGate(
@@ -1116,7 +1116,7 @@ def test_grounding_low_ratio_no_trip_retry_exhausted(tmp_path, monkeypatch):
     microtask still fails via ordinary retry exhaustion, not the breaker."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
 
@@ -1143,7 +1143,7 @@ def test_grounding_pass_only_never_trips(tmp_path, monkeypatch):
     drops) never counts as a bad cycle -- passed calls are never grounding-bad."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
 
@@ -1196,7 +1196,7 @@ def test_grounding_breaker_disabled_never_records(tmp_path, monkeypatch):
     across repeated high-ratio failing CR cycles."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     cr = _ScriptedGate(
