@@ -1260,6 +1260,41 @@ GitHub remote is available. Set to `false` to skip CI gate entirely without GitH
 
 ---
 
+## DevOps Tool-Agent Subprocess Timeouts
+
+Named, per-tool timeout constants for the devops team's stateless tool-agents (`shared/subprocess_timeouts.py`),
+each parsed via the shared `env_int` (unset/garbage/`< 1` → the documented default, with a warning on a
+set-but-unparseable value). These replace hardcoded `timeout=` literals in the individual tool-agent files.
+
+### DEVOPS_HELM_DRY_RUN_TIMEOUT_S
+Timeout (seconds) for `helm lint .` in the deployment dry-run tool-agent. Default `120`, floor `1`.
+
+### DEVOPS_TERRAFORM_EXECUTION_TIMEOUT_S
+Timeout (seconds) for terraform apply/plan in the terraform execution tool-agent. Default `180`, floor `1`.
+
+### DEVOPS_HELM_EXECUTION_TIMEOUT_S
+Timeout (seconds) for helm install/upgrade in the helm execution tool-agent. Default `120`, floor `1`.
+
+### DEVOPS_CDK_EXECUTION_TIMEOUT_S
+Timeout (seconds) for `cdk deploy`/`cdk synth` in the CDK execution tool-agent. Default `180`, floor `1`.
+
+### DEVOPS_IAC_VALIDATION_TIMEOUT_S
+Timeout (seconds) for both `terraform fmt -check` and `terraform validate` in the IaC validation
+tool-agent. Default `120`, floor `1`.
+
+### DEVOPS_DOCKER_COMPOSE_TIMEOUT_S
+Timeout (seconds) for `docker compose up`/`down` in the docker compose execution tool-agent. Default
+`120`, floor `1`.
+
+### DEVOPS_POLICY_AS_CODE_TIMEOUT_S
+Timeout (seconds) for the checkov scan in the policy-as-code tool-agent. Default `180`, floor `1`.
+
+### DEVOPS_ARCHITECT_INTEGRATION_TIMEOUT_S
+Timeout (seconds) for the `architect_agents/main.py` subprocess invoked from the enterprise architect
+integration helper. Default `3600` (1 hour), floor `1`.
+
+---
+
 ## Profiles
 
 ### AUTHOR_PROFILE_PATH
