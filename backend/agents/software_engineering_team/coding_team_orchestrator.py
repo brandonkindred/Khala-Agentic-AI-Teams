@@ -259,6 +259,18 @@ def run_coding_team_orchestrator(
     ``last_activity_at`` (read by the UI's stall warning) is stamped centrally by the
     job service on every real update — see job_service/db.py — so plain ``_update``
     writes count as activity while the 120s liveness heartbeat does not.
+
+    Preconditions:
+        - ``progress_base``/``progress_span`` are non-negative and sum to <= 100 (the band this run
+          owns on the job's overall progress bar); violated by raising ``ValueError``.
+        - ``repo_path`` is a git checkout the pipeline can branch/merge in; ``plan_input`` carries
+          the plan text (and any already-resolved HITL decisions) the Tech Lead plans from.
+    Postconditions:
+        - Runs the coding-team pipeline to a terminal job status (completed, completed-with-failures,
+          already-complete, failed, or cancelled) via ``update_job_fn``/the default job store —
+          never raises for an in-pipeline failure, only for the precondition violation above.
+        - The task graph's persist/flush coordinator is always stopped before returning, on every
+          exit path including an unexpected exception.
     """
     if not (0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100):
         raise ValueError(
@@ -702,6 +714,9 @@ class CodingTeamSwarm(
         the user; when omitted, a worker that raises a decision fails its task closed (no silent
         decide). The loop stops early if a pause ends without answers (``self.aborted``).
 
+        Preconditions:
+            - The swarm was constructed with a non-empty ``workers``/``agent_ids`` roster and a
+              ``graph`` already seeded with the job's tasks (or empty, for a no-op run).
         Postconditions:
             - Every worker's git worktree (see WorktreeManager) is removed before this method
               returns, on every exit path (normal completion, cancellation, abort, a worktree-setup

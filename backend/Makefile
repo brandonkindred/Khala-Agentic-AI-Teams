@@ -43,6 +43,7 @@ install-dev: install
 lint:
 	$(VENV_PYTHON) -m ruff check .
 	$(VENV_PYTHON) -m ruff format --check .
+	$(VENV_PYTHON) agents/software_engineering_team/scripts/check_dbc_docstrings.py
 
 lint-fix:
 	$(VENV_PYTHON) -m ruff check . --fix
