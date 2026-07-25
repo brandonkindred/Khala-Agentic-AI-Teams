@@ -1022,6 +1022,32 @@ def test_review_question_answer_alignment_rejects_hallucinated_id() -> None:
     assert result_by_id["q2"].question_text == "Which platform?"
 
 
+def test_review_question_answer_alignment_rejects_duplicate_id() -> None:
+    """If the LLM returns the same recognized id twice, only the first occurrence is kept;
+    the repeat is dropped rather than duplicating the question, and any omitted original
+    (here q2) is still restored."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "q1", "question_text": "Aligned once"},
+                {"id": "q1", "question_text": "Aligned again"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert set(result_by_id) == {"q1", "q2"}
+    assert result_by_id["q1"].question_text == "Aligned once"
+    assert result_by_id["q2"] is q2
+    assert len([q for q in result if q.id == "q1"]) == 1
+
+
 def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> None:
     """If every item in the batch fails to parse, the original list is returned unchanged."""
     llm = _StubClient(

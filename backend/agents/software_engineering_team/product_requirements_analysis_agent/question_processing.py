@@ -442,11 +442,14 @@ def review_question_answer_alignment(
     Postconditions: returns the aligned list, or the unmodified list on empty input
         or a full-batch LLM/parse failure; never raises. This is a per-question
         review (ids are preserved), so an item that individually fails to parse,
-        or that parses but carries an id not present in ``open_questions``
-        (a hallucinated/unrecognized id), falls back to its original
-        (unaligned) question by id; any original question whose id never
-        appears in the result is appended at the end. No original question is
-        ever dropped, and no question with an unrecognized id is ever added.
+        that carries an id not present in ``open_questions`` (a
+        hallucinated/unrecognized id), or that repeats an id already placed in
+        the result (a duplicate), falls back to its original (unaligned)
+        question by id — unless that original id is already in the result, in
+        which case the item is dropped outright. Any original question whose
+        id never appears in the result is appended at the end. The result
+        therefore contains exactly one entry per original id: no question is
+        ever dropped, added, or duplicated.
     """
     if len(open_questions) == 0:
         return []
@@ -497,13 +500,15 @@ def review_question_answer_alignment(
                 parsed = parse_open_question(q_data, i)
                 if parsed.id not in original_by_id:
                     raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
+                if parsed.id in seen_ids:
+                    raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
                 result.append(parsed)
                 seen_ids.add(parsed.id)
             except Exception as e:
                 logger.warning("Failed to parse aligned question %d: %s", i, e)
                 fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
                 original = original_by_id.get(fallback_id) if fallback_id else None
-                if original is not None:
+                if original is not None and original.id not in seen_ids:
                     result.append(original)
                     seen_ids.add(original.id)
         if not result:
