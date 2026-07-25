@@ -166,6 +166,37 @@ def test_method_behind_class_level_if_is_checked(tmp_path: Path) -> None:
     assert "do_thing" in violations[0]
 
 
+def test_function_in_except_handler_is_checked(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        try:
+            pass
+        except ValueError:
+            def do_thing(x):
+                return x
+        """,
+    )
+    violations = check_file(path)
+    assert len(violations) == 1
+    assert "do_thing" in violations[0]
+
+
+def test_function_in_match_case_is_checked(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        match 1:
+            case 1:
+                def do_thing(x):
+                    return x
+        """,
+    )
+    violations = check_file(path)
+    assert len(violations) == 1
+    assert "do_thing" in violations[0]
+
+
 def test_nested_function_is_not_flagged(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
