@@ -9,6 +9,7 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from shared.command_runner.runner import run_command
+from shared.subprocess_timeouts import DEVOPS_TERRAFORM_EXECUTION_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class TerraformExecutionToolAgent:
         else:
             cmd.append(input_data.command)
 
-        result = run_command(cmd, cwd=path, timeout=180)
+        result = run_command(cmd, cwd=path, timeout=DEVOPS_TERRAFORM_EXECUTION_TIMEOUT_S)
 
         findings: List[str] = []
         if not result.success:

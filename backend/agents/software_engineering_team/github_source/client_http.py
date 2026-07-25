@@ -17,6 +17,8 @@ from typing import Any, Iterator, Optional
 
 import httpx
 
+from shared.http.retry import retry_delay
+
 # Named to match the pre-split logger identity (`...github_source.client`), not this
 # module's own `__name__`: these log records are byte-identical carry-overs from client.py,
 # and keeping the same logger name preserves that history for anything filtering on it.
@@ -97,7 +99,6 @@ class _GitHubHttpMixin:
     ) -> httpx.Response:
         url = self._absolute_url(path)
         last_exc: Optional[Exception] = None
-        backoff = 1.0
         for attempt in range(self._max_retries):
             try:
                 response = self._client.request(
@@ -112,8 +113,7 @@ class _GitHubHttpMixin:
                 logger.warning(
                     "GitHub %s %s transport error: %s (attempt %d)", method, url, exc, attempt + 1
                 )
-                self._sleep(backoff)
-                backoff *= 2
+                self._sleep(retry_delay(attempt, 1.0, RATE_LIMIT_CAP_S))
                 continue
 
             if response.status_code in (502, 503, 504):
@@ -124,8 +124,7 @@ class _GitHubHttpMixin:
                     response.status_code,
                     attempt + 1,
                 )
-                self._sleep(backoff)
-                backoff *= 2
+                self._sleep(retry_delay(attempt, 1.0, RATE_LIMIT_CAP_S))
                 continue
 
             if (

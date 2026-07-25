@@ -13,10 +13,10 @@ from __future__ import annotations
 import textwrap
 
 from investment_team.models import StrategySpec
-from investment_team.strategy_lab.quality_gates.code_conformance import (
+from investment_team.strategy_lab.quality_gates.code_conformance.ast_helpers import (
     _POSITION_SNAPSHOT_ATTRS,
-    CodeConformanceGate,
 )
+from investment_team.strategy_lab.quality_gates.code_conformance.gate import CodeConformanceGate
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
     AllOf,

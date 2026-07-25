@@ -89,7 +89,7 @@ from .phases import Phase, hash_code, hash_metrics_and_trades
 from .quality_gates.acceptance_gate import AcceptanceGate, summarize_acceptance_reason
 from .quality_gates.alignment_checks import DeterministicAlignmentChecker
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
-from .quality_gates.code_conformance import CodeConformanceGate
+from .quality_gates.code_conformance.gate import CodeConformanceGate
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
 from .quality_gates.cost_stress_realism import CostStressRealismGate
@@ -813,6 +813,17 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin):
         # cost-stress on winning-candidate runs lives at the production
         # entrypoint, which force-enables the flag. Critical findings feed
         # the veto block below.
+        # ``None`` (no reports at all) is RuleFiringRateGate's "nothing to
+        # evaluate, self-skip" signal on the custom-code path; an empty
+        # ``alignment_findings`` list on a real report is instead read as
+        # "every rule is dead" (see that gate's docstring). Those two only
+        # stay distinguishable because this method's own early-out above
+        # (``if not execution_succeeded or not trades: return []``) and
+        # ``DeterministicAlignmentChecker`` both key off the same "no
+        # trades" condition — an aligned report for a non-empty ledger is
+        # never expected to carry an empty ``alignment_findings``. If that
+        # invariant ever breaks, the gate would treat the empty list as a
+        # false "all rules dead" verdict rather than skipping.
         realism_results = self._run_realism_gates(
             spec=spec,
             trades=trades,
@@ -821,6 +832,9 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin):
             market_data=market_data,
             execution_succeeded=execution_succeeded,
             open_position_entry_reasons=open_position_entry_reasons,
+            alignment_findings=alignment_reports[-1].alignment_findings
+            if alignment_reports
+            else None,
         )
         all_gate_results.extend(realism_results)
         realism_critical = [r for r in realism_results if not r.passed and r.severity == "critical"]
@@ -1223,6 +1237,7 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin):
         market_data: Optional[Dict[str, List[OHLCVBar]]],
         execution_succeeded: bool,
         open_position_entry_reasons: Optional[List[str]] = None,
+        alignment_findings: Optional[List[AlignmentFinding]] = None,
     ) -> List[QualityGateResult]:
         """Run verification-phase realism gates and return their results.
 
@@ -1233,6 +1248,12 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin):
           - ``config`` is the run's :class:`BacktestConfig`.
           - ``market_data`` is the per-symbol bar table used for the run;
             the liquidity gate self-skips when this is ``None``.
+          - ``alignment_findings`` is the latest
+            :class:`TradeAlignmentReport`'s ``alignment_findings`` ledger
+            (``None`` when the alignment loop produced no report yet); it
+            is the ``RuleFiringRateGate``'s sole rule-firing signal for a
+            ``requires_custom_code=True`` spec, since that path has no
+            reliable ``entry_reason``/``exit_reason`` annotation to count.
         Postconditions:
           - Returns ``[]`` when execution didn't succeed or the ledger is
             empty — the gates' contracts are only meaningful for a strategy
@@ -1266,6 +1287,7 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin):
                 spec,
                 trades,
                 open_position_entry_reasons=open_position_entry_reasons or [],
+                alignment_findings=alignment_findings,
                 phase="verification",
             )
         )
