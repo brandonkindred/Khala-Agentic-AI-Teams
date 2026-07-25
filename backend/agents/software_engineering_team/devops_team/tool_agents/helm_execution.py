@@ -9,6 +9,7 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from shared.command_runner.runner import run_command
+from shared.subprocess_timeouts import DEVOPS_HELM_EXECUTION_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class HelmExecutionToolAgent:
         if input_data.values_file:
             cmd.extend(["-f", input_data.values_file])
 
-        result = run_command(cmd, cwd=path, timeout=120)
+        result = run_command(cmd, cwd=path, timeout=DEVOPS_HELM_EXECUTION_TIMEOUT_S)
 
         findings: List[str] = []
         if not result.success:
