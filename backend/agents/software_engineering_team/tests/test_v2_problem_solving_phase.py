@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _task(**overrides):
     from software_engineering_team.shared.models import Task, TaskType
@@ -78,6 +80,15 @@ def test_format_all_code_empty():
     )
 
     assert _format_all_code({}) == "(no code)"
+
+
+def test_format_all_code_raises_on_nonpositive_max_chars():
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        _format_all_code,
+    )
+
+    with pytest.raises(ValueError):
+        _format_all_code({"f.py": "x"}, max_chars=0)
 
 
 def test_format_issues_for_batch():

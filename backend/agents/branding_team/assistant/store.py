@@ -354,6 +354,36 @@ class BrandingConversationStore(PostgresHelperMixin):
             > 0
         )
 
+    @timed_query(store=_STORE, op="attach_and_update_mission")
+    def attach_and_update_mission(
+        self, conversation_id: str, brand_id: Optional[str], mission: BrandingMission
+    ) -> bool:
+        """Attach a conversation to a brand and replace its mission, atomically.
+
+        Combines what ``set_brand`` and ``update_mission`` would otherwise do as
+        two independently-committed statements into one transaction, so a
+        conversation can never be left attached to a brand with a stale mission
+        (or vice versa) if the second write were to fail.
+
+        Preconditions:
+            ``conversation_id`` is a non-empty string; ``brand_id`` is None or a
+            brand id string; ``mission`` is a valid :class:`BrandingMission`.
+        Postconditions:
+            Returns True iff a matching conversation row was updated with both
+            ``brand_id`` and ``mission_json``; False when no such conversation
+            exists (the transaction still commits, but affects zero rows).
+            ``updated_at`` is bumped once on success.
+        """
+        ts = datetime.now(tz=timezone.utc)
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE branding_conversations "
+                "SET brand_id = %s, mission_json = %s, updated_at = %s "
+                "WHERE conversation_id = %s",
+                (brand_id, Json(mission.model_dump(mode="json")), ts, conversation_id),
+            )
+            return cur.rowcount > 0
+
     @timed_query(store=_STORE, op="get_by_brand_id")
     def get_by_brand_id(
         self, brand_id: str
