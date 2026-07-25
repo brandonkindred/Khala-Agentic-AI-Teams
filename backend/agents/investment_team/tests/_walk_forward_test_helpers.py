@@ -342,7 +342,25 @@ def wire_run_cycle_stubs(
         lambda **kw: AlignmentCheckResult(
             aligned=alignment_aligned,
             rationale=alignment_rationale,
-            findings=[]
+            # ``aligned=True`` stands in for a real deterministic-gate run
+            # where every trade's entry_signal check passed against
+            # ``entry[0]`` — the stub spec's sole entry rule (see
+            # ``minimal_custom_spec_dict``). Without this, the rule-firing
+            # gate's alignment-findings-derived signal (fed by this same
+            # report on the custom-code path — see rule_firing.py) would
+            # read an "aligned" report as "entry[0] never fired" and emit a
+            # spurious critical the real deterministic gate would never
+            # produce for a genuinely aligned ledger.
+            findings=[
+                AlignmentFinding(
+                    trade_num=1,
+                    rule_id="entry[0]",
+                    check_name="entry_signal",
+                    passed=True,
+                    severity="info",
+                    details="stub: entry aligned",
+                )
+            ]
             if alignment_aligned
             else [
                 AlignmentFinding(
