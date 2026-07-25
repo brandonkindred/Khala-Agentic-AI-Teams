@@ -10,6 +10,7 @@ import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
+import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
 import type {
@@ -118,7 +119,13 @@ describe('StrategyLabComponent a11y — result card disclosure', () => {
       ],
     })
       .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
+        set: {
+          providers: [
+            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
+            StrategyLabActivityLogService,
+            StrategyLabPaperTradingService,
+          ],
+        },
       })
       .compileComponents();
 
@@ -220,7 +227,13 @@ describe('StrategyLabComponent a11y — root region labelling (showTitle input)'
       ],
     })
       .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
+        set: {
+          providers: [
+            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
+            StrategyLabActivityLogService,
+            StrategyLabPaperTradingService,
+          ],
+        },
       })
       .compileComponents();
 
@@ -348,7 +361,13 @@ describe('StrategyLabComponent a11y — scrollable containers (WCAG 2.4.7)', () 
       ],
     })
       .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
+        set: {
+          providers: [
+            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
+            StrategyLabActivityLogService,
+            StrategyLabPaperTradingService,
+          ],
+        },
       })
       .compileComponents();
 
@@ -503,7 +522,13 @@ describe('StrategyLabComponent a11y — run announcement live region', () => {
       ],
     })
       .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
+        set: {
+          providers: [
+            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
+            StrategyLabActivityLogService,
+            StrategyLabPaperTradingService,
+          ],
+        },
       })
       .compileComponents();
 
@@ -1542,7 +1567,13 @@ describe('StrategyLabComponent a11y — decorative icons hidden from assistive t
       ],
     })
       .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
+        set: {
+          providers: [
+            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
+            StrategyLabActivityLogService,
+            StrategyLabPaperTradingService,
+          ],
+        },
       })
       .compileComponents();
 
@@ -1777,7 +1808,13 @@ describe('StrategyLabComponent a11y — phase stepper state (WCAG 1.3.1 / 4.1.2)
       ],
     })
       .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
+        set: {
+          providers: [
+            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
+            StrategyLabActivityLogService,
+            StrategyLabPaperTradingService,
+          ],
+        },
       })
       .compileComponents();
 
@@ -1887,7 +1924,13 @@ describe('StrategyLabComponent a11y — visible run progress (role=meter + curre
       ],
     })
       .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
+        set: {
+          providers: [
+            { provide: StrategyLabRunService, useValue: createRunServiceStub() },
+            StrategyLabActivityLogService,
+            StrategyLabPaperTradingService,
+          ],
+        },
       })
       .compileComponents();
 
