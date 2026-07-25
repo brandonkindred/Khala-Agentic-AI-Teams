@@ -65,7 +65,7 @@ the parent effort names it, but it has no live position in the sequence today.
 | QA | `run_qa_testing_phase_impl` (`review.py:391-437`) | `microtask_files` (post-CR content), `deps.qa_agent`, `deps.tool_agents[TESTING_QA]`, `agent_review_cache` | `GateOutcome` with `source="qa"` issues |
 | Security | `run_security_testing_phase_impl` (`review.py:439+`) | `microtask_files`, `deps.security_agent`, `deps.tool_agents[SECURITY]`, `agent_review_cache` | `GateOutcome` with `source="security"` issues |
 | Documentation | `_run_documentation_phase` (`execution.py:1422-1546`) | `microtask_files` (last review-accepted write), `deps.tool_agents[DOCUMENTATION]`, `task.description` | Refined `doc_files` merged into `microtask_files`/`all_files`/`mt.output_files`; sets `mt.status = COMPLETED` |
-| DbC (dormant) | `run_dbc_comments` (`quality_gate_tools.py`) | Whole repo directory tree on disk (not `microtask_files`) | Pre/postcondition comments added to files; not currently invoked by the pipeline |
+| DbC (dormant) | `run_dbc_comments` (`quality_gate_tools.py:232-303`) | Whole repo directory tree on disk (not `microtask_files`) | Pre/postcondition comments written to disk **and committed** (`write_files_and_commit`, `quality_gate_tools.py:294`); not currently invoked by the pipeline |
 
 ## Dependency graph
 
@@ -78,7 +78,7 @@ flowchart TD
     Sec -->|fail: batch-fix| CR
     CR -->|retry-exhausted / circuit-breaker| Fail[Terminal REVIEW_FAILED]
     Sec -->|pass, same cycle as CR+QA| Doc[Documentation]
-    DbC[DbC — unwired]:::dormant
+    DbC[DbC — unwired; writes+commits files,\nneeds a serialized position if added]:::dormant
 
     classDef dormant stroke-dasharray: 5 5
 ```
@@ -101,9 +101,18 @@ Edge classification:
 - **Hard data dependency**: {Code Review, QA, Security} → Documentation.
   Documentation only runs once `phase_failed` is `False`, i.e. after all three
   gates passed together in one cycle, and reads the resulting accepted file state.
-- **No dependency (currently disconnected)**: DbC. It re-scans the repo on disk
-  rather than consuming any `GateOutcome`, and is not invoked by
-  `run_gated_execution_impl` at all today.
+- **Currently disconnected, but not safe to run independently if wired in**: DbC.
+  It re-scans the repo on disk rather than consuming any `GateOutcome`, and is not
+  invoked by `run_gated_execution_impl` at all today — but `run_dbc_comments`
+  itself writes and commits files back to the worktree
+  (`quality_gate_tools.py:261-294`, `write_files_and_commit`). That write makes it
+  unsafe to run concurrently with the other gates (a concurrent build/review could
+  observe a changing worktree mid-scan), and unsafe to run *after* the loop as an
+  independent pass, since its generated edits would then bypass Code Review, QA,
+  and Security entirely. If wired in, DbC needs an explicit serialized position —
+  either before the review cycle (so its edits get reviewed like any other code
+  change) or as an additional review pass after it — not a "no dependency,
+  run-whenever" classification.
 - **Independent sub-steps, currently serialized**: within Code Review, build
   verification, lint, and the code-review-agent call each read the same static
   `microtask_files` snapshot and don't consume each other's output — they are run
@@ -123,6 +132,10 @@ Edge classification:
   rather than "go re-run only QA".
 - Documentation: hard-gated on all three review gates passing in the same cycle;
   cannot start earlier without weakening that invariant.
+- DbC, if wired in: it writes and commits files directly
+  (`quality_gate_tools.py:261-294`), so it cannot run concurrently with the other
+  gates (worktree race) nor as an independent pass after them (its edits would
+  bypass review) — see the dependency-graph note above.
 
 **Safe to parallelize as-is, or with modest restructuring, with no change to what
 gets checked:**
@@ -139,11 +152,8 @@ gets checked:**
   concurrently. This is a real pipeline change (today Security only starts once QA
   has already passed), not a drop-in optimization — it changes the retry/restart
   semantics described above and needs its own design before implementation.
-- DbC, if it were wired in: since it operates on the whole repo tree rather than
-  per-microtask `microtask_files` and consumes no `GateOutcome`, it could run
-  independently of (or after) the whole gated loop with no data dependency on the
-  other four gates.
-
 The follow-up implementation issue should scope itself to the two "modest
 restructuring" items above (Code-Review sub-steps, and QA/Security analysis
-concurrency) rather than attempting to parallelize the full sequential chain.
+concurrency) rather than attempting to parallelize the full sequential chain. DbC
+is out of scope for parallelization — if it is wired in, it needs an explicit
+serialized position in the sequence, not a concurrent or independent one.
