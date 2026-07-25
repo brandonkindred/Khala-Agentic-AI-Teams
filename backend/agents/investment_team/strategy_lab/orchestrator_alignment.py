@@ -3,8 +3,20 @@ from :mod:`orchestrator`.
 
 Pure move (issue #2585, part of #2571 decomposing the StrategyLabOrchestrator
 god-class tracking issue): every method and helper below is relocated
-verbatim from ``orchestrator.py``. No behavior changes. ``AlignmentMixin`` is
-mixed into ``StrategyLabOrchestrator``
+verbatim from ``orchestrator.py``. No behavior changes, with one narrow
+exception — ``_evaluate_alignment_proposal`` resolves ``compute_metrics``
+through a function-local ``from . import orchestrator as _orchestrator_module``
+deferred import instead of a static module-level import. This is required
+(not a stylistic choice): ``test_acceptance_gate_integration.py`` /
+``_walk_forward_test_helpers.py`` monkeypatch
+``investment_team.strategy_lab.orchestrator.compute_metrics`` directly, and a
+static import here would bind a private reference in this module's globals
+that such a patch would never reach. Do not "clean up" this deferred import
+back into a static one — see the identical, pre-existing idiom in
+``orchestrator_synthesis.py``'s ``_cached_run_strategy_code`` /
+``_run_synthesis_loop`` / ``_evaluate_synthesis_round`` for precedent.
+``AlignmentMixin`` is mixed into
+``StrategyLabOrchestrator``
 (``class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin):``);
 its methods expect the attributes ``StrategyLabOrchestrator.__init__`` sets on
 ``self`` (``self.code_safety_checker``), plus the ``self.record_gates`` /
@@ -14,11 +26,12 @@ its methods expect the attributes ``StrategyLabOrchestrator.__init__`` sets on
 methods — all of which stay on the base class and resolve via MRO on the
 final composed instance.
 
-This module must not import anything from ``orchestrator.py`` (that would be
-circular: ``orchestrator.py`` imports ``AlignmentMixin`` from here before its
-own class statement executes). Pure helpers shared by both this cluster and
-code that stays in ``orchestrator.py`` live in ``_orchestrator_helpers.py``
-instead.
+This module must not import anything from ``orchestrator.py`` at module level
+(that would be circular: ``orchestrator.py`` imports ``AlignmentMixin`` from
+here before its own class statement executes) — the deferred import described
+above is the sole, intentional exception. Pure helpers shared by both this
+cluster and code that stays in ``orchestrator.py`` live in
+``_orchestrator_helpers.py`` instead.
 """
 
 from __future__ import annotations
@@ -28,7 +41,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..market_data_service import OHLCVBar
 from ..models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
-from ..trade_simulator import compute_metrics
 from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     _AlignmentLoopOutcome,
@@ -586,8 +598,13 @@ class AlignmentMixin:
         diagnostics. Records the ``alignment_``-prefixed anomaly gates on
         ``all_gate_results`` in place.
         """
+        # Local import — same deferred-import rationale as
+        # ``SynthesisMixin._cached_run_strategy_code``: keeps test
+        # monkeypatches of ``orchestrator.compute_metrics`` honored.
+        from . import orchestrator as _orchestrator_module
+
         new_trades = align_exec.trades
-        new_metrics = compute_metrics(
+        new_metrics = _orchestrator_module.compute_metrics(
             new_trades, config.initial_capital, config.start_date, config.end_date
         )
         # Carry this re-execution's engine exit-rule firing counters onto the
