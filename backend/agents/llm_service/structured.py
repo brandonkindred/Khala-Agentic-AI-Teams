@@ -83,6 +83,7 @@ def complete_validated(
     temperature: float = 0.0,
     correction_attempts: int = 1,
     context: dict[str, Any] | None = None,
+    think: "bool | str | None" = False,
     **kwargs: Any,
 ) -> T:
     """Call ``client.complete_json`` and validate the result against ``schema``.
@@ -107,6 +108,10 @@ def complete_validated(
             from it (e.g. an allowed URL set) and mutate it to surface
             side-channel signals to other validators in the same model
             tree.
+        think: Forwarded to ``client.complete_json``. Defaults to ``False``:
+            every call here requires a schema-conformant JSON reply, and
+            extended thinking competes with strict JSON decoding for the
+            content channel. Pass an explicit value to override.
         **kwargs: Forwarded to ``client.complete_json``.
 
     Returns:
@@ -137,6 +142,7 @@ def complete_validated(
                 objective=objective,
                 system_prompt=system_prompt,
                 temperature=temperature,
+                think=think,
                 **kwargs,
             )
         except LLMJsonParseError as exc:

@@ -254,7 +254,7 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     assert len(stub_client.calls) == 1
     call = stub_client.calls[0]
     assert call["schema"] == DESIGN_SPEC_SCHEMA
-    assert call["system_prompt"] == design_mod._SYSTEM_PROMPT
+    assert call["system_prompt"] == design_mod._get_design_system_prompt()
     assert "Design ONE novel swing-style strategy" in call["prompt"]
     # The original task prompt was sent, not a correction re-prompt.
     assert "could not be parsed as a single JSON object" not in call["prompt"]
