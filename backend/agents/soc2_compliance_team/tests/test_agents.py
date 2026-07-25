@@ -121,21 +121,20 @@ def test_run_tsc_agent_parses_response_into_audit_result() -> None:
     assert out.findings[1].severity is FindingSeverity.LOW
     assert out.compliant is False
     # Prompt should include criterion-specific text
-    call = llm.calls[0]
-    assert "Security" in call["prompt"]
-    assert "auth, encryption" in call["prompt"]
-    # The formatting call stays at the pure-transcription default...
-    assert call["temperature"] == 0.0
-    assert call["think"] is False
-    # ...while the criterion-specific temperature (0.1) reaches the reasoning
-    # pass that actually performs the audit, with thinking enabled.
+    # The criterion-specific content and temperature belong to the reasoning
+    # pass — that is the call that actually performs the audit. Assert against
+    # ``reasoning_calls`` rather than ``calls[0]``: the formatting call only
+    # sees the reasoning pass's prose, so a prompt-content assertion there
+    # would pass only because ``FakeLLM.complete`` echoes its prompt back.
     reasoning = llm.reasoning_calls[0]
-    assert reasoning["temperature"] == 0.1
-    assert reasoning["think"] is True
-    # The repo content and criterion focus go to the reasoning pass; the
-    # formatting pass sees only its prose output.
     assert "Security" in reasoning["prompt"]
     assert "auth, encryption" in reasoning["prompt"]
+    assert reasoning["temperature"] == 0.1
+    assert reasoning["think"] is True
+    # The formatting call stays a pure, thinking-off transcription.
+    call = llm.calls[0]
+    assert call["temperature"] == 0.0
+    assert call["think"] is False
 
 
 def test_run_tsc_agent_skips_empty_findings_and_invents_compliance() -> None:
@@ -406,12 +405,11 @@ def test_report_writer_handles_invalid_finding_dicts() -> None:
     """If the per-category findings list contains invalid dicts, the
     writer's typed conversion falls back to an empty list rather than
     raising."""
-    # Manually construct an audit result whose internal findings are
-    # legitimate TSCFinding instances; we'll then patch the
-    # ``findings_by_tsc`` building step indirectly by passing an LLM
-    # response containing nothing — the *inputs* dict comes from
-    # ``r.findings`` via .model_dump(), so to exercise the except branch
-    # we monkey-patch the conversion path via the agent's private helper.
+    # The except branch is exercised by handing ``_produce_compliance_report``
+    # a malformed per-category findings override directly (``bad_findings``
+    # below) — dicts whose keys don't satisfy ``TSCFinding``, so the typed
+    # conversion raises and falls back to an empty list. No monkey-patching
+    # is needed: the helper takes the findings mapping as an argument.
     agent = ReportWriterAgent()
     llm = _FakeLLM(
         {

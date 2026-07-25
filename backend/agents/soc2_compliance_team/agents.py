@@ -75,7 +75,10 @@ implementation found"). Do not invent file paths.
 
 def _parse_finding(d: Dict[str, Any], category: TSCCategory) -> TSCFinding:
     """Build TSCFinding from LLM response dict."""
-    sev = (d.get("severity") or "medium").lower()
+    # str() before .lower(): the value comes straight from an LLM response, so
+    # a non-string (e.g. a bare int severity) must not crash the audit — it
+    # falls through to the ValueError branch and defaults to MEDIUM.
+    sev = str(d.get("severity") or "medium").lower()
     try:
         severity = FindingSeverity(sev)
     except ValueError:
@@ -314,7 +317,14 @@ recommendations)."""
         for cat, list_dicts in findings_by_tsc.items():
             try:
                 findings_typed[cat] = [TSCFinding(**d) for d in list_dicts]
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — report is best-effort
+                # Log before dropping: silently returning an empty list makes a
+                # malformed-findings bug invisible in production.
+                logger.warning(
+                    "Failed to type findings for TSC category %s; dropping them: %s",
+                    cat,
+                    exc,
+                )
                 findings_typed[cat] = []
         return SOC2ComplianceReport(
             executive_summary=data.get("executive_summary") or "",

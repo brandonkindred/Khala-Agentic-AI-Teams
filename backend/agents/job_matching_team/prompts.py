@@ -1,7 +1,11 @@
 """System prompts for the job matching pipeline agents.
 
-Each prompt instructs the model to emit strict JSON so downstream Pydantic
-validation can enforce the contract.
+The scanner/query-builder prompts instruct the model to emit strict JSON so
+downstream Pydantic validation can enforce the contract. The ranker instead
+uses a two-call split: ``RANKER_SYSTEM_PROMPT_REASONING`` drives the
+think=True analysis (prose, no JSON), and ``RANKER_FORMAT_INSTRUCTIONS``
+drives the think=False pass that transcribes that prose into the strict JSON
+the contract still requires.
 """
 
 from __future__ import annotations

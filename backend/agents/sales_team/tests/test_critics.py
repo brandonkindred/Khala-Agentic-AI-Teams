@@ -41,6 +41,17 @@ class CannedLLMClient(LLMClient):
     Mirrors the test helper in ``test_sales_team.py``. Re-defined locally to
     keep this file self-contained — both critic tests and orchestrator-level
     retry tests share this exact pattern.
+
+    The critics make two calls per review, and this double records them in
+    two SEPARATE lists — they are not aliases:
+
+    * ``calls`` — the think=False ``complete_json`` formatting calls. These
+      consume the programmed ``responses`` queue, so assertions about the
+      *verdict* (and about the JSON-shape system prompt) belong here.
+    * ``reasoning_calls`` — the think=True ``complete`` reasoning calls. These
+      never touch the queue. The critic's built prompt (dossier, rubric,
+      sequence/proposal payload) is sent here, so assertions about *prompt
+      content* belong here, not in ``calls``.
     """
 
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
