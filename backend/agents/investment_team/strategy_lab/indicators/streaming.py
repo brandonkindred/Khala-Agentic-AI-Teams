@@ -613,7 +613,7 @@ class IndicatorRegistry:
         return plus_dm, minus_dm, tr
 
     def adx(self, bars: Sequence[Any], period: int = 14) -> Optional[float]:
-        """Average directional index (un-smoothed single-DI form) at ``bars[-1]``.
+        """Average directional index (un-smoothed single-DX form) at ``bars[-1]``.
 
         Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= 2*period + 1``.
         Post: the ADX scalar computed from the trailing ``period`` directional-
