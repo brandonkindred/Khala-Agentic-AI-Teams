@@ -68,7 +68,8 @@ class LLMClient:
 
     The real wiring (Ollama / Claude via `backend.agents.llm_service`) lands
     this week. Until then `complete()` returns a deterministic fallback so
-    the documentation phase still produces output and tests remain stable.
+    every LLM-driven phase that uses this client (documentation today, setup
+    planning next) still produces output and tests remain stable.
     """
 
     _warned_fallback = False

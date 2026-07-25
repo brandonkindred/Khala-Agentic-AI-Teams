@@ -45,7 +45,6 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List, Optional
 
@@ -364,7 +363,9 @@ def find_architecture_and_redundancy_issues(
           is satisfied), when ``input_data.architecture`` is absent or
           carries none of an ``architecture_document``, ``overview``,
           ``components``, or ``decisions`` (nothing to check a contradiction
-          against), or when the submission has no readable files.
+          against). Also returns ``[]`` (still with no LLM call) when the
+          submission has no readable files — checked inside :func:`_run_pass`
+          rather than here, once the index has been built.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"architecture"`` or ``"refactor"`` only, each with its cited
           ``line`` bounds-checked against the real file (a hallucinated
@@ -449,8 +450,10 @@ def _run_pass(
         system_prompt=ARCHITECTURE_CONSISTENCY_PROMPT,
         tools=_build_tools(index),
     )
+    from shared.llm_recovery import extract_json_object
+
     raw = str(agent(prompt)).strip()
-    data = json.loads(raw)
+    data = extract_json_object(raw) or {}
     findings = _parse_findings(data)
     if findings:
         findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)

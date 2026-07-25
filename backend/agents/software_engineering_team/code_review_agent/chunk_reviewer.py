@@ -31,9 +31,6 @@ import os
 from typing import List, Optional, Union
 
 from llm_service import LLMClient, LLMJsonParseError
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_map_chunk_chars,
-)
 from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .model_resolution import resolve_code_review_model
@@ -203,16 +200,7 @@ def _run_chunk_review(
         LLMPermanentError: other unrecoverable LLM failures propagate
             unchanged from ``complete_json_with_continuation``.
     """
-    max_chunk_chars = compute_code_review_map_chunk_chars(llm)
     code_chunk = input_data.code_chunk
-    if len(code_chunk) > max_chunk_chars:
-        # Coordinator invariant violation (e.g. a single line longer than the
-        # cap): log it but never mutate the code under review.
-        logger.warning(
-            "ChunkReview: code chunk is %s chars, above the %s-char map budget — reviewing as-is",
-            len(code_chunk),
-            max_chunk_chars,
-        )
     spec_excerpt = input_data.spec_excerpt
     architecture_overview = input_data.architecture_overview
     existing_codebase_excerpt = input_data.existing_codebase_excerpt or ""

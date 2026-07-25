@@ -31,6 +31,22 @@ logger = logging.getLogger(__name__)
 MAX_ISSUES = 10
 MAX_GAPS = 10
 
+ORGANIZATIONAL_PHRASES = [
+    "decision process",
+    "approval process",
+    "who makes",
+    "final decision",
+    "consensus",
+    "product manager",
+    "stakeholder approval",
+    "organizational structure",
+    "who approves",
+    "sign-off",
+    "sign off",
+    "hierarchy",
+    "reporting",
+]
+
 
 def filter_duplicate_questions(
     new_questions: List[OpenQuestion],
@@ -59,8 +75,6 @@ def filter_duplicate_questions(
     def _stem(w: str) -> str:
         """Normalize word for matching (e.g. tokens->token, stored->store)."""
         w = w.strip()
-        if len(w) <= 3:
-            return w
         if w.endswith("ed") and len(w) > 4:
             return w[:-2]  # stored -> store
         if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
@@ -115,21 +129,6 @@ def filter_organizational_questions(questions: List[OpenQuestion]) -> List[OpenQ
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`.
     Postconditions: returns the sublist that is not organizational, order preserved.
     """
-    ORGANIZATIONAL_PHRASES = [
-        "decision process",
-        "approval process",
-        "who makes",
-        "final decision",
-        "consensus",
-        "product manager",
-        "stakeholder approval",
-        "organizational structure",
-        "who approves",
-        "sign-off",
-        "sign off",
-        "hierarchy",
-        "reporting",
-    ]
     kept: List[OpenQuestion] = []
     for q in questions:
         text_norm = (q.question_text or "").lower().strip()

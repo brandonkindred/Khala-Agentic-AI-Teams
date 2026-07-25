@@ -150,8 +150,9 @@ def build_specialist_collaboration_plan(
     cross-team collaboration (UX, architecture, risk, data, security).
 
     Preconditions: ``cleaned_spec`` is a string; ``answered_questions`` a list.
-    Postconditions: returns a newline-joined, de-duplicated, deterministically
-        ordered recommendation list keyed off keywords present in the spec + answers.
+    Postconditions: returns a newline-joined string of de-duplicated,
+        deterministically ordered recommendations keyed off keywords present
+        in the spec + answers.
     """
     spec_text = (cleaned_spec + "\n" + format_answered_questions(answered_questions)).lower()
 
@@ -284,18 +285,15 @@ def generate_prd_document(
     # Summarize answered questions for the prompt; this may be empty on the first run
     answered_summary = format_answered_questions(answered_questions)
 
-    cleaned_spec_snippet = cleaned_spec
-    answered_summary_snippet = answered_summary
     specialist_plan = build_specialist_collaboration_plan(
-        cleaned_spec=cleaned_spec_snippet,
+        cleaned_spec=cleaned_spec,
         answered_questions=answered_questions,
     )
-    specialist_plan_snippet = specialist_plan
 
     prompt = PRD_PROMPT.format(
-        cleaned_spec=cleaned_spec_snippet,
-        answered_questions_summary=answered_summary_snippet,
-        specialist_collaboration_plan=specialist_plan_snippet,
+        cleaned_spec=cleaned_spec,
+        answered_questions_summary=answered_summary,
+        specialist_collaboration_plan=specialist_plan,
     )
 
     try:

@@ -24,6 +24,10 @@ from .models import AnsweredQuestion, OpenQuestion
 
 logger = logging.getLogger(__name__)
 
+# Minimum keyword/word-overlap ratio for two questions to be treated as the
+# same underlying decision (duplicate-answer lookup and supersede detection).
+_QUESTION_MATCH_THRESHOLD = 0.5
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically (write-temp-then-rename).
@@ -144,7 +148,7 @@ def extract_answer_from_qa_history(
         matches = sum(1 for w in key_words if w in recorded_question_lower)
         match_ratio = matches / len(key_words) if key_words else 0
 
-        if match_ratio > 0.5:  # Good enough match
+        if match_ratio > _QUESTION_MATCH_THRESHOLD:  # Good enough match
             # Extract answer from block
             answer = ""
             rationale = ""
@@ -250,7 +254,7 @@ def is_same_decision(existing_question: str, new_question: str) -> bool:
     if not existing_w or not new_w:
         return False
     overlap = len(existing_w & new_w) / max(len(existing_w), len(new_w))
-    return overlap >= 0.5
+    return overlap >= _QUESTION_MATCH_THRESHOLD
 
 
 def record_answers(
