@@ -467,8 +467,7 @@ def test_constructor_resolves_json_model_when_enabled(monkeypatch):
     assert "text" in seen and "json" in seen
 
 
-@pytest.mark.parametrize("mode", ["json"])
-def test_review_json_mode(monkeypatch, mode):
+def test_review_json_mode(monkeypatch):
     class _JsonReview(_DemoAgent):
         review_parse_mode = "json"
 

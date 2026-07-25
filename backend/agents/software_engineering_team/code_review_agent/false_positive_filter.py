@@ -812,6 +812,11 @@ def _build_group_prompt(
 ) -> str:
     """Render the user prompt for verifying one file's findings.
 
+    ``max_inline_chars`` is accepted but intentionally unused -- retained only
+    for call-site compatibility with callers still computing it. See the
+    module-level fail-safe rationale for why the primary file body is inlined
+    in full rather than bounded by it.
+
     The prompt inlines the cited file's full content (so the model has the
     primary evidence even without a tool call) and lists up to
     ``_MANIFEST_LIMIT`` available paths; other files (including any manifest

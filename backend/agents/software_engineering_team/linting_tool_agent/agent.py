@@ -17,6 +17,10 @@ from .prompts import LINT_FIX_PROMPT
 
 logger = logging.getLogger(__name__)
 
+# Cap on lint issues sent to the fix-generation prompt; a linter run can report
+# hundreds of violations, and each one adds an issue line plus (indirectly, via
+# _read_affected_files) file content to the prompt, so this bounds both prompt
+# size and LLM output size for a single fix-generation call.
 MAX_ISSUES_FOR_LLM = 30
 MAX_AFFECTED_CODE_CHARS = 60_000  # Cap context to avoid blowing up the LLM context window
 
@@ -35,6 +39,13 @@ class LintingToolAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
+        """Resolve the strands model for lint-fix generation.
+
+        Preconditions: none -- ``llm_client`` is optional; a missing/unconfigured
+            client resolves to a model that fails fast when actually invoked.
+        Postconditions: ``self._model`` holds the strands model resolved for the
+            ``"linting_tool_agent"`` agent key.
+        """
         self._model = resolve_strands_model(
             llm_client, agent_key="linting_tool_agent", get_strands_model_fn=get_strands_model
         )

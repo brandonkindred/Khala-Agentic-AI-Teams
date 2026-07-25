@@ -91,9 +91,9 @@ class ArchitectureToolAgent(PlanGeneratorToolAgent):
             (falling back to ``task_title``, then a default) and the full spec
             content (falling back to a placeholder when blank).
         """
-        spec_excerpt = inp.spec_context or ""
+        spec_text = inp.spec_context or ""
         task_desc = inp.task_description or inp.task_title or "Frontend application"
         return FRONTEND_ARCHITECT_PROMPT.format(
             task_description=task_desc,
-            spec_content=spec_excerpt if spec_excerpt.strip() else "(no spec provided)",
+            spec_content=spec_text if spec_text.strip() else "(no spec provided)",
         )
