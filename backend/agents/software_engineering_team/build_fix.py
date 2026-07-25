@@ -380,8 +380,10 @@ def _try_build_fix_one_at_a_time(
                             cwd=project_dir,
                             timeout=120,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            "Build fix: failed to install requirements.txt before test run: %s", e
+                        )
                 test_result = run_pytest(project_dir, python_exe=sys.executable)
                 if not test_result.success:
                     for f in test_result.parsed_failures("pytest"):
@@ -436,7 +438,8 @@ def _try_build_fix_one_at_a_time(
             total += len(content) + len(rel)
             if total > max_chars:
                 break
-        except Exception:
+        except Exception as e:
+            logger.debug("Build fix: could not read file %s: %s", f, e)
             continue
 
     try:

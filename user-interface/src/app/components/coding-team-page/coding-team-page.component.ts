@@ -87,8 +87,8 @@ interface IssueRowVm {
 }
 
 /**
- * Main page for the Coding Team feature, hosting three single-select views: the assistant
- * chat (default), a GitHub issue browser, and the job Runs panel.
+ * Main page for the Coding Team feature, hosting three single-select views: the job Runs
+ * panel (default), a GitHub issue browser, and the assistant chat.
  *
  * The GitHub view lists every repository the configured PAT can access — repository access
  * is defined by the PAT's own authorization, not by per-repo Khala configuration. Expanding
@@ -129,8 +129,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
   private readonly notifications = inject(NotificationService);
 
-  /** Which single view is visible. The page opens on the assistant chat. */
-  activeView: 'chat' | 'github' | 'jobs' = 'chat';
+  /** Which single view is visible. The page opens on the job Runs panel. */
+  activeView: 'chat' | 'github' | 'jobs' = 'jobs';
 
   // Embedded assistant chat configuration — named properties rather than template literals, so the
   // chat panel's wiring lives in one place.
