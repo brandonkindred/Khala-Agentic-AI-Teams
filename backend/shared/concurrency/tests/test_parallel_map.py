@@ -168,6 +168,18 @@ def test_each_task_gets_independent_context_copy() -> None:
     assert var.get() == 100
 
 
+def test_trace_id_propagates_into_workers() -> None:
+    """A bound trace_id (shared.observability.trace_context) survives fan-out,
+    proving parallel_map's generic contextvar propagation covers it too."""
+    from shared.observability import bind_trace_id, current_trace_id
+
+    def fn(_x: int) -> str:
+        return current_trace_id()
+
+    with bind_trace_id("trace-abc"):
+        assert parallel_map([1, 2, 3], fn, max_workers=3) == ["trace-abc"] * 3
+
+
 def test_fast_fail_reraises_with_traceback() -> None:
     """The first worker exception propagates with its original type/message."""
 
