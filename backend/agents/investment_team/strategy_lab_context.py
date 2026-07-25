@@ -231,7 +231,14 @@ def format_prior_results(records: List[StrategyLabRecord], *, max_records: int =
         ordered = ordered[-max_records:]
     lines = []
     for i, r in enumerate(ordered, start=1):
-        label = "WINNING" if r.is_winning else "LOSING"
+        if not r.is_winning:
+            label = "LOSING"
+        elif r.is_publishable:
+            label = "WINNING · PUBLISHABLE"
+        elif r.publishability_skip_reason:
+            label = f"WINNING · NOT PUBLISHABLE ({r.publishability_skip_reason})"
+        else:
+            label = "WINNING · NOT PUBLISHABLE"
         hyp = r.strategy.hypothesis.replace("\n", " ").strip()
         if len(hyp) > 160:
             hyp = hyp[:157] + "..."
