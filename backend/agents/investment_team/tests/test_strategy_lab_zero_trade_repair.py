@@ -29,7 +29,6 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
-from investment_team.strategy_lab import zero_trade_repair as zero_trade_repair_module
 from investment_team.strategy_lab.agents._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from investment_team.strategy_lab.agents.zero_trade_repair import (
     _ZERO_TRADE_REPAIR_SCHEMA_JSON,
@@ -248,10 +247,6 @@ def _make_orchestrator_with_stubs(
     sandbox_stub = _StubSandbox(sandbox_results or [])
     orch.zero_trade_repair_agent = repair_stub  # type: ignore[assignment]
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", sandbox_stub)
-    # The zero-trade repairer module imports ``run_strategy_code`` directly
-    # rather than going through ``orchestrator_module``, so it needs its own
-    # monkeypatch target.
-    monkeypatch.setattr(zero_trade_repair_module, "run_strategy_code", sandbox_stub)
     return orch, repair_stub, sandbox_stub
 
 
