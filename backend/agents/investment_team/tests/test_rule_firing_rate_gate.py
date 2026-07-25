@@ -453,3 +453,54 @@ def test_custom_code_empty_alignment_findings_reports_all_dead():
     trades = [_trade(1)]
     results = gate.check(spec, trades, alignment_findings=[])
     assert len(_criticals(results)) == 1
+
+
+def test_custom_code_open_position_entry_reason_prevents_false_critical():
+    """Regression: alignment findings only cover CLOSED trades, so an entry
+    rule whose only firing left a position open at end-of-stream would be
+    misreported as dead code unless open_position_entry_reasons is also
+    consulted on the custom-code path (mirrors the compiled path's own
+    open-position union)."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+            EntryRule(side="short", when=Predicate(lhs="bar.close", op="<", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [_finding(rule_id="entry[0]", check_name="entry_signal", passed=True)]
+    results = gate.check(
+        spec,
+        trades,
+        alignment_findings=findings,
+        open_position_entry_reasons=["compiled_entry:entry[1]"],
+    )
+    assert _criticals(results) == []
+    assert all(r.passed for r in results)
+
+
+def test_custom_code_engine_attributed_exit_prevents_false_warning():
+    """Regression: DeterministicAlignmentChecker emits only the UNINDEXED
+    'exit:signal_exit' skip marker (not the rule's index) for a close it
+    attributes to the engine's own structured-exit dispatcher, since the
+    engine manages exit_rules identically regardless of
+    requires_custom_code. Without also consulting trade.exit_reason
+    (_count_exit_hits) on the custom-code path, a SignalExitRule closed
+    entirely via engine attribution would be misreported as never fired."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(i + 1, exit_reason="engine_exit:signal_exit[0]") for i in range(5)]
+    findings = [_finding(rule_id="entry[0]", check_name="entry_signal", passed=True)]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    assert _warnings(results) == []
+    assert _criticals(results) == []

@@ -90,8 +90,14 @@ class RuleFiringRateGate(GateResultsMixin):
           ledger for this run. ``alignment_findings`` (when given) is the
           :class:`~investment_team.strategy_lab.agents.alignment.TradeAlignmentReport`
           ledger for the same run — required to evaluate a
-          ``requires_custom_code=True`` spec; ignored on the compiled path,
-          which always has ``entry_reason``/``exit_reason`` to work with.
+          ``requires_custom_code=True`` spec. ``open_position_entry_reasons``
+          is consulted on BOTH paths (not just the compiled path): a custom-code
+          strategy's alignment findings only cover closed trades, so a
+          position still open at end-of-stream needs the same reason-string
+          fallback the compiled path uses. ``trades`` itself is also
+          consulted for engine-attributed exits on the custom-code path
+          (``_count_exit_hits``), since the engine manages ``exit_rules``
+          identically regardless of ``requires_custom_code``.
 
         Postconditions:
           Returns one or more :class:`QualityGateResult`s: ``critical`` for
@@ -116,6 +122,33 @@ class RuleFiringRateGate(GateResultsMixin):
                         )
                     ]
                 entry_hits, exit_hits = _count_finding_hits(alignment_findings)
+                # Two unions onto the alignment-findings counts, both
+                # needed because ``DeterministicAlignmentChecker`` only
+                # audits CLOSED trades and only re-derives an index for a
+                # close it attributes to the strategy's own signal-exit
+                # logic:
+                #  1. ``open_position_entry_reasons`` — a position still
+                #     open at end-of-stream never appears in ``trades``,
+                #     so alignment findings structurally cannot credit
+                #     its entry rule; reuse the same reason-string count
+                #     the compiled path already trusts (harmless no-op
+                #     when custom code never sets a parseable reason).
+                #  2. ``_count_exit_hits(trades)`` — an ENGINE-attributed
+                #     signal-exit close (``exit_reason`` starting
+                #     ``engine_exit:``) makes the checker emit the
+                #     unindexed ``"exit:signal_exit"`` skip marker rather
+                #     than the rule's index, since it isn't evaluating
+                #     the strategy's own logic there. The engine manages
+                #     ``exit_rules`` identically regardless of
+                #     ``requires_custom_code`` (only entry management
+                #     differs — see ``trading_service/modes/backtest.py``),
+                #     so ``engine_exit:signal_exit[N]`` is exactly as
+                #     reliable here as on the compiled path.
+                if open_position_entry_reasons:
+                    for idx, count in _count_entry_hits([], open_position_entry_reasons).items():
+                        entry_hits[idx] = entry_hits.get(idx, 0) + count
+                for idx, count in _count_exit_hits(trades).items():
+                    exit_hits[idx] = exit_hits.get(idx, 0) + count
             else:
                 entry_hits = _count_entry_hits(trades, open_position_entry_reasons or ())
                 exit_hits = _count_exit_hits(trades)
