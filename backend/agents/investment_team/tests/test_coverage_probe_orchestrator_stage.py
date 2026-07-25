@@ -119,9 +119,11 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
     """Every ``_maybe_attach_coverage_report`` call site must pair an
     ``exec_result`` with the spec whose ``strategy_code`` matches the
     code that produced it. Lock the AST shape across the orchestrator, its
-    ``SynthesisMixin`` cluster, and the zero-trade repair module so a future
-    refactor that re-introduces the spec/exec drift fails loudly here.
+    ``SynthesisMixin`` and ``AlignmentMixin`` clusters, and the zero-trade
+    repair module so a future refactor that re-introduces the spec/exec
+    drift fails loudly here.
     """
+    from investment_team.strategy_lab import orchestrator_alignment as orch_alignment_mod
     from investment_team.strategy_lab import orchestrator_synthesis as orch_synthesis_mod
     from investment_team.strategy_lab import zero_trade_repair as zt_repair_mod
 
@@ -132,7 +134,7 @@ def test_orchestrator_call_sites_use_consistent_spec_and_exec_result() -> None:
     }
 
     sites: list[dict[str, Any]] = []
-    for module in (orch_mod, orch_synthesis_mod, zt_repair_mod):
+    for module in (orch_mod, orch_synthesis_mod, orch_alignment_mod, zt_repair_mod):
         source = inspect.getsource(module)
         tree = ast.parse(source)
         for node in ast.walk(tree):
