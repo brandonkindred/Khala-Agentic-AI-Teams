@@ -119,7 +119,7 @@ def _wait_for_hitl(
             raise
         except Exception as e:
             consecutive_read_errors += 1
-            if consecutive_read_errors > HITL_MAX_CONSECUTIVE_READ_ERRORS:
+            if consecutive_read_errors >= HITL_MAX_CONSECUTIVE_READ_ERRORS:
                 logger.warning(
                     "HITL wait for job %s: %d consecutive job-store read failures; giving up",
                     job_id,

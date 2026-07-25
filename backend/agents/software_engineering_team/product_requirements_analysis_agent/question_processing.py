@@ -532,7 +532,7 @@ def add_recommendations(
         rec_by_id = {
             r.get("id"): str(r.get("recommendation", "") or "")
             for r in recs
-            if isinstance(r, dict) and r.get("id")
+            if isinstance(r, dict) and "id" in r
         }
         result = []
         for q in open_questions:

@@ -257,4 +257,4 @@ class MicrotaskReviewFailedError(Exception):
     def __init__(self, microtask: "Any", review_result: "ReviewResult") -> None:
         self.microtask = microtask
         self.review_result = review_result
-        super().__init__(f"Microtask {microtask.id} failed review after max retries")
+        super().__init__(f"Microtask {microtask.id} failed review (on_failure='stop')")
