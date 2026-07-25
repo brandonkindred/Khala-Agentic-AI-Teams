@@ -181,17 +181,16 @@ def invoke_structured_with_schema(
     single_call_timeout_s = max(0.001, env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key)))
     timeout_s = single_call_timeout_s * 2
 
-    # _resolve_config's own default budget formula (attempts * timeout_s * 1.5)
-    # already scales correctly since it derives from the doubled timeout_s
-    # above — but an *explicit* STRATEGY_LAB_LLM_TOTAL_BUDGET override bypasses
-    # that formula entirely and would size the retry budget for the old,
-    # single-call timeout. Double an explicit override here too so it stays in
-    # sync; leave total_budget_s unset (None) when no override is present so
-    # the doubled-timeout-derived default still applies.
-    _budget_sentinel = -1.0
-    _budget_override = env_float("STRATEGY_LAB_LLM_TOTAL_BUDGET", _budget_sentinel)
-    total_budget_s = _budget_override * 2 if _budget_override != _budget_sentinel else None
-
+    # total_budget_s is left unset (None) so _resolve_config's own default
+    # formula (attempts * timeout_s * 1.5) applies, which already scales
+    # correctly since it derives from the doubled timeout_s above. An
+    # *explicit* STRATEGY_LAB_LLM_TOTAL_BUDGET override is intentionally left
+    # unscaled: _resolve_config documents it as the hard wall-clock deadline
+    # for the whole call ("the real terminator" of the retry loop, not a
+    # per-attempt figure), so doubling it would let a call run for twice the
+    # operator-approved latency/cost window — an explicit cap must be
+    # honored as configured, even if that means fewer retry attempts fit
+    # inside it now that each attempt takes longer.
     return run_structured_agent(
         _call,
         user_prompt,
@@ -201,5 +200,4 @@ def invoke_structured_with_schema(
         charge=charge,
         logger=logger,
         timeout_s=timeout_s,
-        total_budget_s=total_budget_s,
     )
