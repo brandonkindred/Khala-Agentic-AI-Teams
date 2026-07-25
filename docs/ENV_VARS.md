@@ -1260,6 +1260,50 @@ GitHub remote is available. Set to `false` to skip CI gate entirely without GitH
 
 ---
 
+## DevOps Tool-Agent Subprocess Timeouts
+
+Named, per-tool timeout constants for the devops team's stateless tool-agents (`shared/subprocess_timeouts.py`),
+each parsed via the shared `env_int` with `floor=1` (unset or unparseable → the documented default, with a
+warning on a set-but-unparseable value; a parsed value below `1` is clamped to `1`, not replaced by the
+default). These are intended to replace the hardcoded `timeout=` literals in the individual tool-agent
+files; that call-site migration is tracked as a separate follow-up and has not landed yet, so setting
+one of these variables today has no effect until that migration lands.
+
+### DEVOPS_HELM_DRY_RUN_TIMEOUT_S
+Timeout (seconds) for `helm lint .` in the deployment dry-run tool-agent. Default `120`, floor `1`.
+
+### DEVOPS_TERRAFORM_EXECUTION_TIMEOUT_S
+Timeout (seconds) for `terraform init`/`validate`/`plan`/`apply`/`fmt` (the only commands
+`TerraformExecutionInput` accepts) in the terraform execution tool-agent. Default `180`, floor `1`.
+
+### DEVOPS_HELM_EXECUTION_TIMEOUT_S
+Timeout (seconds) for `helm template`/`lint` — the only commands `HelmExecutionInput` accepts; this
+tool-agent is read-only and cannot install/upgrade a release — in the helm execution tool-agent.
+Default `120`, floor `1`.
+
+### DEVOPS_CDK_EXECUTION_TIMEOUT_S
+Timeout (seconds) for `cdk synth`/`cdk diff` — the only commands `CDKExecutionInput` accepts; this
+tool-agent is read-only and cannot deploy a stack — in the CDK execution tool-agent. Default `180`,
+floor `1`.
+
+### DEVOPS_IAC_VALIDATION_TIMEOUT_S
+Timeout (seconds) for both `terraform fmt -check` and `terraform validate` in the IaC validation
+tool-agent. Default `120`, floor `1`.
+
+### DEVOPS_DOCKER_COMPOSE_TIMEOUT_S
+Timeout (seconds) for `docker compose config`/`build`/`ps`/`logs` — the only commands
+`DockerComposeExecutionInput` accepts; this tool-agent is read-only and cannot bring services up or
+down — in the docker compose execution tool-agent. Default `120`, floor `1`.
+
+### DEVOPS_POLICY_AS_CODE_TIMEOUT_S
+Timeout (seconds) for the checkov scan in the policy-as-code tool-agent. Default `180`, floor `1`.
+
+### DEVOPS_ARCHITECT_INTEGRATION_TIMEOUT_S
+Timeout (seconds) for the `architect_agents/main.py` subprocess invoked from the enterprise architect
+integration helper. Default `3600` (1 hour), floor `1`.
+
+---
+
 ## Profiles
 
 ### AUTHOR_PROFILE_PATH
