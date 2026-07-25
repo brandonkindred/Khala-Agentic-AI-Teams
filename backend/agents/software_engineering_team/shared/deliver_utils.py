@@ -26,8 +26,9 @@ class FilesPayload:
 class DeliverGitOps:
     """Git and writer operations used by shared delivery logic.
 
-    Team modules pass their imported functions in so existing tests can keep
-    monkeypatching the team module boundary while the implementation is shared.
+    Built fresh by ``make_run_deliver`` on every call from its ``git_ns``/
+    ``output_ns`` namespaces, which default to the real ``shared.git_utils``/
+    ``shared.repo_writer`` modules — tests monkeypatch those modules directly.
     """
 
     abort_merge: Callable[..., Any]
