@@ -335,6 +335,7 @@ def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
 
 
 def test_coerce_finding_accepts_architecture_and_refactor_categories() -> None:
+    """``_coerce_finding`` accepts both ``architecture`` and ``refactor`` categories."""
     arch_finding = _coerce_finding(
         {
             "severity": "high",

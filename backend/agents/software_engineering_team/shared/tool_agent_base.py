@@ -232,6 +232,13 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         return self._invoke_llm(model, prompt)
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
+        """Join up to 20 files' content into one bounded blob for the review prompt.
+
+        Preconditions: ``current_files`` maps path -> content.
+        Postconditions: returns a ``"--- path ---\\ncontent"``-joined string of
+            the first 20 files, truncated to :attr:`max_code_chars`; empty
+            string for an empty dict.
+        """
         return "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:20])[
             : self.max_code_chars
         ]
@@ -344,6 +351,17 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         )
 
     def review(self, inp) -> ToolAgentPhaseOutput:
+        """Find issues in ``inp.current_files``, via the recipe this subclass configured.
+
+        Preconditions: ``inp`` is a ``ToolAgentPhaseInput``-shaped object.
+        Postconditions: takes the first configured path -- :attr:`build_runner`
+            (a static analysis/build tool), :attr:`review_via_engine` (the
+            shared code-review engine), or the LLM one-shot ``review_prompt`` --
+            and returns a :class:`ToolAgentPhaseOutput` whose ``issues`` (if
+            any) all carry :attr:`issue_source`. Never raises: a missing model,
+            empty code, or LLM failure each degrade to a skipped/failed summary
+            with no issues.
+        """
         if self.build_runner is not None:
             return self._build_review(inp)
         if self.review_via_engine:
@@ -387,6 +405,18 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         )
 
     def problem_solve(self, inp) -> ToolAgentPhaseOutput:
+        """Fix each of this agent's own issues in ``inp.review_issues``, one at a time.
+
+        Preconditions: ``inp.review_issues`` is a list of issues; ``inp.current_files``
+            maps path -> content.
+        Postconditions: filters to issues whose ``source`` is in
+            :attr:`problem_solve_sources`; for each, builds a single-issue fix
+            prompt from its relevant code and merges any returned files into a
+            running ``merged`` dict (never mutating ``inp.current_files``).
+            Returns a :class:`ToolAgentPhaseOutput` with ``files=merged`` and a
+            "fixed N of M" summary; an LLM failure for one issue is logged and
+            skipped, not raised, so the remaining issues still get a chance.
+        """
         if not self._model:
             return ToolAgentPhaseOutput(summary=f"{self.name} problem_solve skipped (no LLM).")
         issues = [
@@ -429,6 +459,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         )
 
     def deliver(self, inp) -> ToolAgentPhaseOutput:
+        """Stub deliver phase: this family of tool agents applies no delivery-time changes.
+
+        Postconditions: returns a placeholder :class:`ToolAgentPhaseOutput`
+            summary; never touches ``inp`` or applies any change.
+        """
         return ToolAgentPhaseOutput(summary=f"{self.name} deliver.")
 
 

@@ -580,8 +580,8 @@ def add_recommendations(
         }
         result = []
         for q in open_questions:
-            rec = rec_by_id.get(q.id, "")
-            result.append(q.model_copy(update={"recommendation": rec}))
+            rec = rec_by_id.get(q.id)
+            result.append(q.model_copy(update={"recommendation": rec}) if rec else q)
         return result
     except Exception as e:
         logger.warning(
