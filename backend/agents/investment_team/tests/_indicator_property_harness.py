@@ -22,8 +22,8 @@ test suite building on top of this harness).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from hypothesis import strategies as st
 
@@ -115,13 +115,24 @@ class IndicatorCase:
     indicators); ``shared_name``/``shared_params`` address the three
     implementations that already agree on naming
     (``executor.indicators``, ``executor.strategy_indicators``,
-    ``synthesis.compiler``'s ``_HELPER_BODIES``).
+    ``synthesis.compiler``'s ``_HELPER_BODIES``). Some indicators (``macd``)
+    still need adapter-specific extras on top of ``shared_params`` — e.g.
+    the scalar accessor's selector kwarg is named ``output``, the synthesis
+    helper's is named ``select``, and the executor helper returns every
+    line as a tuple rather than accepting a selector — so
+    ``strategy_indicators_params``/``synthesis_params`` merge on top of
+    ``shared_params`` for their respective adapter, and ``executor_select``
+    names the tuple index to project so all four adapters end up comparing
+    the same line.
     """
 
     primitives_name: str
     primitives_params: Dict[str, Any]
     shared_name: str
     shared_params: Dict[str, Any]
+    strategy_indicators_params: Dict[str, Any] = field(default_factory=dict)
+    synthesis_params: Dict[str, Any] = field(default_factory=dict)
+    executor_select: Optional[int] = None
 
 
 # The 4-way intersection of indicator math duplicated across all four
@@ -140,10 +151,18 @@ SHARED_INDICATORS: Dict[str, IndicatorCase] = {
     "adx": IndicatorCase("adx", {"period": 14}, "adx", {"period": 14}),
     "vwap": IndicatorCase("vwap", {"period": 20}, "vwap", {"period": 20}),
     "macd": IndicatorCase(
-        "macd_signal",
-        {"fast": 12, "slow": 26, "signal": 9},
-        "macd",
-        {"fast": 12, "slow": 26, "signal": 9},
+        primitives_name="macd_signal",
+        primitives_params={"fast": 12, "slow": 26, "signal": 9},
+        shared_name="macd",
+        shared_params={"fast": 12, "slow": 26, "signal": 9},
+        # `macd_signal` returns the signal line, so every other adapter must
+        # be steered to the same line: `indicator_value`'s selector kwarg is
+        # `output`, the synthesis helper's is `select`, and the executor
+        # helper (no selector) always returns the full (macd, signal,
+        # histogram) tuple — project index 1.
+        strategy_indicators_params={"output": "signal"},
+        synthesis_params={"select": "signal"},
+        executor_select=1,
     ),
 }
 
@@ -174,9 +193,28 @@ def call_executor_indicators(name: str, bars: List[Bar], **params: Any):
     return spec.helper(*args, **params)
 
 
+# `executor.strategy_indicators._VALID_INDICATORS` (the DSL name table
+# `indicator_value` dispatches on) uses shorter names than
+# `executor.indicators.INDICATORS`/`synthesis._HELPER_BODIES` for these
+# three multi-band indicators — calling `indicator_value` with the executor
+# key raises `ValueError`, so translate before dispatch.
+_STRATEGY_INDICATORS_NAME_OVERRIDES: Dict[str, str] = {
+    "bollinger_bands": "bollinger",
+    "donchian_channels": "donchian",
+    "keltner_channels": "keltner",
+}
+
+
 def call_strategy_indicators(name: str, bars: List[Bar], *, source: str = "close", **params: Any):
-    """Call ``executor.strategy_indicators.indicator_value`` for ``name``."""
-    return indicator_value(name, bars, source=source, **params)
+    """Call ``executor.strategy_indicators.indicator_value`` for ``name``.
+
+    ``name`` is the ``executor.indicators``/``synthesis`` spelling (e.g.
+    ``THREE_WAY_INDICATORS`` entries); it is translated to the DSL's own
+    (sometimes shorter) name via :data:`_STRATEGY_INDICATORS_NAME_OVERRIDES`
+    before dispatch.
+    """
+    dsl_name = _STRATEGY_INDICATORS_NAME_OVERRIDES.get(name, name)
+    return indicator_value(dsl_name, bars, source=source, **params)
 
 
 # synthesis.compiler's _HELPER_BODIES occasionally reference `math` (e.g.
@@ -206,3 +244,30 @@ def call_synthesis_helper(name: str, bars: List[Bar], **params: Any):
     exec(compile(src, "<indicator_property_harness>", "exec"), namespace)  # noqa: S102
     obj = namespace["_Harness"]()
     return getattr(obj, name)(bars, **params)
+
+
+def call_case(case: IndicatorCase, bars: List[Bar]) -> Dict[str, Any]:
+    """Run all 4 adapters for one :data:`SHARED_INDICATORS` case.
+
+    Postconditions: each adapter is called with that case's per-adapter
+    params (``shared_params`` merged with the adapter's own overrides), and
+    the executor result is projected via ``executor_select`` when set — so
+    the four returned values line up on the same indicator line and are
+    directly comparable value-for-value by a future equivalence test.
+    """
+    executor_result = call_executor_indicators(case.shared_name, bars, **case.shared_params)
+    executor_value = (
+        executor_result[case.executor_select]
+        if case.executor_select is not None
+        else executor_result
+    )
+    return {
+        "primitives": call_primitives(case.primitives_name, bars, **case.primitives_params),
+        "executor": executor_value,
+        "strategy_indicators": call_strategy_indicators(
+            case.shared_name, bars, **{**case.shared_params, **case.strategy_indicators_params}
+        ),
+        "synthesis": call_synthesis_helper(
+            case.shared_name, bars, **{**case.shared_params, **case.synthesis_params}
+        ),
+    }
