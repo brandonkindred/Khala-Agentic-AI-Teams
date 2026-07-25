@@ -744,6 +744,14 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
         """Generate a single conversational follow-up question.
 
         Uses the evaluator's ``missing`` and ``story_context`` fields to know what to ask.
+
+        Args:
+            gap: The story gap being explored.
+            conversation: The interview conversation history as role/content dicts.
+            evaluation: The sufficiency evaluation containing ``missing`` and ``story_context``.
+
+        Returns:
+            A follow-up question string, or ``None`` if the LLM call fails.
         """
         missing = evaluation.get("missing") or "more detail about what happened"
         story_context = evaluation.get("story_context")
