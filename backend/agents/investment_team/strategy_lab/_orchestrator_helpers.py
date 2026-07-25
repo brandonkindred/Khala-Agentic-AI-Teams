@@ -32,6 +32,7 @@ from ..models import (
     TradeRecord,
 )
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
+from .alignment_findings import entry_rule_id, signal_exit_rule_id
 from .coverage_probe import run_coverage_stage, should_run_probes
 from .exceptions import OrchestratorContractError
 from .quality_gates.models import QualityGateResult
@@ -622,16 +623,33 @@ def _build_rule_implementation_map(
 
     rule_ids: List[str] = []
     for i, _ in enumerate(getattr(spec, "entry_rules", None) or []):
-        rule_ids.append(f"entry[{i}]")
+        rule_ids.append(entry_rule_id(i))
     kind_counts: Dict[str, int] = defaultdict(int)
     # Map suffixed finding IDs to the specific rule instance based on
     # distinguishing attributes (e.g. StopLossRule.basis).
     _suffix_to_instance: Dict[str, str] = {}
-    for er in getattr(spec, "exit_rules", None) or []:
+    for absolute_idx, er in enumerate(getattr(spec, "exit_rules", None) or []):
         if hasattr(er, "kind"):
-            idx = kind_counts[er.kind]
-            kind_counts[er.kind] += 1
-            canonical = f"exit:{er.kind}[{idx}]"
+            if er.kind == "signal_exit":
+                # Signal-exit findings are keyed by the rule's ABSOLUTE
+                # ``spec.exit_rules`` index (``signal_exit_rule_id``,
+                # shared with ``alignment_checks.py`` and
+                # ``RuleFiringRateGate``) — it must match here too, or a
+                # spec mixing exit-rule kinds (e.g. ``[StopLossRule,
+                # SignalExitRule]``) desyncs this map's canonical
+                # ``exit:signal_exit[0]`` (per-kind count) from the
+                # findings' ``exit:signal_exit[1]`` (absolute index),
+                # silently reporting ``traded_count=0`` for a rule that
+                # fired on every trade. Other kinds keep the per-kind
+                # counter: the engine's own stop_loss/take_profit
+                # reasons are never index-stamped (always ambiguous
+                # among same-kind rules), so an arbitrary per-instance id
+                # is all any consumer can offer for those anyway.
+                canonical = signal_exit_rule_id(absolute_idx)
+            else:
+                idx = kind_counts[er.kind]
+                kind_counts[er.kind] += 1
+                canonical = f"exit:{er.kind}[{idx}]"
             rule_ids.append(canonical)
             basis = getattr(er, "basis", None)
             if basis:

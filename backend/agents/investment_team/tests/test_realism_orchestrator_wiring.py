@@ -30,6 +30,8 @@ from investment_team.models import (
     StrategySpec,
     TradeRecord,
 )
+from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
+from investment_team.strategy_lab.alignment_findings import AlignmentFinding
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
@@ -40,7 +42,9 @@ from investment_team.strategy_lab.spec_dsl import EntryRule, Predicate, SignalEx
 # ---------------------------------------------------------------------------
 
 
-def _spec(target_symbols: Optional[List[str]] = None) -> StrategySpec:
+def _spec(
+    target_symbols: Optional[List[str]] = None, *, requires_custom_code: bool = False
+) -> StrategySpec:
     return StrategySpec(
         strategy_id="realism-test",
         authored_by="test",
@@ -53,6 +57,7 @@ def _spec(target_symbols: Optional[List[str]] = None) -> StrategySpec:
         risk_limits={},
         speculative=False,
         target_symbols=target_symbols or [],
+        requires_custom_code=requires_custom_code,
         strategy_code="from contract import Strategy\nclass S(Strategy):\n    def on_bar(self, ctx, bar):\n        pass\n",
     )
 
@@ -462,3 +467,158 @@ def test_verification_phase_does_not_veto_on_realism_warning(monkeypatch):
     assert breadth_gates[0].severity == "warning"
     reason = outcome.metrics.acceptance_reason or ""
     assert "realism_failed:" not in reason
+
+
+# ---------------------------------------------------------------------------
+# rule_firing_rate_realism: custom-code alignment-findings signal wiring
+# ---------------------------------------------------------------------------
+
+
+def test_run_realism_gates_forwards_alignment_findings_to_rule_firing_gate():
+    """A ``requires_custom_code=True`` spec with a dead entry rule (no
+    passed ``entry[0]`` alignment finding) gets a real critical from
+    ``rule_firing_rate_realism`` instead of the old info self-skip, once
+    ``alignment_findings`` is threaded through."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = [_trade("QQQ", i + 1) for i in range(5)]
+    findings = [
+        AlignmentFinding(
+            trade_num=1,
+            rule_id="entry[0]",
+            check_name="entry_signal",
+            passed=False,
+            severity="critical",
+            details="near miss",
+        )
+    ]
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=_metrics(),
+        config=_config(),
+        market_data=None,
+        execution_succeeded=True,
+        alignment_findings=findings,
+    )
+
+    rule_firing_criticals = [
+        r for r in results if r.gate_name == "rule_firing_rate_realism" and r.severity == "critical"
+    ]
+    assert len(rule_firing_criticals) == 1
+    assert rule_firing_criticals[0].passed is False
+    assert rule_firing_criticals[0].rule_id == "entry[0]"
+
+
+def test_run_realism_gates_custom_code_skips_when_alignment_findings_omitted():
+    """Without ``alignment_findings`` (the default), a custom-code spec
+    still gets the legacy info self-skip — no behavior change for callers
+    that haven't been updated."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = [_trade("QQQ", i + 1) for i in range(5)]
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=_metrics(),
+        config=_config(),
+        market_data=None,
+        execution_succeeded=True,
+    )
+
+    rule_firing_results = [r for r in results if r.gate_name == "rule_firing_rate_realism"]
+    assert len(rule_firing_results) == 1
+    assert rule_firing_results[0].passed is True
+    assert rule_firing_results[0].severity == "info"
+    assert "custom_code" in rule_firing_results[0].details.lower()
+
+
+def test_verification_phase_threads_latest_alignment_report_findings(monkeypatch):
+    """``_run_verification_phase`` must pass the LATEST alignment report's
+    findings (not an earlier one) to the realism cycle, for a custom-code
+    spec's dead entry rule to surface as a critical veto."""
+    orch = _orch()
+
+    monkeypatch.setattr(
+        orch, "_evaluate_walk_forward", lambda spec, md, cfg, trades, metrics: metrics
+    )
+    monkeypatch.setattr(
+        orch.acceptance_gate,
+        "check",
+        lambda metrics, config, n_trials: [
+            QualityGateResult(
+                gate_name="oos_deflated_sharpe",
+                passed=True,
+                severity="info",
+                phase="verification",
+                details="ok",
+            ),
+        ],
+    )
+
+    captured: dict = {}
+    real_run_realism_gates = orch._run_realism_gates
+
+    def _spy(**kwargs):
+        captured["alignment_findings"] = kwargs.get("alignment_findings")
+        return real_run_realism_gates(**kwargs)
+
+    monkeypatch.setattr(orch, "_run_realism_gates", _spy)
+
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = [_trade("QQQ", i + 1) for i in range(20)]
+    metrics = _metrics()
+    config = _config()
+    market_data: dict = {"QQQ": []}
+    all_gate_results: List[QualityGateResult] = []
+
+    stale_report = TradeAlignmentReport(
+        aligned=True,
+        alignment_findings=[
+            AlignmentFinding(
+                trade_num=1,
+                rule_id="entry[0]",
+                check_name="entry_signal",
+                passed=True,
+                severity="info",
+                details="stale — superseded by the latest report",
+            )
+        ],
+    )
+    latest_report = TradeAlignmentReport(
+        aligned=True,
+        alignment_findings=[
+            AlignmentFinding(
+                trade_num=1,
+                rule_id="entry[0]",
+                check_name="entry_signal",
+                passed=False,
+                severity="critical",
+                details="latest report: never satisfied",
+            )
+        ],
+    )
+
+    orch._run_verification_phase(
+        spec=spec,
+        trades=trades,
+        metrics=metrics,
+        market_data=market_data,
+        config=config,
+        execution_succeeded=True,
+        trades_aligned=True,
+        alignment_reports=[stale_report, latest_report],
+        all_gate_results=all_gate_results,
+        emit=lambda *_a, **_k: None,
+    )
+
+    assert captured["alignment_findings"] == latest_report.alignment_findings
+    rule_firing_criticals = [
+        g
+        for g in all_gate_results
+        if g.gate_name == "rule_firing_rate_realism" and g.severity == "critical"
+    ]
+    assert len(rule_firing_criticals) == 1
+    assert rule_firing_criticals[0].rule_id == "entry[0]"
