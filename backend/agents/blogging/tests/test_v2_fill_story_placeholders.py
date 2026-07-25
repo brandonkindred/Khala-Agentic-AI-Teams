@@ -294,6 +294,44 @@ def test_fill_story_placeholders_cancelled_break(monkeypatch, tmp_path) -> None:
     assert "[Author:" in out_draft.draft
 
 
+def test_fill_story_placeholders_progress_stays_below_next_phase(monkeypatch, tmp_path) -> None:
+    """With more placeholders than the old +idx headroom, per-gap progress must
+    stay below the 40 the next phase ("draft_initial") reports, so progress
+    never regresses."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
+
+    job_id = str(uuid.uuid4())[:8]
+    bjs.create_blog_job(job_id, "brief")
+
+    import agents.blogging.ghost_writer_agent as gw
+
+    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(skipped=True))
+
+    draft_text = "# Draft\n" + "\n".join(f"[Author: story {i}]" for i in range(6)) + "\nBody."
+
+    progress_values: list[int] = []
+
+    def _capture_updater(**kw):
+        progress_values.append(kw["progress"])
+
+    v2._fill_story_placeholders(
+        draft_text=draft_text,
+        plan=_plan(),
+        llm_client=object(),
+        job_id=job_id,
+        job_updater=_capture_updater,
+        elicited_stories_text=None,
+        draft_agent=_make_stub_draft_agent("# Redraft\nBody.")(),
+        draft_input_kwargs={"content_plan": _plan()},
+        work_dir=tmp_path,
+        iteration=1,
+    )
+    story_elicitation_progress = progress_values[:-1]
+    assert all(p < 40 for p in story_elicitation_progress)
+    assert progress_values[-1] == 40
+
+
 def test_fill_story_placeholders_rejects_non_str_draft_text() -> None:
     """draft_text must be a str — fail before placeholder scanning."""
     from agents.blogging.agent_implementations.blog_writing_process_v2 import (

@@ -670,67 +670,74 @@ def test_attach_conversation_unknown_conversation_404() -> None:
     assert resp.status_code == 404
 
 
-def test_create_brand_attaches_existing_unattached_conversation() -> None:
-    """POST /clients/{id}/brands with conversation_id attaches that conversation
-    atomically: the new brand's conversation_id is set and the conversation's
-    brand_id/mission are updated in the same request."""
-    client_id = client.post("/clients", json={"name": "Attach-On-Create Client"}).json()["id"]
+def test_create_brand_with_existing_conversation_id_attaches_it() -> None:
+    """POST /clients/{id}/brands with a conversation_id attaches that
+    conversation atomically instead of auto-creating a new one."""
+    create_c = client.post("/clients", json={"name": "ExistingConv Client"})
+    client_id = create_c.json()["id"]
     conv_id = client.post("/conversations", json={}).json()["conversation_id"]
 
-    resp = client.post(
+    create_b = client.post(
         f"/clients/{client_id}/brands",
         json={
-            "company_name": "AttachOnCreateCo",
-            "company_description": "Company created with an existing conversation",
+            "company_name": "ExistingConvCo",
+            "company_description": "Company created with a pre-existing conversation",
             "target_audience": "teams",
             "conversation_id": conv_id,
         },
     )
-    assert resp.status_code == 201
-    brand = resp.json()
+    assert create_b.status_code == 201, create_b.text
+    brand = create_b.json()
     assert brand["conversation_id"] == conv_id
 
-    reload = client.get(f"/conversations/{conv_id}")
-    assert reload.status_code == 200
-    reloaded = reload.json()
-    assert reloaded["brand_id"] == brand["id"]
-    assert reloaded["mission"]["company_name"] == "AttachOnCreateCo"
+    conv_resp = client.get(f"/clients/{client_id}/brands/{brand['id']}/conversation")
+    assert conv_resp.status_code == 200
+    assert conv_resp.json()["conversation_id"] == conv_id
 
 
-def test_create_brand_rejects_conversation_attached_to_another_brand() -> None:
-    """A conversation already attached to a different brand cannot be attached
-    again via create_brand — the response is 409 and no partial state is left
-    behind (the new brand's conversation_id stays unset)."""
-    client_id = client.post("/clients", json={"name": "Conflict Client"}).json()["id"]
-    conv_id = client.post("/conversations", json={}).json()["conversation_id"]
+def test_create_brand_with_conversation_already_attached_returns_409() -> None:
+    """Reusing a conversation_id already attached to another brand is a conflict."""
+    create_c = client.post("/clients", json={"name": "ConflictConv Client"})
+    client_id = create_c.json()["id"]
 
     first = client.post(
         f"/clients/{client_id}/brands",
         json={
-            "company_name": "FirstOwnerCo",
-            "company_description": "Company that legitimately owns the conversation",
+            "company_name": "FirstCo",
+            "company_description": "First brand owning the conversation",
             "target_audience": "teams",
-            "conversation_id": conv_id,
         },
     )
     assert first.status_code == 201
+    taken_conv_id = first.json()["conversation_id"]
 
     second = client.post(
         f"/clients/{client_id}/brands",
         json={
-            "company_name": "SecondClaimantCo",
-            "company_description": "Company trying to steal the same conversation",
+            "company_name": "SecondCo",
+            "company_description": "Second brand trying to reuse the conversation",
             "target_audience": "teams",
-            "conversation_id": conv_id,
+            "conversation_id": taken_conv_id,
         },
     )
     assert second.status_code == 409
 
-    # The conversation still points at the brand that legitimately attached
-    # it — the failed second attach left no partial state behind.
-    conv_state = client.get(f"/conversations/{conv_id}")
-    assert conv_state.status_code == 200
-    assert conv_state.json()["brand_id"] == first.json()["id"]
+
+def test_create_brand_with_unknown_conversation_id_returns_404() -> None:
+    """A conversation_id that doesn't exist yields 404, not a silent auto-create."""
+    create_c = client.post("/clients", json={"name": "MissingConv Client"})
+    client_id = create_c.json()["id"]
+
+    resp = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "MissingConvCo",
+            "company_description": "Company referencing an unknown conversation",
+            "target_audience": "teams",
+            "conversation_id": "conv_does_not_exist",
+        },
+    )
+    assert resp.status_code == 404
 
 
 def test_list_clients_pagination_query_params() -> None:

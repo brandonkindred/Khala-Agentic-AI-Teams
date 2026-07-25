@@ -441,13 +441,11 @@ def _dispatch() -> DispatchTable:
         else:
             cur.rowcount = 0
 
-    def match_attach_conv_to_brand(norm: str) -> bool:
-        return (
-            norm.startswith("update branding_conversations set brand_id") and "mission_json" in norm
-        )
+    def match_update_conv_brand_and_mission(norm: str) -> bool:
+        return norm.startswith("update branding_conversations set brand_id = %s, mission_json")
 
-    def handle_attach_conv_to_brand(cur: FakeCursor, params: tuple) -> None:
-        """Emulate _attach_conversation_to_brand's combined SET brand_id + mission_json.
+    def handle_update_conv_brand_and_mission(cur: FakeCursor, params: tuple) -> None:
+        """Emulate attach_and_update_mission SET brand_id + mission_json + updated_at.
 
         Params: ``(brand_id, mission_json, updated_at, conversation_id)``.
         Sets ``rowcount`` to 1 on match, else 0.
@@ -602,7 +600,7 @@ def _dispatch() -> DispatchTable:
         (match_cte_insert_message, handle_cte_insert_message),
         (match_update_conv_mission, handle_update_conv_mission),
         (match_update_conv_output, handle_update_conv_output),
-        (match_attach_conv_to_brand, handle_attach_conv_to_brand),
+        (match_update_conv_brand_and_mission, handle_update_conv_brand_and_mission),
         (match_update_conv_brand, handle_update_conv_brand),
         (match_list_conversations, handle_list_conversations),
         (match_select_conv_brand_id, handle_select_conv_brand_id),
