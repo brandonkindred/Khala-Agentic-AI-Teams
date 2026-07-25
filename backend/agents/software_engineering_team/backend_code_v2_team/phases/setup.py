@@ -48,8 +48,8 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
             if "[tool.ruff]" in text:
                 logger.info("Setup: linting already configured via pyproject.toml [tool.ruff]")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Setup: could not read pyproject.toml for lint config check: %s", e)
     if flake8_cfg.exists():
         logger.info("Setup: linting already configured via .flake8")
         return True
@@ -59,8 +59,8 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
             if "[flake8]" in text:
                 logger.info("Setup: linting already configured via setup.cfg [flake8]")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Setup: could not read setup.cfg for lint config check: %s", e)
 
     # No linting config found — create minimal ruff config in pyproject.toml
     logger.info("Setup: no linting configuration found; creating pyproject.toml with ruff config")
@@ -106,8 +106,8 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
         try:
             text = pyproject.read_text(encoding="utf-8", errors="replace")
             has_pytest_config = "[tool.pytest" in text
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Setup: could not read pyproject.toml for pytest config check: %s", e)
 
     if has_pytest_config and tests_dir.exists():
         logger.info("Setup: testing already configured")
