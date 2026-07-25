@@ -711,7 +711,7 @@ class BlogWriterAgent(_BlogAgentBase):
             draft = _PLACEHOLDER_DRAFT
 
         logger.info("Draft generated: length=%s", len(draft))
-        if draft and not draft.startswith(_PLACEHOLDER_DRAFT):
+        if draft != _PLACEHOLDER_DRAFT:
             if on_llm_request:
                 on_llm_request("Running self-review...")
             draft = self._self_review(draft)
