@@ -894,7 +894,13 @@ def _run_orchestrator_body(
     planning_only: bool,
     sprint_id: Optional[str],
 ) -> None:
-    """Body of :func:`run_orchestrator`, run inside its ``bind_trace_id`` block."""
+    """Body of :func:`run_orchestrator`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`run_orchestrator`); ``path`` is an absolute, resolved work path.
+    Postconditions: the job reaches a terminal status, and every phase this drives
+        observes the caller's bound trace id via ``current_trace_id()``.
+    """
     try:  # pragma: no cover  # integration-only: end-to-end 4-phase orchestration pipeline (LLM + git + npm/pytest)
         # Check for cancellation at start
         _check_cancellation(job_id)
@@ -1217,7 +1223,13 @@ def run_failed_tasks(job_id: str, *, trace_id: Optional[str] = None) -> None:
 
 
 def _run_failed_tasks_body(job_id: str) -> None:
-    """Body of :func:`run_failed_tasks`, run inside its ``bind_trace_id`` block."""
+    """Body of :func:`run_failed_tasks`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`run_failed_tasks`); ``job_id`` carries ``repo_path`` and a task-graph snapshot.
+    Postconditions: as :func:`run_failed_tasks` — the retry reaches a terminal status, with
+        the caller's bound trace id visible to the Execution/Integration work it re-enters.
+    """
     from software_engineering_team.shared.job_store import get_job
 
     job_data = get_job(job_id)

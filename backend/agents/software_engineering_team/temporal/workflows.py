@@ -51,8 +51,9 @@ class RunTeamWorkflow:
     ) -> None:
         # Generated via workflow.uuid4() (Temporal's replay-safe UUID source), not
         # shared.observability.new_trace_id()/uuid.uuid4() directly — workflow code
-        # must be deterministic across replays.
-        trace_id = str(workflow.uuid4())[:12]
+        # must be deterministic across replays. ``.hex[:12]`` mirrors new_trace_id()'s
+        # documented shape, so both runtime modes emit the same id format.
+        trace_id = workflow.uuid4().hex[:12]
         await workflow.execute_activity(
             _activities.run_orchestrator_activity,
             args=[
@@ -75,7 +76,7 @@ class RetryFailedWorkflow:
 
     @workflow.run
     async def run(self, job_id: str) -> None:
-        trace_id = str(workflow.uuid4())[:12]
+        trace_id = workflow.uuid4().hex[:12]
         await workflow.execute_activity(
             _activities.retry_failed_activity,
             args=[job_id, trace_id],
@@ -108,7 +109,9 @@ class RunTeamWorkflowV2:
         # code must be deterministic across replays. Each activity runs as its own
         # process/thread invocation, so the id is passed explicitly and re-bound
         # inside each activity rather than relying on contextvar inheritance.
-        trace_id = str(workflow.uuid4())[:12]
+        # ``.hex[:12]`` mirrors new_trace_id()'s documented shape, so both runtime
+        # modes emit the same id format.
+        trace_id = workflow.uuid4().hex[:12]
 
         # Phase 1: Spec parsing + Product Requirements Analysis
         spec_result = await workflow.execute_activity(

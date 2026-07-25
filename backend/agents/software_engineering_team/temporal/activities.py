@@ -346,7 +346,13 @@ def _parse_spec_activity_body(
     repo_path: str,
     spec_content_override: Optional[str],
 ) -> Dict[str, Any]:
-    """Body of :func:`parse_spec_activity`, run inside its ``bind_trace_id`` block."""
+    """Body of :func:`parse_spec_activity`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`parse_spec_activity`).
+    Postconditions: returns a ``SpecParseResult`` dict; on failure the job is marked
+        FAILED and the exception propagates to the activity wrapper.
+    """
     from software_engineering_team.temporal.phase_models import SpecParseResult
 
     try:
@@ -455,7 +461,13 @@ def _plan_project_activity_body(
     repo_path: str,
     spec_parse_result: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block."""
+    """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`plan_project_activity`); ``spec_parse_result`` validates as a ``SpecParseResult``.
+    Postconditions: returns a ``PlanResult`` dict; on failure the job is marked FAILED and
+        the exception propagates to the activity wrapper.
+    """
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
 
     try:
@@ -593,7 +605,15 @@ def _execute_coding_team_activity_body(
     plan_result: Dict[str, Any],
     resolved_questions_override: Optional[List[Dict[str, Any]]],
 ) -> Dict[str, Any]:
-    """Body of :func:`execute_coding_team_activity`, run inside its ``bind_trace_id`` block."""
+    """Body of :func:`execute_coding_team_activity`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`execute_coding_team_activity`); ``plan_result`` validates as a ``PlanResult``
+        whose ``adapter_result_dict`` reconstructs a ``PlanningAdapterResult``.
+    Postconditions: returns an ``ExecutionResult`` dict; the coding-team orchestrator owns
+        the job's terminal status on every exit path, and the bound trace id is visible to
+        its ``parallel_map`` workers via ``contextvars.copy_context()``.
+    """
     from software_engineering_team.temporal.phase_models import ExecutionResult
     from software_engineering_team.temporal.phase_models import PlanResult as PlanResultModel
 
