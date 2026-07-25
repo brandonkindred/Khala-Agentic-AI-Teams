@@ -14,8 +14,9 @@ timeouts, retries and heartbeats instead of one opaque black-box activity:
 - :func:`sub_agent_provisioning_activity` — optional AI-Systems build (wraps ``run_sub_agent_provisioning``).
 - :func:`finalize_planning_activity` — mark the job completed with its handoff package.
 
-Each activity is a plain **sync** function (run in the worker's thread-pool
-executor) whose heavy imports live inside the body, keeping this module — which
+Each activity is a plain **sync** function decorated with ``@activity.defn``,
+suitable for execution by the Temporal worker, whose heavy imports live inside
+the body, keeping this module — which
 the workflow sandbox reuses via ``imports_passed_through`` — cheap and side-effect
 free at import. The mutable planning ``context`` crosses the activity boundary as
 a **JSON-native dict** (Temporal's default converter is used repo-wide, so no
