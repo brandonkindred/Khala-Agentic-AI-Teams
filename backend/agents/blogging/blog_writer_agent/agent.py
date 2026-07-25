@@ -581,6 +581,8 @@ class BlogWriterAgent(_BlogAgentBase):
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
             - Unexpected programming errors from the LLM call path propagate.
+        Invariants:
+            - The agent's configuration, style guide, and brand spec are not mutated.
         """
         self._assert_guidelines_present()
         outline = draft_input.outline_for_prompt().strip()
