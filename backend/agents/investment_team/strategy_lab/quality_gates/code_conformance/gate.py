@@ -33,7 +33,7 @@ Scope choices:
   intentional defense-in-depth so this gate remains self-sufficient.
 
 The free-function AST-analysis helpers this gate composes into checks live in
-:mod:`ast_helpers`.
+:mod:`.ast_helpers`.
 """
 
 from __future__ import annotations
@@ -55,10 +55,7 @@ from ..code_safety_ast import (
 from ..models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 from .ast_helpers import (
     _ALLOWED_HOOK_NAMES,
-    _BOLLINGER_BASE_BANDS,  # noqa: F401 (re-exported for downstream imports)
-    _BOLLINGER_DERIVED_BANDS,  # noqa: F401 (re-exported for downstream imports)
     _INDICATOR_ALLOWED_CALL_NAMES,
-    _POSITION_SNAPSHOT_ATTRS,  # noqa: F401 (re-exported for downstream imports)
     _collect_called_names_in_methods,
     _collect_ctx_indicator_names,
     _collect_import_aliases,
