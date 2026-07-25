@@ -18,6 +18,7 @@ from .prompts import LINT_FIX_PROMPT
 logger = logging.getLogger(__name__)
 
 MAX_ISSUES_FOR_LLM = 30
+MAX_AFFECTED_CODE_CHARS = 60_000  # Cap context to avoid blowing up the LLM context window
 
 
 class LintingToolAgent:
@@ -78,7 +79,9 @@ class LintingToolAgent:
             )
 
         # Phase 3: Review (LLM fix generation)
-        affected_code = self._read_affected_files(repo_path, execution_result.issues)
+        affected_code = self._read_affected_files(
+            repo_path, execution_result.issues[:MAX_ISSUES_FOR_LLM]
+        )
         edits = self._generate_fixes(execution_result.issues, affected_code)
 
         summary = (
@@ -102,9 +105,12 @@ class LintingToolAgent:
     def _read_affected_files(repo_path: Path, issues: List[LintIssue]) -> str:
         """Read and concatenate content of files mentioned in lint issues.
 
-        De-duplicates file paths.
+        De-duplicates file paths and caps total content to
+        ``MAX_AFFECTED_CODE_CHARS`` so a large or numerous affected file can't
+        blow the fix-generation prompt past the model's context window.
         """
         seen_files: Dict[str, str] = {}
+        total_chars = 0
         for issue in issues:
             if issue.file_path in seen_files:
                 continue
@@ -113,9 +119,15 @@ class LintingToolAgent:
                 continue
             try:
                 content = file_abs.read_text(encoding="utf-8", errors="replace")
-                seen_files[issue.file_path] = content
             except Exception:
                 continue
+            if total_chars + len(content) > MAX_AFFECTED_CODE_CHARS:
+                remaining = MAX_AFFECTED_CODE_CHARS - total_chars
+                if remaining <= 200:
+                    break
+                content = content[:remaining] + "\n... [truncated]"
+            seen_files[issue.file_path] = content
+            total_chars += len(content)
 
         parts: List[str] = []
         for fpath, content in seen_files.items():

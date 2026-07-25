@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from software_engineering_team.shared.context_sizing import compute_prd_snippet_chars
 from software_engineering_team.shared.json_utils import (
     default_decompose_by_sections,
     parse_json_with_recovery,
@@ -280,8 +281,12 @@ def generate_prd_document(
     Preconditions: ``model`` is a Strands ``Model``; ``llm`` is the ``LLMClient``
         used for context sizing.
     Postconditions: returns the generated PRD text, or ``cleaned_spec`` when the LLM
-        fails or returns empty output.
+        fails or returns empty output. Each prompt input is compacted (via LLM
+        summarization, not hard truncation) to fit the model's context when it
+        would otherwise be too large for the combined prompt.
     """
+    from llm_service import compact_text
+
     # Summarize answered questions for the prompt; this may be empty on the first run
     answered_summary = format_answered_questions(answered_questions)
 
@@ -290,10 +295,19 @@ def generate_prd_document(
         answered_questions=answered_questions,
     )
 
+    max_chars = compute_prd_snippet_chars(llm)
+    cleaned_spec_input = compact_text(cleaned_spec, max_chars, llm, "specification")[:max_chars]
+    answered_summary_input = compact_text(answered_summary, max_chars, llm, "answered questions")[
+        :max_chars
+    ]
+    specialist_plan_input = compact_text(
+        specialist_plan, max_chars, llm, "specialist collaboration plan"
+    )[:max_chars]
+
     prompt = PRD_PROMPT.format(
-        cleaned_spec=cleaned_spec,
-        answered_questions_summary=answered_summary,
-        specialist_collaboration_plan=specialist_plan,
+        cleaned_spec=cleaned_spec_input,
+        answered_questions_summary=answered_summary_input,
+        specialist_collaboration_plan=specialist_plan_input,
     )
 
     try:
