@@ -444,7 +444,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             max_iterations,
             devops_review_agent,
         )  # reserved for future routing
-        task_spec = self._build_legacy_spec(
+        task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id=task_id,
             task_description=task_description,
             requirements=requirements,
