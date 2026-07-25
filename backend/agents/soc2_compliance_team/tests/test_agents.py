@@ -124,7 +124,10 @@ def test_run_tsc_agent_parses_response_into_audit_result() -> None:
     call = llm.calls[0]
     assert "Security" in call["prompt"]
     assert "auth, encryption" in call["prompt"]
-    assert call["temperature"] == 0.1
+    # The reasoning call now carries the criterion-specific temperature
+    # (0.1); FakeLLM.complete() doesn't record calls, so only the formatting
+    # call is observable here — it stays at the pure-transcription default.
+    assert call["temperature"] == 0.0
     assert call["think"] is False
 
 

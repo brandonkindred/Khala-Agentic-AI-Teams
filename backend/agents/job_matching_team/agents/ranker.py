@@ -96,7 +96,7 @@ class JobRankerAgent:
                 reasoning_prompt=prompt,
                 reasoning_system_prompt=RANKER_SYSTEM_PROMPT_REASONING,
                 formatting_instructions=RANKER_FORMAT_INSTRUCTIONS,
-                temperature=0.1,
+                reasoning_temperature=0.1,
                 objective="rank job candidates",
             )
         except Exception:  # noqa: BLE001 - scoring is best-effort per posting

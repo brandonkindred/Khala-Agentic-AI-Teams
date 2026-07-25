@@ -119,7 +119,7 @@ Identify any gaps, missing controls, or risks relative to this criterion. If the
         reasoning_prompt=reasoning_prompt,
         reasoning_system_prompt=None,
         formatting_instructions=_TSC_OUTPUT_FORMAT,
-        temperature=0.1,
+        reasoning_temperature=0.1,
         objective="evaluate soc2 control",
     )
     summary = data.get("summary") or ""
@@ -292,7 +292,7 @@ recommendations)."""
                 'findings by TSC with severity and recommendation, then recommendations summary)\n\n'
                 "Respond with valid JSON only. No text outside JSON."
             ),
-            temperature=0.2,
+            reasoning_temperature=0.2,
             objective="generate soc2 report",
         )
         findings_typed: Dict[str, List[TSCFinding]] = {}
@@ -345,7 +345,7 @@ timeline."""
                 '- "raw_markdown": string (full document in markdown for display/saving)\n\n'
                 "Respond with valid JSON only. No text outside JSON."
             ),
-            temperature=0.2,
+            reasoning_temperature=0.2,
             objective="produce soc2 next steps",
         )
         steps = data.get("steps") or []

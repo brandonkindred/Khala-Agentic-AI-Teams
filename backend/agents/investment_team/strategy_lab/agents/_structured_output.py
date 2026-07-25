@@ -27,6 +27,7 @@ from typing import Any, Dict, Mapping
 
 from llm_service import provider_supports_structured_output
 from llm_service.config import resolve_provider, resolve_timeout
+from llm_service.interface import LLMSemanticExhaustionError
 from shared.env_config import env_float
 
 from ._llm_envelope import run_structured_agent
@@ -127,13 +128,28 @@ def invoke_structured_with_schema(
         # not in system_prompt) — reuse it unchanged for both calls rather
         # than replacing it, so neither pass loses the task-specific content
         # guidance (DSL shape reminders, worked examples, etc.) baked into it.
-        prose = client.complete(
-            prompt,
-            objective=f"{objective} (reasoning)",
-            system_prompt=reasoning_system_prompt,
-            temperature=0.3,
-            think=True,
-        )
+        try:
+            prose = client.complete(
+                prompt,
+                objective=f"{objective} (reasoning)",
+                system_prompt=reasoning_system_prompt,
+                temperature=0.3,
+                think=True,
+            )
+        except LLMSemanticExhaustionError as exc:
+            # The reasoning call is unconstrained (no schema=), so the client
+            # always raises this with schema_forced=False — but the caller's
+            # degrade check gates on schema_forced to decide whether to fall
+            # back to the legacy unconstrained parse-retry loop. From the
+            # pipeline's perspective, starving before the schema-constrained
+            # formatting call even runs is equally "structured decoding could
+            # not produce output", so mark it schema_forced=True here too —
+            # otherwise this now-reachable failure mode (impossible pre-split,
+            # when there was only one, schema-constrained call) would
+            # propagate as fatal instead of degrading like its formatting-call
+            # counterpart.
+            exc.schema_forced = True
+            raise
         format_prompt = (
             f"{prompt}\n\n"
             "--- YOUR PRIOR ANALYSIS (produced under a separate reasoning pass) ---\n"
@@ -163,6 +179,18 @@ def invoke_structured_with_schema(
     # (explicit -> STRATEGY_LAB_LLM_TIMEOUT -> per-model default) so this
     # stays in sync with an operator override of either env var.
     single_call_timeout_s = max(0.001, env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key)))
+    timeout_s = single_call_timeout_s * 2
+
+    # _resolve_config's own default budget formula (attempts * timeout_s * 1.5)
+    # already scales correctly since it derives from the doubled timeout_s
+    # above — but an *explicit* STRATEGY_LAB_LLM_TOTAL_BUDGET override bypasses
+    # that formula entirely and would size the retry budget for the old,
+    # single-call timeout. Double an explicit override here too so it stays in
+    # sync; leave total_budget_s unset (None) when no override is present so
+    # the doubled-timeout-derived default still applies.
+    _budget_sentinel = -1.0
+    _budget_override = env_float("STRATEGY_LAB_LLM_TOTAL_BUDGET", _budget_sentinel)
+    total_budget_s = _budget_override * 2 if _budget_override != _budget_sentinel else None
 
     return run_structured_agent(
         _call,
@@ -172,5 +200,6 @@ def invoke_structured_with_schema(
         parse=extract_json_object,
         charge=charge,
         logger=logger,
-        timeout_s=single_call_timeout_s * 2,
+        timeout_s=timeout_s,
+        total_budget_s=total_budget_s,
     )

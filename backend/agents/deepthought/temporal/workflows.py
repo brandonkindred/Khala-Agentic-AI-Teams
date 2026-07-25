@@ -26,6 +26,7 @@ from typing import Any
 from temporalio import workflow
 
 from deepthought.temporal.constants import (
+    ANALYSE_ACTIVITY_OPTS,
     DECOMPOSED_PIPELINE_PATCH,
     JOB_ACTIVITY_OPTS,
     LLM_ACTIVITY_OPTS,
@@ -340,7 +341,7 @@ class DeepthoughtWorkflow:
                 knowledge_summary=render_knowledge_summary(self._kb, ANALYSIS_KB_SUMMARY_CHARS),
                 max_depth=max_depth,
             ).model_dump(mode="json"),
-            **LLM_ACTIVITY_OPTS,
+            **ANALYSE_ACTIVITY_OPTS,
         )
         return QueryAnalysis.model_validate(data)
 

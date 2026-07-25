@@ -253,7 +253,7 @@ class DeepthoughtAgent:
                 reasoning_prompt=user,
                 reasoning_system_prompt=reasoning_system,
                 formatting_instructions=ANALYSIS_FORMAT_INSTRUCTIONS,
-                temperature=0.3,
+                reasoning_temperature=0.3,
                 objective="analyze specialist question",
             )
             return self._parse_analysis(data)

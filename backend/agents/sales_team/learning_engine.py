@@ -282,7 +282,7 @@ class LearningEngine:
             reasoning_prompt=prompt,
             reasoning_system_prompt=_LEARNING_SYSTEM_PROMPT_REASONING,
             formatting_system_prompt=_LEARNING_SYSTEM_PROMPT,
-            temperature=0.0,
+            reasoning_temperature=0.0,
             correction_attempts=2,
             objective="extract sales learning insights",
         )

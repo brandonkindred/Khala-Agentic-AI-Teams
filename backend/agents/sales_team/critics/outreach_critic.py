@@ -180,7 +180,7 @@ class OutreachCriticAgent:
                 reasoning_prompt=prompt,
                 reasoning_system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT_REASONING,
                 formatting_system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT,
-                temperature=0.0,
+                reasoning_temperature=0.0,
                 correction_attempts=2,
                 objective="critique outreach sequence",
             )
@@ -216,8 +216,7 @@ class OutreachCriticAgent:
             "--- OUTREACH SEQUENCE (JSON) ---\n"
             f"{sequence_json}\n\n"
             "--- TASK ---\n"
-            "Evaluate the outreach sequence against the rubric in your system "
-            "prompt. Return a single OutreachCriticReport JSON object only."
+            "Evaluate the outreach sequence against the rubric in your system prompt."
         )
 
 

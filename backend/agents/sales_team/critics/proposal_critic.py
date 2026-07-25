@@ -170,7 +170,7 @@ class ProposalCriticAgent:
                 reasoning_prompt=prompt,
                 reasoning_system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT_REASONING,
                 formatting_system_prompt=_PROPOSAL_CRITIC_SYSTEM_PROMPT,
-                temperature=0.0,
+                reasoning_temperature=0.0,
                 correction_attempts=2,
                 objective="critique sales proposal",
             )
@@ -210,7 +210,7 @@ class ProposalCriticAgent:
             "--- TASK ---\n"
             "Evaluate the proposal against the rubric in your system prompt. "
             "Compute the ROI arithmetic yourself before flagging or clearing "
-            "rule 1. Return a single ProposalCriticReport JSON object only."
+            "rule 1."
         )
 
 

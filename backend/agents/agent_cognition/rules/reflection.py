@@ -429,7 +429,7 @@ def _propose(
         reasoning_system_prompt=_REFLECTION_SYSTEM_PROMPT_REASONING,
         formatting_system_prompt=f"{_REFLECTION_SYSTEM_PROMPT}\n\n{_TASK_INSTRUCTION}",
         objective="propose rule changes",
-        temperature=0.0,
+        reasoning_temperature=0.0,
         correction_attempts=1,
     )
 
