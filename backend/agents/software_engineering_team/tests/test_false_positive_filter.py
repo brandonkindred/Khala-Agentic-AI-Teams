@@ -558,13 +558,14 @@ def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
     assert "first 10 characters" not in prompt
 
 
-def test_group_prompt_lists_full_manifest() -> None:
-    """A submission with many files lists every path in the manifest."""
+def test_group_prompt_caps_manifest_and_notes_overflow() -> None:
+    """A submission with more files than the manifest cap lists only the cap and notes the rest."""
     files = {f"f{i:04d}.py": "x = 1\n" for i in range(305)}
     idx = CodebaseIndex(files=files)
     prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input(), 1000)
-    assert "f0000.py" in prompt and "f0304.py" in prompt
-    assert "call list_files()" not in prompt
+    assert "f0000.py" in prompt
+    assert "f0304.py" not in prompt
+    assert "call list_files()" in prompt
 
 def test_code_fence_for_grows_past_backtick_runs() -> None:
     """``_code_fence_for`` returns a fence longer than the longest backtick run in the content."""

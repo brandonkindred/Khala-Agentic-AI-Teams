@@ -67,6 +67,13 @@ _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
 
+# Cap on file paths listed inline in the verification prompt's manifest, so a
+# submission touching a large repo can't by itself blow the prompt past the
+# model's context window; the rest remains reachable via list_files()/
+# read_file(), so nothing is actually inaccessible -- only the inline listing
+# is bounded.
+_MANIFEST_LIMIT = 300
+
 # Column-0 token prefixes that should NOT be counted as construct start lines
 # by the heuristic fallback used for non-Python files.
 _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
@@ -799,8 +806,9 @@ def _build_group_prompt(
     """Render the user prompt for verifying one file's findings.
 
     The prompt inlines the cited file's full content (so the model has the
-    primary evidence even without a tool call) and lists every available path;
-    other files and the existing-codebase excerpt remain reachable through the
+    primary evidence even without a tool call) and lists up to
+    ``_MANIFEST_LIMIT`` available paths; other files (including any manifest
+    overflow) and the existing-codebase excerpt remain reachable through the
     tools. The wording is a stable anchor for the verdict contract: it names
     the file, indexes each finding, and asks for a ``verdicts`` array.
 
@@ -822,7 +830,9 @@ def _build_group_prompt(
     parts.append(
         f"**Files available to read ({len(manifest)} total) — use read_file/search_codebase:**"
     )
-    parts.extend(manifest)
+    parts.extend(manifest[:_MANIFEST_LIMIT])
+    if len(manifest) > _MANIFEST_LIMIT:
+        parts.append(f"... and {len(manifest) - _MANIFEST_LIMIT} more (call list_files()).")
     parts.append("")
 
     body = index.read_file(file_path)
