@@ -375,6 +375,17 @@ describe('StrategyCardComponent', () => {
       expect(component['copyResetTimer']).toBeNull();
     });
 
+    it('does not throw when navigator.clipboard is undefined', () => {
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+      try {
+        expect(() => component.copyStrategyCode('print("hello")')).not.toThrow();
+        expect(component.strategyCodeCopied).toBe(true);
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
+    });
+
     it('is a safe no-op for a falsy code, without touching the clipboard', () => {
       const writeText = vi.fn();
       const original = (navigator as { clipboard?: unknown }).clipboard;
