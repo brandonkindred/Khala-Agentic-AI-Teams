@@ -52,11 +52,30 @@ __all__ = [
 DEFAULT_TERMINAL_STATUSES: FrozenSet[str] = frozenset({"completed", "failed", "cancelled"})
 
 # JSONDecodeError is a ValueError subclass, so this tuple also covers a
-# response body that isn't valid JSON. RuntimeError is included because httpx
-# raises it (not an HTTPError) when a request is issued on a client that was
-# closed mid-flight — e.g. a pooled client torn down by close_async_pool while
-# a request is in progress. Without it that escapes the never-raises contract.
-_REQUEST_ERRORS = (httpx.HTTPError, ValueError, RuntimeError)
+# response body that isn't valid JSON.
+_REQUEST_ERRORS = (httpx.HTTPError, ValueError)
+
+# httpx signals "this client was closed underneath you" with a plain
+# RuntimeError rather than an HTTPError, which would otherwise escape the
+# never-raises contract when a pooled client is torn down mid-request. Match on
+# the message rather than adding bare RuntimeError to _REQUEST_ERRORS: that
+# would also swallow genuine programming errors in these helpers as a benign
+# "request failed" None.
+_CLOSED_CLIENT_MARKER = "client has been closed"
+
+
+def _is_closed_client_error(exc: BaseException) -> bool:
+    """True when ``exc`` is httpx's "client has been closed" RuntimeError.
+
+    Preconditions:
+        - ``exc`` is the exception being considered for the request-failure path.
+    Postconditions:
+        - Returns True only for a ``RuntimeError`` whose message identifies a
+          closed client; every other ``RuntimeError`` (a real bug) returns False
+          so it propagates.
+    """
+    return isinstance(exc, RuntimeError) and _CLOSED_CLIENT_MARKER in str(exc)
+
 
 # Error string for a status-retrieval failure (status_fn returned None or raised).
 _STATUS_FAILURE = "Failed to get status"
@@ -145,6 +164,11 @@ async def _await_within_budget(awaitable: Awaitable[Any], remaining: float) -> A
         # Callback is suppressing cancellation; do not block the poller. Detach
         # with a done-callback that consumes its eventual result/exception.
         task.add_done_callback(_discard_task_result)
+    else:
+        # Finished inside the grace window. If it finished by *raising* (rather
+        # than by cancelling), nobody is going to await it, so consume the
+        # exception here or asyncio logs "Task exception was never retrieved".
+        _discard_task_result(task)
     raise _BudgetExpired()
 
 
@@ -194,6 +218,11 @@ def post_json(
     except _REQUEST_ERRORS as e:
         logger.warning("%s failed: %s", log_context, e)
         return None
+    except RuntimeError as e:
+        if not _is_closed_client_error(e):
+            raise
+        logger.warning("%s failed: %s", log_context, e)
+        return None
 
 
 def get_json(
@@ -213,6 +242,11 @@ def get_json(
         resp.raise_for_status()
         return resp.json()
     except _REQUEST_ERRORS as e:
+        logger.warning("%s failed: %s", log_context, e)
+        return None
+    except RuntimeError as e:
+        if not _is_closed_client_error(e):
+            raise
         logger.warning("%s failed: %s", log_context, e)
         return None
 
@@ -248,6 +282,11 @@ async def async_post_json(
     except _REQUEST_ERRORS as e:
         logger.warning("%s failed: %s", log_context, e)
         return None
+    except RuntimeError as e:
+        if not _is_closed_client_error(e):
+            raise
+        logger.warning("%s failed: %s", log_context, e)
+        return None
 
 
 async def async_get_json(
@@ -264,6 +303,11 @@ async def async_get_json(
         resp.raise_for_status()
         return resp.json()
     except _REQUEST_ERRORS as e:
+        logger.warning("%s failed: %s", log_context, e)
+        return None
+    except RuntimeError as e:
+        if not _is_closed_client_error(e):
+            raise
         logger.warning("%s failed: %s", log_context, e)
         return None
 

@@ -20,8 +20,10 @@ Invariants:
       loop)`` while that loop is alive. ``get_pooled_async_client`` requires a
       running loop (no sentinel / sync-setup bucket). Stale entries are closed
       then dropped when their owning loop is closed or garbage-collected. A
-      client whose owning loop has stopped but is not yet closed is closed on
-      that loop (``run_until_complete``) rather than dropped open.
+      client whose owning loop has stopped but is not yet closed stays pooled
+      rather than being dropped open — there is no safe way to close it from
+      another thread or loop (see ``_stopped_owner_loop_is_unclosable``), so it
+      remains tracked and reported instead of silently leaking.
     - An entry is removed from the async pool before its client is closed, so
       teardown and a concurrent ``get_pooled_async_client`` can never disagree
       about which client is live; a client that fails to close is restored.
@@ -181,7 +183,12 @@ def close_pool() -> None:
 atexit.register(close_pool)
 
 
-_async_lock = threading.Lock()
+# Reentrant by necessity, not convenience: allocating an ``httpx.AsyncClient``
+# (or a ``weakref.finalize``) inside this lock can trigger a cyclic-GC pass that
+# collects a dead event loop, which synchronously runs that loop's finalizer →
+# ``_evict_async_pool_key`` → this same lock on this same thread. A plain Lock
+# self-deadlocks there.
+_async_lock = threading.RLock()
 
 
 @dataclass
@@ -264,16 +271,25 @@ def _restore_async_pool_entry(key: tuple[float, int], entry: _AsyncPoolEntry) ->
     """Put a still-open ``entry`` back in the pool after a failed teardown.
 
     Postconditions:
-        - ``entry`` is re-pooled (with a fresh finalizer) only when ``key`` is
-          still vacant; otherwise the newer entry wins and this one is dropped.
+        - ``entry`` is re-pooled (with a fresh finalizer) when ``key`` is still
+          vacant.
+        - When a newer entry already holds ``key``, that one wins and this
+          client is closed instead of being silently orphaned — its finalizer
+          was already detached by :func:`_take_async_pool_entry`, so nothing
+          else would ever close or report it.
     """
     loop = entry.loop_ref()
     with _async_lock:
-        if key in _async_clients:
-            return
-        if loop is not None and not loop.is_closed():
-            entry.finalizer = weakref.finalize(loop, _evict_async_pool_key, key)
-        _async_clients[key] = entry
+        vacant = key not in _async_clients
+        if vacant:
+            if loop is not None and not loop.is_closed():
+                entry.finalizer = weakref.finalize(loop, _evict_async_pool_key, key)
+            _async_clients[key] = entry
+    if vacant:
+        return
+    # Displaced by a newer client: close this one rather than leak its transport.
+    if not _close_client_on_owning_loop(entry):
+        logger.warning("Displaced pooled AsyncClient could not be closed; its transport may stay open")
 
 
 def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
@@ -292,10 +308,9 @@ def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
           by a 5s wait). Never runs ``asyncio.run(aclose)`` on a foreign loop —
           that is unsafe for keep-alive transports.
         - If the owning loop is *stopped but not closed* (e.g. after
-          ``run_until_complete`` returns), drives ``aclose()`` on that same loop
-          via ``run_until_complete`` so the transport's sockets are released
-          rather than leaked. ``run_coroutine_threadsafe`` cannot be used there:
-          it would queue the close on an inactive loop and block forever.
+          ``run_until_complete`` returns), returns False so the entry stays
+          pooled. See :func:`_stopped_owner_loop_is_unclosable` for why the
+          close cannot be performed from here.
         - If the owning loop is closed or collected, skips ``aclose`` (a
           coroutine cannot run there) and returns True so the pool can drop the
           entry without a false "closed" mark from a wrong-loop close.
@@ -325,46 +340,47 @@ def _close_client_on_owning_loop(entry: _AsyncPoolEntry) -> bool:
         task.add_done_callback(_pending_aclose_tasks.discard)
         return True
     if not loop.is_running():
-        return _close_client_on_stopped_loop(client, loop)
+        return _stopped_owner_loop_is_unclosable()
+    fut = None
     try:
         fut = asyncio.run_coroutine_threadsafe(_aclose_quietly(client), loop)
         fut.result(timeout=_CROSS_LOOP_CLOSE_TIMEOUT_S)
     except Exception:  # noqa: BLE001 — best-effort teardown
+        # Stop the close from running later against an entry we may re-pool;
+        # a half-finished aclose would hand callers a client httpx then rejects.
+        if fut is not None:
+            fut.cancel()
         logger.warning("Failed to aclose pooled AsyncClient on owning loop", exc_info=True)
     return client.is_closed
 
 
-def _close_client_on_stopped_loop(client: httpx.AsyncClient, loop: asyncio.AbstractEventLoop) -> bool:
-    """Drive ``client.aclose()`` to completion on a stopped-but-open owning loop.
+def _stopped_owner_loop_is_unclosable() -> bool:
+    """Report that a client owned by a stopped-but-open loop cannot be closed here.
 
     A loop that is neither running nor closed still owns the client's keep-alive
-    transport, so the close must happen *there*. Since nothing is driving that
-    loop, ``run_until_complete`` is the only way to advance it —
-    ``run_coroutine_threadsafe`` would queue work no one ever runs.
+    transport, so the close has to happen *on that loop* — but there is no safe
+    way to make that happen from outside it:
 
-    Preconditions:
-        - ``loop`` is not closed and not currently running.
+    - ``run_coroutine_threadsafe`` queues the close on a loop nobody is driving,
+      so awaiting it hangs forever.
+    - ``run_until_complete`` requires the calling thread to have no running loop
+      (so it is unusable from ``aclose_async_pool``), and even from a sync
+      caller it would drive *another thread's* loop — draining that loop's ready
+      queue on the wrong thread and reassigning its ``_thread_id``, racing the
+      owning thread if it ever resumes.
+
+    So the entry stays pooled rather than being dropped open: it is still
+    tracked, still visible in ``aclose_async_pool``'s "left tracked" warning,
+    and gets closed if the owning loop is ever run again or reaches
+    :func:`aclose_async_pool` from inside itself. Callers that create their own
+    loops should close them (``loop.close()``) or ``await aclose_async_pool()``
+    from within the loop before abandoning it.
+
     Postconditions:
-        - Returns True when the client ends up closed (so the pool may drop the
-          entry), False when the close could not be performed and the entry
-          should stay tracked for a later attempt.
-        - Never raises. If another thread concurrently starts the loop,
-          ``run_until_complete`` raises and this reports failure rather than
-          leaving a half-closed client silently dropped.
-        - Returns False without attempting anything when the calling thread
-          already drives a running loop: Python forbids running a second loop
-          there, and dropping the entry would strand an open transport. Keeping
-          it pooled lets the sync/atexit teardown (which has no running loop)
-          close it later.
+        - Always returns False ("not safe to drop"). Never raises.
     """
-    if _running_loop() is not None:
-        logger.debug("Deferring close of pooled AsyncClient owned by a stopped loop (caller loop is running)")
-        return False
-    try:
-        loop.run_until_complete(_aclose_quietly(client))
-    except Exception:  # noqa: BLE001 — best-effort teardown
-        logger.warning("Failed to aclose pooled AsyncClient on stopped owning loop", exc_info=True)
-    return client.is_closed
+    logger.debug("Pooled AsyncClient owned by a stopped-but-open loop; keeping it tracked rather than dropping it")
+    return False
 
 
 async def _aclose_quietly(client: httpx.AsyncClient) -> None:
@@ -478,9 +494,9 @@ async def aclose_async_pool() -> None:
     Clients owned by the current running loop are ``await``-ed directly; clients
     owned by other *running* loops are closed via ``run_coroutine_threadsafe``,
     bounded by ``_CROSS_LOOP_CLOSE_TIMEOUT_S`` so a wedged foreign loop cannot
-    hang shutdown. A stopped-but-open owning loop is driven with
-    ``run_until_complete`` rather than leaked; only dead/collected loops are
-    dropped without ``aclose``.
+    hang shutdown. A client owned by a stopped-but-open loop stays pooled (it
+    cannot be closed safely from here); only dead/collected loops are dropped
+    without ``aclose``.
 
     Each entry is removed from the pool *before* being closed, so a concurrent
     ``get_pooled_async_client`` during an await point cannot have its fresh
@@ -500,8 +516,15 @@ async def aclose_async_pool() -> None:
         for key, entry in snapshot:
             if not _take_async_pool_entry(key, entry):
                 continue
-            if not await _aclose_entry(entry, running):
-                _restore_async_pool_entry(key, entry)
+            # try/finally, not except: a CancelledError here (shutdown racing
+            # teardown) must still put the already-popped entry back, or its
+            # open client becomes untrackable by any later teardown or purge.
+            dropped = False
+            try:
+                dropped = await _aclose_entry(entry, running)
+            finally:
+                if not dropped:
+                    _restore_async_pool_entry(key, entry)
         with _async_lock:
             still_pooled = {key: id(entry) for key, entry in _async_clients.items()}
         # A round that closed nothing and saw nothing repooled will not do
@@ -523,8 +546,12 @@ async def _aclose_entry(entry: _AsyncPoolEntry, running: asyncio.AbstractEventLo
     Postconditions:
         - Returns True when the client is closed or its owning loop is dead
           (nothing left to close); False when the client is still open and the
-          entry should be restored to the pool for a later attempt.
-        - Never raises.
+          entry should be restored to the pool for a later attempt — including
+          a stopped-but-open owning loop (see
+          :func:`_stopped_owner_loop_is_unclosable`).
+        - Never raises an ordinary exception. ``CancelledError`` (a
+          ``BaseException``) can still propagate from the awaits; the caller
+          restores the entry in a ``finally`` for exactly that reason.
     """
     client = entry.client
     if client.is_closed:
@@ -546,7 +573,7 @@ async def _aclose_entry(entry: _AsyncPoolEntry, running: asyncio.AbstractEventLo
                 fut.cancel()
                 logger.warning("Timed out closing pooled AsyncClient on foreign loop")
         else:
-            return _close_client_on_stopped_loop(client, loop)
+            return _stopped_owner_loop_is_unclosable()
     except Exception:  # noqa: BLE001 — best-effort teardown
         logger.warning("Failed to aclose pooled AsyncClient", exc_info=True)
     return client.is_closed
@@ -559,8 +586,8 @@ def close_async_pool() -> None:
     ``run_coroutine_threadsafe``. When called from that owning loop's thread,
     schedules ``aclose`` as a task (cannot block without deadlock) — prefer
     :func:`aclose_async_pool` from async code when you need awaited completion.
-    A stopped-but-open owning loop is driven with ``run_until_complete``; only
-    dead-loop entries are dropped without ``aclose``.
+    A client owned by a stopped-but-open loop stays pooled; only dead-loop
+    entries are dropped without ``aclose``.
 
     Entries are taken out of the pool before being closed so a concurrent
     ``get_pooled_async_client`` cannot hand out a client this teardown is about

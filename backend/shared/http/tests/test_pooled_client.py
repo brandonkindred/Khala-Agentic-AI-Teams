@@ -337,8 +337,14 @@ def test_async_close_pool_closes_even_when_caller_has_running_loop():
 
 def test_async_aclose_pool_keeps_stopped_owner_loop_client_without_hanging():
     """A client owned by a stopped-but-not-closed loop must not hang teardown and
-    must not be dropped while still open — it stays tracked so the sync path
-    (which has no running loop) can close it on that loop."""
+    must not be dropped while still open.
+
+    It cannot be closed from another thread or loop (that would drive the owner's
+    ready queue on the wrong thread), so it stays *tracked* rather than silently
+    orphaned — visible to a later teardown and to the "left tracked" warning.
+    Closing it for real requires running the owner loop again, which is what the
+    caller that created the loop is expected to do.
+    """
     owner_loop = asyncio.new_event_loop()
     try:
         client = owner_loop.run_until_complete(_grab_async_client(15.0))
@@ -357,11 +363,35 @@ def test_async_aclose_pool_keeps_stopped_owner_loop_client_without_hanging():
             for entry in shared.http._async_clients.values()  # noqa: SLF001
         )
 
-        # The sync path has no running loop, so it can drive the owner loop.
+        # The sync path reaches the same conclusion; it must not drive the
+        # owner loop from this thread.
         close_async_pool()
+        assert not client.is_closed
+        assert any(
+            entry.client is client
+            for entry in shared.http._async_clients.values()  # noqa: SLF001
+        )
+
+        # Running the owner loop again does close it, on the loop that owns it.
+        owner_loop.run_until_complete(aclose_async_pool())
         assert client.is_closed
         assert shared.http._async_clients == {}  # noqa: SLF001
     finally:
+        owner_loop.close()
+
+
+def test_stopped_owner_loop_is_never_closed_from_another_thread():
+    """The stopped-loop path must report 'cannot close', never drive the loop."""
+    owner_loop = asyncio.new_event_loop()
+    try:
+        client = owner_loop.run_until_complete(_make_client())
+        entry = _entry_for(client, owner_loop)
+        # No running loop here, yet the owner loop must still not be driven.
+        assert shared.http._close_client_on_owning_loop(entry) is False  # noqa: SLF001
+        assert not client.is_closed
+        assert not owner_loop.is_running()
+    finally:
+        owner_loop.run_until_complete(client.aclose())
         owner_loop.close()
 
 
@@ -603,19 +633,6 @@ def _raise(exc):
     raise exc
 
 
-def test_close_client_on_stopped_loop_swallows_run_failure(monkeypatch):
-    """A stopped-loop close that blows up is reported as 'not closed', not raised."""
-    owner_loop = asyncio.new_event_loop()
-    try:
-        client = owner_loop.run_until_complete(_make_client())
-        monkeypatch.setattr(owner_loop, "run_until_complete", lambda coro: _raise(RuntimeError("boom")))
-        assert shared.http._close_client_on_stopped_loop(client, owner_loop) is False  # noqa: SLF001
-    finally:
-        monkeypatch.undo()
-        owner_loop.run_until_complete(client.aclose())
-        owner_loop.close()
-
-
 def test_aclose_quietly_swallows_client_error():
     """``_aclose_quietly`` is best-effort: a failing aclose must not propagate."""
 
@@ -725,3 +742,63 @@ def test_close_async_pool_skips_an_entry_replaced_concurrently():
         shared.http._async_clients.clear()  # noqa: SLF001
         loop.run_until_complete(client.aclose())
         loop.close()
+
+
+def test_async_lock_is_reentrant_for_gc_finalizer_callbacks():
+    """A cyclic-GC pass inside ``get_pooled_async_client``'s locked block can fire
+    a dead loop's finalizer on this very thread; a non-reentrant lock deadlocks."""
+    import threading
+
+    assert isinstance(shared.http._async_lock, type(threading.RLock()))  # noqa: SLF001
+
+    # Direct proof: re-entering the eviction path while holding the lock must
+    # not block. A plain Lock would hang here forever.
+    with shared.http._async_lock:  # noqa: SLF001
+        shared.http._evict_async_pool_key((30.0, 999_999))  # noqa: SLF001
+
+
+def test_restore_closes_a_client_displaced_by_a_newer_entry():
+    """A restore that loses the key must close its client, not orphan it — the
+    finalizer was already detached, so nothing else would ever close it."""
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        key = (30.0, id(loop))
+        displaced = httpx.AsyncClient()
+        newer = _entry_for(httpx.AsyncClient(), loop)
+        shared.http._async_clients[key] = newer  # noqa: SLF001
+        shared.http._restore_async_pool_entry(key, _entry_for(displaced, loop))  # noqa: SLF001
+        # The same-loop close path schedules a task; let it run.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert shared.http._async_clients[key] is newer  # noqa: SLF001
+        assert displaced.is_closed
+        shared.http._async_clients.clear()  # noqa: SLF001
+        await newer.client.aclose()
+
+    asyncio.run(_run())
+
+
+def test_aclose_pool_restores_entry_when_cancelled_mid_close(monkeypatch):
+    """CancelledError during the close must not strand an already-popped entry:
+    ``_aclose_entry`` cannot catch it, so the caller restores in a finally."""
+
+    async def _run():
+        client = get_pooled_async_client(30.0)
+
+        async def _cancel_during_close(entry, running):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(shared.http, "_aclose_entry", _cancel_during_close)
+        with pytest.raises(asyncio.CancelledError):
+            await aclose_async_pool()
+        monkeypatch.undo()
+        # The entry must still be tracked, not silently lost with an open client.
+        assert any(
+            entry.client is client
+            for entry in shared.http._async_clients.values()  # noqa: SLF001
+        )
+        await aclose_async_pool()
+        assert client.is_closed
+
+    asyncio.run(_run())
