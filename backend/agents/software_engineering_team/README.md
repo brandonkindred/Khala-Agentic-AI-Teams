@@ -118,8 +118,10 @@ flowchart LR
 
 **Frontend internal pipeline order:** UX Designer → UI Designer → Design System → Frontend Architect → Feature Implementation → UX Engineer → Performance Engineer → Build/Release
 
-Data and control-flow dependencies between these gates (which are safe to
-parallelize vs. which require a redesign) are mapped in
+Data and control-flow dependencies among the build/code-review/security/QA/DbC
+gates specifically (a subset of the full sequences above — it does not cover
+acceptance verification, Tech Lead review, or accessibility), and which of them
+are safe to parallelize vs. require a redesign, are mapped in
 [`docs/GATE_DEPENDENCY_GRAPH.md`](docs/GATE_DEPENDENCY_GRAPH.md).
 
 ## Plan folder
