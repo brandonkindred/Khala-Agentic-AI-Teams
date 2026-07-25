@@ -125,7 +125,7 @@ def test_run_tsc_agent_parses_response_into_audit_result() -> None:
     assert "Security" in call["prompt"]
     assert "auth, encryption" in call["prompt"]
     assert call["temperature"] == 0.1
-    assert call["think"] is True
+    assert call["think"] is False
 
 
 def test_run_tsc_agent_skips_empty_findings_and_invents_compliance() -> None:

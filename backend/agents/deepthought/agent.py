@@ -250,7 +250,7 @@ class DeepthoughtAgent:
                 user,
                 temperature=0.3,
                 system_prompt=system,
-                think=True,
+                think=False,
                 objective="analyze specialist question",
             )
             return self._parse_analysis(data)
