@@ -1071,6 +1071,31 @@ def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> No
     assert result == [q1, q2]
 
 
+def test_review_question_answer_alignment_preserves_input_order_when_all_items_fail_but_ids_match() -> None:
+    """If every item fails to parse but each still carries a recognizable original id, the
+    id-matched fallbacks must not be returned in the LLM's (possibly reordered) order —
+    since nothing was genuinely realigned, the original input order is preserved instead."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "q2", "question_text": "malformed"},
+                {"id": "q1", "question_text": "also malformed"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=ValueError("simulated malformed item"),
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert result == [q1, q2]
+
+
 def test_dedupe_questions_by_answer_similarity_drops_question_when_we_already_have_that_answer() -> (
     None
 ):

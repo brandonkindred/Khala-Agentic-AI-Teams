@@ -439,17 +439,20 @@ def review_question_answer_alignment(
     """Ensure each question and its options make sense together (e.g. no Yes/No for open-ended questions).
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
-    Postconditions: returns the aligned list, or the unmodified list on empty input
-        or a full-batch LLM/parse failure; never raises. This is a per-question
-        review (ids are preserved), so an item that individually fails to parse,
-        that carries an id not present in ``open_questions`` (a
-        hallucinated/unrecognized id), or that repeats an id already placed in
-        the result (a duplicate), falls back to its original (unaligned)
-        question by id — unless that original id is already in the result, in
-        which case the item is dropped outright. Any original question whose
-        id never appears in the result is appended at the end. The result
-        therefore contains exactly one entry per original id: no question is
-        ever dropped, added, or duplicated.
+    Postconditions: returns the aligned list, or the unmodified list (in its
+        original order) on empty input or when no item in the batch parses
+        successfully; never raises. This is a per-question review (ids are
+        preserved), so an item that individually fails to parse, that carries
+        an id not present in ``open_questions`` (a hallucinated/unrecognized
+        id), or that repeats an id already placed in the result (a
+        duplicate), falls back to its original (unaligned) question by id —
+        unless that original id is already in the result, in which case the
+        item is dropped outright. Any original question whose id never
+        appears in the result is appended at the end. If no item in the batch
+        parses successfully, the LLM-provided order carries no meaning, so
+        the original list is returned unchanged rather than in fallback
+        (LLM-provided) order. The result therefore contains exactly one entry
+        per original id: no question is ever dropped, added, or duplicated.
     """
     if len(open_questions) == 0:
         return []
@@ -495,6 +498,7 @@ def review_question_answer_alignment(
             return list(open_questions)
         result = []
         seen_ids = set()
+        any_parsed = False
         for i, q_data in enumerate(aligned):
             try:
                 parsed = parse_open_question(q_data, i)
@@ -504,6 +508,7 @@ def review_question_answer_alignment(
                     raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
                 result.append(parsed)
                 seen_ids.add(parsed.id)
+                any_parsed = True
             except Exception as e:
                 logger.warning("Failed to parse aligned question %d: %s", i, e)
                 fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
@@ -511,7 +516,10 @@ def review_question_answer_alignment(
                 if original is not None and original.id not in seen_ids:
                     result.append(original)
                     seen_ids.add(original.id)
-        if not result:
+        if not any_parsed:
+            # Nothing in the batch was genuinely realigned, so the LLM-provided
+            # order (which any fallbacks above were assembled in) carries no
+            # meaning — return the original list in its original order instead.
             return list(open_questions)
         for q in open_questions:
             if q.id not in seen_ids:
