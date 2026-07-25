@@ -266,6 +266,33 @@ def test_max_task_revisions_is_20():
     assert orch_mod.MAX_TASK_REVISIONS == 20
 
 
+@pytest.mark.parametrize(
+    "progress_base, progress_span",
+    [
+        (-1, 10),  # negative base
+        (10, -1),  # negative span
+        (60, 50),  # sum exceeds 100
+    ],
+)
+def test_invalid_progress_bounds_raise_value_error_not_assert(
+    tmp_path, progress_base, progress_span
+):
+    """The progress_base/progress_span precondition raises ValueError, surviving `python -O`."""
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    with pytest.raises(ValueError):
+        run_coding_team_orchestrator(
+            "j1",
+            tmp_path,
+            plan,
+            update_job_fn=lambda **kw: None,
+            get_job_fn=lambda jid: {},
+            cache_dir=tmp_path,
+            get_llm=lambda key: None,
+            progress_base=progress_base,
+            progress_span=progress_span,
+        )
+
+
 def test_failed_task_cascades_to_dependents(tmp_path, monkeypatch):
     """When a task is FAILED, tasks depending on it are cascade-FAILED (never satisfiable)."""
     monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 1)

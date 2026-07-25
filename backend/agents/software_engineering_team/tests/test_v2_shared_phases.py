@@ -29,6 +29,7 @@ from software_engineering_team.shared.models import (
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
 from software_engineering_team.shared.phases import problem_solving as sh_ps
+from software_engineering_team.shared.phases import rollback as sh_rollback
 from software_engineering_team.shared.phases import setup as sh_setup
 from software_engineering_team.shared.prompts import (
     build_execution_prompt,
@@ -666,7 +667,7 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
 
     # Snapshot the pre-write baselines the way the loop does, then write.
     rollback = sh_exec._MicrotaskRollback()
-    sh_exec._record_prior_values(
+    sh_rollback._record_prior_values(
         rollback, tmp_path, all_files, {"gen.py": "g2", "shared.py": "clob"}
     )
     ok = sh_exec.write_microtask_output_or_fail(
@@ -716,16 +717,16 @@ def test_resolve_physical_path_and_snapshot_states(tmp_path: Path):
     (tmp_path / "real.py").write_text("X", encoding="utf-8")
     (tmp_path / "mid").symlink_to("real.py")
     (tmp_path / "top").symlink_to("mid")
-    assert sh_exec._resolve_physical_path_in_repo(root, root / "top") == root / "real.py"
+    assert sh_rollback._resolve_physical_path_in_repo(root, root / "top") == root / "real.py"
     # a symlink pointing out of the repo is rejected
     (tmp_path / "escape").symlink_to(tmp_path.parent)
-    assert sh_exec._resolve_physical_path_in_repo(root, root / "escape") is None
+    assert sh_rollback._resolve_physical_path_in_repo(root, root / "escape") is None
 
-    assert sh_exec._snapshot_disk_state(root / "real.py").file_bytes == b"X"
+    assert sh_rollback._snapshot_disk_state(root / "real.py").file_bytes == b"X"
     (tmp_path / "adir").mkdir()
-    directory = sh_exec._snapshot_disk_state(root / "adir")
+    directory = sh_rollback._snapshot_disk_state(root / "adir")
     assert directory.file_bytes is None and not directory.absent
-    assert sh_exec._snapshot_disk_state(root / "missing").absent
+    assert sh_rollback._snapshot_disk_state(root / "missing").absent
 
 
 def test_snapshot_disk_state_degrades_on_read_error(tmp_path: Path, monkeypatch):
@@ -738,7 +739,7 @@ def test_snapshot_disk_state_degrades_on_read_error(tmp_path: Path, monkeypatch)
         raise OSError("unreadable")
 
     monkeypatch.setattr(Path, "read_bytes", _boom)
-    entry = sh_exec._snapshot_disk_state(tmp_path.resolve() / "f.py")
+    entry = sh_rollback._snapshot_disk_state(tmp_path.resolve() / "f.py")
     assert entry.file_bytes is None and not entry.absent  # leave-alone, no exception
 
 

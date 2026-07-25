@@ -6,7 +6,8 @@ subtly different ordering, error-handling, and — most importantly —
 context-propagation semantics. A raw ``ThreadPoolExecutor`` does **not** copy
 contextvars into its worker threads, so every fan-out site must wrap submissions
 in ``contextvars.copy_context().run(...)`` or it silently drops the LLM
-attribution / request-id contextvars (see ``llm_service.attribution``). Routing
+attribution / request-id contextvars (see ``llm_service.attribution``) and the
+job's ``trace_id`` (see ``shared.observability.trace_context``). Routing
 all fan-out through this one helper fixes worker bounds, exception propagation,
 and context propagation once instead of per-team. It is stdlib-only and lives in
 ``shared.concurrency`` so any team can use it without extra dependencies. See
@@ -70,8 +71,9 @@ def parallel_map(
             kept positionally.
         propagate_context: When True (default), each task runs inside a **fresh**
             ``contextvars.copy_context()`` so the caller's contextvars (LLM
-            attribution / request-id) are visible in the worker. Set False only
-            for CPU-only callers that explicitly want no propagation.
+            attribution / request-id, ``trace_id``) are visible in the worker.
+            Set False only for CPU-only callers that explicitly want no
+            propagation.
         on_first_exception: Optional zero-arg callback invoked exactly once, on
             the first worker **``Exception``**, **before** pending tasks are
             cancelled and the exception is re-raised. It is *not* called for a

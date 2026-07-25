@@ -6,21 +6,28 @@ identical workflow models. The classes here are the ones that do **not**
 reference a team-specific ``Microtask``/``ToolAgentKind``/``MicrotaskStatus``
 enum, so they can be defined once and re-exported by each team's ``models.py``.
 
+``PlanningResult``/``ExecutionResult`` are generic over a team's ``Microtask``
+type here (``BasePlanningResult``/``BaseExecutionResult``); each team's
+``models.py`` binds its own ``Microtask`` via ``BasePlanningResult[Microtask]``
+and, for ``PlanningResult``, overrides the ``language`` default.
+
 Team-local (defined per team, not here): ``ToolAgentKind``, ``MicrotaskStatus``,
-``Microtask``, ``PlanningResult``, ``ExecutionResult``, ``ToolAgentInput``,
-``ToolAgentPhaseInput`` (all bind a team ``Microtask``/enum or a team language
-default), and the per-team ``*WorkflowResult``.
+``Microtask``, ``ToolAgentInput``, ``ToolAgentPhaseInput`` (all bind a team
+``Microtask``/enum or a team language default), and the per-team
+``*WorkflowResult``.
 ``MicrotaskReviewConfig`` subclasses ``BaseMicrotaskReviewConfig`` here.
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.models import ToolRecommendation
+
+MicrotaskT = TypeVar("MicrotaskT", bound=BaseModel)
 
 # ---------------------------------------------------------------------------
 # Lifecycle phases (identical across teams)
@@ -42,6 +49,24 @@ class Phase(str, Enum):
 # ---------------------------------------------------------------------------
 # Phase results that do not reference a team-local Microtask
 # ---------------------------------------------------------------------------
+
+
+class BasePlanningResult(BaseModel, Generic[MicrotaskT]):
+    """Output of the Planning phase. Team subclasses set the ``language`` default."""
+
+    microtasks: List[MicrotaskT] = Field(default_factory=list)
+    language: str = Field(default="", description="Detected language/stack")
+    summary: str = Field(default="")
+
+
+class BaseExecutionResult(BaseModel, Generic[MicrotaskT]):
+    """Aggregated output of the Execution phase."""
+
+    files: Dict[str, str] = Field(default_factory=dict, description="All files produced")
+    microtasks: List[MicrotaskT] = Field(
+        default_factory=list, description="Microtasks with updated status"
+    )
+    summary: str = Field(default="")
 
 
 class SetupResult(BaseModel):
@@ -257,4 +282,4 @@ class MicrotaskReviewFailedError(Exception):
     def __init__(self, microtask: "Any", review_result: "ReviewResult") -> None:
         self.microtask = microtask
         self.review_result = review_result
-        super().__init__(f"Microtask {microtask.id} failed review after max retries")
+        super().__init__(f"Microtask {microtask.id} failed review (on_failure='stop')")

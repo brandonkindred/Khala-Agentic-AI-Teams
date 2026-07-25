@@ -122,15 +122,15 @@ def test_split_sections_oversized_coherent_block_kept_whole():
     assert sections == [text]
 
 
-def test_env_positive_int(monkeypatch):
+def test_env_positive_int_or_default(monkeypatch):
     monkeypatch.setenv("PLANNING_TEST_INT", "120")
-    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 120
+    assert spec_digest._env_positive_int_or_default("PLANNING_TEST_INT", 50) == 120
     monkeypatch.setenv("PLANNING_TEST_INT", "garbage")
-    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # garbage -> default
+    assert spec_digest._env_positive_int_or_default("PLANNING_TEST_INT", 50) == 50  # garbage -> default
     monkeypatch.setenv("PLANNING_TEST_INT", "0")
-    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # non-positive -> default
+    assert spec_digest._env_positive_int_or_default("PLANNING_TEST_INT", 50) == 50  # non-positive -> default
     monkeypatch.delenv("PLANNING_TEST_INT", raising=False)
-    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # unset -> default
+    assert spec_digest._env_positive_int_or_default("PLANNING_TEST_INT", 50) == 50  # unset -> default
 
 
 # --- map_reduce ------------------------------------------------------------
@@ -420,7 +420,7 @@ def test_map_reduce_compact_failure_uses_uncompacted_section(monkeypatch):
 # --- parallelism ------------------------------------------------------------
 
 
-def test_map_parallelism_delegates_to_env_positive_int(monkeypatch):
+def test_map_parallelism_delegates_to_env_positive_int_or_default(monkeypatch):
     monkeypatch.setenv("PLANNING_MAP_PARALLELISM", "7")
     assert spec_digest._map_parallelism() == 7
     monkeypatch.setenv("PLANNING_MAP_PARALLELISM", "garbage")
