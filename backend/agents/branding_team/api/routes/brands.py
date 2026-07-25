@@ -47,6 +47,11 @@ def list_brands(
 @router.post("/clients/{client_id}/brands", response_model=Brand, status_code=201)
 def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     from branding_team.api import main as _main
+    from branding_team.assistant.store import (
+        ConversationAttachOutcome,
+        _attach_conversation_to_brand,
+    )
+    from branding_team.store import _apply_brand_patch, _now_iso
 
     mission = _mission_from_payload(payload)
 
@@ -60,19 +65,28 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     # Attach an existing conversation if provided, otherwise create a new one.
     existing_conv_id = (payload.conversation_id or "").strip() or None
     if existing_conv_id and conversation_store.get(existing_conv_id) is not None:
-        existing_brand = conversation_store.get_conversation_brand_id(existing_conv_id)
-        if existing_brand:
-            raise HTTPException(
-                status_code=409,
-                detail="Conversation is already attached to another brand",
-            )
-        if not conversation_store.set_brand(existing_conv_id, brand.id):
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        if not conversation_store.update_mission(existing_conv_id, mission):
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        conv_id = existing_conv_id
-    else:
-        conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
+        # Lock the conversation row, re-check its brand attachment, and update
+        # both the conversation and the brand in one shared transaction — a
+        # concurrent attach attempt blocks on the row lock instead of racing
+        # past a stale check, and a failure mid-way rolls back both writes
+        # instead of leaving the conversation linked to a brand that doesn't
+        # reference it back.
+        with conversation_store._transaction() as cur:
+            outcome = _attach_conversation_to_brand(cur, existing_conv_id, brand.id, mission)
+            if outcome is ConversationAttachOutcome.NOT_FOUND:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            if outcome is ConversationAttachOutcome.ALREADY_ATTACHED:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Conversation is already attached to another brand",
+                )
+            patch = {"updated_at": _now_iso(), "conversation_id": existing_conv_id}
+            updated_brand = _apply_brand_patch(cur, brand.id, client_id, patch)
+        if not updated_brand:
+            raise HTTPException(status_code=404, detail="Brand not found")
+        return updated_brand
+
+    conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
     brand = _main.branding_store.update_brand(client_id, brand.id, conversation_id=conv_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
