@@ -1334,10 +1334,12 @@ class BlogWriterAgent(_BlogAgentBase):
         concrete guideline updates that can be persisted to the writing style guide.
 
         Returns an empty list when the feedback has no guideline-relevant content,
-        the response is malformed / non-dict, or a non-transient LLM failure was
-        soft-failed after logging. Transient ``LLMRateLimitError`` /
-        ``LLMTemporaryError`` (including when wrapped in ``EventLoopException``)
-        propagate so Temporal can retry the draft stage.
+        the response is malformed / non-dict, or the model returned unparsable
+        JSON (``LLMJsonParseError``, soft-failed with a logged traceback).
+        Transient ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when
+        wrapped in ``EventLoopException``) propagate so Temporal can retry the
+        draft stage. Any other exception is an unexpected bug and propagates
+        rather than being swallowed.
         """
         prompt = ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT.format(
             user_feedback=user_feedback,
@@ -1368,7 +1370,9 @@ class BlogWriterAgent(_BlogAgentBase):
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
-            logger.warning("Guideline update analysis failed: %s", e)
+            if not isinstance(cause, LLMJsonParseError):
+                raise
+            logger.exception("Guideline update analysis failed: %s", cause)
             return []
 
     def revise_from_user_feedback(
