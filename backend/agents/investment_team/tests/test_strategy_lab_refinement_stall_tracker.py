@@ -68,21 +68,47 @@ def test_older_rounds_outside_window_do_not_count() -> None:
     assert tracker.is_stalled(4) is False
 
 
-def test_two_cycle_oscillation_is_not_detected_as_stall() -> None:
-    """An A/B/A/B... oscillating signature never produces a window of n
-    identical entries, so the current windowed-equality check reports "not
-    stalled" even though the loop is making zero real progress."""
+def test_two_cycle_oscillation_is_detected_as_stall_with_enough_history() -> None:
+    """An A/B/A/B... oscillating signature is recognized as a period-2 stall
+    once the window holds at least two full cycles (n >= 4); smaller windows
+    lack enough evidence to distinguish oscillation from real progress."""
     tracker = RefinementStallTracker()
     for i in range(6):
         if i % 2 == 0:
             tracker.record("code-a", "failure-a")
         else:
             tracker.record("code-b", "failure-b")
-    # Six rounds recorded, alternating A/B/A/B/A/B — no window of size >= 2
-    # is ever uniform, so the current implementation misses the oscillation.
+    # Six rounds recorded, alternating A/B/A/B/A/B. Windows of size 2 or 3
+    # don't contain two full period-2 cycles, so they're not (yet) flagged.
     assert tracker.is_stalled(2) is False
     assert tracker.is_stalled(3) is False
-    assert tracker.is_stalled(4) is False
+    # A window of 4 contains exactly two period-2 cycles (B,A,B,A / A,B,A,B
+    # depending on parity) — recognized as a short-period oscillating stall.
+    assert tracker.is_stalled(4) is True
+
+
+def test_three_cycle_oscillation_is_detected_as_stall() -> None:
+    """A period-3 A/B/C/A/B/C... oscillation is detected once two full
+    cycles (n >= 6) are in the window."""
+    tracker = RefinementStallTracker()
+    signatures = [("code-a", "failure-a"), ("code-b", "failure-b"), ("code-c", "failure-c")]
+    for i in range(6):
+        code_hash, failure_hash = signatures[i % 3]
+        tracker.record(code_hash, failure_hash)
+    assert tracker.is_stalled(5) is False
+    assert tracker.is_stalled(6) is True
+
+
+def test_identical_window_still_detected_over_longer_oscillating_history() -> None:
+    """Once an oscillation settles into a true repeat, the shortest matching
+    period (1, i.e. identical) is still found within a bounded window."""
+    tracker = RefinementStallTracker()
+    for _ in range(2):
+        tracker.record("code-a", "failure-a")
+        tracker.record("code-b", "failure-b")
+    for _ in range(3):
+        tracker.record("code-c", "failure-c")
+    assert tracker.is_stalled(3) is True
 
 
 # ---------------------------------------------------------------------------

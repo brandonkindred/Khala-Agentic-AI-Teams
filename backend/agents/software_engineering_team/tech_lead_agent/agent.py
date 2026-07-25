@@ -32,6 +32,13 @@ def _review_retry_attempts() -> int:
     with backoff rather than failing the task on the first error. Configurable via
     CODING_TEAM_REVIEW_RETRIES (default 2 retries → 3 attempts; garbage/negative → default;
     floored at 1 attempt).
+
+    Preconditions:
+        - None; reads only the ``CODING_TEAM_REVIEW_RETRIES`` environment variable.
+    Postconditions:
+        - Returns an int >= 1. A parseable non-negative value yields ``retries + 1``; a
+          missing/garbage/negative value falls back to the documented default of 2 retries
+          (3 attempts).
     """
     retries = parse_int("CODING_TEAM_REVIEW_RETRIES", 2)
     # A negative value is meaningless as a retry count; rather than silently collapsing it to a
@@ -199,9 +206,30 @@ def _call_json(
 
 
 class TechLeadAgent:
-    """Tech Lead: given plan, produce tasks + stacks; groom tasks; suggest assignments; code review."""
+    """Tech Lead: given plan, produce tasks + stacks; groom tasks; suggest assignments; code review.
+
+    Invariants:
+        - ``_plan_agent``, ``_groom_agent``, ``_assignment_agent``, and ``_adjudication_agent``
+          are fixed for the instance's lifetime and are each other's own conversation state;
+          concurrent calls to different ``run_*`` methods do not share history.
+        - ``run_code_review`` never uses a stored agent: it builds a fresh per-call ``Agent`` every
+          invocation, so concurrent reviews (the orchestrator's review fan-out) cannot
+          cross-contaminate each other's conversation history.
+        - Each ``run_*`` method is independently callable any number of times and has no ordering
+          requirement relative to the others.
+    """
 
     def __init__(self, model: Any) -> None:
+        """Construct the Tech Lead's fixed per-purpose agents.
+
+        Preconditions:
+            - ``model`` is a Strands-compatible model handle usable to construct an ``Agent``.
+        Postconditions:
+            - ``_plan_agent``, ``_groom_agent``, ``_assignment_agent``, and
+              ``_adjudication_agent`` are each bound to a new ``Agent`` sharing ``model`` and the
+              corresponding system prompt from ``prompts``. No review agent is created here;
+              ``run_code_review`` builds its own per call (see class Invariants).
+        """
         self._model = model
         self._plan_agent = Agent(model=model, system_prompt=prompts.PLAN_TO_TASK_GRAPH_SYSTEM)
         self._groom_agent = Agent(model=model, system_prompt=prompts.GROOM_TASK_SYSTEM)

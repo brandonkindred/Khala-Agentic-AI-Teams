@@ -8,6 +8,7 @@ from typing import Dict, List
 from pydantic import BaseModel, Field
 
 from shared.command_runner.runner import run_command
+from shared.subprocess_timeouts import DEVOPS_HELM_DRY_RUN_TIMEOUT_S
 
 
 class DeploymentDryRunInput(BaseModel):
@@ -32,7 +33,7 @@ class DeploymentDryRunPlanToolAgent:
 
         has_chart = any(path.rglob("Chart.yaml"))
         if has_chart:
-            lint = run_command(["helm", "lint", "."], cwd=path, timeout=120)
+            lint = run_command(["helm", "lint", "."], cwd=path, timeout=DEVOPS_HELM_DRY_RUN_TIMEOUT_S)
             if lint.exit_code == 127:
                 checks["deployment_dry_run"] = "skipped"
             else:

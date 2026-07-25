@@ -116,6 +116,17 @@ class VerificationMixin:
         # cost-stress on winning-candidate runs lives at the production
         # entrypoint, which force-enables the flag. Critical findings feed
         # the veto block below.
+        # ``None`` (no reports at all) is RuleFiringRateGate's "nothing to
+        # evaluate, self-skip" signal on the custom-code path; an empty
+        # ``alignment_findings`` list on a real report is instead read as
+        # "every rule is dead" (see that gate's docstring). Those two only
+        # stay distinguishable because this method's own early-out above
+        # (``if not execution_succeeded or not trades: return []``) and
+        # ``DeterministicAlignmentChecker`` both key off the same "no
+        # trades" condition — an aligned report for a non-empty ledger is
+        # never expected to carry an empty ``alignment_findings``. If that
+        # invariant ever breaks, the gate would treat the empty list as a
+        # false "all rules dead" verdict rather than skipping.
         realism_results = self._run_realism_gates(
             spec=spec,
             trades=trades,
@@ -124,6 +135,9 @@ class VerificationMixin:
             market_data=market_data,
             execution_succeeded=execution_succeeded,
             open_position_entry_reasons=open_position_entry_reasons,
+            alignment_findings=alignment_reports[-1].alignment_findings
+            if alignment_reports
+            else None,
         )
         all_gate_results.extend(realism_results)
         realism_critical = [r for r in realism_results if not r.passed and r.severity == "critical"]

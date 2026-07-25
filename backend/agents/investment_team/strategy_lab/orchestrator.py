@@ -750,6 +750,7 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, Verif
         market_data: Optional[Dict[str, List[OHLCVBar]]],
         execution_succeeded: bool,
         open_position_entry_reasons: Optional[List[str]] = None,
+        alignment_findings: Optional[List[AlignmentFinding]] = None,
     ) -> List[QualityGateResult]:
         """Run verification-phase realism gates and return their results.
 
@@ -760,6 +761,12 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, Verif
           - ``config`` is the run's :class:`BacktestConfig`.
           - ``market_data`` is the per-symbol bar table used for the run;
             the liquidity gate self-skips when this is ``None``.
+          - ``alignment_findings`` is the latest
+            :class:`TradeAlignmentReport`'s ``alignment_findings`` ledger
+            (``None`` when the alignment loop produced no report yet); it
+            is the ``RuleFiringRateGate``'s sole rule-firing signal for a
+            ``requires_custom_code=True`` spec, since that path has no
+            reliable ``entry_reason``/``exit_reason`` annotation to count.
         Postconditions:
           - Returns ``[]`` when execution didn't succeed or the ledger is
             empty — the gates' contracts are only meaningful for a strategy
@@ -793,6 +800,7 @@ class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin, Verif
                 spec,
                 trades,
                 open_position_entry_reasons=open_position_entry_reasons or [],
+                alignment_findings=alignment_findings,
                 phase="verification",
             )
         )

@@ -27,6 +27,7 @@ from strands import Agent
 from llm_service.interface import LLMSemanticExhaustionError
 
 from ...models import StrategySpec
+from .._orchestrator_helpers import _has_short_period_stall
 from ..exceptions import StrategyLabLLMError
 from ..quality_gates.models import QualityGateResult
 from . import _structured_output as so
@@ -339,25 +340,27 @@ class CritiqueLedger:
         return delta
 
     def is_stalled(self, n: int) -> bool:
-        """True when the open set has been non-empty and unchanged for ``n`` rounds.
+        """True when the open set shows no real progress for ``n`` rounds.
+
+        Recognizes both a window of identical, non-empty open-issue sets and
+        short-period oscillating signatures (e.g. an A/B/A/B... 2-cycle
+        between two distinct open-issue sets) — see
+        :func:`_orchestrator_helpers._has_short_period_stall`.
 
         Pre: ``n`` is the consecutive-round threshold (sub-1 values are
         floored to 1).
         Post: returns True only when at least ``n`` rounds have been recorded
-        and the last ``n`` open-issue sets are all identical and non-empty.
-        An empty open set is never a stall (the loop is converging, not
-        oscillating).
+        and the last ``n`` open-issue sets are exactly periodic with some
+        period ``p <= n // 2`` (or the window is a single round), and the
+        current open set is non-empty. An empty open set is never a stall
+        (the loop is converging, not oscillating).
         """
         n = max(n, 1)
         if not self._current_open:
             return False
         if len(self._open_history) < n:
             return False
-        window = self._open_history[-n:]
-        first = window[0]
-        if not first:
-            return False
-        return all(s == first for s in window)
+        return _has_short_period_stall(self._open_history[-n:])
 
     @property
     def current_open(self) -> Set[str]:
