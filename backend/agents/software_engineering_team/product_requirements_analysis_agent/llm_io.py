@@ -11,9 +11,10 @@ Pure functions parameterized by an explicit Strands ``model`` — no agent state
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from strands import Agent
+from strands.models.model import Model
 
 from llm_service import LLMJsonParseError, extract_json_from_response
 
@@ -38,7 +39,7 @@ def parse_llm_json(raw: str) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def call_llm_text(model: Any, prompt: str) -> str:
+def call_llm_text(model: Model, prompt: str) -> str:
     """Run one Strands ``Agent`` round-trip and return the stripped text.
 
     Single seam for every raw LLM invocation in this agent; collapses the former
@@ -59,7 +60,7 @@ def call_llm_text(model: Any, prompt: str) -> str:
     return str(Agent(model=model, callback_handler=None)(prompt)).strip()
 
 
-def call_llm_json(model: Any, prompt: str) -> Optional[dict]:
+def call_llm_json(model: Model, prompt: str) -> Optional[dict]:
     """Run one LLM round-trip and parse the response as a JSON object.
 
     Builds on :func:`call_llm_text` + :func:`parse_llm_json` (fence-aware).
