@@ -223,6 +223,10 @@ class TechLeadAgent:
         If ``target_team`` is missing from a task, legacy routing fields are
         checked in order: ``team``, ``stack``, then ``assignee_stack``.
 
+        Preconditions:
+            - ``plan`` is a ``CodingTeamPlanInput`` carrying the plan/spec/architecture text the
+              Tech Lead reasons over; any unanswered open questions have already been resolved by
+              the caller (this method never re-raises them).
         Postconditions:
             - Returns a dict with "tasks" (possibly empty), a non-empty "stacks" (defaulted),
               "open_questions" (possibly empty), "already_complete" (bool), and
@@ -357,7 +361,18 @@ class TechLeadAgent:
         task_dependencies: List[str],
         plan_context: str,
     ) -> Dict[str, Any]:
-        """Groom one task: acceptance criteria, out of scope, enriched description, priority, subtasks."""
+        """Groom one task: acceptance criteria, out of scope, enriched description, priority, subtasks.
+
+        Preconditions:
+            - ``task_id``/``task_title`` identify the task; ``task_dependencies`` is its
+              already-known dependency id list; ``plan_context`` is the plan text this task was
+              carved from.
+        Postconditions:
+            - Returns a dict with "acceptance_criteria", "out_of_scope", "description_enriched",
+              "priority", "subtasks", and "task_dependencies". On any LLM/parse failure, falls back
+              to the ungroomed defaults (``task_description`` verbatim, "medium" priority, no
+              subtasks, ``task_dependencies`` unchanged) rather than raising.
+        """
         data = _call_json(
             self._groom_agent,
             prompts.GROOM_TASK_USER,
@@ -399,7 +414,16 @@ class TechLeadAgent:
         ready_tasks: List[Dict[str, Any]],
         free_agents: List[str],
     ) -> Dict[str, Any]:
-        """Suggest assignments: list of { agent_id, task_id }. Orchestrator calls Task Graph assign."""
+        """Suggest assignments: list of { agent_id, task_id }. Orchestrator calls Task Graph assign.
+
+        Preconditions:
+            - ``agent_ids`` is the full worker roster; ``ready_tasks`` are tasks with no outstanding
+              dependencies; ``free_agents`` is the subset of ``agent_ids`` currently idle.
+        Postconditions:
+            - Returns ``{"assignments": [...]}`` where each entry is a dict carrying both a
+              non-empty "agent_id" and "task_id"; any malformed or incomplete entry from the LLM
+              response is dropped rather than surfaced.
+        """
         data = _call_json(
             self._assignment_agent,
             prompts.ASSIGNMENT_USER,
