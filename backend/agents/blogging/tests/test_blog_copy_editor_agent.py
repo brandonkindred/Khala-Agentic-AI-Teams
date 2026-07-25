@@ -533,6 +533,56 @@ def test_on_llm_request_callback_invoked() -> None:
     assert messages == ["Reviewing draft for style and clarity..."]
 
 
+@pytest.mark.parametrize("raw_approved", ["false", ["nonempty"], "true", 1])
+def test_non_bool_approved_defaults_to_false(monkeypatch, raw_approved) -> None:
+    """A non-bool `approved` value (truthy string/list/int) must not be treated as True.
+
+    Regression test: `bool(data.get("approved", False))` would coerce the
+    string "false", a non-empty list, or a nonzero int to True. Only a real
+    bool True should approve the draft.
+    """
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps(
+                {"approved": raw_approved, "summary": "reviewed", "feedback_items": []}
+            )
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert result.approved is False
+
+
+def test_bool_true_approved_is_approved(monkeypatch) -> None:
+    """A real bool True `approved` with no blocking feedback approves the draft."""
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"approved": True, "summary": "reviewed", "feedback_items": []})
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert result.approved is True
+
+
 def test_write_feedback_to_path_returns_false_on_failure(tmp_path: Path) -> None:
     """_write_feedback_to_path reports failure via return value (False) instead of raising."""
     agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
