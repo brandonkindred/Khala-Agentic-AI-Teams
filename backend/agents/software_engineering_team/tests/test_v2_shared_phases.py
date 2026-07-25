@@ -927,16 +927,20 @@ def test_write_files_and_commit_reports_unsafe_path_as_failure(tmp_path: Path):
 # --- deliberate wrapper duplication drift guard ------------------------------
 
 
-@pytest.mark.parametrize("phase_module", ["deliver.py", "documentation.py"])
+@pytest.mark.parametrize("phase_module", ["documentation.py"])
 def test_v2_team_phase_wrappers_stay_byte_identical(phase_module: str) -> None:
     """The backend and frontend copies of a v2 phase wrapper are byte-identical.
 
-    The two teams deliberately keep separate thin copies of ``phases/deliver.py``
-    and ``phases/documentation.py``: each copy is the per-team monkeypatch /
-    model-binding boundary that wires that team's models into the shared
-    ``make_run_*`` factories in ``shared/phases/``. They must stay separate —
+    The two teams deliberately keep a separate thin copy of
+    ``phases/documentation.py``: it is the per-team monkeypatch / model-binding
+    boundary that wires that team's models into the shared ``make_run_*``
+    factories in ``shared/phases/``. It must stay separate from its counterpart —
     but they must also stay identical, so a one-sided edit (a fix applied to
     one team only) fails loudly here instead of silently forking the behavior.
+    (``phases/deliver.py`` had the same pattern until ``make_run_deliver`` grew
+    default ``git_ns``/``output_ns`` namespaces pointing at the real shared
+    modules, letting tests monkeypatch those directly — no per-team wrapper
+    file remains for it.)
 
     Preconditions:
         - Both team packages are importable (their ``__init__`` resolves).
