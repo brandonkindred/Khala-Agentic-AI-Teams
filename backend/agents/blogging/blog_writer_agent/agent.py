@@ -698,9 +698,10 @@ class BlogWriterAgent(_BlogAgentBase):
             )
             try:
                 data = self._call_agent_json(prompt)
-                raw_draft = data.get("draft")
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    draft = raw_draft.strip()
+                if isinstance(data, dict):
+                    raw_draft = data.get("draft")
+                    if isinstance(raw_draft, str) and raw_draft.strip():
+                        draft = raw_draft.strip()
             except Exception as e2:
                 cause2 = _unwrap_llm_cause(e2)
                 if not isinstance(cause2, LLMJsonParseError):
