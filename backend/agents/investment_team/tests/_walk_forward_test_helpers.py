@@ -211,8 +211,11 @@ def minimal_custom_spec_dict(**overrides: Any) -> Dict[str, Any]:
 
     Post: a dict with a single long entry rule / stop-loss exit rule,
     suitable for ``DesignAgent.run`` stubs; ``overrides`` are merged in
-    (e.g. ``requires_custom_code=True`` where the rule-firing gate must
-    self-skip on a stub with no compiled-entry annotations).
+    (e.g. ``requires_custom_code=True``, which routes the stub trades
+    through ``RuleFiringRateGate``'s custom-code path — see
+    ``wire_run_cycle_stubs``'s ``deterministic_alignment_checker`` stub
+    for how a stubbed ``entry[0]`` alignment finding keeps that path from
+    reporting a spurious dead-rule critical on these fixtures).
     """
     base: Dict[str, Any] = {
         "asset_class": "stocks",
@@ -297,8 +300,10 @@ def wire_run_cycle_stubs(
 
     # These stubs bypass the compiler and pin ``requires_custom_code=True`` on
     # purpose (see the spec_dict comment below), so the design pre-flight must not
-    # demote the spec back to the compiled path — that would defeat the
-    # rule-firing self-skip these fixtures rely on. Keep the intended custom path.
+    # demote the spec back to the compiled path — that would route
+    # ``RuleFiringRateGate`` to its reason-string counting instead of the
+    # custom-code / alignment-findings path these fixtures exercise. Keep
+    # the intended custom path.
     monkeypatch.setenv("STRATEGY_LAB_DEMOTE_COMPILABLE_CUSTOM_CODE", "false")
 
     # ``_readiness_price_provider`` fails closed (NaN) when the live
@@ -314,8 +319,12 @@ def wire_run_cycle_stubs(
 
     # The stub bypasses the compiler entirely, so the compiled
     # ``reason="compiled_entry:entry[N]"`` annotation is absent from
-    # trades. Mark the spec as custom-code so the rule-firing gate
-    # self-skips rather than firing critical on the missing annotations.
+    # trades. Mark the spec as custom-code so ``RuleFiringRateGate``
+    # takes its alignment-findings path instead of reason-string
+    # counting — the ``deterministic_alignment_checker`` stub below
+    # supplies a passed ``entry[0]`` finding for the ``alignment_aligned``
+    # case precisely so that path doesn't fire a spurious dead-rule
+    # critical on these fixtures.
     spec_dict = minimal_custom_spec_dict(requires_custom_code=True)
     code = minimal_strategy_code()
 

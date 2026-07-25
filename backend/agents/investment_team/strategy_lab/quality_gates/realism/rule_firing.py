@@ -26,12 +26,21 @@ This gate has two independent signal sources for the same verdict
   unconditionally (compiled or custom-code). Counting
   ``AlignmentFinding(check_name="entry_signal", rule_id="entry[N]",
   passed=True)`` / ``AlignmentFinding(check_name="signal_exit",
-  rule_id="exit:signal_exit[N]", passed=True)`` hits gives a rule-firing
-  signal with the same semantics as the compiled path's reason-string
-  counts, but derived from re-executed predicates instead of an
-  annotation the custom code never reliably produces. When the caller
-  has no ``alignment_findings`` to offer (``None``), the gate falls back
-  to an **info-skip** — there is genuinely nothing to evaluate.
+  rule_id="exit:signal_exit[N]", passed=True)`` hits (see
+  :func:`_count_finding_hits`) gives a rule-firing signal with the same
+  semantics as the compiled path's reason-string counts. This is not a
+  *strictly* deterministic re-evaluation, though: a ``passed=True``
+  entry-signal finding also covers a near-miss the LLM adjudicator ruled
+  legitimate, so a judged-legitimate near-miss counts as a fire too. The
+  ``rule_id`` format is the shared contract in
+  :mod:`~investment_team.strategy_lab.alignment_findings`
+  (:func:`~investment_team.strategy_lab.alignment_findings.entry_rule_id`
+  / :func:`~investment_team.strategy_lab.alignment_findings.parse_entry_rule_id`
+  and their ``signal_exit`` counterparts) — both this gate and
+  ``alignment_checks.py`` import it rather than each hardcoding the
+  f-string, so the producer and consumer can't silently drift apart. When
+  the caller has no ``alignment_findings`` to offer (``None``), the gate
+  falls back to an **info-skip** — there is genuinely nothing to evaluate.
 
 Wired from
 :meth:`StrategyLabOrchestrator._run_realism_gates`.
@@ -40,19 +49,16 @@ Wired from
 from __future__ import annotations
 
 import re
-from typing import ClassVar, Dict, List, Optional, Sequence
+from typing import ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from ....models import StrategySpec, TradeRecord
-from ...alignment_findings import AlignmentFinding
+from ...alignment_findings import AlignmentFinding, parse_entry_rule_id, parse_signal_exit_rule_id
 from ..models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "rule_firing_rate_realism"
 
 _ENTRY_REASON_RE = re.compile(r"^(?:compiled_entry|engine_entry):entry\[(\d+)]$")
 _EXIT_REASON_RE = re.compile(r"^(?:compiled_signal_exit:exit|engine_exit:signal_exit)\[(\d+)]$")
-
-_ENTRY_FINDING_RE = re.compile(r"^entry\[(\d+)]$")
-_EXIT_FINDING_RE = re.compile(r"^exit:signal_exit\[(\d+)]$")
 
 
 class RuleFiringRateGate(GateResultsMixin):
@@ -98,8 +104,6 @@ class RuleFiringRateGate(GateResultsMixin):
         rendering (:func:`_entry_rule_results` / :func:`_exit_rule_results`)
         is shared by both signal sources.
         """
-        from ...spec_dsl import SignalExitRule
-
         with self._using_phase(phase):
             if spec.requires_custom_code:
                 if alignment_findings is None:
@@ -111,15 +115,14 @@ class RuleFiringRateGate(GateResultsMixin):
                             "code, so per-rule firing rates can't be evaluated."
                         )
                     ]
-                entry_hits = _count_entry_finding_hits(alignment_findings)
-                exit_hits = _count_exit_finding_hits(alignment_findings)
+                entry_hits, exit_hits = _count_finding_hits(alignment_findings)
             else:
                 entry_hits = _count_entry_hits(trades, open_position_entry_reasons or ())
                 exit_hits = _count_exit_hits(trades)
 
             results: List[QualityGateResult] = []
             results.extend(self._entry_rule_results(spec, entry_hits, len(trades)))
-            results.extend(self._exit_rule_results(spec, exit_hits, len(trades), SignalExitRule))
+            results.extend(self._exit_rule_results(spec, exit_hits, len(trades)))
 
             if not results:
                 results.append(
@@ -135,7 +138,16 @@ class RuleFiringRateGate(GateResultsMixin):
     def _entry_rule_results(
         self, spec: StrategySpec, entry_hits: Dict[int, int], trade_count: int
     ) -> List[QualityGateResult]:
-        """critical per entry rule with zero citations/hits in ``entry_hits``."""
+        """Render a ``critical`` result for every zero-hit entry rule.
+
+        Preconditions: ``entry_hits`` is keyed by each rule's 0-based
+        index in ``spec.entry_rules`` (as produced by either
+        :func:`_count_entry_hits` or :func:`_count_finding_hits`).
+        Postconditions: returns one :class:`QualityGateResult` (severity
+        ``critical``) per entry rule with ``entry_hits.get(idx, 0) == 0``,
+        in ``spec.entry_rules`` order; ``[]`` when every rule has at
+        least one hit. Never mutates ``spec`` or ``entry_hits``.
+        """
         results: List[QualityGateResult] = []
         for idx, rule in enumerate(spec.entry_rules):
             rule_key = f"entry[{idx}]"
@@ -151,16 +163,25 @@ class RuleFiringRateGate(GateResultsMixin):
         return results
 
     def _exit_rule_results(
-        self,
-        spec: StrategySpec,
-        exit_hits: Dict[int, int],
-        trade_count: int,
-        signal_exit_rule_cls: type,
+        self, spec: StrategySpec, exit_hits: Dict[int, int], trade_count: int
     ) -> List[QualityGateResult]:
-        """warning per ``SignalExitRule`` with zero citations/hits in ``exit_hits``."""
+        """Render a ``warning`` result for every zero-hit ``SignalExitRule``.
+
+        Preconditions: ``exit_hits`` is keyed by each rule's 0-based
+        index in ``spec.exit_rules`` (as produced by either
+        :func:`_count_exit_hits` or :func:`_count_finding_hits`).
+        Postconditions: returns one :class:`QualityGateResult` (severity
+        ``warning``) per ``SignalExitRule`` in ``spec.exit_rules`` with
+        ``exit_hits.get(idx, 0) == 0``; non-``SignalExitRule`` exit rules
+        (stop-loss, take-profit) are skipped — mechanical exits are the
+        engine's responsibility, not this gate's. ``[]`` when every
+        signal-exit rule has at least one hit or the spec has none.
+        """
+        from ...spec_dsl import SignalExitRule
+
         results: List[QualityGateResult] = []
         for idx, rule in enumerate(spec.exit_rules):
-            if not isinstance(rule, signal_exit_rule_cls):
+            if not isinstance(rule, SignalExitRule):
                 continue
             rule_key = f"exit[{idx}]"
             if exit_hits.get(idx, 0) == 0:
@@ -222,49 +243,48 @@ def _count_exit_hits(trades: List[TradeRecord]) -> dict:
     return hits
 
 
-def _count_entry_finding_hits(alignment_findings: Sequence[AlignmentFinding]) -> Dict[int, int]:
-    """Return ``{rule_index: count}`` from satisfied entry-signal findings.
+def _count_finding_hits(
+    alignment_findings: Sequence[AlignmentFinding],
+) -> Tuple[Dict[int, int], Dict[int, int]]:
+    """Return ``({entry_rule_index: count}, {exit_rule_index: count})``
+    from satisfied alignment findings, in one pass over ``alignment_findings``.
 
     Preconditions: ``alignment_findings`` is the deterministic
     ``TradeAlignmentGate`` ledger for this run (one finding per trade per
     check it ran).
-    Postconditions: counts findings where ``check_name == "entry_signal"``,
-    ``passed is True``, and ``rule_id`` matches ``entry[N]`` — i.e. the
-    trade's actual signal bar satisfied entry rule N's predicate when
-    re-evaluated against the real market data. Findings for any other
-    check, a failed/near-miss entry check, or a non-rule-indexed
-    ``rule_id`` (e.g. ``"entry:side_mismatch"``, ``"entry:bars_missing"``)
-    are silently skipped.
+    Postconditions:
+      - The entry dict counts findings where ``check_name ==
+        "entry_signal"``, ``passed is True``, and ``rule_id`` parses via
+        :func:`~investment_team.strategy_lab.alignment_findings.parse_entry_rule_id`
+        — i.e. the trade's actual signal bar satisfied entry rule N's
+        predicate when re-evaluated against the real market data. This
+        includes a near-miss the LLM adjudicator ruled legitimate (still
+        ``check_name="entry_signal"``, ``passed=True``): a judged-legitimate
+        near-miss is a real fire, not a strict-predicate one.
+      - The exit dict counts findings where ``check_name ==
+        "signal_exit"``, ``passed is True``, and ``rule_id`` parses via
+        :func:`~investment_team.strategy_lab.alignment_findings.parse_signal_exit_rule_id`
+        — the trade's actual exit signal bar satisfied ``SignalExitRule``
+        N's predicate.
+      - Findings for any other check, a failed finding, or a
+        non-rule-indexed ``rule_id`` (e.g. ``"entry:side_mismatch"``, the
+        unindexed engine-attributed ``"exit:signal_exit"`` skip row) are
+        silently skipped in both dicts.
     """
-    hits: Dict[int, int] = {}
+    entry_hits: Dict[int, int] = {}
+    exit_hits: Dict[int, int] = {}
     for finding in alignment_findings:
-        if finding.check_name != "entry_signal" or not finding.passed or not finding.rule_id:
+        if not finding.passed:
             continue
-        m = _ENTRY_FINDING_RE.match(finding.rule_id)
-        if m:
-            idx = int(m.group(1))
-            hits[idx] = hits.get(idx, 0) + 1
-    return hits
-
-
-def _count_exit_finding_hits(alignment_findings: Sequence[AlignmentFinding]) -> Dict[int, int]:
-    """Return ``{rule_index: count}`` from satisfied signal-exit findings.
-
-    Postconditions: counts findings where ``check_name == "signal_exit"``,
-    ``passed is True``, and ``rule_id`` matches ``exit:signal_exit[N]`` —
-    the trade's actual exit signal bar satisfied ``SignalExitRule`` N's
-    predicate. The engine-attributed skip row (``rule_id="exit:signal_exit"``,
-    unindexed) and failed findings don't match and are skipped.
-    """
-    hits: Dict[int, int] = {}
-    for finding in alignment_findings:
-        if finding.check_name != "signal_exit" or not finding.passed or not finding.rule_id:
-            continue
-        m = _EXIT_FINDING_RE.match(finding.rule_id)
-        if m:
-            idx = int(m.group(1))
-            hits[idx] = hits.get(idx, 0) + 1
-    return hits
+        if finding.check_name == "entry_signal":
+            idx = parse_entry_rule_id(finding.rule_id)
+            if idx is not None:
+                entry_hits[idx] = entry_hits.get(idx, 0) + 1
+        elif finding.check_name == "signal_exit":
+            idx = parse_signal_exit_rule_id(finding.rule_id)
+            if idx is not None:
+                exit_hits[idx] = exit_hits.get(idx, 0) + 1
+    return entry_hits, exit_hits
 
 
 __all__ = ["GATE", "RuleFiringRateGate"]

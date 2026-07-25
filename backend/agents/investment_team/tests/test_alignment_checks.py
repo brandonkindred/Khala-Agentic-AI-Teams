@@ -1163,11 +1163,11 @@ def test_entry_signal_rule_id_uses_original_spec_index() -> None:
 def test_entry_signal_emits_one_finding_per_satisfied_rule() -> None:
     """Two same-side entry rules both satisfied on the same signal bar
     must EACH get a passed ``entry_signal`` finding, not just the first.
-    Regression for the under-counting bug raised in PR review on #2625:
-    crediting only the first satisfied rule starves a rule-level
-    consumer (``RuleFiringRateGate``'s custom-code correlation) of any
-    hit for the second rule, which would then misreport it as dead
-    code even though its predicate held on every trade."""
+    Regression for an under-counting bug: crediting only the first
+    satisfied rule starves a rule-level consumer (``RuleFiringRateGate``'s
+    custom-code correlation) of any hit for the second rule, which would
+    then misreport it as dead code even though its predicate held on
+    every trade."""
     gate = DeterministicAlignmentChecker()
     spec = _spec(
         entry_rules=[
@@ -1211,12 +1211,12 @@ def test_entry_signal_missing_bars_flagged_critical() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _rsi_gt_70_signal_exit() -> SignalExitRule:
+def _rsi_gt_70_signal_exit(rhs: float = 70.0) -> SignalExitRule:
     return SignalExitRule(
         when=Predicate(
             lhs=IndicatorRef(name="rsi", params={"period": 14}),
             op=">",
-            rhs=70.0,
+            rhs=rhs,
         ),
     )
 
@@ -1418,6 +1418,41 @@ def test_signal_exit_satisfied_when_predicate_fires_at_exit_bar() -> None:
     assert "signal-exit satisfied" in signal_exit.details
 
 
+def test_signal_exit_emits_one_finding_per_satisfied_rule() -> None:
+    """Two signal-exit rules both satisfied on the same exit bar must EACH
+    get a passed ``signal_exit`` finding, not just the first. Regression
+    for an under-counting bug mirroring the entry-signal fix in
+    ``test_entry_signal_emits_one_finding_per_satisfied_rule`` —
+    crediting only the first satisfied exit rule would starve
+    ``RuleFiringRateGate``'s custom-code correlation of a hit for the
+    second, misreporting it as dead code."""
+    gate = DeterministicAlignmentChecker()
+    spec = _spec(
+        exit_rules=[
+            _rsi_gt_70_signal_exit(rhs=70.0),  # exit[0]
+            _rsi_gt_70_signal_exit(rhs=0.0),  # exit[1] — trivially true whenever exit[0] is
+        ],
+    )
+    md = _market_data_rsi_overbought()
+    last_date = md["AAPL"][-1].date
+    trade = _trade(
+        entry_date=md["AAPL"][20].date,
+        exit_date=last_date,
+        exit_reason=None,
+    )
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    signal_exit_findings = [
+        f for f in result.findings if f.check_name == "signal_exit" and f.passed is True
+    ]
+    rule_ids = {f.rule_id for f in signal_exit_findings}
+    assert rule_ids == {"exit:signal_exit[0]", "exit:signal_exit[1]"}
+
+
 def test_signal_exit_critical_when_no_predicate_fires_at_exit_bar() -> None:
     """SignalExitRule defined, no engine attribution, predicate does NOT
     fire at the exit bar → critical. The strategy closed for some
@@ -1449,8 +1484,8 @@ def test_signal_exit_critical_when_no_predicate_fires_at_exit_bar() -> None:
 def test_signal_exit_rule_id_uses_original_spec_index() -> None:
     """Mixed exit-rule-kind spec: the SignalExitRule's finding must cite
     its index in ``spec.exit_rules``, not its position in the
-    kind-filtered subset. Regression for the index-renumbering bug
-    raised in PR review on #2625 (mirrors the entry-side fix in
+    kind-filtered subset. Regression for an index-renumbering bug
+    (mirrors the entry-side fix in
     ``test_entry_signal_rule_id_uses_original_spec_index``) — the
     engine's own ``engine_exit:signal_exit[N]`` stamp and
     ``RuleFiringRateGate``'s custom-code correlation both expect the
