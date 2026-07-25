@@ -630,6 +630,20 @@ class CodingTeamSwarm(
     across four mixins by responsibility (assignment, implementation, review,
     revision-cap bookkeeping) — see swarm_assignment.py, swarm_implementation.py,
     swarm_review.py, swarm_revision_cap.py.
+
+    Invariants:
+        - ``_worktrees`` (a ``WorktreeManager``) is constructed in ``__init__`` but does no
+          filesystem/git I/O until ``run()`` calls ``prepare()``; ``run()`` always calls
+          ``cleanup()`` before returning, on every exit path, so the worktree lifecycle is
+          scoped exactly to one ``run()`` call and never leaks past it.
+        - ``_pause_lock``, ``_merge_lock``, and ``_review_verdict_cache_lock`` each guard one
+          piece of state shared across concurrently-running workers within a single ``run()``
+          (the pause-cycle round-trip, the shared checkout's merge/abort-merge calls, and
+          ``_review_verdict_cache`` respectively); they are held only for the instance's
+          lifetime and are never reused across a resume.
+        - ``aborted`` starts ``False`` and is the sole flag that both stops the ``run()`` loop
+          early and tells ``run_coding_team_orchestrator`` not to report the job as completed;
+          once set it is never cleared within the instance's lifetime.
     """
 
     def __init__(
@@ -644,6 +658,18 @@ class CodingTeamSwarm(
         engine_provider: Any = None,
         spec_content: str = "",
     ) -> None:
+        """Construct the swarm; performs no I/O (worktrees are created in ``run()``).
+
+        Preconditions:
+            - Every worker in ``workers`` has an ``agent_id`` that appears in ``agent_ids``
+              (the two rosters correspond 1:1); ``graph`` is a ``TaskGraphService`` the caller
+              owns and continues to control after construction.
+        Postconditions:
+            - Constructs exactly one ``WorktreeManager`` for ``path``/``agent_ids`` (unprepared —
+              see class invariants); ``aborted`` is ``False`` and ``_review_verdict_cache`` is
+              empty. ``resolved_questions`` is copied into an independent list, so later mutation
+              by the caller's original list does not affect this instance.
+        """
         TeamLeadSharedState.__init__(
             self,
             llm_getter=llm_getter,
@@ -699,6 +725,13 @@ class CodingTeamSwarm(
         self._worktrees = WorktreeManager(path, agent_ids)
 
     def _is_complete(self) -> bool:
+        """Whether this round's work is fully drained: nothing left to assign, run, or review.
+
+        Postconditions:
+            - Returns ``True`` iff no task is ``TO_DO``, no agent in ``agent_ids`` has a task
+              assigned to it, and no task is ``IN_REVIEW``. Pure: reads ``graph`` and
+              ``agent_ids``, no side effects.
+        """
         tasks = self.graph.get_tasks()
         remaining = [t for t in tasks if t.status == TaskStatus.TO_DO]
         active = sum(1 for aid in self.agent_ids if self.graph.get_task_for_agent(aid) is not None)
