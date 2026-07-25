@@ -9,10 +9,14 @@ import type { StrategyLabRecord } from '../models';
  * would the live service) plus a `Subject` backing `errors$`, with
  * `vi.fn()` action methods a test can assert against or drive manually.
  *
- * Shared by `strategy-lab.component.spec.ts`,
- * `strategy-lab.component.integration.spec.ts`, and
- * `strategy-lab.component.a11y.spec.ts`, mirroring
- * `createRunServiceStub()`'s rationale in `strategy-lab-run-service.stub.ts`.
+ * Used by `strategy-lab.component.spec.ts`'s paper-trading delegation tests
+ * (`strategy-lab.component.integration.spec.ts` and
+ * `strategy-lab.component.a11y.spec.ts` provide the real
+ * `StrategyLabPaperTradingService` instead, the same way they do for
+ * `StrategyLabActivityLogService` — this stub exists specifically for
+ * asserting on delegation without a live `StrategyLabRunService`/API chain
+ * behind it), mirroring `createRunServiceStub()`'s rationale in
+ * `strategy-lab-run-service.stub.ts`.
  *
  * Preconditions: none — call once per test (or per fixture) needing an
  *   isolated `StrategyLabPaperTradingService` stand-in; each call returns
@@ -29,7 +33,12 @@ export function createPaperTradingServiceStub() {
     paperTradingLabRecordId,
     errors$,
     loadPaperTradingResults: vi.fn(),
+    // Mirrors the real service's publishability guard: only touches
+    // paperTradingLabRecordId when the record is actually publishable, so a
+    // test asserting the guard's no-op behavior (via this stub) can't pass
+    // for the wrong reason.
     runPaperTrading: vi.fn((record: StrategyLabRecord) => {
+      if (!record.is_publishable) return;
       paperTradingLabRecordId.set(record.lab_record_id);
     }),
     getPaperSession: vi.fn(() => null),

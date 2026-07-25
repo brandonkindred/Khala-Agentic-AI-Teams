@@ -816,7 +816,42 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
   // verdictLabel/verdictColor moved to strategy-card.component.spec.ts along
   // with the markup and methods that used them.
 
-  // loadPaperTradingResults/runPaperTrading coverage moved to
-  // strategy-lab-paper-trading.service.spec.ts; delegation is covered in the
-  // 'paper trading delegation' describe above.
+  // loadPaperTradingResults/runPaperTrading's own guard/dedupe/tracking logic
+  // moved to strategy-lab-paper-trading.service.spec.ts; delegation (does the
+  // component call the service?) is covered in the 'paper trading delegation'
+  // describe above using a stub. The two tests below are neither: this
+  // describe block provides the REAL StrategyLabPaperTradingService (not a
+  // stub), so they instead prove the live wiring between the real component
+  // and the real service — the field-initializer errors$ subscription
+  // (strategy-lab.component.ts's paperTradingErrorSub) actually reaches
+  // component.error(), and a successful POST actually reaches
+  // runService.trackPaperTradingSession — which no other spec file checks
+  // end-to-end for this pair of classes.
+
+  it('runPaperTrading (real service, real component) sets error() via the field-initializer subscription when not publishable', () => {
+    const record = {
+      lab_record_id: 'rec-1',
+      is_publishable: false,
+      publishability_skip_reason: 'realism_failed',
+    } as unknown as StrategyLabRecord;
+
+    component.runPaperTrading(record);
+
+    expect(apiSpy.runPaperTrading).not.toHaveBeenCalled();
+    expect(component.error()).toContain('not publishable');
+    expect(component.error()).toContain('realism_failed');
+  });
+
+  it('runPaperTrading (real service, real component) tracks the session via runService on success', () => {
+    const record = { lab_record_id: 'rec-1', is_publishable: true } as unknown as StrategyLabRecord;
+
+    component.runPaperTrading(record);
+
+    expect(apiSpy.runPaperTrading).toHaveBeenCalledWith({ lab_record_id: 'rec-1' });
+    expect(runService.trackPaperTradingSession).toHaveBeenCalledWith(
+      'rec-1',
+      expect.objectContaining({ session_id: 'pt-1' }),
+    );
+    expect(component.error()).toBeNull();
+  });
 });

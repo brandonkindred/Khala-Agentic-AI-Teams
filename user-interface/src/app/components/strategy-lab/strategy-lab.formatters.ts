@@ -1,7 +1,6 @@
 import { isDevMode } from '@angular/core';
 import type {
   QualityGateResult,
-  StrategyLabRecord,
   EntryRule,
   ExitRule,
   SizingRule,
@@ -17,6 +16,7 @@ import type {
 } from '../../models';
 import { COMPARISON_OP_OPTIONS } from '../../models';
 import { formatPct, formatUsd } from '../../shared/number-format';
+export { publishabilitySkipLabel } from '../../shared/publishability';
 
 /** Material icon per asset class, keyed by the lowercased category value. */
 export const ASSET_CLASS_ICONS: Record<string, string> = {
@@ -331,21 +331,4 @@ export function sizingRows(sizing: SizingRule): { label: string; value: string }
   }
   if (sizing.note) rows.push({ label: 'Note', value: sizing.note });
   return rows;
-}
-
-/**
- * Human-readable publishability skip reason for a winning-but-blocked record.
- *
- * Preconditions: `record` is a loaded lab row.
- * Postconditions: returns the persisted skip reason when present, else null.
- */
-export function publishabilitySkipLabel(record: StrategyLabRecord): string | null {
-  const reason =
-    record.publishability_skip_reason ||
-    (record.paper_trading_skipped_reason &&
-    record.paper_trading_skipped_reason !== 'not_winning' &&
-    record.paper_trading_skipped_reason !== 'disabled'
-      ? record.paper_trading_skipped_reason
-      : null);
-  return reason || null;
 }

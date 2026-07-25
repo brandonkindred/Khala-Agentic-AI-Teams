@@ -26,7 +26,7 @@ import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import type { PageEvent } from '@angular/material/paginator';
 import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
-import { of } from 'rxjs';
+import { Observable, Subscription, of } from 'rxjs';
 import { finalize, map } from 'rxjs/operators';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
@@ -320,15 +320,28 @@ export class StrategyLabComponent implements OnInit {
   });
 
   /**
+   * Subscribes `source$` to mirror each of its emissions onto the `error`
+   * signal for the component's lifetime. Shared by every "forward this
+   * service's error stream into the banner" wiring site (`activityLogService`,
+   * `runService`, `paperTradingService`) instead of each hand-rolling the same
+   * `pipe(takeUntilDestroyed) -> subscribe` boilerplate.
+   *
+   * Preconditions: none.
+   * Postconditions: every value `source$` emits — including `null`, which
+   *   clears the banner — is set on `error` until the component is destroyed.
+   */
+  private mirrorErrorsIntoBanner<T extends string | null>(source$: Observable<T>): Subscription {
+    return source$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((message) => this.error.set(message));
+  }
+
+  /**
    * Mirrors `paperTradingService.errors$` into the component's `error`
    * signal. A field initializer (not wired inside `ngOnInit()`) so it's
    * active the instant the component is constructed — `runPaperTrading()`
    * can be called, and its guard/POST error surfaced, before `ngOnInit()`
    * ever runs.
    */
-  private readonly paperTradingErrorSub = this.paperTradingService.errors$
-    .pipe(takeUntilDestroyed(this.destroyRef))
-    .subscribe((message) => this.error.set(message));
+  private readonly paperTradingErrorSub = this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
 
   ngOnInit(): void {
     this.loadConfig();
@@ -340,15 +353,11 @@ export class StrategyLabComponent implements OnInit {
     this.activityLogService.resultsRefreshRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.loadResults());
-    this.activityLogService.terminalError$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((message) => this.error.set(message));
+    this.mirrorErrorsIntoBanner(this.activityLogService.terminalError$);
     this.activityLogService.scrollRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.logContainer?.nativeElement?.scrollTo({ top: 999999, behavior: 'smooth' }));
-    this.runService.errors$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((message) => this.error.set(message));
+    this.mirrorErrorsIntoBanner(this.runService.errors$);
   }
 
   /**

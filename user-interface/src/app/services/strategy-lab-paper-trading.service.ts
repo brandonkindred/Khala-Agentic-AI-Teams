@@ -4,7 +4,7 @@ import { Observable, Subject } from 'rxjs';
 import { InvestmentApiService } from './investment-api.service';
 import { StrategyLabRunService } from './strategy-lab-run.service';
 import { extractErrorDetail } from '../shared/extract-error-detail';
-import { publishabilitySkipLabel } from '../components/strategy-lab/strategy-lab.formatters';
+import { publishabilitySkipLabel } from '../shared/publishability';
 import type { PaperTradingSession, StrategyLabRecord } from '../models';
 
 /**
@@ -18,6 +18,20 @@ import type { PaperTradingSession, StrategyLabRecord } from '../models';
  * Not `providedIn: 'root'` — intended to be provided at the consuming
  * component (alongside `StrategyLabRunService`) so its lifecycle is scoped
  * to that component.
+ *
+ * Invariants: `errors$` emits exactly once per `runPaperTrading()` call that
+ *   fails the publishability guard or the POST, and once with `null` per call
+ *   that passes the guard; it never emits as a side effect of
+ *   `loadPaperTradingResults()` or `getPaperSession()`. `paperTradingLabRecordId()`
+ *   merges this service's own in-flight-POST tracking with `runService`'s
+ *   tracked session id via `??`; it is NOT re-entrancy-safe across overlapping
+ *   `runPaperTrading()` calls for two different records — both share the one
+ *   `startingPaperTrade` signal, so whichever call's POST settles first clears
+ *   it for both, and the still-pending call's record can transiently read as
+ *   not-in-progress (or vice versa) until it too settles. This is a pre-existing
+ *   limitation carried over unchanged from the original component code, not
+ *   introduced by this extraction, and is masked in the shipped UI by the
+ *   paper-trade button disabling whenever any record is in progress.
  */
 @Injectable()
 export class StrategyLabPaperTradingService {
@@ -67,11 +81,33 @@ export class StrategyLabPaperTradingService {
       });
   }
 
-  /** Sortable recency key for a paper-trading session. */
+  /**
+   * Sortable recency key for a paper-trading session.
+   *
+   * Preconditions: none — tolerates a session with neither timestamp set.
+   * Postconditions: returns `started_at` when present (a running session has
+   *   one but no `completed_at` yet), else `completed_at`, else `''` — an
+   *   ISO-8601 string ordering that ranks a more-recently-started session
+   *   above an older one under plain `>` comparison.
+   */
   private paperSessionRecencyKey(s: PaperTradingSession): string {
     return s.started_at || s.completed_at || '';
   }
 
+  /**
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: when `!record.is_publishable`, no API call is made,
+   *   `errors$` emits one non-null "not publishable" message, and
+   *   `paperTradingLabRecordId()` is left untouched. Otherwise `errors$`
+   *   emits `null` synchronously (clearing any stale error banner before the
+   *   POST fires), `paperTradingLabRecordId()` becomes `record.lab_record_id`
+   *   until the POST settles, and then: on success,
+   *   `runService.trackPaperTradingSession` is called with the returned
+   *   session (handing polling off to `runService`); on failure, `errors$`
+   *   emits the failure detail. Either way, once settled,
+   *   `paperTradingLabRecordId()` reverts to mirroring
+   *   `runService.paperTradingLabRecordId()`.
+   */
   runPaperTrading(record: StrategyLabRecord): void {
     if (!record.is_publishable) {
       const reason = publishabilitySkipLabel(record);
@@ -100,6 +136,12 @@ export class StrategyLabPaperTradingService {
       });
   }
 
+  /**
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: returns the session `runService` currently holds for
+   *   `record.lab_record_id` (whatever its status), or `null` if none has
+   *   been tracked or hydrated for it yet.
+   */
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
     return this.runService.paperTradingSessions()[record.lab_record_id] ?? null;
   }
