@@ -5,11 +5,10 @@ The backend and frontend deliver phases differed only in docstrings. The real
 git work already lives in ``shared/deliver_utils.py`` (via ``DeliverGitOps``);
 this collapses the remaining orchestration wrapper into one place.
 
-Git callables are supplied by the caller through ``ops`` (a ``DeliverGitOps``)
-so the team module remains the monkeypatch boundary for tests — this module
-never imports git functions directly. ``make_run_deliver`` builds that ``ops``
-bundle from a caller-supplied ``git_ns`` at call time and returns the bound
-team-facing ``run_deliver``.
+``make_run_deliver`` builds a ``DeliverGitOps`` bundle from ``git_ns``/``output_ns``
+fresh on every call, so tests can monkeypatch ``shared.git_utils``/``shared.repo_writer``
+directly (even after ``make_run_deliver`` has been called) without needing a
+per-team wrapper module as the patch surface.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from software_engineering_team.shared import git_utils, repo_writer
 from software_engineering_team.shared.deliver_utils import (
     DeliverGitOps,
     deliver_inline_merge,
@@ -147,24 +147,28 @@ def run_deliver_impl(
 
 def make_run_deliver(
     *,
-    git_ns: Any,
+    git_ns: Any = git_utils,
+    output_ns: Any = repo_writer,
     models: PhaseModels,
     commit_msg_template: str,
     logger: logging.Logger,
 ) -> Callable[..., Any]:
-    """Bind a team-module ``run_deliver`` that keeps ``git_ns`` as the patch surface.
+    """Bind a team-facing ``run_deliver`` over the shared deliver implementation.
 
     Preconditions:
         ``git_ns`` exposes ``abort_merge``, ``checkout_branch``,
         ``commit_working_tree``, ``create_feature_branch``, ``delete_branch``,
-        ``merge_branch``, and ``write_agent_output``; ``models`` satisfies
-        ``PhaseModels``; ``commit_msg_template`` has ``{scope}`` and
-        ``{summary}`` slots; ``logger`` is a ``logging.Logger``.
+        and ``merge_branch``; ``output_ns`` exposes ``write_agent_output``;
+        both default to the real ``shared.git_utils``/``shared.repo_writer``
+        modules. ``models`` satisfies ``PhaseModels``; ``commit_msg_template``
+        has ``{scope}`` and ``{summary}`` slots; ``logger`` is a
+        ``logging.Logger``.
     Postconditions:
         Returns a keyword-only ``run_deliver`` matching the code-v2 team public
         signature. Each call builds a fresh ``DeliverGitOps`` from the *current*
-        attributes on ``git_ns`` (so monkeypatches after bind still apply) and
-        delegates entirely to ``run_deliver_impl``.
+        attributes on ``git_ns``/``output_ns`` (so monkeypatches on those
+        modules, applied after bind, still apply) and delegates entirely to
+        ``run_deliver_impl``.
     """
 
     def run_deliver(
@@ -190,7 +194,7 @@ def make_run_deliver(
             ``repo_path`` is a git repo; ``files`` maps relative paths to content.
         Postconditions:
             Returns a ``DeliverResult``. Each call builds a fresh ``DeliverGitOps`` from
-            the current attributes on ``git_ns`` and delegates entirely to
+            the current attributes on ``git_ns``/``output_ns`` and delegates entirely to
             ``run_deliver_impl``; git side effects run through that ``ops`` bundle.
         """
         ops = DeliverGitOps(
@@ -200,7 +204,7 @@ def make_run_deliver(
             create_feature_branch=git_ns.create_feature_branch,
             delete_branch=git_ns.delete_branch,
             merge_branch=git_ns.merge_branch,
-            write_agent_output=git_ns.write_agent_output,
+            write_agent_output=output_ns.write_agent_output,
         )
         return run_deliver_impl(
             task_id=task_id,
