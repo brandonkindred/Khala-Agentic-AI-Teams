@@ -260,8 +260,8 @@ def test_wait_for_hitl_reraises_after_persistent_read_errors(monkeypatch) -> Non
     monkeypatch.setattr(v2, "get_blog_job", _boom)
     with pytest.raises(RuntimeError, match="job-store down"):
         v2._wait_for_hitl("job-z", lambda _job_id: True)
-    # One more attempt than the tolerated bound, then it gives up.
-    assert attempts["n"] == v2.HITL_MAX_CONSECUTIVE_READ_ERRORS + 1
+    # Gives up after exactly the tolerated bound of attempts.
+    assert attempts["n"] == v2.HITL_MAX_CONSECUTIVE_READ_ERRORS
 
 
 def test_wait_for_hitl_reraises_cancelled_error_immediately(monkeypatch) -> None:

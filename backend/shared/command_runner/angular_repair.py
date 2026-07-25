@@ -177,6 +177,9 @@ def _ensure_material_theme_in_styles(
     """
     Ensure styles.scss (or styles.css) has a Material prebuilt theme import.
     Appends it at the top if missing. Required for Angular Material components.
+
+    Note: this performs best-effort text manipulation rather than a full
+    SCSS/CSS parse, so unusual styles file formatting may not be handled.
     """
 
     def _transform(content: str) -> str:
@@ -202,6 +205,10 @@ def _ensure_provide_animations_in_config(
     """
     Ensure app.config.ts has provideAnimations in providers.
     Adds import and provider if missing. Required for Angular Material components.
+
+    Note: this performs best-effort string/text manipulation rather than a
+    full TypeScript AST parse, so unusual app.config.ts formatting may not
+    be handled.
     """
 
     def _transform(content: str) -> str:

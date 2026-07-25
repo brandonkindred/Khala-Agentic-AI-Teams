@@ -122,6 +122,40 @@ def test_blog_writer_agent_run() -> None:
     )
 
 
+def test_run_skips_self_review_only_for_exact_placeholder() -> None:
+    """run() skips self-review when the draft is exactly the placeholder, but not for
+    real drafts that merely share the placeholder's leading text (regression for the
+    prior brittle ``startswith`` check)."""
+    from unittest.mock import patch
+
+    from agents.blogging.blog_writer_agent.agent import _PLACEHOLDER_DRAFT
+
+    agent = make_writer_agent(
+        writing_style_guide_content="Use clear sentence flow and plain language.",
+        brand_spec_content="Brand voice: practical and trustworthy.",
+    )
+    draft_input = WriterInput(
+        research_document="Compiled research text.",
+        content_plan=_minimal_plan(),
+    )
+
+    with patch.object(agent, "_self_review", wraps=agent._self_review) as mock_review:
+        with patch.object(agent, "_call_text", return_value=""):
+            result = agent.run(draft_input)
+        assert result.draft == _PLACEHOLDER_DRAFT
+        mock_review.assert_not_called()
+
+    with patch.object(agent, "_self_review", wraps=agent._self_review) as mock_review:
+        with patch.object(
+            agent,
+            "_call_text",
+            return_value=f"---DRAFT---\n{_PLACEHOLDER_DRAFT} plus real content that follows.",
+        ):
+            result = agent.run(draft_input)
+        assert result.draft != _PLACEHOLDER_DRAFT
+        mock_review.assert_called_once()
+
+
 def test_blog_writer_agent_with_style_guide() -> None:
     """BlogWriterAgent uses writing_style_guide_content passed at init."""
     agent = make_writer_agent(

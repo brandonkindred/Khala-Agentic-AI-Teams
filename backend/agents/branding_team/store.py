@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -59,6 +60,22 @@ def _validate_pagination(limit: Optional[int], offset: int) -> None:
         raise ValueError("limit must be None or a positive int")
     if offset < 0:
         raise ValueError("offset must be >= 0")
+
+
+class AttachConversationResult(str, Enum):
+    """Outcome of :meth:`BrandingStore.attach_conversation`."""
+
+    OK = "ok"
+    CONVERSATION_NOT_FOUND = "conversation_not_found"
+    ALREADY_ATTACHED = "already_attached"
+    BRAND_NOT_FOUND = "brand_not_found"
+
+
+class _AttachAbort(Exception):
+    """Internal control-flow signal: abort the attach transaction with *result*."""
+
+    def __init__(self, result: AttachConversationResult) -> None:
+        self.result = result
 
 
 def _apply_brand_patch(cur: Cursor, brand_id: str, client_id: str, patch: dict) -> Optional[Brand]:
@@ -323,6 +340,60 @@ class BrandingStore(PostgresHelperMixin):
             patch["conversation_id"] = conversation_id
         with self._transaction() as cur:
             return _apply_brand_patch(cur, brand_id, client_id, patch)
+
+    @timed_query(store=_STORE, op="attach_conversation")
+    def attach_conversation(
+        self, client_id: str, brand_id: str, conversation_id: str, mission: BrandingMission
+    ) -> Tuple[AttachConversationResult, Optional[Brand]]:
+        """Attach an existing conversation to *brand_id* and patch the brand, atomically.
+
+        Locks the conversation row (``FOR UPDATE``) before checking whether it is
+        already attached elsewhere, then updates both the conversation and the
+        brand in the same transaction. This closes two races a check-then-write
+        sequence across separate transactions would leave open: another request
+        attaching the same conversation between the uniqueness check and the
+        write, and the brand row disappearing after the conversation was already
+        attached (which would otherwise leave the conversation pointing at a
+        brand that never learns its id).
+
+        Preconditions:
+            ``client_id``, ``brand_id``, ``conversation_id`` are non-empty
+            strings; ``mission`` is a valid :class:`BrandingMission`.
+        Postconditions:
+            On :attr:`AttachConversationResult.OK`, the conversation row now has
+            ``brand_id`` set to *brand_id* and ``mission_json`` set to *mission*,
+            the brand's ``conversation_id`` is set to *conversation_id*, and the
+            updated :class:`Brand` is returned. Any other result leaves both
+            rows unchanged (the transaction rolls back) and the paired value is
+            ``None``.
+        """
+        try:
+            with self._transaction() as cur:
+                cur.execute(
+                    "SELECT brand_id FROM branding_conversations WHERE conversation_id = %s FOR UPDATE",
+                    (conversation_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise _AttachAbort(AttachConversationResult.CONVERSATION_NOT_FOUND)
+                current_brand_id = row["brand_id"]
+                if current_brand_id and str(current_brand_id) != brand_id:
+                    raise _AttachAbort(AttachConversationResult.ALREADY_ATTACHED)
+
+                ts = datetime.now(tz=timezone.utc)
+                cur.execute(
+                    "UPDATE branding_conversations SET brand_id = %s, mission_json = %s, updated_at = %s "
+                    "WHERE conversation_id = %s",
+                    (brand_id, Json(mission.model_dump(mode="json")), ts, conversation_id),
+                )
+
+                patch = {"conversation_id": conversation_id, "updated_at": _now_iso()}
+                brand = _apply_brand_patch(cur, brand_id, client_id, patch)
+                if brand is None:
+                    raise _AttachAbort(AttachConversationResult.BRAND_NOT_FOUND)
+        except _AttachAbort as exc:
+            return exc.result, None
+        return AttachConversationResult.OK, brand
 
     @timed_query(store=_STORE, op="append_brand_version")
     def append_brand_version(

@@ -504,7 +504,11 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         # Derive approved: true when the LLM says so and there are no blocking items.
         # Fall back to checking severity counts when the model omits the field.
         has_blocking = any(f.severity in ("must_fix", "should_fix") for f in feedback_items)
-        llm_approved = bool(data.get("approved", False))
+        if "approved" in data:
+            raw_approved = data["approved"]
+            llm_approved = raw_approved if isinstance(raw_approved, bool) else False
+        else:
+            llm_approved = not has_blocking
         approved = llm_approved and not has_blocking
 
         logger.info(

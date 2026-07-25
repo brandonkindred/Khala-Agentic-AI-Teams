@@ -515,6 +515,7 @@ jobs:
             ruff-${{ runner.os }}-${{ hashFiles('backend/pyproject.toml') }}-
       - run: pip install ruff
       - run: ruff check agents/ shared/ unified_api/ blogging_service/ team_service/
+      - run: python agents/software_engineering_team/scripts/check_dbc_docstrings.py
 
   # ── Tests ───────────────────────────────────────────────────────────────────
   # Test jobs run in parallel with lint — lint failures are surfaced via the

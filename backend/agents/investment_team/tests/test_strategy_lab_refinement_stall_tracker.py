@@ -68,6 +68,23 @@ def test_older_rounds_outside_window_do_not_count() -> None:
     assert tracker.is_stalled(4) is False
 
 
+def test_two_cycle_oscillation_is_not_detected_as_stall() -> None:
+    """An A/B/A/B... oscillating signature never produces a window of n
+    identical entries, so the current windowed-equality check reports "not
+    stalled" even though the loop is making zero real progress."""
+    tracker = RefinementStallTracker()
+    for i in range(6):
+        if i % 2 == 0:
+            tracker.record("code-a", "failure-a")
+        else:
+            tracker.record("code-b", "failure-b")
+    # Six rounds recorded, alternating A/B/A/B/A/B — no window of size >= 2
+    # is ever uniform, so the current implementation misses the oscillation.
+    assert tracker.is_stalled(2) is False
+    assert tracker.is_stalled(3) is False
+    assert tracker.is_stalled(4) is False
+
+
 # ---------------------------------------------------------------------------
 # _refinement_stall_rounds env resolver
 # ---------------------------------------------------------------------------

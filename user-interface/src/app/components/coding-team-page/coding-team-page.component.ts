@@ -33,6 +33,12 @@ import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.
 import { extractErrorDetail } from '../../shared/extract-error-detail';
 import { LatestOnly } from '../../shared/latest-only';
 import { NotificationService } from '../../core/notification.service';
+import {
+  appendActivityNarrative,
+  emptyActivityNarrative,
+  thoughtStreamPanelTitle,
+  type ActivityNarrativeState,
+} from './activity-narrative';
 
 /** How often the Runs list is re-fetched while the page is open. */
 const RUNS_POLL_MS = 15000;
@@ -87,8 +93,8 @@ interface IssueRowVm {
 }
 
 /**
- * Main page for the Coding Team feature, hosting three single-select views: the assistant
- * chat (default), a GitHub issue browser, and the job Runs panel.
+ * Main page for the Coding Team feature, hosting three single-select views: the job Runs
+ * panel (default), a GitHub issue browser, and the assistant chat.
  *
  * The GitHub view lists every repository the configured PAT can access — repository access
  * is defined by the PAT's own authorization, not by per-repo Khala configuration. Expanding
@@ -129,8 +135,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly destroyRef = inject(DestroyRef);
   private readonly notifications = inject(NotificationService);
 
-  /** Which single view is visible. The page opens on the assistant chat. */
-  activeView: 'chat' | 'github' | 'jobs' = 'chat';
+  /** Which single view is visible. The page opens on the job Runs panel. */
+  activeView: 'chat' | 'github' | 'jobs' = 'jobs';
 
   // Embedded assistant chat configuration — named properties rather than template literals, so the
   // chat panel's wiring lives in one place.
@@ -249,13 +255,43 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Debounce handle for the settled-count announcement; cleared/replaced on every new thinking token
    * and on destroy so a stale timer never overwrites a later announcement or fires on a dead view. */
   private thinkingAnnounceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** In-memory activity narrative for the selected run (Jobs thought-stream panel). */
+  activityNarrative: ActivityNarrativeState = emptyActivityNarrative();
+  /** Polite live-region cue for activity-only updates; never contains raw narrative lines. */
+  activityAnnouncement = '';
+  /** Monotonic counter so each activity cue mutates the live-region text (identical strings are not re-announced). */
+  private activityAnnounceSeq = 0;
+
+  /**
+   * Preconditions: none.
+   * Postconditions: true when reasoning text or at least one narrative line is present.
+   */
+  get showThoughtStreamPanel(): boolean {
+    return !!(this._jobStatus?.thinking || this.activityNarrative.lines.length > 0);
+  }
+
+  /**
+   * Preconditions: none.
+   * Postconditions: panel title preferring thinking when reasoning is present; null when hidden.
+   */
+  get thoughtStreamTitle(): 'Agent thinking' | 'Agent activity' | null {
+    return thoughtStreamPanelTitle(!!this._jobStatus?.thinking, this.activityNarrative.lines.length > 0);
+  }
+
+  /**
+   * Preconditions: none.
+   * Postconditions: newline-joined `at  text` rows for the Activity stream `<pre>`.
+   */
+  get activityStreamText(): string {
+    return this.activityNarrative.lines.map((l) => `${l.at}  ${l.text}`).join('\n');
+  }
 
   get jobStatus(): CodingTeamJobStatus | null {
     return this._jobStatus;
   }
 
   /** Setting the polled status refreshes the precomputed badge class, terminal flag, pending-questions
-   * flag, and thinking-panel announcement. */
+   * flag, thinking-panel announcement, and activity narrative. */
   set jobStatus(status: CodingTeamJobStatus | null) {
     const previousThinking = this._jobStatus?.thinking ?? '';
     this._jobStatus = status;
@@ -264,6 +300,19 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.jobStatusHasPendingQuestions =
       !!status?.waiting_for_answers && (status?.pending_questions?.length ?? 0) > 0;
     this.updateThinkingAnnouncement(status?.thinking ?? '', previousThinking);
+    if (!status) {
+      this.activityNarrative = emptyActivityNarrative();
+      this.activityAnnouncement = '';
+      this.activityAnnounceSeq = 0;
+      return;
+    }
+    const prev = this.activityNarrative;
+    this.activityNarrative = appendActivityNarrative(prev, status, new Date().toISOString());
+    // Compare `lines` identity (not length): a capped append keeps length constant but replaces the array.
+    if (this.activityNarrative.lines !== prev.lines && !status.thinking) {
+      this.activityAnnounceSeq += 1;
+      this.activityAnnouncement = `Agent activity updated (${this.activityAnnounceSeq})`;
+    }
   }
 
   /**
@@ -925,8 +974,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * `selectedRunNumber` is taken from the matching run when it is in `runs` (its issue number, or null
    * if the run somehow lacks one — the list is pre-filtered to issue-bearing runs, so this is a
    * defensive fallback), and left untouched when the run is not yet in `runs` (e.g. just started, so
-   * the caller's pre-set number survives); `jobStatus`/`issueError`/`jobStatusError` are cleared, and
-   * status polling for `jobId` is (re)started.
+   * the caller's pre-set number survives); `activityNarrative`/`activityAnnouncement` are cleared,
+   * `jobStatus`/`issueError`/`jobStatusError` are cleared, and status polling for `jobId` is (re)started.
    */
   selectRun(jobId: string): void {
     if (this.selectedRunId === jobId) return;
@@ -937,6 +986,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.selectedRunOwner = run.github_context?.owner ?? '';
       this.selectedRunRepo = run.github_context?.repo ?? '';
     }
+    this.activityNarrative = emptyActivityNarrative();
+    this.activityAnnouncement = '';
+    this.activityAnnounceSeq = 0;
     this.jobStatus = null;
     this.issueError = null;
     this.jobStatusError = null;

@@ -50,6 +50,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from shared.http.retry import backoff_sleep, parse_retry_env_config, retry_delay
+
 __all__ = [
     "get_pooled_client",
     "close_pool",
@@ -57,6 +59,9 @@ __all__ = [
     "close_async_pool",
     "aclose_async_pool",
     "DEFAULT_LIMITS",
+    "backoff_sleep",
+    "parse_retry_env_config",
+    "retry_delay",
 ]
 
 logger = logging.getLogger(__name__)

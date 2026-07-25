@@ -723,6 +723,22 @@
   color: var(--kh-text-secondary);
 }
 
+.thought-stream-label {
+  display: block;
+  margin: 0.5rem 0 0.25rem;
+  font-size: var(--kh-text-xs);
+  font-weight: 600;
+  color: var(--kh-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.reasoning-section + .activity-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--kh-border, rgba(0, 0, 0, 0.08));
+}
+
 // ---------------------------------------------------------------------------
 // Small viewports — the three views are already single-column and full-width,
 // so this only tightens spacing and collapses the toggle to icons so the
