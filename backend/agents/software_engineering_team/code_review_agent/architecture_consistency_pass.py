@@ -52,6 +52,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
+from shared.llm_recovery import extract_json_object
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_map_chunk_chars,
@@ -454,10 +455,15 @@ def _run_pass(
         system_prompt=ARCHITECTURE_CONSISTENCY_PROMPT,
         tools=_build_tools(index),
     )
-    from shared.llm_recovery import extract_json_object
-
     raw = str(agent(prompt)).strip()
-    data = extract_json_object(raw) or {}
+    parsed = extract_json_object(raw, required_keys=["findings"])
+    if parsed is None:
+        logger.warning(
+            "ArchitectureConsistencyPass: could not parse a JSON object from the LLM reply "
+            "(%d chars); treating as no new findings",
+            len(raw),
+        )
+    data = parsed or {}
     findings = _parse_findings(data)
     if findings:
         findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)

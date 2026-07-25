@@ -185,10 +185,11 @@ def _run_chunk_review(
           strands ``Model``, which cannot re-resolve its thinking level).
 
     Postconditions:
-        - Shared context (spec/architecture/existing code) is hard-capped to
-          its budget deterministically — no LLM compaction happens here (the
-          coordinator already compacted once), so a chunk call never grows the
-          prompt or fires extra LLM calls even when upstream compaction failed.
+        - Shared context (spec/architecture/existing code) is passed through
+          verbatim; this function never re-caps or re-compacts it — the
+          coordinator's prep is the only place that bounds it, so a chunk call
+          never fires extra LLM calls, but it also has no local defense if an
+          upstream cap were ever skipped.
 
     Raises:
         LLMJsonParseError: the LLM response could not be parsed as JSON at

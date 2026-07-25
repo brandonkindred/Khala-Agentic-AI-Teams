@@ -281,9 +281,11 @@ def generate_prd_document(
     Preconditions: ``model`` is a Strands ``Model``; ``llm`` is the ``LLMClient``
         used for context sizing.
     Postconditions: returns the generated PRD text, or ``cleaned_spec`` when the LLM
-        fails or returns empty output. Each prompt input is compacted (via LLM
-        summarization, not hard truncation) to fit the model's context when it
-        would otherwise be too large for the combined prompt.
+        fails or returns empty output. Each prompt input is compacted via LLM
+        summarization to fit the model's context when it would otherwise be too
+        large for the combined prompt; the trailing hard slice is a fail-safe
+        only, for the rare case ``compact_text`` itself fails and falls back to
+        returning the original (still oversized) text.
     """
     from llm_service import compact_text
 
