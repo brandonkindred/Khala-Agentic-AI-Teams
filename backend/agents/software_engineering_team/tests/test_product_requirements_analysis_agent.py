@@ -997,6 +997,31 @@ def test_review_question_answer_alignment_restores_original_when_two_items_fail_
     assert result_by_id["q2"] is q2
 
 
+def test_review_question_answer_alignment_rejects_hallucinated_id() -> None:
+    """An aligned item that parses successfully but carries an id absent from the original
+    questions (a hallucinated id) must not be added to the result; the original question it
+    displaced is restored instead, and the batch is never inflated beyond the originals."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "unknown", "question_text": "A question that was never asked"},
+                {"id": "q2", "question_text": "Which platform?"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert set(result_by_id) == {"q1", "q2"}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"].question_text == "Which platform?"
+
+
 def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> None:
     """If every item in the batch fails to parse, the original list is returned unchanged."""
     llm = _StubClient(

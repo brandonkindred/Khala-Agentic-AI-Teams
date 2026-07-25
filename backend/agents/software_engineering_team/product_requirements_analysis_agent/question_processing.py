@@ -441,11 +441,12 @@ def review_question_answer_alignment(
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the aligned list, or the unmodified list on empty input
         or a full-batch LLM/parse failure; never raises. This is a per-question
-        review (ids are preserved), so an item that individually fails to parse
-        falls back to its original (unaligned) question by id, and any original
-        question whose id never appears in the result (e.g. the failed item's id
-        was missing or unrecognized) is appended at the end — no original
-        question is ever dropped from the batch.
+        review (ids are preserved), so an item that individually fails to parse,
+        or that parses but carries an id not present in ``open_questions``
+        (a hallucinated/unrecognized id), falls back to its original
+        (unaligned) question by id; any original question whose id never
+        appears in the result is appended at the end. No original question is
+        ever dropped, and no question with an unrecognized id is ever added.
     """
     if len(open_questions) == 0:
         return []
@@ -494,6 +495,8 @@ def review_question_answer_alignment(
         for i, q_data in enumerate(aligned):
             try:
                 parsed = parse_open_question(q_data, i)
+                if parsed.id not in original_by_id:
+                    raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
                 result.append(parsed)
                 seen_ids.add(parsed.id)
             except Exception as e:
