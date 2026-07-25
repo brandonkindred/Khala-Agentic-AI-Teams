@@ -21,6 +21,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -161,32 +162,87 @@ Guidelines:
 # No-experience phrase detection
 # ---------------------------------------------------------------------------
 
-_NO_EXPERIENCE_PHRASES = frozenset(
+# Exact whole-message refusals (normalized). Short tokens and formerly ambiguous
+# stems belong here so they never match as substrings inside ordinary prose.
+_NO_EXPERIENCE_EXACT = frozenset(
     {
         "skip",
-        "no experience",
-        "no relevant experience",
-        "n/a",
         "none",
         "pass",
-        "i don't have",
+        "n/a",
         "i haven't",
         "i have no",
         "i can't think of",
         "nothing comes to mind",
+        "i haven't done that",
+    }
+)
+
+# Leading command tokens: "skip this one", "pass on this question", "n/a for now".
+# Anchored at start so incidental mid-sentence uses ("please skip ahead") stay False.
+# "none" stays exact-only — "none of my colleagues…" is ordinary prose, not a skip command.
+_NO_EXPERIENCE_COMMAND_PREFIX_RE = re.compile(r"^(?:skip|pass|n/a)\b")
+
+# Specific refusal phrases matched with word-boundary regex. Ambiguous stems
+# like "i have no" / "i haven't" / "i can't think of" / "nothing comes to mind"
+# are exact-only (see ``_NO_EXPERIENCE_EXACT``) so mid-sentence non-refusals do
+# not prematurely end the interview; the LLM evaluator still has a no_experience
+# path for softer refusals.
+_NO_EXPERIENCE_PHRASES = frozenset(
+    {
+        "no experience",
+        "no relevant experience",
         "not applicable",
         "i don't have a story",
         "no story",
+        "i have no story",
+        "i can't think of a story",
+        "i can't think of any",
     }
+)
+
+_NO_EXPERIENCE_PHRASE_RE = tuple(
+    re.compile(r"\b" + re.escape(phrase) + r"\b") for phrase in _NO_EXPERIENCE_PHRASES
+)
+
+# "I have no [direct/personal/…] experience(s)" — bounded so "I have no idea" stays False.
+_NO_EXPERIENCE_QUALIFIED_RE = re.compile(
+    r"\bi have no (?:direct |personal |relevant |real |prior )?experiences?\b"
+)
+
+# "I don't have [a/any/direct/…] story/experience" — specific enough to avoid
+# treating missing incidental details ("I don't have the exact dates") as a
+# refusal to answer the interview question.
+_NO_EXPERIENCE_DONT_HAVE_RE = re.compile(
+    r"\bi don't have (?:(?:a|any) )?"
+    r"(?:(?:direct|personal|relevant|real|prior) )?(?:story|experiences?)\b"
 )
 
 
 def _is_no_experience(message: str) -> bool:
-    """Return True if the user's message indicates they have no relevant experience."""
+    """Return True if the user's message indicates they have no relevant experience.
+
+    Preconditions:
+        - ``message`` is a string (may be empty or whitespace-only).
+    Postconditions:
+        - Returns True for exact whole-message refusals (``_NO_EXPERIENCE_EXACT``),
+          leading skip/pass/n/a command prefixes, qualified ``i have no … experience``
+          and ``i don't have … story/experience`` patterns, or word-boundary
+          matches against ``_NO_EXPERIENCE_PHRASES``; otherwise False.
+        - Does not mutate ``message``.
+    """
     text = message.strip().lower().rstrip(".!?")
-    if text in _NO_EXPERIENCE_PHRASES:
+    if not text:
+        return False
+    if text in _NO_EXPERIENCE_EXACT:
         return True
-    return any(phrase in text for phrase in _NO_EXPERIENCE_PHRASES)
+    if _NO_EXPERIENCE_COMMAND_PREFIX_RE.match(text):
+        return True
+    if _NO_EXPERIENCE_QUALIFIED_RE.search(
+        text
+    ) or _NO_EXPERIENCE_DONT_HAVE_RE.search(text):
+        return True
+    return any(pattern.search(text) for pattern in _NO_EXPERIENCE_PHRASE_RE)
 
 
 def _notify_job_updater(

@@ -541,13 +541,57 @@ def test_v2_build_plan_critic_agent_when_enabled(monkeypatch) -> None:
 def test_ghost_writer_no_experience_phrase() -> None:
     from agents.blogging.ghost_writer_agent.agent import _is_no_experience
 
+    # Exact short tokens
     assert _is_no_experience("skip") is True
     assert _is_no_experience("SKIP.") is True
     assert _is_no_experience("none") is True
+    assert _is_no_experience("pass") is True
+    assert _is_no_experience("n/a") is True
+
+    # Formerly ambiguous stems — exact message only (not substring)
+    assert _is_no_experience("Nothing comes to mind") is True
+    assert _is_no_experience("nothing comes to mind.") is True
+    assert _is_no_experience("I haven't done that") is True
+    assert _is_no_experience("i haven't") is True
+    assert _is_no_experience("i have no") is True
+    assert _is_no_experience("i can't think of") is True
+
+    # Explicit command-prefixed skips (leading token + trailing text)
+    assert _is_no_experience("skip this one") is True
+    assert _is_no_experience("skip, please") is True
+    assert _is_no_experience("pass on this question") is True
+    assert _is_no_experience("n/a for this section") is True
+
+    # Specific refusal phrases (word-boundary containment)
     assert _is_no_experience("I don't have any story") is True
-    assert _is_no_experience("I haven't tried that") is True
+    assert _is_no_experience("I don't have direct experience with that") is True
+    assert _is_no_experience("I don't have any relevant experiences") is True
+    assert _is_no_experience("no relevant experience for this") is True
+    assert _is_no_experience("I have no experience with that") is True
+    assert _is_no_experience("I have no story for this topic") is True
+    assert _is_no_experience("I can't think of a story") is True
     assert _is_no_experience("Yes I have a great one") is False
-    assert _is_no_experience("nothing comes to mind here") is True
+
+    # Qualified experience refusals (optional adjective between "no" and "experience")
+    assert _is_no_experience("I have no direct experience with that") is True
+    assert _is_no_experience("I have no personal experience here") is True
+    assert _is_no_experience("I have no relevant experiences in this area") is True
+    assert _is_no_experience("I have no prior experience") is True
+
+    # Ambiguous substrings / incidental short-word uses must NOT skip
+    assert _is_no_experience("I have no idea what you mean") is False
+    assert _is_no_experience("I haven't thought about it that way") is False
+    assert _is_no_experience("I can't think of anything else right now") is False
+    assert _is_no_experience("Nothing comes to mind immediately") is False
+    assert _is_no_experience("I haven't tried that") is False
+    assert _is_no_experience("nothing comes to mind here") is False
+    assert _is_no_experience("please skip ahead in the draft") is False
+    assert _is_no_experience("I will pass along the details") is False
+    assert _is_no_experience("none of my colleagues knew the answer, but I did") is False
+    assert (
+        _is_no_experience("I don't have the exact dates, but the migration started after launch")
+        is False
+    )
 
 
 def test_ghost_writer_agent_construction() -> None:
