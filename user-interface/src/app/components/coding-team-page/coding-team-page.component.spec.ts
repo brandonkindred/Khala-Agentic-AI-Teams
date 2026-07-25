@@ -141,7 +141,7 @@ describe('CodingTeamPageComponent', () => {
     localStorage.clear();
   });
 
-  /** Switch the visible view (the page opens on 'chat') and re-render. */
+  /** Switch the visible view (the page opens on 'jobs') and re-render. */
   function showView(view: 'chat' | 'github' | 'jobs'): void {
     component.activeView = view;
     fixture.detectChanges();
@@ -485,13 +485,13 @@ describe('CodingTeamPageComponent', () => {
   // -------------------------------------------------------------------------
 
   describe('view switcher', () => {
-    it('opens on the Chat view showing the assistant, not the GitHub or Jobs panels', async () => {
+    it('opens on the Jobs view showing the Runs panel, not the Chat or GitHub views', async () => {
       await setup();
-      expect(component.activeView).toBe('chat');
+      expect(component.activeView).toBe('jobs');
       const el: HTMLElement = fixture.nativeElement;
-      expect(el.querySelector('app-team-assistant-chat')).not.toBeNull();
+      expect(el.querySelector('.jobs-panel')).not.toBeNull();
+      expect(el.querySelector('app-team-assistant-chat')).toBeNull();
       expect(el.querySelector('.github-section')).toBeNull();
-      expect(el.querySelector('.jobs-panel')).toBeNull();
     });
 
     it('shows only the GitHub repos panel when the GitHub view is active', async () => {
