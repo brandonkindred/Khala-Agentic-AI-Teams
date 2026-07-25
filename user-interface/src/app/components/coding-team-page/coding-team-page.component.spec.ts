@@ -263,10 +263,10 @@ describe('CodingTeamPageComponent', () => {
     await setup();
     showView('github');
     expandFirstRepo();
-    const loadSpy = vi.spyOn(component, 'loadIssues');
+    const runsCallsBefore = apiSpy.listJobs.mock.calls.length;
     component.toggleLabelFilter();
-    // loadIssues(false) skips the refreshTrigger$ that refetches the Runs list.
-    expect(loadSpy).toHaveBeenCalledWith(false);
+    // Toggling the filter skips the refreshTrigger$ that refetches the Runs list.
+    expect(apiSpy.listJobs.mock.calls.length).toBe(runsCallsBefore);
   });
 
   it('resets the label filter to on when a different repo is expanded (per-repo, not global)', async () => {
@@ -387,7 +387,7 @@ describe('CodingTeamPageComponent', () => {
     expect(component.selectedIssue).toBeNull();
     expect(component.isIssueInProgress(issue)).toBe(true);
     // The panel is not dismissable.
-    expect((component as unknown as Record<string, unknown>)['dismissJob']).toBeUndefined();
+    expect('dismissJob' in component).toBe(false);
   });
 
   it('surfaces an error when starting a run fails', async () => {

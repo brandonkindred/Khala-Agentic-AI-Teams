@@ -1,4 +1,5 @@
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
+import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 
 /** Newest-line cap for the in-memory Jobs activity narrative. */
 export const ACTIVITY_NARRATIVE_MAX_LINES = 200;
@@ -53,6 +54,7 @@ function candidateLines(status: CodingTeamJobStatus): string[] {
   const out: string[] = [];
   if (status.phase) out.push(`Phase → ${status.phase}`);
   if (status.status_text) out.push(`Status: ${status.status_text}`);
+  if (isCodingTeamTerminalStatus(status.status)) out.push(`Status: ${status.status}`);
   const activity = formatCurrentActivity(status);
   if (activity) out.push(activity);
   const agents = [...(status.agents ?? [])].sort((a, b) => a.agent_id.localeCompare(b.agent_id));
@@ -65,7 +67,7 @@ function candidateLines(status: CodingTeamJobStatus): string[] {
 
 /**
  * Preconditions: `status` is a job status snapshot (fields may be absent).
- * Postconditions: returns `candidateLines(status).join('\\n')`; identical inputs yield identical fingerprints.
+ * Postconditions: returns `candidateLines(status).join('\n')`; identical inputs yield identical fingerprints.
  */
 export function statusActivityFingerprint(status: CodingTeamJobStatus): string {
   return candidateLines(status).join('\n');
@@ -74,7 +76,7 @@ export function statusActivityFingerprint(status: CodingTeamJobStatus): string {
 /**
  * Preconditions: `at` is the timestamp to stamp on any new lines.
  * Postconditions: returns one `{ at, text }` per candidate display line not present in `prevFp`
- * (split on `\\n`). When `prevFp` is empty, every current candidate line is returned. Never mutates inputs.
+ * (split on `\n`). When `prevFp` is empty, every current candidate line is returned. Never mutates inputs.
  */
 export function diffActivityLines(
   prevFp: string,

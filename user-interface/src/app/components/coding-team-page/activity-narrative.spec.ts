@@ -86,6 +86,27 @@ describe('activity-narrative', () => {
     expect(state.lines.at(-1)?.text).toBe(`Status: tick ${ACTIVITY_NARRATIVE_MAX_LINES + 4}`);
   });
 
+  it('appendActivityNarrative records a terminal status even when status_text/current_activity are cleared', () => {
+    let state = emptyActivityNarrative();
+    state = appendActivityNarrative(
+      state,
+      status({
+        phase: 'implementation',
+        status_text: 'Implementing backend',
+        current_activity: { agent: 'backend', detail: 'writing tests' },
+        updated_at: '2026-07-24T15:00:00Z',
+      }),
+      '2026-07-24T15:00:01Z',
+    );
+    // _record_failure clears status_text/current_activity while setting status='failed'.
+    state = appendActivityNarrative(
+      state,
+      status({ status: 'failed', phase: 'implementation', updated_at: '2026-07-24T15:05:00Z' }),
+      '2026-07-24T15:05:01Z',
+    );
+    expect(state.lines.map((l) => l.text)).toContain('Status: failed');
+  });
+
   it('thoughtStreamPanelTitle prefers thinking title when reasoning is present', () => {
     expect(thoughtStreamPanelTitle(true, false)).toBe('Agent thinking');
     expect(thoughtStreamPanelTitle(true, true)).toBe('Agent thinking');
