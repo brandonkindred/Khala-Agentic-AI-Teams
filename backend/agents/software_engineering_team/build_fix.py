@@ -80,7 +80,7 @@ def _run_build_verification(
     ``(True, "")`` via the fallthrough at the end of this function.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
-    from shared.command_runner.runner import (
+    from shared.command_runner.executor import (
         run_command,
         run_pytest,
         run_python_syntax_check,
@@ -102,7 +102,7 @@ def _run_build_verification(
         if not (frontend_dir / "package.json").exists():
             logger.info("Build verification: no frontend project found, skipping frontend build")
             return True, ""
-        from shared.command_runner.runner import is_ng_build_environment_failure
+        from shared.command_runner.executor import is_ng_build_environment_failure
 
         result = run_ng_build_with_nvm_fallback(frontend_dir)
         if not result.success:
@@ -285,7 +285,7 @@ def _try_build_fix_one_at_a_time(
         function never receives a ``_code_v2``-suffixed value.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
-    from shared.command_runner.runner import (
+    from shared.command_runner.executor import (
         run_command,
         run_pytest,
         run_python_syntax_check,
@@ -303,7 +303,7 @@ def _try_build_fix_one_at_a_time(
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
         try:
-            from shared.command_runner.runner import (
+            from shared.command_runner.executor import (
                 is_ng_build_environment_failure,
             )
 

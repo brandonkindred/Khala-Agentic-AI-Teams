@@ -8,7 +8,7 @@ the software-engineering team and the coding team can depend on it without
 importing one another.
 
 Layout:
-    - ``runner``         — core: subprocess primitives, frontend framework
+    - ``executor``        — core: subprocess primitives, frontend framework
       detection, ``run_pytest``/``run_python_syntax_check``/``run_linter``
     - ``nvm``             — NVM (Node Version Manager) install/detect and
       running commands under a managed Node version
@@ -20,10 +20,10 @@ Layout:
       it compiles and runs
     - ``error_parsing``   — the failure parser (was ``shared/error_parsing.py``)
 
-``runner`` is the dependency-free base (stdlib-only at import time). The other
+``executor`` is the dependency-free base (stdlib-only at import time). The other
 submodules import from sibling modules at load time along an acyclic graph:
-``runner`` <- ``nvm`` <- ``angular_repair`` / ``scaffolding`` / ``smoke_test``.
-``runner`` itself lazily imports ``error_parsing``
+``executor`` <- ``nvm`` <- ``angular_repair`` / ``scaffolding`` / ``smoke_test``.
+``executor`` itself lazily imports ``error_parsing``
 (inside ``CommandResult.parsed_failures``) and the two leaf modules it
 dispatches to from ``run_frontend_build``/``run_linter``; ``scaffolding``
 lazily imports ``shared.git`` (inside ``ensure_backend_project_initialized``).
@@ -54,13 +54,7 @@ from shared.command_runner.error_parsing import (
     parse_ng_build_failure,
     parse_pytest_failure,
 )
-from shared.command_runner.nvm import (
-    NvmInstallResult,
-    ensure_nvm_installed,
-    run_command_with_nvm,
-    run_npm_build_with_nvm,
-)
-from shared.command_runner.runner import (
+from shared.command_runner.executor import (
     BUILD_TIMEOUT,
     SERVE_TIMEOUT,
     TEST_TIMEOUT,
@@ -76,6 +70,12 @@ from shared.command_runner.runner import (
     run_pytest,
     run_python_syntax_check,
 )
+from shared.command_runner.nvm import (
+    NvmInstallResult,
+    ensure_nvm_installed,
+    run_command_with_nvm,
+    run_npm_build_with_nvm,
+)
 from shared.command_runner.scaffolding import (
     ensure_backend_project_initialized,
     ensure_frontend_project_initialized,
@@ -87,21 +87,21 @@ from shared.command_runner.smoke_test import (
 )
 
 __all__ = [
-    # runner — subprocess primitives
+    # executor — subprocess primitives
     "CommandResult",
     "run_command",
     "patch_json_file",
     "patch_text_file",
-    # runner — frontend build/serve
+    # executor — frontend build/serve
     "detect_frontend_framework",
     "run_frontend_build",
     "run_ng_build",
     "is_ng_build_environment_failure",
-    # runner — backend test/lint
+    # executor — backend test/lint
     "run_pytest",
     "run_python_syntax_check",
     "run_linter",
-    # runner — timeouts
+    # executor — timeouts
     "BUILD_TIMEOUT",
     "SERVE_TIMEOUT",
     "TEST_TIMEOUT",

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from shared.command_runner.runner import (
+from shared.command_runner.executor import (
     BUILD_TIMEOUT,
     FRONTEND_NODE_VERSION,
     NVM_NODE_FALLBACK_VERSION,
