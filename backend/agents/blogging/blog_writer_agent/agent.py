@@ -237,6 +237,7 @@ class BlogWriterAgent(_BlogAgentBase):
             - llm_client is not None.
         Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
+        assert llm_client is not None, "llm_client must not be None"
         super().__init__(llm_client)
         # ``_call_text`` produces the ``---DRAFT---`` hybrid format (JSON
         # marker line + Markdown body), which only works when the underlying
@@ -265,7 +266,7 @@ class BlogWriterAgent(_BlogAgentBase):
         self._style_prompt = "\n\n".join(parts)
 
     def _call_text(self, prompt: str, system_prompt: str = "") -> str:
-        """Call the text-mode Strands Agent and return raw prose.
+        """Call the text-mode Strands Agent and return its stripped text output.
 
         Used for drafting and revision paths that emit the ``---DRAFT---``
         marker + Markdown hybrid format. The text-mode sibling avoids forcing
@@ -276,7 +277,7 @@ class BlogWriterAgent(_BlogAgentBase):
         return str(result).strip()
 
     def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
-        """Invoke the injected model via Strands and return raw assistant text.
+        """Invoke the injected model via Strands and return its stripped assistant text.
 
         Uses ``self._model`` as supplied by the caller (typically already configured
         for structured/JSON-oriented completions). Does not clone or force
@@ -296,6 +297,9 @@ class BlogWriterAgent(_BlogAgentBase):
         as defensive cleanup if the model wraps the object. Relies on ``self._model``
         already being suitable for structured replies; this method does not force
         ``response_format=json_object`` on the wire.
+
+        Raises:
+            ``LLMJsonParseError`` when the response contains no extractable JSON.
         """
         raw = self._call_json_raw(
             prompt + "\n\nRespond with valid JSON only, no markdown fences.",
@@ -383,6 +387,13 @@ class BlogWriterAgent(_BlogAgentBase):
         on_llm_request: Optional[Callable[[str], None]],
         max_parse_retries: int,
     ) -> tuple[dict[str, Any], int]:
+        """Delegate to ``shared.content_planning_loop.complete_plan_json``, wiring this
+        agent's ``_call_agent_json`` / ``_call_json_raw`` as the JSON and raw-text callers.
+
+        Postconditions:
+            - Returns the parsed plan dict and the number of parse retries consumed,
+              per ``complete_plan_json``'s contract.
+        """
         return complete_plan_json(
             prompt,
             system=system,
@@ -430,7 +441,12 @@ class BlogWriterAgent(_BlogAgentBase):
     # ------------------------------------------------------------------
 
     def _deterministic_self_check(self, draft: str) -> list[str]:
-        """Scan draft for mechanical violations. Returns list of violation descriptions."""
+        """Scan draft for mechanical violations. Returns list of violation descriptions.
+
+        Checks: em/en dashes, banned phrases (``BANNED_PHRASES``), vague citation
+        patterns not followed by a source/link, reader-address (``you``/``your``)
+        count below 3, and staccato prose (3+ consecutive short sentences).
+        """
         violations: list[str] = []
         draft_lower = draft.lower()
         paragraphs = [p.strip() for p in draft.split("\n\n") if p.strip()]
@@ -605,7 +621,12 @@ class BlogWriterAgent(_BlogAgentBase):
         return draft
 
     def _self_review(self, draft: str) -> str:
-        """Run deterministic check then LLM self-review. Returns cleaned draft."""
+        """Run deterministic check then LLM self-review. Returns cleaned draft.
+
+        Both sub-steps (``_fix_deterministic_violations``, ``_llm_self_review``)
+        already return the original draft on their own soft-fail paths, so this
+        method has no additional failure handling of its own.
+        """
         # Step 1: Deterministic checks
         violations = self._deterministic_self_check(draft)
         if violations:
@@ -811,7 +832,14 @@ class BlogWriterAgent(_BlogAgentBase):
         style_guide_text: str,
         revise_input: ReviseWriterInput,
     ) -> str:
-        """Build one revision prompt that applies every copy-editor feedback item."""
+        """Build one revision prompt that applies every copy-editor feedback item.
+
+        Postconditions:
+            - Returns a prompt string embedding the brand/style sections, the
+              content plan, every feedback item formatted via
+              ``_format_feedback_item_line``, ``revision_plan`` as planning
+              context, and the current draft.
+        """
         brand_section = (
             self._brand_spec_prompt
             if self._brand_spec_prompt
@@ -1065,7 +1093,14 @@ class BlogWriterAgent(_BlogAgentBase):
         style_guide_text: str,
         revise_input: ReviseWriterInput,
     ) -> str:
-        """Build a revision prompt for a single feedback item."""
+        """Build a revision prompt for a single feedback item.
+
+        Postconditions:
+            - Returns a prompt string embedding the brand/style sections, the
+              content plan, the single feedback item formatted via
+              ``_format_feedback_item_line``, and the current draft, instructing
+              the model to change only that one issue.
+        """
         brand_section = (
             self._brand_spec_prompt
             if self._brand_spec_prompt
@@ -1469,6 +1504,14 @@ class BlogWriterAgent(_BlogAgentBase):
         Unlike ``revise()`` which handles structured copy-editor feedback items,
         this method handles free-form user feedback from the interactive review
         cycle where the user acts as the editor.
+
+        Postconditions:
+            - Returns ``draft`` unchanged when it is blank.
+            - Otherwise retries the text-completion path up to 3 times on
+              transient ``LLMRateLimitError`` / ``LLMTemporaryError`` (including
+              ``EventLoopException`` wrappers), then falls back to
+              ``_fallback_draft_via_json``; if both paths fail to produce a
+              usable draft, returns the original ``draft`` unchanged.
         """
         self._assert_guidelines_present()
         if not draft.strip():
