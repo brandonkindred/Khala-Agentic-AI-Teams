@@ -45,10 +45,53 @@ changes three previously-observable SE behaviors (each covered by a regression t
 
 ## Non-shared: team WorkflowStatus
 
-Branding (`READY_FOR_ROLLOUT`) and market research (`DRAFT` / `READY_FOR_EXECUTION`)
-keep local `WorkflowStatus` enums because terminal semantics differ per team.
-Investment's `WorkflowStatusResponse` is an unrelated API DTO and is not part of
-this package.
+`branding_team` and `market_research_team` each define their own run-lifecycle
+`WorkflowStatus(str, Enum)`. Both were evaluated for consolidation into this
+package alongside `HumanReview` and deliberately kept team-local — recorded here
+as the decision, with the evidence behind it, rather than re-litigated per team.
+
+**branding_team.WorkflowStatus** (`branding_team/models.py:43-52`): `NEEDS_HUMAN_DECISION`,
+`READY_FOR_ROLLOUT`. Produced by the single pure function
+`BrandingTeamOrchestrator._build_status_summary` (`orchestrator.py:443-475`), shared by
+both the thread-mode run path and the Temporal `finalize_branding_activity` via
+`_assemble_team_output`. Recomputed fresh into a new `TeamOutput` on every run — never
+mutated in place.
+
+| `human_review.approved` | `current_phase` | Result |
+|---|---|---|
+| `False` | any | `NEEDS_HUMAN_DECISION` |
+| `True` | `< COMPLETE` | `NEEDS_HUMAN_DECISION` |
+| `True` | `== COMPLETE` | `READY_FOR_ROLLOUT` (terminal) |
+
+(`branding_team` also has three unrelated status vocabularies in the same package —
+`BrandStatus` for the brand entity, job-store `JOB_STATUS_*` for background jobs, and ad
+hoc session/question strings — none of which are part of this comparison.)
+
+**market_research_team.WorkflowStatus** (`market_research_team/models.py:20-30`):
+`DRAFT`, `NEEDS_HUMAN_DECISION`, `READY_FOR_EXECUTION`. Produced by the single pure
+function `MarketResearchOrchestrator.assemble` (`orchestrator.py:231-291`), branching
+only on `human_review.approved` (`True` → `READY_FOR_EXECUTION`, `False` →
+`NEEDS_HUMAN_DECISION`). `DRAFT` is defined but currently dead — no code path produces it.
+
+**investment_team**: no comparable `WorkflowStatus` enum exists. `api/main.py`'s
+`WorkflowStatusResponse` (`mode`, `audit_log`, `queue_counts`) is an unrelated API DTO
+backed by `WorkflowMode` (`models.py:116-120`: `ADVISORY`/`PAPER`/`LIVE`/`MONITOR_ONLY`) —
+a trading-mode setting, not a run-lifecycle status. Its actual status vocabularies
+(`AdvisorSessionStatus`, `PaperTradingStatus`, `ValidationStatus`, `JOB_STATUS_*`,
+`STRATEGY_LAB_TERMINAL_STATUSES`) serve job/backtest/paper-trading lifecycles that don't
+map onto the human-approval-gate concept `WorkflowStatus` models in the other two teams.
+
+**Decision: keep independent (no shared enum).** Only the string `"needs_human_decision"`
+is genuinely common between branding and market research; each team's terminal state
+names a different domain outcome (`ready_for_rollout` vs. `ready_for_execution`), and
+market research carries an extra, currently-unused `DRAFT`. A shared enum would need
+either an awkward union of all per-team terminal values (defeating the point of an enum
+as a closed set) or a lossy shared subset still requiring a per-team extension — more
+complexity than the current two ~10-line enums. `investment_team` isn't part of the
+overlap at all. The one piece that *was* genuinely duplicated across teams — the
+`HumanReview` approve/reject gate — is already shared here; each team derives its own
+`WorkflowStatus` from `human_review.approved` at the orchestrator boundary, which is
+exactly why `WorkflowStatus` itself was not folded into this package.
 
 ## Layout & conventions
 
