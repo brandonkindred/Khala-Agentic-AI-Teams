@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
     BacktestResult,
@@ -35,6 +36,7 @@ from investment_team.strategy_lab.alignment_findings import AlignmentFinding
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.strategy_lab.quality_gates.realism.rule_firing import RuleFiringRateGate
 from investment_team.strategy_lab.spec_dsl import EntryRule, Predicate, SignalExitRule
 
 # ---------------------------------------------------------------------------
@@ -622,3 +624,365 @@ def test_verification_phase_threads_latest_alignment_report_findings(monkeypatch
     ]
     assert len(rule_firing_criticals) == 1
     assert rule_firing_criticals[0].rule_id == "entry[0]"
+
+
+# ---------------------------------------------------------------------------
+# Custom-code parity: liquidity / regime coverage / trade clustering / cost
+# stress gates take no ``spec`` and never branch on ``requires_custom_code``
+# (see each gate's "custom-code parity" docstring note) — their inputs are
+# fill-simulator/engine outputs populated identically regardless of compile
+# path. These tests prove that concretely at the orchestrator level: each
+# gate still fires its critical for a ``requires_custom_code=True`` spec
+# exactly as it would for a compiled one.
+# ---------------------------------------------------------------------------
+
+
+def _adv_bar(date_str: str, *, close: float, volume: float) -> OHLCVBar:
+    return OHLCVBar(
+        date=date_str,
+        open=close,
+        high=close + 0.5,
+        low=close - 0.5,
+        close=close,
+        volume=volume,
+    )
+
+
+def _thin_liquidity_market_data(
+    symbol: str, *, daily_dollar_volume: float, lookback: int = 20
+) -> dict:
+    """Market data whose trailing ADV equals ``daily_dollar_volume`` for
+    ``symbol`` over ``lookback`` bars preceding the trade window."""
+    bars = []
+    close = 100.0
+    volume = daily_dollar_volume / close
+    for i in range(lookback):
+        bars.append(_adv_bar(f"2024-02-{i + 1:02d}", close=close, volume=volume))
+    return {symbol: bars}
+
+
+def _oversized_trade(symbol: str, trade_num: int) -> TradeRecord:
+    """A single winning trade whose ``position_value`` dwarfs the thin ADV
+    from :func:`_thin_liquidity_market_data`, so the liquidity slippage
+    haircut flips its adjusted P&L negative."""
+    return TradeRecord(
+        trade_num=trade_num,
+        entry_date="2024-03-01",
+        exit_date="2024-03-02",
+        symbol=symbol,
+        side="long",
+        entry_price=100.0,
+        exit_price=101.0,
+        shares=500.0,
+        position_value=50_000.0,
+        gross_pnl=500.0,
+        net_pnl=500.0,
+        return_pct=1.0,
+        hold_days=1,
+        outcome="win",
+        cumulative_pnl=500.0,
+        entry_reason="compiled_entry:entry[0]",
+    )
+
+
+def test_run_realism_gates_liquidity_critical_for_custom_code_spec():
+    """A custom-code spec with an oversized fill against thin ADV still
+    trips the liquidity realism critical — the gate has no ``spec``
+    parameter to skip on, so scrutiny is identical to the compiled path."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = [_oversized_trade("QQQ", 1)]
+    market_data = _thin_liquidity_market_data("QQQ", daily_dollar_volume=100_000.0)
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=_metrics(),
+        config=_config(),
+        market_data=market_data,
+        execution_succeeded=True,
+    )
+
+    liquidity_criticals = [
+        r for r in results if r.gate_name == "liquidity_realism" and r.severity == "critical"
+    ]
+    assert len(liquidity_criticals) == 1
+    assert liquidity_criticals[0].passed is False
+
+
+def _metrics_with_regime_results(regime_results: List[dict]) -> BacktestResult:
+    return BacktestResult(
+        total_return_pct=20.0,
+        annualized_return_pct=10.0,
+        volatility_pct=12.0,
+        sharpe_ratio=0.8,
+        max_drawdown_pct=10.0,
+        win_rate_pct=58.0,
+        profit_factor=1.6,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+        cost_stress_results=_cost_stress_payload_passing(),
+        regime_results=regime_results,
+        acceptance_reason="walk_forward_passed: all four criteria met",
+    )
+
+
+def test_run_realism_gates_regime_coverage_critical_for_custom_code_spec():
+    """A custom-code spec that lost money in a regime it actually traded
+    in still trips the regime-coverage critical."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = [_trade("QQQ", i + 1) for i in range(5)]
+    metrics = _metrics_with_regime_results(
+        [
+            {
+                "regime": "vix_q1",
+                "n_obs": 20,
+                "strategy_cumret": -0.05,
+                "benchmark_cumret": 0.05,
+                "beat_benchmark": False,
+            },
+            {
+                "regime": "vix_q2",
+                "n_obs": 20,
+                "strategy_cumret": 0.03,
+                "benchmark_cumret": 0.05,
+                "beat_benchmark": False,
+            },
+        ]
+    )
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=metrics,
+        config=_config(),
+        market_data=None,
+        execution_succeeded=True,
+    )
+
+    regime_criticals = [
+        r for r in results if r.gate_name == "regime_coverage_realism" and r.severity == "critical"
+    ]
+    assert len(regime_criticals) == 1
+    assert regime_criticals[0].passed is False
+
+
+def _dated_trade(symbol: str, trade_num: int, entry_date: str) -> TradeRecord:
+    return TradeRecord(
+        trade_num=trade_num,
+        entry_date=entry_date,
+        exit_date=entry_date,
+        symbol=symbol,
+        side="long",
+        entry_price=100.0,
+        exit_price=101.0,
+        shares=10.0,
+        position_value=1000.0,
+        gross_pnl=10.0,
+        net_pnl=10.0,
+        return_pct=1.0,
+        hold_days=1,
+        outcome="win",
+        cumulative_pnl=10.0 * trade_num,
+        entry_reason="compiled_entry:entry[0]",
+    )
+
+
+def _clustered_trades(symbol: str) -> List[TradeRecord]:
+    """20 trades, 16 bursty within 2020-Q2 (consecutive April days), 4
+    spread across 2020-Q3/Q4 — mirrors
+    ``test_trade_clustering_gate.py``'s critical-path fixture."""
+    trades: List[TradeRecord] = []
+    for i in range(16):
+        trades.append(_dated_trade(symbol, i + 1, f"2020-04-{i + 1:02d}"))
+    trades.append(_dated_trade(symbol, 17, "2020-07-15"))
+    trades.append(_dated_trade(symbol, 18, "2020-08-22"))
+    trades.append(_dated_trade(symbol, 19, "2020-10-05"))
+    trades.append(_dated_trade(symbol, 20, "2020-12-18"))
+    return trades
+
+
+def test_run_realism_gates_trade_clustering_critical_for_custom_code_spec():
+    """A custom-code spec whose trades are bursty-clustered in a single
+    calendar quarter still trips the trade-clustering critical."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = _clustered_trades("QQQ")
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=_metrics(),
+        config=_config(),
+        market_data=None,
+        execution_succeeded=True,
+    )
+
+    clustering_criticals = [
+        r for r in results if r.gate_name == "trade_clustering_realism" and r.severity == "critical"
+    ]
+    assert len(clustering_criticals) == 1
+    assert clustering_criticals[0].passed is False
+
+
+def test_run_realism_gates_cost_stress_critical_for_custom_code_spec():
+    """A custom-code spec whose 2.0x cost-stress Sharpe goes negative still
+    trips the cost-stress critical — same payload as
+    ``test_run_realism_gates_cost_stress_critical_when_2x_sharpe_negative``,
+    just with ``requires_custom_code=True``."""
+    orch = _orch()
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = [_trade("QQQ", i + 1) for i in range(5)]
+    bad_payload = [
+        {
+            "multiplier": 1.0,
+            "sharpe_ratio": 1.0,
+            "annualized_return_pct": 10.0,
+            "max_drawdown_pct": 5.0,
+            "trade_count": 50,
+        },
+        {
+            "multiplier": 2.0,
+            "sharpe_ratio": -0.4,
+            "annualized_return_pct": -2.0,
+            "max_drawdown_pct": 15.0,
+            "trade_count": 50,
+        },
+    ]
+    metrics = BacktestResult(
+        total_return_pct=18.0,
+        annualized_return_pct=10.0,
+        volatility_pct=12.0,
+        sharpe_ratio=0.8,
+        max_drawdown_pct=8.0,
+        win_rate_pct=58.0,
+        profit_factor=1.6,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+        cost_stress_results=bad_payload,
+    )
+
+    results = orch._run_realism_gates(
+        spec=spec,
+        trades=trades,
+        metrics=metrics,
+        config=_config(),
+        market_data=None,
+        execution_succeeded=True,
+    )
+
+    cost_stress_criticals = [
+        r for r in results if r.gate_name == "cost_stress_realism" and r.severity == "critical"
+    ]
+    assert len(cost_stress_criticals) == 1
+    assert cost_stress_criticals[0].passed is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: the old self-skip bug (#2575/#2601)
+#
+# Before #2599, ``RuleFiringRateGate`` unconditionally self-skipped at
+# ``info`` for any ``requires_custom_code=True`` spec, because its only
+# signal (the compiler's ``entry_reason``/``exit_reason`` annotation) is
+# absent for LLM-authored ``on_bar`` code. That meant a custom-code
+# strategy with a genuinely dead entry rule — the predicate never actually
+# satisfied — sailed through verification and could be published, with
+# nothing in the realism cycle able to catch it.
+# ---------------------------------------------------------------------------
+
+
+def test_verification_phase_vetoes_custom_code_strategy_with_dead_entry_rule_regression(
+    monkeypatch,
+):
+    """Regression case for the pre-#2599 self-skip bug: a custom-code
+    strategy whose only entry rule never actually fires (alignment
+    findings confirm zero satisfied ``entry[0]`` checks) is now vetoed by
+    the full ``_run_verification_phase`` pipeline instead of shipping
+    clean.
+
+    The contrast assertion at the end proves the bug was real and precise:
+    calling the gate directly the way pre-#2599 callers did (no
+    ``alignment_findings`` kwarg) still reproduces the old ``info``
+    self-skip on this exact spec/trade pair — the only thing that changed
+    is that the production ``_run_verification_phase`` path now always
+    threads the latest alignment report's findings through, closing the
+    gap for real runs.
+    """
+    orch = _orch()
+
+    monkeypatch.setattr(
+        orch, "_evaluate_walk_forward", lambda spec, md, cfg, trades, metrics: metrics
+    )
+    monkeypatch.setattr(
+        orch.acceptance_gate,
+        "check",
+        lambda metrics, config, n_trials: [
+            QualityGateResult(
+                gate_name="oos_deflated_sharpe",
+                passed=True,
+                severity="info",
+                phase="verification",
+                details="ok",
+            ),
+        ],
+    )
+
+    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    trades = [_trade("QQQ", i + 1) for i in range(20)]
+    metrics = _metrics()
+    config = _config()
+    market_data: dict = {"QQQ": []}
+    all_gate_results: List[QualityGateResult] = []
+
+    dead_rule_report = TradeAlignmentReport(
+        aligned=True,
+        alignment_findings=[
+            AlignmentFinding(
+                trade_num=1,
+                rule_id="entry[0]",
+                check_name="entry_signal",
+                passed=False,
+                severity="critical",
+                details="predicate never satisfied at the trade's actual signal bar",
+            )
+        ],
+    )
+
+    outcome = orch._run_verification_phase(
+        spec=spec,
+        trades=trades,
+        metrics=metrics,
+        market_data=market_data,
+        config=config,
+        execution_succeeded=True,
+        trades_aligned=True,
+        alignment_reports=[dead_rule_report],
+        all_gate_results=all_gate_results,
+        emit=lambda *_a, **_k: None,
+    )
+
+    # Fixed behavior: the dead entry rule is caught and vetoes publication.
+    assert outcome.is_publishable is False
+    assert outcome.publishability_skip_reason == "realism_failed"
+    reason = outcome.metrics.acceptance_reason or ""
+    assert "realism_failed:" in reason
+    rule_firing_criticals = [
+        g
+        for g in all_gate_results
+        if g.gate_name == "rule_firing_rate_realism" and g.severity == "critical"
+    ]
+    assert len(rule_firing_criticals) == 1
+    assert rule_firing_criticals[0].rule_id == "entry[0]"
+
+    # Contrast: the pre-#2599 call contract (no alignment_findings kwarg)
+    # on this exact spec/trade pair still reproduces the old self-skip —
+    # proving the fix is specifically about threading alignment_findings
+    # through, not a change to the dead-rule scenario itself.
+    legacy_call_results = RuleFiringRateGate().check(spec, trades)
+    assert len(legacy_call_results) == 1
+    assert legacy_call_results[0].passed is True
+    assert legacy_call_results[0].severity == "info"
+    assert "custom_code" in legacy_call_results[0].details.lower()
