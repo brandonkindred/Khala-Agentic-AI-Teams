@@ -1,11 +1,11 @@
 import { TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StrategyLabPaperTradingService } from './strategy-lab-paper-trading.service';
 import { StrategyLabRunService } from './strategy-lab-run.service';
 import { InvestmentApiService } from './investment-api.service';
 import { createRunServiceStub, type RunServiceStub } from '../testing/strategy-lab-run-service.stub';
-import type { StrategyLabRecord } from '../models';
+import type { PaperTradingSession, StrategyLabRecord } from '../models';
 
 describe('StrategyLabPaperTradingService', () => {
   let service: StrategyLabPaperTradingService;
@@ -55,6 +55,50 @@ describe('StrategyLabPaperTradingService', () => {
 
   it('starts with no in-flight paper trade', () => {
     expect(service.paperTradingLabRecordId()).toBeNull();
+  });
+
+  it('falls back to runService.paperTradingLabRecordId() when no local call is in flight', () => {
+    runService.paperTradingLabRecordId.set('rec-9');
+    expect(service.paperTradingLabRecordId()).toBe('rec-9');
+  });
+
+  it('lets two overlapping runPaperTrading calls cross-talk through the shared in-flight flag', () => {
+    // Documents the pre-existing limitation called out in the service's doc
+    // comment: startingPaperTrade is a single signal shared across records, so
+    // whichever call settles first clears it for both.
+    const recordB: StrategyLabRecord = { ...publishableRecord, lab_record_id: 'rec-2' };
+    const responseA$ = new Subject<{ session: PaperTradingSession }>();
+    const responseB$ = new Subject<{ session: PaperTradingSession }>();
+    apiSpy.runPaperTrading.mockReturnValueOnce(responseA$).mockReturnValueOnce(responseB$);
+
+    service.runPaperTrading(publishableRecord);
+    expect(service.paperTradingLabRecordId()).toBe('rec-1');
+
+    service.runPaperTrading(recordB);
+    // The second call's optimistic flag clobbers the first's in the shared signal.
+    expect(service.paperTradingLabRecordId()).toBe('rec-2');
+
+    // Settling A (not B, which is still pending) clears the *shared* flag.
+    responseA$.next({ session: { session_id: 'pt-a', status: 'running' } as never });
+    responseA$.complete();
+
+    expect(runService.trackPaperTradingSession).toHaveBeenCalledWith('rec-1', {
+      session_id: 'pt-a',
+      status: 'running',
+    });
+    // With the local flag cleared, the merged signal falls back to runService's
+    // last known value — rec-1 (from A's trackPaperTradingSession above) — even
+    // though B's POST is still outstanding. This is the documented cross-talk.
+    expect(service.paperTradingLabRecordId()).toBe('rec-1');
+
+    responseB$.next({ session: { session_id: 'pt-b', status: 'running' } as never });
+    responseB$.complete();
+
+    expect(runService.trackPaperTradingSession).toHaveBeenCalledWith('rec-2', {
+      session_id: 'pt-b',
+      status: 'running',
+    });
+    expect(service.paperTradingLabRecordId()).toBe('rec-2');
   });
 
   describe('runPaperTrading', () => {
