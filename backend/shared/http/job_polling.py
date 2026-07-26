@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Awaitable, Callable, Dict, FrozenSet, Optional
+from typing import Any, Awaitable, Callable, Dict, FrozenSet, Optional, Tuple
 
 import httpx
 
@@ -43,6 +43,7 @@ __all__ = [
     "DEFAULT_TERMINAL_STATUSES",
     "post_json",
     "get_json",
+    "get_json_with_status",
     "poll_until_terminal",
     "async_post_json",
     "async_get_json",
@@ -249,6 +250,51 @@ def get_json(
             raise
         logger.warning("%s failed: %s", log_context, e)
         return None
+
+
+def get_json_with_status(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    log_context: str = "request",
+) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """GET a resource without raising on a non-2xx status.
+
+    Shares :func:`get_json`'s transport-failure semantics but skips
+    ``raise_for_status``, so a caller that needs to branch on a specific
+    status code (e.g. 404 vs. 5xx) doesn't lose that information the way
+    ``get_json``'s swallow-to-None contract does.
+
+    Preconditions:
+        - ``url`` is a non-empty absolute URL.
+    Postconditions:
+        - On a transport-level failure (httpx error, or the pooled client
+          having been closed underneath the caller), logs a WARNING tagged
+          with ``log_context`` and returns ``(None, None)``.
+        - Otherwise returns ``(resp.status_code, body)`` where ``body`` is
+          the parsed JSON if the response has a valid JSON body, else None
+          -- regardless of status code. Never raises for these failure
+          modes (a precondition violation still raises AssertionError).
+        - Reuses the process-wide pooled client; never opens/closes a
+          client.
+    """
+    assert url, "url must be non-empty"
+    try:
+        client = get_pooled_client(timeout)
+        resp = client.get(url)
+    except httpx.HTTPError as e:
+        logger.warning("%s failed: %s", log_context, e)
+        return None, None
+    except RuntimeError as e:
+        if not _is_closed_client_error(e):
+            raise
+        logger.warning("%s failed: %s", log_context, e)
+        return None, None
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    return resp.status_code, body
 
 
 async def async_post_json(
