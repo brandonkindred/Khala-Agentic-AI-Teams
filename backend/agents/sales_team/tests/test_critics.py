@@ -331,6 +331,7 @@ class TestOutreachCriticAgent:
         assert report.status == "FAIL"
         assert report.approved is False
         assert report.notes is not None and "parseable JSON" in report.notes
+        assert len(llm.reasoning_calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +413,7 @@ class TestProposalCriticAgent:
 
         assert report.status == "FAIL"
         assert report.notes is not None and "parseable JSON" in report.notes
+        assert len(llm.reasoning_calls) == 1
 
     def test_handles_missing_dossier_and_qualification(
         self, sample_proposal: SalesProposal

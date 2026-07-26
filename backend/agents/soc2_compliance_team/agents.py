@@ -101,7 +101,7 @@ def _run_tsc_agent(
     focus_areas: str,
     context: RepoContext,
 ) -> TSCAuditResult:
-    """Generic TSC audit: one criterion, one LLM call, return TSCAuditResult."""
+    """Generic TSC audit: one criterion, two LLM calls (reasoning + formatting), return TSCAuditResult."""
     # Compute budgets from model context: reserve 8K tokens for prompt template + response
     ctx_tokens = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
     total_chars = int((ctx_tokens - 8000) * 3.5)
@@ -248,7 +248,9 @@ class ReportWriterAgent:
             - Returns ``(compliance_report, next_steps_document)`` with exactly
               one element non-None: the compliance report when any result is
               non-compliant or has a critical/high finding, otherwise the
-              next-steps document. Performs exactly one LLM call.
+              next-steps document. Performs exactly two LLM calls (a reasoning
+              prose pass followed by a JSON formatting pass) via whichever of
+              ``_produce_compliance_report``/``_produce_next_steps`` is chosen.
         """
         has_findings = any(
             not r.compliant

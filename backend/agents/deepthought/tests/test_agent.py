@@ -379,8 +379,8 @@ def test_original_query_threaded_to_children(root_spec, mock_llm):
     # Verify the original_query appears in the analysis reasoning-pass system
     # prompt (the root's analyse call runs synchronously before any children
     # are spawned, so it's the first .complete() call recorded).
-    first_call_kwargs = mock_llm.complete.call_args_list[0]
-    system_prompt = first_call_kwargs.kwargs.get("system_prompt", "")
+    first_complete_call = mock_llm.complete.call_args_list[0]
+    system_prompt = first_complete_call.kwargs.get("system_prompt", "")
     assert original_msg in system_prompt
 
 
@@ -409,8 +409,8 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
     # The user prompt should contain the conversation history. It's now the
     # reasoning-pass .complete() call that carries the user-facing prompt;
     # the .complete_json() formatting call only sees the reasoning prose.
-    first_call_args = mock_llm.complete.call_args_list[0]
-    user_prompt = first_call_args.args[0] if first_call_args.args else ""
+    first_complete_call = mock_llm.complete.call_args_list[0]
+    user_prompt = first_complete_call.args[0] if first_complete_call.args else ""
     assert "Mars" in user_prompt
 
 
