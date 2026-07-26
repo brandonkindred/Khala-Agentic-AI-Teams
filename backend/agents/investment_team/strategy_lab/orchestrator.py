@@ -168,7 +168,7 @@ def _design_max_llm_calls() -> int:
     return env_int("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", 120, floor=1)
 
 
-MAX_CODE_REFINEMENT_ROUNDS = 50
+MAX_CODE_REFINEMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS", 50, floor=1)
 # ``WINNING_THRESHOLD`` (the S&P-500 amortized benchmark, 8.0%) is imported
 # from ``..models`` and is the single deterministic verdict floor: a valid run
 # is WINNING iff ``annualized_return_pct >= WINNING_THRESHOLD``, on every path.
