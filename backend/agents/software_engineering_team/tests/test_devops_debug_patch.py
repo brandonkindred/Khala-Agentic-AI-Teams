@@ -262,6 +262,9 @@ class TestInfraPatchAgent:
             )
         )
         assert "main.tf" in result.patched_artifacts
+        assert result.patched_artifacts["main.tf"] == (
+            'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n'
+        )
         assert result.edits_applied == 1
 
     def test_returns_empty_when_not_fixable(self) -> None:
