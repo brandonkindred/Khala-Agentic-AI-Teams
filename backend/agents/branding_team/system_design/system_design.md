@@ -266,12 +266,15 @@ wraps `shared.postgres.get_conn` with `_fetch_one`/`_fetch_all`/`_execute`/
 Unit tests run against `tests/_fake_postgres.py`, an in-memory fake that
 matches the SQL emitted by each store by prefix, so the test suites stay
 independent without a live database. `real_postgres`-marked tests
-(`tests/test_store_real_postgres.py`) exercise `BrandingStore`'s and
-`BrandingConversationStore`'s SQL against a live Postgres instance in CI, so
-the fake can't silently drift from what the real database accepts for those
-two stores. `BrandingSessionStore`'s create/get/save queries are currently
-validated only against the fake — that table is truncated for isolation but
-its own queries aren't exercised live.
+(`tests/test_store_real_postgres.py`) exercise representative `BrandingStore`
+and `BrandingConversationStore` paths — `create_client`, `create_brand`,
+`update_brand`, `append_brand_version`, `attach_conversation`, `append_message`
+— against a live Postgres instance in the `test-branding` CI job, but not
+every method (e.g. `BrandingConversationStore.update_mission`/`update_output`
+run only against the fake), so this is representative coverage, not a
+guarantee against drift for every query. `BrandingSessionStore`'s create/get/
+save queries are currently validated only against the fake — that table is
+truncated for isolation but its own queries aren't exercised live.
 
 ### Postgres schema
 
@@ -284,7 +287,7 @@ tables, all sharing the `branding_` prefix to avoid collisions in the shared
 | `branding_clients` | Client rows | `id TEXT PK`, `data JSONB`, `created_at` |
 | `branding_brands` | Brand rows (indexed on `client_id`) | `id TEXT PK`, `client_id TEXT`, `data JSONB`, `created_at` |
 | `branding_sessions` | Session rows | `session_id TEXT PK`, `session_json JSONB`, `updated_at` |
-| `branding_conversations` | Conversation headers | `conversation_id TEXT PK`, `brand_id` (unique where not null), `mission_json JSONB`, `latest_output_json JSONB` |
+| `branding_conversations` | Conversation headers | `conversation_id TEXT PK`, `brand_id` (unique where not null), `mission_json JSONB`, `latest_output_json JSONB`, `created_at`/`updated_at TIMESTAMPTZ NOT NULL` |
 | `branding_conv_messages` | Conversation messages (indexed on `conversation_id`) | `id BIGSERIAL PK`, `conversation_id`, `role`, `content`, `timestamp` |
 
 Clients and brands are stored as JSON-serialized Pydantic models in the
@@ -294,9 +297,10 @@ reads the existing brand, increments `version`, appends a
 `BrandVersionSummary` to `history`, updates `latest_output`, and re-writes
 the row. Reads go through `store.py:125` (`list_clients`) and friends.
 
-The `_lifespan` hook in `api/main.py` calls
-`register_team_schemas(SCHEMA)` at startup, which is a no-op when
-`POSTGRES_HOST` is not set.
+`api/main.py` passes `SCHEMA` as `postgres_schema` to `create_team_app`
+(`shared/app/factory.py`), whose `_lifespan` hook calls
+`register_team_schemas` on it at startup — a no-op when `POSTGRES_HOST`
+is not set.
 
 ## LLM integration
 

@@ -223,8 +223,9 @@ flowchart LR
 - **Trigger:** The agency needs to organize many clients, each with one
   or more brands.
 - **Preconditions:** `POSTGRES_HOST` is configured and reachable, and the
-  branding schema is registered (`register_team_schemas(SCHEMA)`
-  in `api/main.py`'s lifespan) — `BrandingStore` calls
+  branding schema is registered (`create_team_app`'s lifespan in
+  `shared/app/factory.py` calls `register_team_schemas` on the schema
+  `api/main.py` passes it) — `BrandingStore` calls
   `shared.postgres.get_conn`, which raises `RuntimeError` when
   `POSTGRES_HOST` is unset.
 - **Main flow:**
