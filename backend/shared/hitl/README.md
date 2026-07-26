@@ -88,13 +88,29 @@ against `WorkflowStatus`, is **`PromotionStage`** (`models.py:103-107`: `REJECT`
 `human_review.approved` branch — `decide` walks five independent, ordered gates
 (separation-of-duties, risk veto, validation checklist, IPS live-trading permission,
 then `ips.human_approval_required_for_live and not human_live_approval`), any of which
-can short-circuit to `REJECT`/`REVISE`/`PAPER` before human approval is even checked;
-only the last gate reaching `LIVE` depends on approval. Each decision also carries a
+can short-circuit to `REJECT`/`REVISE`/`PAPER` before human approval is even checked. The
+last gate only *blocks* `LIVE` on missing approval when the IPS requires it
+(`ips.human_approval_required_for_live`); when that setting is `False`, `decide` reaches
+`LIVE` regardless of `human_live_approval` — reaching `LIVE` is conditionally, not
+unconditionally, approval-dependent. Each decision also carries a
 `gate_results: List[GateCheckResult]` trace and an `AuditContext` (`models.py:1124-1138`)
 that `WorkflowStatus` has no equivalent of. Given the different shape (five-gate
 checklist producing an audited decision, vs. a single boolean gate producing a display
 tag) and the complete non-overlap in member names, `PromotionStage` was evaluated and
 kept out of this comparison rather than silently omitted.
+
+`investment_team/spec_models.py:33-48` also defines a deprecated V1 mirror —
+`PromotionStageV1` (`DESIGN`/`BACKTEST`/`WALK_FORWARD`/`PAPER`/`LIVE_CANDIDATE`/`LIVE`)
+and `PromotionDecisionType` (…`APPROVE_LIVE`…), carried by `PromotionDecisionV1`
+(`spec_models.py:410-422`, `human_approval_required: bool = True`). The module docstring
+marks it "retained for backward compatibility only; new features should not add V1
+mirrors here," and it isn't wired into `PromotionGateAgent.decide` or any other runtime
+gate logic — it's re-exported (`__init__.py`) and documented as an agent's I/O contract
+in `agent_catalog.py`, and constructed directly in one test, but nothing in
+`investment_team` computes a `PromotionDecisionV1` from a live approval check the way
+`PromotionStage` or `WorkflowStatus` are computed. It's excluded from this comparison for
+the same reason it's excluded from new runtime work generally: it's a frozen legacy
+contract, not an active status representation.
 
 **Decision: keep independent (no shared enum).** Only the string `"needs_human_decision"`
 is genuinely common between branding and market research; each team's terminal state
@@ -102,9 +118,11 @@ names a different domain outcome (`ready_for_rollout` vs. `ready_for_execution`)
 market research carries an extra, currently-unused `DRAFT`. A shared enum would need
 either an awkward union of all per-team terminal values (defeating the point of an enum
 as a closed set) or a lossy shared subset still requiring a per-team extension — more
-complexity than the current two ~10-line enums. `investment_team`'s only
-approval-adjacent enum, `PromotionStage`, was evaluated above and excluded on shape
-(multi-gate audited checklist, not a boolean-derived tag) and naming, not overlooked.
+complexity than the current two ~10-line enums. `investment_team`'s approval-adjacent
+enums — runtime `PromotionStage` and the deprecated V1 `PromotionStageV1`/
+`PromotionDecisionType` — were evaluated above and excluded on shape (multi-gate
+audited checklists, not a boolean-derived tag), conditional rather than unconditional
+approval dependence, and (for the V1 pair) frozen legacy status, not overlooked.
 The one piece that *was* genuinely duplicated across teams — the
 `HumanReview` approve/reject gate — is already shared here; each team derives its own
 `WorkflowStatus` from `human_review.approved` at the orchestrator boundary, which is
