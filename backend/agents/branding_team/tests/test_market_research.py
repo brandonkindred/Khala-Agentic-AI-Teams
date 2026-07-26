@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import httpx
 import pytest
 
 from branding_team.adapters import market_research as mr
@@ -17,37 +16,14 @@ from branding_team.models import CompetitiveSnapshot
 from branding_team.tests.conftest import make_mission
 
 
-class _FakeResp:
-    def __init__(self, payload: dict, status_code: int = 200) -> None:
-        self._payload = payload
-        self.status_code = status_code
+def _patch_poll(monkeypatch, statuses: list[dict]) -> None:
+    """Patch async_get_json to return queued status dicts, one per poll."""
+    queue = list(statuses)
 
-    def json(self) -> dict:
-        return self._payload
+    async def _fake_async_get_json(*_a: object, **_kw: object) -> Optional[dict]:
+        return queue.pop(0)
 
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            raise httpx.HTTPError(f"status {self.status_code}")
-
-
-class _FakeAsyncClient:
-    """Fake httpx.AsyncClient: queued GET (status) responses for the poll loop."""
-
-    def __init__(self, statuses: list[_FakeResp]) -> None:
-        self._statuses = list(statuses)
-
-    async def __aenter__(self) -> "_FakeAsyncClient":
-        return self
-
-    async def __aexit__(self, *_exc: object) -> bool:
-        return False
-
-    async def get(self, url: str, **_kw: object) -> _FakeResp:
-        return self._statuses.pop(0)
-
-
-def _patch_poll(monkeypatch, statuses: list[_FakeResp]) -> None:
-    monkeypatch.setattr(mr.httpx, "AsyncClient", lambda: _FakeAsyncClient(statuses))
+    monkeypatch.setattr(mr, "async_get_json", _fake_async_get_json)
 
 
 def _patch_submit(monkeypatch, result: Optional[dict]) -> None:
@@ -125,7 +101,7 @@ def test_request_success_returns_snapshot(monkeypatch) -> None:
     _patch_submit(monkeypatch, {"job_id": "j1"})
     _patch_poll(
         monkeypatch,
-        statuses=[_FakeResp({"status": "completed", "result": {"mission_summary": "done"}})],
+        statuses=[{"status": "completed", "result": {"mission_summary": "done"}}],
     )
     snap = mr.request_market_research(
         make_mission(
@@ -158,9 +134,31 @@ def test_request_raises_on_terminal_failure(monkeypatch) -> None:
     _patch_submit(monkeypatch, {"job_id": "j2"})
     _patch_poll(
         monkeypatch,
-        statuses=[_FakeResp({"status": "failed", "error": "boom"})],
+        statuses=[{"status": "failed", "error": "boom"}],
     )
     with pytest.raises(RuntimeError, match="ended with status failed"):
+        mr.request_market_research(
+            make_mission(
+                company_name="Acme",
+                company_description="A company that builds developer tools",
+                target_audience="developers",
+                differentiators=["speed", "clarity"],
+            )
+        )
+
+
+def test_request_raises_on_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
+    monkeypatch.setenv("BRANDING_MR_TOTAL_TIMEOUT_S", "1")
+    monkeypatch.setenv("BRANDING_MR_POLL_INTERVAL_S", "0.1")
+    _patch_submit(monkeypatch, {"job_id": "j4"})
+
+    async def _fake_async_get_json(*_a: object, **_kw: object) -> dict:
+        return {"status": "running"}
+
+    monkeypatch.setattr(mr, "async_get_json", _fake_async_get_json)
+
+    with pytest.raises(RuntimeError, match="ended with status failed.*Timed out waiting for"):
         mr.request_market_research(
             make_mission(
                 company_name="Acme",
@@ -194,7 +192,7 @@ def test_request_offloads_when_loop_running(monkeypatch) -> None:
     _patch_submit(monkeypatch, {"job_id": "j3"})
     _patch_poll(
         monkeypatch,
-        statuses=[_FakeResp({"status": "completed", "result": {"mission_summary": "offloaded"}})],
+        statuses=[{"status": "completed", "result": {"mission_summary": "offloaded"}}],
     )
 
     async def _driver():

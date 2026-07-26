@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-import time
 from typing import Optional
-
-import httpx
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
 from branding_team.shared.coro_runner import run_coroutine
 from shared.env_config import env_float
-from shared.http.job_polling import async_post_json
-
-_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+from shared.http.job_polling import (
+    DEFAULT_TERMINAL_STATUSES,
+    async_get_json,
+    async_poll_until_terminal,
+    async_post_json,
+)
 
 
 def _poll_interval_s() -> float:
@@ -103,24 +102,17 @@ async def request_market_research_async(
     if not job_id:
         raise RuntimeError("Market research submit returned no job_id")
 
-    try:
-        async with httpx.AsyncClient() as client:
-            deadline = time.monotonic() + total_timeout
-            while True:
-                status = await client.get(
-                    f"{root}/market-research/status/{job_id}", timeout=request_timeout
-                )
-                status.raise_for_status()
-                data = status.json()
-                if data.get("status") in _TERMINAL_STATUSES:
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"Market research job {job_id} timed out after {total_timeout}s"
-                    )
-                await asyncio.sleep(poll_interval)
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as e:
-        raise RuntimeError(f"Market research request failed: {e}") from e
+    data = await async_poll_until_terminal(
+        lambda: async_get_json(
+            f"{root}/market-research/status/{job_id}",
+            timeout=request_timeout,
+            log_context=f"Market research status for {job_id}",
+        ),
+        terminal_statuses=DEFAULT_TERMINAL_STATUSES,
+        poll_interval=poll_interval,
+        total_timeout=total_timeout,
+        log_context=f"market research job {job_id}",
+    )
 
     if data.get("status") != "completed":
         raise RuntimeError(
