@@ -69,11 +69,15 @@ def _format_issues_for_batch(issues: List[Any]) -> str:
     lines: List[str] = []
     for idx, issue in enumerate(issues, 1):
         lines.append(f"### Issue {idx}")
-        lines.append(f"- **Source:** {issue.source or 'review'}")
-        lines.append(f"- **Severity:** {issue.severity or 'medium'}")
-        lines.append(f"- **File:** {issue.file_path or 'N/A'}")
-        lines.append(f"- **Description:** {issue.description or 'No description'}")
-        lines.append(f"- **Recommendation:** {issue.recommendation or 'Fix the issue.'}")
+        lines.append(f"- **Source:** {getattr(issue, 'source', None) or 'review'}")
+        lines.append(f"- **Severity:** {getattr(issue, 'severity', None) or 'medium'}")
+        lines.append(f"- **File:** {getattr(issue, 'file_path', None) or 'N/A'}")
+        lines.append(
+            f"- **Description:** {getattr(issue, 'description', None) or 'No description'}"
+        )
+        lines.append(
+            f"- **Recommendation:** {getattr(issue, 'recommendation', None) or 'Fix the issue.'}"
+        )
         lines.append("")
     return "\n".join(lines)
 
@@ -87,9 +91,10 @@ def _relevant_code_for_issue(issue: Any, current_files: Dict[str, str]) -> str:
         Returns the issue's file when known, else the first ≤10 files, else
         ``"(no code)"``. Pure.
     """
-    if issue.file_path and issue.file_path in current_files:
-        content = current_files[issue.file_path]
-        return f"--- {issue.file_path} ---\n{content}"
+    issue_file_path = getattr(issue, "file_path", None)
+    if issue_file_path and issue_file_path in current_files:
+        content = current_files[issue_file_path]
+        return f"--- {issue_file_path} ---\n{content}"
     # Fallback: include first files
     parts: List[str] = []
     for path, content in list(current_files.items())[:10]:
@@ -134,7 +139,9 @@ def run_batch_coding_fixes_impl(
     problem_solving_result_cls = models.ProblemSolvingResult
 
     microtask_id = microtask.id
-    actionable = [i for i in issues if i.severity in ("critical", "high", "medium")]
+    actionable = [
+        i for i in issues if getattr(i, "severity", None) in ("critical", "high", "medium")
+    ]
 
     if not actionable:
         logger.info("[%s] Batch fix for %s: no actionable issues.", task_id, phase_name)
@@ -233,7 +240,10 @@ def run_batch_coding_fixes_impl(
     if rejected_files:
         already_unresolved = set(id(issue) for issue in unresolved_issues)
         for issue in actionable:
-            if issue.file_path in rejected_files and id(issue) not in already_unresolved:
+            if (
+                getattr(issue, "file_path", None) in rejected_files
+                and id(issue) not in already_unresolved
+            ):
                 unresolved_issues.append(issue)
                 already_unresolved.add(id(issue))
 
@@ -312,7 +322,7 @@ def _fix_issues_one_at_a_time_impl(
     phase_ctx = f"{phase_name} " if phase_name else ""
 
     for issue_idx, issue in enumerate(actionable):
-        desc_short = (issue.description or "")[:80]
+        desc_short = (getattr(issue, "description", None) or "")[:80]
         if detail_callback:
             detail_callback(
                 f"Fixing {phase_ctx}issue {issue_idx + 1}/{len(actionable)}: {desc_short[:50]}..."
@@ -333,11 +343,11 @@ def _fix_issues_one_at_a_time_impl(
         for attempt in range(1, MAX_ITERATIONS_PER_ISSUE + 1):
             relevant_code = _relevant_code_for_issue(issue, working)
             fmt: Dict[str, Any] = dict(
-                source=issue.source or default_source,
-                severity=issue.severity or "medium",
-                description=issue.description or "",
-                file_path=issue.file_path or "N/A",
-                recommendation=issue.recommendation or default_recommendation,
+                source=getattr(issue, "source", None) or default_source,
+                severity=getattr(issue, "severity", None) or "medium",
+                description=getattr(issue, "description", None) or "",
+                file_path=getattr(issue, "file_path", None) or "N/A",
+                recommendation=getattr(issue, "recommendation", None) or default_recommendation,
                 current_code=relevant_code,
             )
             if has_language_conventions:
@@ -391,7 +401,7 @@ def _fix_issues_one_at_a_time_impl(
             # survive the completeness check, and don't record a fix entry for
             # an attempt that didn't actually land the issue's file; retry
             # instead.
-            if issue.file_path in rejected_files:
+            if getattr(issue, "file_path", None) in rejected_files:
                 continue
 
             entry: Dict[str, Any] = {}
@@ -509,7 +519,11 @@ def run_problem_solving_impl(
     phase_input_cls = models.ToolAgentPhaseInput
 
     task_id = task.id
-    actionable = [i for i in review_result.issues if i.severity in ("critical", "high", "medium")]
+    actionable = [
+        i
+        for i in review_result.issues
+        if getattr(i, "severity", None) in ("critical", "high", "medium")
+    ]
     if not actionable:
         logger.info("[%s] Problem-solving: no actionable issues.", task_id)
         return problem_solving_result_cls(
@@ -600,7 +614,11 @@ def run_problem_solving_for_microtask_impl(
     phase_input_cls = models.ToolAgentPhaseInput
 
     microtask_id = microtask.id
-    actionable = [i for i in review_result.issues if i.severity in ("critical", "high", "medium")]
+    actionable = [
+        i
+        for i in review_result.issues
+        if getattr(i, "severity", None) in ("critical", "high", "medium")
+    ]
     if not actionable:
         return problem_solving_result_cls(
             resolved=True, files=current_files, summary="No actionable issues."
