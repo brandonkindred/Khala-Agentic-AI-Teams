@@ -16,7 +16,6 @@ from ...models import ReviewIssue
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
-MAX_ACCESSIBILITY_CODE_CHARS = 12_000
 MAX_RELEVANT_CODE_CHARS = 8_000
 
 ACCESSIBILITY_REVIEW_PROMPT = (
@@ -89,7 +88,6 @@ class AccessibilityToolAgent(BaseReviewToolAgent):
     problem_solve_sources = ("accessibility", "tool_accessibility")
     review_prompt = ACCESSIBILITY_REVIEW_PROMPT
     problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-    max_code_chars = MAX_ACCESSIBILITY_CODE_CHARS
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "json"
     uses_json_model = True

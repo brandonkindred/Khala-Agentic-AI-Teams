@@ -22,8 +22,7 @@ from __future__ import annotations
 
 from software_engineering_team.shared.tool_agent_base import BaseReviewToolAgent
 
-# Per-issue code-context budgets shared by both teams' Testing/QA agents.
-MAX_QA_CODE_CHARS = 12_000
+# Per-issue code-context budget shared by both teams' Testing/QA agents.
 MAX_RELEVANT_CODE_CHARS = 8_000
 
 
@@ -52,7 +51,6 @@ class SharedTestingQAToolAgent(BaseReviewToolAgent):
     empty_label = "QA issues"
     issue_source = "qa"
     problem_solve_sources = ("qa", "testing_qa", "tool_testing_qa")
-    max_code_chars = MAX_QA_CODE_CHARS
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "text"
     default_recommendation = "Fix the issue."

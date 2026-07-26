@@ -8,11 +8,13 @@ pipeline entry points (those are pragma'd separately).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from shared.observability import bind_trace_id
 from software_engineering_team import orchestrator
 
 
@@ -102,6 +104,18 @@ def test_check_cancellation_raises_when_cancel_requested(monkeypatch):
     monkeypatch.setattr(orchestrator, "is_cancel_requested", lambda jid: True)
     with pytest.raises(orchestrator.CancellationError):
         orchestrator._check_cancellation("job-x")
+
+
+def test_check_cancellation_logs_bound_trace_id(monkeypatch, caplog):
+    """The 'Cancellation detected' log carries the job's bound trace id via extra=,
+    not plain string interpolation, so it can be correlated across phases."""
+    monkeypatch.setattr(orchestrator, "is_cancel_requested", lambda jid: True)
+    caplog.set_level(logging.INFO)
+    with bind_trace_id("cancel-trace-id"), pytest.raises(orchestrator.CancellationError):
+        orchestrator._check_cancellation("job-x")
+    matching = [r for r in caplog.records if "Cancellation detected" in r.message]
+    assert matching, "expected the cancellation log to be emitted"
+    assert matching[-1].trace_id == "cancel-trace-id"
 
 
 def test_check_cancellation_silent_when_not_requested(monkeypatch):
