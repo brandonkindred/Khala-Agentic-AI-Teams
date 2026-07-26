@@ -45,7 +45,10 @@ from investment_team.strategy_lab.spec_dsl import EntryRule, Predicate, SignalEx
 
 
 def _spec(
-    target_symbols: Optional[List[str]] = None, *, requires_custom_code: bool = False
+    target_symbols: Optional[List[str]] = None,
+    *,
+    requires_custom_code: bool = False,
+    entry_rules: Optional[List[EntryRule]] = None,
 ) -> StrategySpec:
     return StrategySpec(
         strategy_id="realism-test",
@@ -54,7 +57,8 @@ def _spec(
         hypothesis="hyp",
         signal_definition="sig",
         timeframe="1d",
-        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
+        entry_rules=entry_rules
+        or [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0))],
         exit_rules=[SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=0))],
         risk_limits={},
         speculative=False,
@@ -898,10 +902,28 @@ def test_verification_phase_vetoes_custom_code_strategy_with_dead_entry_rule_reg
     monkeypatch,
 ):
     """Regression case for the pre-#2599 self-skip bug: a custom-code
-    strategy whose only entry rule never actually fires (alignment
-    findings confirm zero satisfied ``entry[0]`` checks) is now vetoed by
-    the full ``_run_verification_phase`` pipeline instead of shipping
-    clean.
+    strategy with a genuinely dead second entry rule (never once the basis
+    for a satisfied ``entry_signal`` alignment finding, across the whole
+    ledger) is now vetoed by the full ``_run_verification_phase`` pipeline
+    via ``rule_firing_rate_realism``, instead of shipping clean.
+
+    The spec deliberately declares TWO entry rules and every real trade's
+    alignment finding credits only ``entry[1]`` (``passed=True,
+    severity="info"``, the exact shape
+    :meth:`DeterministicAlignmentChecker._check_entry_signal` emits for a
+    satisfied entry) — never ``entry[0]``. This is the crucial difference
+    from a single-dead-rule scenario: ``DeterministicAlignmentChecker``
+    only requires that a trade's entry be justified by *some* matching
+    rule, not that *every declared rule* fire at least once, so
+    ``aligned = all(f.passed for f in findings if f.severity ==
+    "critical")`` is legitimately ``True`` here — there is no failing
+    critical finding to make ``trades_aligned=False`` and trip the
+    ``alignment_unresolved`` veto first. ``entry[0]`` being dead is
+    invisible to alignment; catching it is specifically
+    ``RuleFiringRateGate``'s job, and only its job, once
+    ``alignment_findings`` reaches it (a single-rule "the alignment finding
+    itself failed" scenario would already be caught by the alignment
+    veto regardless of this fix, and can't demonstrate the regression).
 
     The contrast assertion at the end proves the bug was real and precise:
     calling the gate directly the way pre-#2599 callers did (no
@@ -930,26 +952,43 @@ def test_verification_phase_vetoes_custom_code_strategy_with_dead_entry_rule_reg
         ],
     )
 
-    spec = _spec(target_symbols=["QQQ"], requires_custom_code=True)
+    spec = _spec(
+        target_symbols=["QQQ"],
+        requires_custom_code=True,
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+            EntryRule(side="long", when=Predicate(lhs="bar.volume", op=">", rhs=0)),
+        ],
+    )
     trades = [_trade("QQQ", i + 1) for i in range(20)]
     metrics = _metrics()
     config = _config()
     market_data: dict = {"QQQ": []}
     all_gate_results: List[QualityGateResult] = []
 
-    dead_rule_report = TradeAlignmentReport(
-        aligned=True,
-        alignment_findings=[
-            AlignmentFinding(
-                trade_num=1,
-                rule_id="entry[0]",
-                check_name="entry_signal",
-                passed=False,
-                severity="critical",
-                details="predicate never satisfied at the trade's actual signal bar",
-            )
-        ],
-    )
+    # Every trade's entry was satisfied by entry[1] only — the same shape
+    # DeterministicAlignmentChecker emits for a satisfied entry_signal
+    # check (passed=True, severity="info"). entry[0] never appears in any
+    # finding: it was never the basis for a real trade, but it also never
+    # produced a hard-miss critical either (no trade's evaluation cited
+    # it), so it is invisible to the alignment critical roll-up.
+    findings = [
+        AlignmentFinding(
+            trade_num=t.trade_num,
+            rule_id="entry[1]",
+            check_name="entry_signal",
+            passed=True,
+            severity="info",
+            details=f"Trade #{t.trade_num} entry satisfied by entry[1].",
+        )
+        for t in trades
+    ]
+    # ``aligned`` mirrors DeterministicAlignmentChecker.check's own
+    # roll-up: True because no severity="critical" finding failed (there
+    # are none at all here) — computed the same way the real checker
+    # would, not asserted independently of the findings that back it.
+    assert all(f.severity != "critical" for f in findings)
+    dead_rule_report = TradeAlignmentReport(aligned=True, alignment_findings=findings)
 
     outcome = orch._run_verification_phase(
         spec=spec,
@@ -964,11 +1003,13 @@ def test_verification_phase_vetoes_custom_code_strategy_with_dead_entry_rule_reg
         emit=lambda *_a, **_k: None,
     )
 
-    # Fixed behavior: the dead entry rule is caught and vetoes publication.
+    # Fixed behavior: the dead entry rule is caught and vetoes publication
+    # — realism, not alignment, is what catches it here.
     assert outcome.is_publishable is False
     assert outcome.publishability_skip_reason == "realism_failed"
     reason = outcome.metrics.acceptance_reason or ""
     assert "realism_failed:" in reason
+    assert "alignment_unresolved:" not in reason
     rule_firing_criticals = [
         g
         for g in all_gate_results
