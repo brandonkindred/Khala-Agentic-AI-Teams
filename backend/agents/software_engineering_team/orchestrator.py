@@ -28,7 +28,7 @@ from llm_service import (
     get_client,
     llm_attribution,
 )
-from shared.observability import bind_trace_id, new_trace_id
+from shared.observability import bind_trace_id, current_trace_id, new_trace_id
 from shared.repo_context.repo_utils import (
     read_repo_code,
     truncate_for_context,
@@ -259,7 +259,9 @@ class CancellationError(Exception):
 def _check_cancellation(job_id: str) -> None:
     """Check if cancellation has been requested and raise CancellationError if so."""
     if is_cancel_requested(job_id):
-        logger.info("Cancellation detected for job %s", job_id)
+        logger.info(
+            "Cancellation detected for job %s", job_id, extra={"trace_id": current_trace_id()}
+        )
         raise CancellationError(f"Job {job_id} was cancelled")
 
 
@@ -312,7 +314,11 @@ def _wait_for_user_answers(
         if job_data and job_data.get("status") in (JOB_STATUS_FAILED, JOB_STATUS_COMPLETED):
             return False
         time.sleep(ANSWER_WAIT_POLL_INTERVAL)
-    logger.warning("Timed out waiting for user answers on job %s", job_id)
+    logger.warning(
+        "Timed out waiting for user answers on job %s",
+        job_id,
+        extra={"trace_id": current_trace_id()},
+    )
     update_job(job_id, status=JOB_STATUS_FAILED, error="Timed out waiting for user answers")
     return False
 
@@ -341,7 +347,10 @@ def _run_se_decision_gate(
     if slack_notify_open_questions:
         slack_notify_open_questions(job_id, structured, source="run-team")
     logger.info(
-        "Job %s waiting for %d clarification answer(s) from the user", job_id, len(structured)
+        "Job %s waiting for %d clarification answer(s) from the user",
+        job_id,
+        len(structured),
+        extra={"trace_id": current_trace_id()},
     )
     if not _wait_for_user_answers(job_id):
         return [], False
@@ -814,7 +823,12 @@ def _emit_coding_team_metrics(job_id: str) -> None:
         ):
             se_events.record_event(se_events.MERGE_TO_MAIN, job_id=job_id, phase="integration")
     except Exception:
-        logger.debug("failed to emit coding-team DORA metrics for %s", job_id, exc_info=True)
+        logger.debug(
+            "failed to emit coding-team DORA metrics for %s",
+            job_id,
+            exc_info=True,
+            extra={"trace_id": current_trace_id()},
+        )
     finally:
         cost_tracker.flush(job_id)
 
@@ -937,7 +951,7 @@ def _run_orchestrator_body(
 
         # Create plan folder after spec is ingested successfully (all planning artifacts go here)
         plan_dir = ensure_plan_dir(path)
-        logger.info("Plan folder ensured at %s", plan_dir)
+        logger.info("Plan folder ensured at %s", plan_dir, extra={"trace_id": current_trace_id()})
 
         # ── Step 1: Product Requirements Analysis Agent (skipped on the sprint path) ──
         _pra_job_updater = _make_pra_job_updater(job_id)
@@ -963,7 +977,10 @@ def _run_orchestrator_body(
             message="Starting planning workflow...",
             status_text="Starting planning workflow",
         )
-        logger.info("Next step -> Running Planning team to generate handoff and context")
+        logger.info(
+            "Next step -> Running Planning team to generate handoff and context",
+            extra={"trace_id": current_trace_id()},
+        )
 
         from planning_team.orchestrator import run_workflow as run_planning_workflow
         from software_engineering_team.planning_adapter import (
@@ -990,7 +1007,7 @@ def _run_orchestrator_body(
                 planning_result.get("failure_reason")
                 or "Planning workflow did not complete successfully."
             )
-            logger.error("Planning failed: %s", err)
+            logger.error("Planning failed: %s", err, extra={"trace_id": current_trace_id()})
             return _fail_job(job_id, err)
 
         planning_audit.record_se_planning_run(job_id, planning_result)
@@ -1000,7 +1017,7 @@ def _run_orchestrator_body(
                 planning_result, spec_title=requirements.title, repo_path=str(path)
             )
         except ValueError as e:
-            logger.error("Planning adapter failed: %s", e)
+            logger.error("Planning adapter failed: %s", e, extra={"trace_id": current_trace_id()})
             return _fail_job(job_id, str(e))
 
         adapter_result.shared_planning_doc_path = str(
@@ -1030,7 +1047,11 @@ def _run_orchestrator_body(
         # stop before execution per the documented contract. The Temporal path
         # honors this independently; the thread path must too.
         if planning_only:
-            logger.info("Planning-only run: stopping before execution (job %s)", job_id)
+            logger.info(
+                "Planning-only run: stopping before execution (job %s)",
+                job_id,
+                extra={"trace_id": current_trace_id()},
+            )
             update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
             return
 
@@ -1048,12 +1069,16 @@ def _run_orchestrator_body(
     except (
         CancellationError
     ):  # pragma: no cover  # integration-only: paired with integration-only try block
-        logger.info("Orchestrator stopped due to job cancellation: %s", job_id)
+        logger.info(
+            "Orchestrator stopped due to job cancellation: %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         _mark_cancelled(job_id)
     except (
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
-        logger.exception("Orchestrator failed")
+        logger.exception("Orchestrator failed", extra={"trace_id": current_trace_id()})
         _fail_job(job_id, str(e))
 
 
@@ -1244,7 +1269,12 @@ def _run_failed_tasks_body(job_id: str) -> None:
         raise ValueError(f"Job {job_id} has no task graph snapshot to retry")
 
     path = Path(repo_path).resolve()
-    logger.info("=== Retrying failed tasks for job %s (repo %s) ===", job_id, path)
+    logger.info(
+        "=== Retrying failed tasks for job %s (repo %s) ===",
+        job_id,
+        path,
+        extra={"trace_id": current_trace_id()},
+    )
 
     from software_engineering_team.models import CodingTeamPlanInput
 
@@ -1270,8 +1300,12 @@ def _run_failed_tasks_body(job_id: str) -> None:
     try:
         _run_coding_and_finalize(job_id, path, plan_input, retry_failed=True)
     except CancellationError:
-        logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)
+        logger.info(
+            "Retry orchestrator stopped due to job cancellation: %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         _mark_cancelled(job_id)
     except Exception as e:
-        logger.exception("Retry orchestrator failed")
+        logger.exception("Retry orchestrator failed", extra={"trace_id": current_trace_id()})
         _fail_job(job_id, str(e))

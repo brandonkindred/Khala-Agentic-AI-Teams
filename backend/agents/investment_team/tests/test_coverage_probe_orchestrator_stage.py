@@ -248,8 +248,9 @@ def test_collect_attribute_call_sites_helper_isolates_matching_calls() -> None:
 
 def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
     """Every ``anomaly_detector.check(...)`` call across the orchestrator
-    and the zero-trade repair module must forward ``coverage_report=`` so
-    the persisted gate result carries the static probe's verdict.
+    (and its ``VerificationMixin`` cluster) and the zero-trade repair
+    module must forward ``coverage_report=`` so the persisted gate result
+    carries the static probe's verdict.
 
     Locking this at source level catches the alignment-loop and walk-
     forward-fallback paths that are not directly exercised by the
@@ -257,25 +258,29 @@ def test_every_anomaly_detector_check_call_forwards_coverage_report() -> None:
     loop and alignment loop now share a single physical call site inside
     ``_check_anomalies_cached`` (the signature-guarded wrapper both route
     through, mirroring the reachability-probe guard — see
-    ``test_strategy_lab_anomaly_cache.py``); walk-forward fallback stays
-    direct on the orchestrator (``self.anomaly_detector.check``); the
-    zero-trade-repair recheck lives in :mod:`zero_trade_repair`
-    (``orch.anomaly_detector.check``).
+    ``test_strategy_lab_anomaly_cache.py``); walk-forward fallback lives in
+    ``VerificationMixin._resolve_publication_decision``
+    (``self.anomaly_detector.check``, extracted into
+    :mod:`orchestrator_verification`); the zero-trade-repair recheck lives
+    in :mod:`zero_trade_repair` (``orch.anomaly_detector.check``).
     """
+    from investment_team.strategy_lab import orchestrator_verification as orch_verification_mod
     from investment_team.strategy_lab import zero_trade_repair as zt_repair_mod
 
-    orch_sites = _collect_attribute_call_sites(
-        inspect.getsource(orch_mod),
-        owner_attr="anomaly_detector",
-        method_attr="check",
-    )
-    zt_sites = _collect_attribute_call_sites(
-        inspect.getsource(zt_repair_mod),
-        owner_attr="anomaly_detector",
-        method_attr="check",
-        root_names=frozenset({"orch"}),
-    )
-    sites = orch_sites + zt_sites
+    sites: list[dict[str, Any]] = []
+    for module, root_names in (
+        (orch_mod, frozenset({"self"})),
+        (orch_verification_mod, frozenset({"self"})),
+        (zt_repair_mod, frozenset({"orch"})),
+    ):
+        sites.extend(
+            _collect_attribute_call_sites(
+                inspect.getsource(module),
+                owner_attr="anomaly_detector",
+                method_attr="check",
+                root_names=root_names,
+            )
+        )
     assert len(sites) == 3, (
         "expected exactly 3 anomaly_detector.check sites (main loop + "
         "alignment loop sharing _check_anomalies_cached's call site, "

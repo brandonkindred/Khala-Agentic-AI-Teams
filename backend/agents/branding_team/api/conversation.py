@@ -143,8 +143,10 @@ def _create_branding_conversation_impl(
         if not _brand_exists(brand_id):
             raise HTTPException(status_code=404, detail="Brand not found")
 
-    # Conversations are created unattached; auto-create-brand logic in
-    # send_message will attach them once the mission has enough info.
+    # Conversations are created unattached. If an initial message is provided
+    # and the mission ends up with enough info, the auto-create-brand step
+    # below attaches this conversation to a new brand before the response is
+    # returned; otherwise, send_message will handle auto-creation on a later turn.
     conversation_id = conversation_store.create(brand_id=brand_id)
     initial_message = (req.initial_message or "").strip()
     suggested_questions: List[str] = []

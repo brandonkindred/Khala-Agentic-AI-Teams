@@ -18,8 +18,11 @@ from agents.blogging.shared.content_profile import (
     build_planning_length_context,
     series_context_block,
 )
+from agents.blogging.shared.errors import PlanningError
 from agents.blogging.shared.models import BlogPhase
 from temporalio.exceptions import CancelledError
+
+from llm_service.interface import LLMRateLimitError, LLMTemporaryError
 
 from ._common import (
     _extract_plan_keywords,
@@ -329,6 +332,8 @@ def run_planning_stage(
                     )
                     plan = refined_result.content_plan
                     planning_phase_result = refined_result
+                except (LLMRateLimitError, LLMTemporaryError, PlanningError):
+                    raise
                 except Exception as e:
                     logger.warning("Re-planning with feedback failed: %s; keeping current plan", e)
 
@@ -357,6 +362,8 @@ def run_planning_stage(
                 )
 
         except CancelledError:
+            raise
+        except (LLMRateLimitError, LLMTemporaryError, PlanningError):
             raise
         except Exception as e:
             logger.warning("Outline approval phase error (skipping): %s", e)

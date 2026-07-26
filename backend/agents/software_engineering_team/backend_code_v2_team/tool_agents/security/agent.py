@@ -8,7 +8,6 @@ from ...output_templates import parse_problem_solving_single_issue_template, par
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, SECURITY_TOOL_AGENT_REVIEW_PROMPT
 from ..base import BackendReviewToolAgent
 
-MAX_SECURITY_CODE_CHARS = 12_000
 MAX_RELEVANT_CODE_CHARS = 8_000
 
 
@@ -21,7 +20,6 @@ class SecurityToolAgent(BackendReviewToolAgent):
     problem_solve_sources = ("security", "tool_security")
     review_prompt = SECURITY_TOOL_AGENT_REVIEW_PROMPT
     problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-    max_code_chars = MAX_SECURITY_CODE_CHARS
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "text"
     default_recommendation = "Fix the security issue."

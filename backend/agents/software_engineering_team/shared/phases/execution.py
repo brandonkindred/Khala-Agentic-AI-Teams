@@ -25,6 +25,8 @@ from software_engineering_team.shared.repo_writer import (
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
+from software_engineering_team.shared.v2_models import BaseExecutionResult
+from software_engineering_team.shared.v2_review import _review_steps_run_sequentially
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +258,7 @@ def run_execution_impl(
     only_microtask_ids: Optional[List[str]],
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
-) -> Any:
+) -> BaseExecutionResult[Any]:
     """Execute microtasks in the planner's stated order, best-effort on dependencies.
 
     If ``only_microtask_ids`` is set, only those microtasks are run (e.g. fix
@@ -435,6 +437,15 @@ def _terminal_failing_outcome(cr: GateOutcome, qa: GateOutcome, sec: GateOutcome
         if not outcome.passed:
             return outcome
     return GateOutcome(passed=False, summary="Max cycles exceeded")
+
+
+# Reused (not duplicated) from ``shared.v2_review``, which already exports it
+# in ``__all__`` for exactly this cross-module use — both ``backend_code_v2_team``'s
+# and ``frontend_code_v2_team``'s ``phases/review.py`` already import it the same
+# way. ``DummyLLMClient`` doubles use a shared non-thread-safe scripted response
+# index, so they are not safe under concurrent fan-out; this same check gates
+# ``shared.v2_review``'s own code-review/QA/security ``parallel_map`` fan-out.
+_qa_security_run_sequentially = _review_steps_run_sequentially
 
 
 def _record_terminal_gate_failure(gate: str, outcome: Any, task_id: str) -> None:
@@ -674,6 +685,11 @@ class GatedExecutionConfig:
     run_documentation_self_review: Callable[..., Any]
     # ``mt.status`` set at each gate's entry (backend: distinct per phase;
     # frontend: ``IN_REVIEW`` for all three — a no-op re-assign after code review).
+    # When ``parallelize_qa_security`` is in effect, QA and Security run at once,
+    # so there is no per-gate entry point for Security to set ``status_security``
+    # at — ``mt.status`` is set to ``status_qa`` once for the whole combined
+    # phase and intentionally never reaches ``status_security`` (see
+    # ``_run_review_cycles``'s concurrent branch).
     status_code_review: Any
     status_qa: Any
     status_security: Any
@@ -688,6 +704,12 @@ class GatedExecutionConfig:
     # Verb in the QA/security "…%s %d issues" INFO line (backend "failed with";
     # frontend "found").
     gate_issue_log_verb: str
+    # When True, QA and Security run concurrently via parallel_map against the
+    # same post-Code-Review snapshot (backend only — see
+    # docs/GATE_DEPENDENCY_GRAPH.md). Defaults False (today's fully sequential
+    # QA -> Security behavior), so the frontend config is unaffected until its
+    # tool-agent fan-out is scoped per gate the way the backend's already is.
+    parallelize_qa_security: bool = False
 
 
 def _execute_coding_phase(
@@ -809,11 +831,16 @@ def _run_review_cycles(
     total: int,
     detail_cb: Callable[[str, int, str], None],
 ) -> Tuple[bool, Dict[str, str], int]:
-    """Run the sequential code review / QA / security gate cycles (Phases 2-4).
+    """Run the code review / QA / security gate cycles (Phases 2-4).
 
     Flow per outer cycle: Code Review (with in-place batch-fix retries up to
     ``code_review_retry_cap``) → QA Testing → Security Testing; a failing QA or
     security gate is batch-fixed and restarts the outer cycle from Code Review.
+    When ``gate_config.parallelize_qa_security`` is True and ``llm`` doesn't
+    require sequencing (see ``_qa_security_run_sequentially``), QA and Security
+    instead run concurrently via ``parallel_map`` against the same
+    post-Code-Review snapshot, and a failure from either is batch-fixed together
+    in a single restart from Code Review (see docs/GATE_DEPENDENCY_GRAPH.md).
     Split out of :func:`run_gated_execution_impl`, which supplies the coded
     ``microtask_files`` from its own Phase 1 and runs Phase 5 (documentation)
     afterward using this function's return value.
@@ -1017,43 +1044,20 @@ def _run_review_cycles(
         if phase_failed:
             break
 
-        # ── QA Testing Phase ──────────────────────────────────────────────
-        mt.status = gate_config.status_qa
-        logger.info(
-            "[%s] Microtask %s: Cycle %d - Running QA testing phase",
-            task_id,
-            mt.id,
-            total_cycles,
-        )
-
-        if progress_callback:
-            progress_callback(
-                current_idx,
-                len(completed_ids),
-                total,
-                mt.title or mt.id,
-                "qa_testing",
-                f"QA testing (cycle {total_cycles})...",
-            )
-
-        qa_outcome = gate_config.run_qa_gate(
-            llm=llm,
-            task=task,
-            microtask=mt,
-            repo_path=repo_path,
-            files=microtask_files,
-            deps=deps,
-            detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
-            cache=agent_review_cache,
-        )
-
-        if not qa_outcome.passed:
+        # ── QA + Security Testing Phase ────────────────────────────────────
+        if gate_config.parallelize_qa_security and not _qa_security_run_sequentially(llm):
+            # Concurrent path (backend only): QA and Security are independent
+            # analysis calls over the same immutable post-Code-Review snapshot
+            # (see docs/GATE_DEPENDENCY_GRAPH.md), so they run at once via
+            # parallel_map and their issues are collected and batch-fixed
+            # together in a single restart-from-Code-Review, rather than
+            # fixing QA and Security one gate at a time.
+            mt.status = gate_config.status_qa
             logger.info(
-                "[%s] Microtask %s: QA testing %s %d issues. Batch fixing and restarting from code review.",
+                "[%s] Microtask %s: Cycle %d - Running QA + security testing phases concurrently",
                 task_id,
                 mt.id,
-                gate_config.gate_issue_log_verb,
-                len(qa_outcome.issues),
+                total_cycles,
             )
 
             if progress_callback:
@@ -1063,80 +1067,209 @@ def _run_review_cycles(
                     total,
                     mt.title or mt.id,
                     "qa_testing",
-                    f"Batch fixing {len(qa_outcome.issues)} QA issues...",
+                    f"QA testing (cycle {total_cycles})...",
+                )
+                progress_callback(
+                    current_idx,
+                    len(completed_ids),
+                    total,
+                    mt.title or mt.id,
+                    "security_testing",
+                    f"Security testing (cycle {total_cycles})...",
                 )
 
-            ps_result = gate_config.run_batch_coding_fixes(
-                llm=llm,
-                microtask=mt,
-                issues=_dedup_issues(list(qa_outcome.issues), seen_issues),
-                current_files=microtask_files,
-                language=planning_result.language,
-                repo_path=str(repo_path),
-                task_id=task_id,
-                phase_name="qa",
-                detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+            from shared.concurrency import parallel_map
+
+            qa_outcome, sec_outcome = parallel_map(
+                [
+                    lambda: gate_config.run_qa_gate(
+                        llm=llm,
+                        task=task,
+                        microtask=mt,
+                        repo_path=repo_path,
+                        files=microtask_files,
+                        deps=deps,
+                        detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                        cache=agent_review_cache,
+                    ),
+                    lambda: gate_config.run_security_gate(
+                        llm=llm,
+                        task=task,
+                        microtask=mt,
+                        repo_path=repo_path,
+                        files=microtask_files,
+                        deps=deps,
+                        detail_callback=lambda d: detail_cb(d, current_idx, "security_testing"),
+                        cache=agent_review_cache,
+                    ),
+                ],
+                lambda fn: fn(),
+                max_workers=2,
+                skip_none=False,
+                # Both callables write into the shared ``agent_review_cache`` and
+                # report progress via ``detail_cb`` — never leave one straggling
+                # in the background after the other raises (see
+                # ``run_qa_gate``/``run_security_gate``'s "never raises"
+                # contract this relies on being upheld).
+                wait_for_stragglers=True,
             )
 
-            microtask_files = ps_result.files
-            # Snapshot prior values for any keys the fix introduced, before the
-            # write, so a later rollback restores them (or removes newly-created ones).
-            _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-            if not write_microtask_output_or_fail(
-                repo_path,
-                microtask_files,
-                mt=mt,
-                task_id=task_id,
-                review_failed_ids=review_failed_ids,
-                all_files=all_files,
-                rollback=microtask_rollback,
-                review_failed_status=microtask_status.REVIEW_FAILED,
-            ):
-                phase_failed = True
-                break
-            mt.output_files = microtask_files
-            all_files.update(microtask_files)
+            if not qa_outcome.passed or not sec_outcome.passed:
+                # Only a *failing* gate's issues are fixable material — a
+                # passing gate's ``issues`` can still carry non-blocking
+                # (e.g. medium-severity) findings (``GateOutcome.passed``
+                # reflects only critical/high issues, per
+                # ``_run_agent_testing_phase``), and those were never sent to
+                # ``run_batch_coding_fixes`` in the old sequential path either.
+                combined_issues = (
+                    (list(qa_outcome.issues) if not qa_outcome.passed else [])
+                    + (list(sec_outcome.issues) if not sec_outcome.passed else [])
+                )
+                logger.info(
+                    "[%s] Microtask %s: QA/security testing %s %d issue(s) (QA: %d, security: %d). "
+                    "Batch fixing and restarting from code review.",
+                    task_id,
+                    mt.id,
+                    gate_config.gate_issue_log_verb,
+                    len(combined_issues),
+                    len(qa_outcome.issues),
+                    len(sec_outcome.issues),
+                )
 
-            # Restart from code review
-            continue
+                if progress_callback:
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "qa_testing",
+                        f"Batch fixing {len(combined_issues)} QA/security issues...",
+                    )
 
-        # ── Security Testing Phase ────────────────────────────────────────
-        mt.status = gate_config.status_security
-        logger.info(
-            "[%s] Microtask %s: Cycle %d - Running security testing phase",
-            task_id,
-            mt.id,
-            total_cycles,
-        )
+                ps_result = gate_config.run_batch_coding_fixes(
+                    llm=llm,
+                    microtask=mt,
+                    issues=_dedup_issues(combined_issues, seen_issues),
+                    current_files=microtask_files,
+                    language=planning_result.language,
+                    repo_path=str(repo_path),
+                    task_id=task_id,
+                    phase_name="qa_security",
+                    detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                )
 
-        if progress_callback:
-            progress_callback(
-                current_idx,
-                len(completed_ids),
-                total,
-                mt.title or mt.id,
-                "security_testing",
-                f"Security testing (cycle {total_cycles})...",
-            )
+                microtask_files = ps_result.files
+                # Snapshot prior values for any keys the fix introduced, before the
+                # write, so a later rollback restores them (or removes newly-created ones).
+                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    rollback=microtask_rollback,
+                    review_failed_status=microtask_status.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
+                mt.output_files = microtask_files
+                all_files.update(microtask_files)
 
-        sec_outcome = gate_config.run_security_gate(
-            llm=llm,
-            task=task,
-            microtask=mt,
-            repo_path=repo_path,
-            files=microtask_files,
-            deps=deps,
-            detail_callback=lambda d: detail_cb(d, current_idx, "security_testing"),
-            cache=agent_review_cache,
-        )
-
-        if not sec_outcome.passed:
+                # Restart from code review
+                continue
+        else:
+            # ── QA Testing Phase (sequential) ──────────────────────────────
+            mt.status = gate_config.status_qa
             logger.info(
-                "[%s] Microtask %s: Security testing %s %d issues. Batch fixing and restarting from code review.",
+                "[%s] Microtask %s: Cycle %d - Running QA testing phase",
                 task_id,
                 mt.id,
-                gate_config.gate_issue_log_verb,
-                len(sec_outcome.issues),
+                total_cycles,
+            )
+
+            if progress_callback:
+                progress_callback(
+                    current_idx,
+                    len(completed_ids),
+                    total,
+                    mt.title or mt.id,
+                    "qa_testing",
+                    f"QA testing (cycle {total_cycles})...",
+                )
+
+            qa_outcome = gate_config.run_qa_gate(
+                llm=llm,
+                task=task,
+                microtask=mt,
+                repo_path=repo_path,
+                files=microtask_files,
+                deps=deps,
+                detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                cache=agent_review_cache,
+            )
+
+            if not qa_outcome.passed:
+                logger.info(
+                    "[%s] Microtask %s: QA testing %s %d issues. Batch fixing and restarting from code review.",
+                    task_id,
+                    mt.id,
+                    gate_config.gate_issue_log_verb,
+                    len(qa_outcome.issues),
+                )
+
+                if progress_callback:
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "qa_testing",
+                        f"Batch fixing {len(qa_outcome.issues)} QA issues...",
+                    )
+
+                ps_result = gate_config.run_batch_coding_fixes(
+                    llm=llm,
+                    microtask=mt,
+                    issues=_dedup_issues(list(qa_outcome.issues), seen_issues),
+                    current_files=microtask_files,
+                    language=planning_result.language,
+                    repo_path=str(repo_path),
+                    task_id=task_id,
+                    phase_name="qa",
+                    detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                )
+
+                microtask_files = ps_result.files
+                # Snapshot prior values for any keys the fix introduced, before the
+                # write, so a later rollback restores them (or removes newly-created ones).
+                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    rollback=microtask_rollback,
+                    review_failed_status=microtask_status.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
+                mt.output_files = microtask_files
+                all_files.update(microtask_files)
+
+                # Restart from code review
+                continue
+
+            # ── Security Testing Phase (sequential) ─────────────────────────
+            mt.status = gate_config.status_security
+            logger.info(
+                "[%s] Microtask %s: Cycle %d - Running security testing phase",
+                task_id,
+                mt.id,
+                total_cycles,
             )
 
             if progress_callback:
@@ -1146,42 +1279,72 @@ def _run_review_cycles(
                     total,
                     mt.title or mt.id,
                     "security_testing",
-                    f"Batch fixing {len(sec_outcome.issues)} security issues...",
+                    f"Security testing (cycle {total_cycles})...",
                 )
 
-            ps_result = gate_config.run_batch_coding_fixes(
+            sec_outcome = gate_config.run_security_gate(
                 llm=llm,
+                task=task,
                 microtask=mt,
-                issues=_dedup_issues(list(sec_outcome.issues), seen_issues),
-                current_files=microtask_files,
-                language=planning_result.language,
-                repo_path=str(repo_path),
-                task_id=task_id,
-                phase_name="security",
+                repo_path=repo_path,
+                files=microtask_files,
+                deps=deps,
                 detail_callback=lambda d: detail_cb(d, current_idx, "security_testing"),
+                cache=agent_review_cache,
             )
 
-            microtask_files = ps_result.files
-            # Snapshot prior values for any keys the fix introduced, before the
-            # write, so a later rollback restores them (or removes newly-created ones).
-            _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-            if not write_microtask_output_or_fail(
-                repo_path,
-                microtask_files,
-                mt=mt,
-                task_id=task_id,
-                review_failed_ids=review_failed_ids,
-                all_files=all_files,
-                rollback=microtask_rollback,
-                review_failed_status=microtask_status.REVIEW_FAILED,
-            ):
-                phase_failed = True
-                break
-            mt.output_files = microtask_files
-            all_files.update(microtask_files)
+            if not sec_outcome.passed:
+                logger.info(
+                    "[%s] Microtask %s: Security testing %s %d issues. Batch fixing and restarting from code review.",
+                    task_id,
+                    mt.id,
+                    gate_config.gate_issue_log_verb,
+                    len(sec_outcome.issues),
+                )
 
-            # Restart from code review
-            continue
+                if progress_callback:
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "security_testing",
+                        f"Batch fixing {len(sec_outcome.issues)} security issues...",
+                    )
+
+                ps_result = gate_config.run_batch_coding_fixes(
+                    llm=llm,
+                    microtask=mt,
+                    issues=_dedup_issues(list(sec_outcome.issues), seen_issues),
+                    current_files=microtask_files,
+                    language=planning_result.language,
+                    repo_path=str(repo_path),
+                    task_id=task_id,
+                    phase_name="security",
+                    detail_callback=lambda d: detail_cb(d, current_idx, "security_testing"),
+                )
+
+                microtask_files = ps_result.files
+                # Snapshot prior values for any keys the fix introduced, before the
+                # write, so a later rollback restores them (or removes newly-created ones).
+                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    rollback=microtask_rollback,
+                    review_failed_status=microtask_status.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
+                mt.output_files = microtask_files
+                all_files.update(microtask_files)
+
+                # Restart from code review
+                continue
 
         # All review phases passed - proceed to documentation
         break
@@ -1444,6 +1607,14 @@ def run_gated_execution_impl(
     max_total_cycles = gate_config.max_total_cycles(config)
     code_review_retry_cap = gate_config.code_review_retry_cap(config)
 
+    _current_mt = [None]
+
+    def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
+        """Forward phase detail to progress callback."""
+        if progress_callback:
+            mt = _current_mt[0]
+            progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
+
     for idx, mt in enumerate(microtasks):
         deps_met = all(d in completed_ids for d in mt.depends_on)
         if not deps_met:
@@ -1467,6 +1638,7 @@ def run_gated_execution_impl(
             )
 
         mt.status = microtask_status.IN_PROGRESS
+        _current_mt[0] = mt
         logger.info(
             "[%s] Execution: microtask %d/%d — %s (%s)",
             task_id,
@@ -1487,13 +1659,6 @@ def run_gated_execution_impl(
                 "coding",
                 "Generating code...",
             )
-
-        def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
-            """Forward phase detail to progress callback."""
-            if progress_callback:
-                progress_callback(
-                    _idx, len(completed_ids), total, mt.title or mt.id, _phase, detail
-                )
 
         coding_result = _execute_coding_phase(
             llm=llm,

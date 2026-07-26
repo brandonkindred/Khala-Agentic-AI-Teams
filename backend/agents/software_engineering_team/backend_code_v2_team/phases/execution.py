@@ -268,6 +268,12 @@ GATE_CONFIG = GatedExecutionConfig(
         f"{total} microtasks, on_failure={config.on_failure}"
     ),
     gate_issue_log_verb="failed with",
+    # QA and Security are independent analysis calls over the same
+    # post-Code-Review snapshot on the backend (each scopes its tool-agent call
+    # to its own spec.tool_kind) -- see docs/GATE_DEPENDENCY_GRAPH.md. The
+    # frontend keeps the default False until its tool-agent fan-out is scoped
+    # per gate the same way.
+    parallelize_qa_security=True,
 )
 
 

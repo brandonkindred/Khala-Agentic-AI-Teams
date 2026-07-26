@@ -307,11 +307,14 @@ class BlogWriterAgent(_BlogAgentBase):
         )
         return extract_json_from_response(raw)
 
-    def _fallback_draft_via_json(self, prompt: str) -> Optional[str]:
+    def _fallback_draft_via_json(self, prompt: str, system_prompt: str = "") -> Optional[str]:
         """Parse a revised draft via shared JSON retry when the text path fails.
 
         Preconditions:
             - ``prompt`` is a non-empty string (same prompt used for the text path).
+            - ``system_prompt``, if given, mirrors the one used for the failed
+              text-path call; falls back to ``WRITING_SYSTEM_PROMPT`` when empty,
+              matching ``_call_text``/``_call_json_raw``.
         Postconditions:
             - Returns a non-empty stripped draft string on success.
             - Returns ``None`` when JSON cannot yield a usable draft (caller keeps
@@ -336,7 +339,9 @@ class BlogWriterAgent(_BlogAgentBase):
             model = self._model
 
             def _invoke(prompt: str):
-                return Agent(model=model, system_prompt=WRITING_SYSTEM_PROMPT)(prompt)
+                return Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)(
+                    prompt
+                )
 
             return _invoke
 
@@ -1213,7 +1218,7 @@ class BlogWriterAgent(_BlogAgentBase):
         # Fallback — keep original on unexpected failure; re-raise transient LLM
         # errors so the draft-stage retry funnel can own backoff.
         try:
-            fallback = self._fallback_draft_via_json(prompt)
+            fallback = self._fallback_draft_via_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             if fallback:
                 return fallback
         except (LLMRateLimitError, LLMTemporaryError):
@@ -1355,7 +1360,9 @@ class BlogWriterAgent(_BlogAgentBase):
                 raise
         if not primary_succeeded:
             try:
-                fallback = self._fallback_draft_via_json(prompt)
+                fallback = self._fallback_draft_via_json(
+                    prompt, system_prompt=WRITING_SYSTEM_PROMPT
+                )
                 if fallback:
                     current_draft = fallback
             except (LLMRateLimitError, LLMTemporaryError):
@@ -1622,7 +1629,9 @@ class BlogWriterAgent(_BlogAgentBase):
 
         if not primary_succeeded:
             try:
-                fallback = self._fallback_draft_via_json(prompt)
+                fallback = self._fallback_draft_via_json(
+                    prompt, system_prompt=WRITING_SYSTEM_PROMPT
+                )
                 if fallback:
                     current_draft = fallback
             except (LLMRateLimitError, LLMTemporaryError):
