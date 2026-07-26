@@ -290,6 +290,7 @@ class TestInfraDebugAgent:
                 artifacts={},
             )
         )
+        assert len(result.errors) == 1
         assert result.errors[0].error_type == "unknown"
         assert not result.fixable
 
