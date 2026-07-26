@@ -565,6 +565,7 @@ def _attr_record(
     status: str = "completed",
     requires_redesign: bool = False,
     unparsed_rules=None,
+    is_publishable: bool = False,
 ):
     """Build a ``StrategyLabRecord`` with the DSL knobs the attribution buckets on.
 
@@ -630,6 +631,7 @@ def _attr_record(
         strategy=strat,
         backtest=bt,
         is_winning=annual_return >= 8.0,
+        is_publishable=is_publishable,
         strategy_rationale="r",
         analysis_narrative="n",
         created_at=f"2024-01-{i + 1:02d}T00:00:00Z",
@@ -839,11 +841,50 @@ def test_aggregate_prior_results_single_record_keys_and_means() -> None:
     )
     agg = aggregate_prior_results([rec])
 
-    assert agg[("asset_class", "crypto")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
-    assert agg[("entry", "rsi")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
-    assert agg[("exit", "trailing_stop")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
+    expected_stats = {
+        "win_rate": 60.0,
+        "annual_return": 12.0,
+        "n": 1,
+        "publishable_n": 0,
+        "publishable_win_rate": None,
+        "publishable_annual_return": None,
+    }
+    assert agg[("asset_class", "crypto")] == expected_stats
+    assert agg[("entry", "rsi")] == expected_stats
+    assert agg[("exit", "trailing_stop")] == expected_stats
     # Sizing defaults to fixed_fraction on StrategySpec.
     assert agg[("sizing", "fixed_fraction")]["n"] == 1
+
+
+def test_aggregate_prior_results_publishable_subset_means() -> None:
+    """``publishable_*`` fields track a mean over only the ``is_publishable``
+    subset of a bucket's contributing records, distinct from the raw mean over
+    all of them — so a bucket's apparent (possibly overfit) raw edge never
+    hides whether any of it is actually robust."""
+    recs = [
+        _attr_record(i=0, asset_class="crypto", win_rate=40.0, annual_return=4.0),
+        _attr_record(
+            i=1, asset_class="crypto", win_rate=80.0, annual_return=20.0, is_publishable=True
+        ),
+    ]
+    agg = aggregate_prior_results(recs)
+    bucket = agg[("asset_class", "crypto")]
+    assert bucket["n"] == 2
+    assert bucket["win_rate"] == pytest.approx(60.0)
+    assert bucket["annual_return"] == pytest.approx(12.0)
+    assert bucket["publishable_n"] == 1
+    assert bucket["publishable_win_rate"] == pytest.approx(80.0)
+    assert bucket["publishable_annual_return"] == pytest.approx(20.0)
+
+
+def test_aggregate_prior_results_publishable_fields_none_when_no_publishable_record() -> None:
+    """A bucket with zero publishable contributors reports ``None`` (not 0.0,
+    which would misleadingly read as a genuine zero-return robust result)."""
+    agg = aggregate_prior_results([_attr_record(i=0, asset_class="forex")])
+    bucket = agg[("asset_class", "forex")]
+    assert bucket["publishable_n"] == 0
+    assert bucket["publishable_win_rate"] is None
+    assert bucket["publishable_annual_return"] is None
 
 
 def test_aggregate_prior_results_averages_within_bucket() -> None:
