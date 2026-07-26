@@ -298,7 +298,8 @@ class LlmToolAgentBase:
 
         Postconditions:
             Returns a list of successful ``fn(item)`` results in encounter order.
-            Failures are logged at warning and omitted. Does not build a
+            Any ``Exception`` raised by ``fn`` is treated as a failure: it is
+            logged at warning and the item is omitted. Does not build a
             ``FallbackPayload``.
         """
         label = log_label or type(self).__name__
