@@ -300,11 +300,9 @@ def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> 
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# Fallback",
+        lambda self, p, system_prompt="": "# Fallback",
     )
-    out = a.revise_from_user_feedback(
-        draft="# Original", user_feedback="x", content_plan_text="cp"
-    )
+    out = a.revise_from_user_feedback(draft="# Original", user_feedback="x", content_plan_text="cp")
     assert "# Fallback" in out.draft
 
 
@@ -346,12 +344,13 @@ def test_revise_from_user_feedback_transient_retries_then_fallback(monkeypatch) 
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# User Feedback Recovered",
+        lambda self, p, system_prompt="": "# User Feedback Recovered",
     )
     out = a.revise_from_user_feedback(
         draft="# Original", user_feedback="tighten", content_plan_text="cp"
     )
     assert "User Feedback Recovered" in out.draft
+
 
 def test_revise_from_user_feedback_json_parse_error_skips_sleep(monkeypatch) -> None:
     """LLMJsonParseError must use the no-sleep handler, not the transient backoff."""
@@ -522,7 +521,7 @@ def test_revise_skips_json_fallback_when_primary_returns_identical_draft(monkeyp
         lambda self, p, system_prompt="": f'{{"draft": 0}}\n---DRAFT---\n{original}',
     )
 
-    def tracking_fallback(self, prompt):
+    def tracking_fallback(self, prompt, system_prompt=""):
         fallback_calls["n"] += 1
         return "# Should not be used"
 
@@ -609,10 +608,10 @@ def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> 
     import agents.blogging.blog_writer_agent.agent as wa_mod
 
     monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, *a, **kw: "no marker")
     monkeypatch.setattr(
-        BlogWriterAgent, "_call_text", lambda self, *a, **kw: "no marker"
+        BlogWriterAgent, "_fallback_draft_via_json", lambda self, p, system_prompt="": None
     )
-    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
 
     plan = make_content_plan(
         overarching_topic="x",
@@ -650,13 +649,11 @@ def test_revise_batch_uses_json_fallback_when_text_fails(monkeypatch) -> None:
         lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
     )
 
-    monkeypatch.setattr(
-        BlogWriterAgent, "_call_text", lambda self, *a, **kw: "no marker"
-    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, *a, **kw: "no marker")
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# Batch Recovered",
+        lambda self, p, system_prompt="": "# Batch Recovered",
     )
     plan = make_content_plan(
         overarching_topic="x",
@@ -705,7 +702,7 @@ def test_revise_wrapped_temporary_retries_then_fallback(monkeypatch) -> None:
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# Batch Recovered Wrapped",
+        lambda self, p, system_prompt="": "# Batch Recovered Wrapped",
     )
     plan = make_content_plan(
         overarching_topic="x",
