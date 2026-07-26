@@ -148,6 +148,24 @@ def test_market_research_to_evidence_includes_rationale_and_pain_points():
     assert ev["insights"] == ["Reason A", "Reason B", "Pain 1"]
 
 
+def test_market_research_to_evidence_handles_malformed_shape():
+    from planning_team.adapters.market_research import market_research_to_evidence
+
+    data = {
+        "mission_summary": "Summary",
+        "recommendation": "not-a-dict",
+        "insights": ["not-a-dict"],
+        "market_signals": ["not-a-dict"],
+    }
+    ev = market_research_to_evidence(data)
+    assert ev == {
+        "summary": "",
+        "insights": [],
+        "market_signals": [],
+        "source": "market_research_team",
+    }
+
+
 def test_request_market_research_submit_fails():
     from planning_team.adapters.market_research import request_market_research
 
