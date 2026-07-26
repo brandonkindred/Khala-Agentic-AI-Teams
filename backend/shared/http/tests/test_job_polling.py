@@ -15,6 +15,7 @@ from shared.http.job_polling import (
     async_poll_until_terminal,
     async_post_json,
     get_json,
+    get_json_with_status,
     poll_until_terminal,
     post_json,
 )
@@ -140,6 +141,51 @@ def test_get_json_returns_none_on_transport_error():
 def test_get_json_rejects_empty_url():
     with pytest.raises(AssertionError):
         get_json("")
+
+
+# --- get_json_with_status ---------------------------------------------------
+
+
+def test_get_json_with_status_returns_status_and_body_on_success():
+    client = _mock_client(response={"id": "b"})
+    client.get.return_value.status_code = 200
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
+        status_code, body = get_json_with_status("http://x/brand/1")
+    assert (status_code, body) == (200, {"id": "b"})
+    client.get.assert_called_once_with("http://x/brand/1")
+
+
+def test_get_json_with_status_returns_status_without_raising_on_404():
+    resp = MagicMock()
+    resp.status_code = 404
+    resp.json.return_value = None
+    client = MagicMock()
+    client.get = MagicMock(return_value=resp)
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
+        status_code, body = get_json_with_status("http://x/brand/1")
+    assert (status_code, body) == (404, None)
+
+
+def test_get_json_with_status_returns_none_none_on_transport_error():
+    client = _mock_client(request_error=httpx.ConnectError("refused"))
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
+        assert get_json_with_status("http://x/brand/1") == (None, None)
+
+
+def test_get_json_with_status_returns_status_with_none_body_on_bad_json():
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.side_effect = ValueError("bad json")
+    client = MagicMock()
+    client.get = MagicMock(return_value=resp)
+    with patch("shared.http.job_polling.get_pooled_client", return_value=client):
+        status_code, body = get_json_with_status("http://x/brand/1")
+    assert (status_code, body) == (200, None)
+
+
+def test_get_json_with_status_rejects_empty_url():
+    with pytest.raises(AssertionError):
+        get_json_with_status("")
 
 
 # --- poll_until_terminal -----------------------------------------------------
