@@ -30,12 +30,14 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
         spec_content_override=None,
         resolved_questions_override=None,
         planning_only=False,
+        trace_id=None,
     ):
         called.update(
             job_id=job_id,
             repo_path=repo_path,
             spec_override=spec_content_override,
             planning_only=planning_only,
+            trace_id=trace_id,
         )
 
     monkeypatch.setattr(
@@ -46,6 +48,7 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
     )
     assert called["job_id"] == "job1"
     assert called["planning_only"] is True
+    assert called["trace_id"]  # activity generates one when the caller passes none
 
 
 def test_run_orchestrator_activity_failure_captured(
@@ -73,12 +76,14 @@ def test_retry_failed_activity_success(monkeypatch) -> None:
 
     called: Dict[str, str] = {}
 
-    def fake(job_id):
+    def fake(job_id, *, trace_id=None):
         called["id"] = job_id
+        called["trace_id"] = trace_id
 
     monkeypatch.setattr("software_engineering_team.orchestrator.run_failed_tasks", fake)
     activities.retry_failed_activity("j1")
     assert called["id"] == "j1"
+    assert called["trace_id"]  # activity generates one when the caller passes none
 
 
 def test_retry_failed_activity_failure(monkeypatch, tmp_path, patched_job_store) -> None:
@@ -87,7 +92,7 @@ def test_retry_failed_activity_failure(monkeypatch, tmp_path, patched_job_store)
 
     js.create_job("j-fail", repo_path=str(tmp_path))
 
-    def boom(_):
+    def boom(_, **kw):
         raise RuntimeError("retry exploded")
 
     monkeypatch.setattr("software_engineering_team.orchestrator.run_failed_tasks", boom)
@@ -564,3 +569,133 @@ def test_adapter_result_round_trips_through_dict() -> None:
     assert rebuilt.architecture_overview == "arch"
     assert rebuilt.shared_planning_doc_path == "/plan/doc.md"
     assert rebuilt.resolved_questions == original.resolved_questions
+
+
+def test_parse_spec_activity_binds_the_passed_trace_id(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Each phase activity runs as its own process/thread invocation (no shared contextvar
+    context with the workflow or the other phase activities), so ``trace_id`` must be passed
+    explicitly and re-bound inside the activity — this pins that ``parse_spec_activity`` does so."""
+    from shared.observability import current_trace_id
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ps-trace", repo_path=str(tmp_path))
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
+
+    seen = {}
+
+    def fake_parse_spec_with_llm(*a, **kw):
+        seen["trace_id"] = current_trace_id()
+        raise RuntimeError("stop after capturing trace_id")
+
+    monkeypatch.setattr(
+        "software_engineering_team.spec_parser.parse_spec_with_llm", fake_parse_spec_with_llm
+    )
+    with pytest.raises(RuntimeError, match="stop after capturing trace_id"):
+        activities.parse_spec_activity("ps-trace", str(tmp_path), trace_id="fixed-trace-1")
+    assert seen["trace_id"] == "fixed-trace-1"
+    assert current_trace_id() == ""  # unbound again once the activity returns/raises
+
+
+def test_plan_project_activity_binds_the_passed_trace_id(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """See ``test_parse_spec_activity_binds_the_passed_trace_id``; same contract for Phase 2."""
+    from shared.observability import current_trace_id
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-trace", repo_path=str(tmp_path))
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+
+    seen = {}
+
+    def fake_parse_spec_with_llm(*a, **kw):
+        seen["trace_id"] = current_trace_id()
+        raise RuntimeError("stop after capturing trace_id")
+
+    monkeypatch.setattr(
+        "software_engineering_team.spec_parser.parse_spec_with_llm", fake_parse_spec_with_llm
+    )
+    with pytest.raises(RuntimeError, match="stop after capturing trace_id"):
+        activities.plan_project_activity(
+            "pp-trace",
+            str(tmp_path),
+            {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+            trace_id="fixed-trace-2",
+        )
+    assert seen["trace_id"] == "fixed-trace-2"
+    assert current_trace_id() == ""
+
+
+def test_execute_coding_team_activity_binds_the_passed_trace_id(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """See ``test_parse_spec_activity_binds_the_passed_trace_id``; same contract for Phase 3 —
+    including the ``parallel_map`` fan-out inside ``run_coding_team_orchestrator``, which inherits
+    the bound id via ``contextvars.copy_context()`` once it is bound here."""
+    from planning_adapter import PlanningAdapterResult
+
+    from shared.observability import current_trace_id
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.shared.models import ProductRequirements
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ec-trace", repo_path=str(tmp_path))
+
+    seen = {}
+
+    def fake_run_coding_team_orchestrator(job_id, repo_path, plan_input, **kwargs):
+        seen["trace_id"] = current_trace_id()
+
+    monkeypatch.setattr(
+        "software_engineering_team.coding_team_orchestrator.run_coding_team_orchestrator",
+        fake_run_coding_team_orchestrator,
+    )
+
+    adapter_dict = PlanningAdapterResult(
+        requirements=ProductRequirements(
+            title="T", description="d", acceptance_criteria=[], constraints=[]
+        ),
+        project_overview={},
+        open_questions=[],
+        assumptions=[],
+    ).to_dict()
+    activities.execute_coding_team_activity(
+        "ec-trace",
+        str(tmp_path),
+        {"adapter_result_dict": adapter_dict, "spec_content_for_planning": "s"},
+        trace_id="fixed-trace-3",
+    )
+    assert seen["trace_id"] == "fixed-trace-3"
+    assert current_trace_id() == ""
+
+
+def test_phase_activities_generate_a_trace_id_when_none_supplied(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """A blank ``trace_id`` (Temporal's default when a caller omits it) still binds a non-empty,
+    generated id rather than leaving the phase's logs uncorrelated."""
+    from shared.observability import current_trace_id
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ps-notrace", repo_path=str(tmp_path))
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
+
+    seen = {}
+
+    def fake_parse_spec_with_llm(*a, **kw):
+        seen["trace_id"] = current_trace_id()
+        raise RuntimeError("stop after capturing trace_id")
+
+    monkeypatch.setattr(
+        "software_engineering_team.spec_parser.parse_spec_with_llm", fake_parse_spec_with_llm
+    )
+    with pytest.raises(RuntimeError):
+        activities.parse_spec_activity("ps-notrace", str(tmp_path))
+    assert seen["trace_id"]

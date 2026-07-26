@@ -9,6 +9,7 @@ from typing import Dict, List, Literal
 from pydantic import BaseModel, Field
 
 from shared.command_runner.runner import run_command
+from shared.subprocess_timeouts import DEVOPS_DOCKER_COMPOSE_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class DockerComposeExecutionToolAgent:
         if input_data.services:
             cmd.extend(input_data.services)
 
-        result = run_command(cmd, cwd=path, timeout=120)
+        result = run_command(cmd, cwd=path, timeout=DEVOPS_DOCKER_COMPOSE_TIMEOUT_S)
 
         findings: List[str] = []
         if not result.success:

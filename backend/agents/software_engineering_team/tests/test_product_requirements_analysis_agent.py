@@ -630,6 +630,23 @@ def test_parse_open_question_preserves_extended_metadata() -> None:
     assert parsed.asked_via == ["slack", "web_ui"]
 
 
+def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
+    """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-003",
+            "question_text": "What is the constraint layer?",
+            "constraint_layer": "high",
+        },
+        index=0,
+    )
+
+    assert parsed.constraint_layer == 0
+
+
 def test_convert_to_pending_questions_includes_extended_metadata() -> None:
     """Pending question payload should include gate-aware metadata for UI and orchestration."""
     llm = MagicMock()

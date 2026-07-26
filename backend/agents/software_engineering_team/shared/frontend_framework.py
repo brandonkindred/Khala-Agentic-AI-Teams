@@ -82,7 +82,7 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
     # Check for framework-specific files
     if (repo_path / "vue.config.js").exists() or (repo_path / "vite.config.ts").exists():
         # Could be React or Vue with Vite, check for Vue-specific markers
-        for f in repo_path.rglob("*.vue"):
+        if any(repo_path.rglob("*.vue")):
             return "vue"
 
     return None

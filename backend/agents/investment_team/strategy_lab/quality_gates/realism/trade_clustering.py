@@ -25,6 +25,16 @@ Severity:
 
 Skipped when fewer than 10 trades are present — sample is too small
 for either signal to be informative.
+
+Custom-code strategies: this gate takes no ``spec`` and never branches on
+``requires_custom_code``. Both signals are computed purely from
+``TradeRecord.entry_date`` — fill-simulator output populated identically
+regardless of code path — so the gate has no compiler dependency to lose.
+Unlike
+:class:`~investment_team.strategy_lab.quality_gates.realism.rule_firing.RuleFiringRateGate`,
+which relies on the compiler's per-rule reason annotation absent for
+LLM-authored code, this gate already applies equal scrutiny to
+custom-code and compiled strategies.
 """
 
 from __future__ import annotations

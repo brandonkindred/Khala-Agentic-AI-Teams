@@ -26,13 +26,14 @@ import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import type { PageEvent } from '@angular/material/paginator';
 import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
-import { of } from 'rxjs';
+import { Observable, of } from 'rxjs';
 import { finalize, map } from 'rxjs/operators';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
+import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
 import { describeRunStatus } from '../../services/strategy-lab-log-message';
 import { NotificationService } from '../../core/notification.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
@@ -46,7 +47,6 @@ import {
   returnColor,
   returnColorLabel,
   getAssetClassIcon,
-  publishabilitySkipLabel,
 } from './strategy-lab.formatters';
 import { PhaseStepperComponent, phaseLabel } from './phase-stepper/phase-stepper.component';
 import { StrategyCardComponent } from './strategy-card/strategy-card.component';
@@ -102,7 +102,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   selector: 'app-strategy-lab',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  providers: [StrategyLabRunService, StrategyLabActivityLogService],
+  providers: [StrategyLabRunService, StrategyLabActivityLogService, StrategyLabPaperTradingService],
   imports: [
     CommonModule,
     DecimalPipe,
@@ -143,6 +143,8 @@ export class StrategyLabComponent implements OnInit {
   readonly runService = inject(StrategyLabRunService);
   /** Owns activity-log bookkeeping and the completion/error/warning banners driven by runService.events$. */
   private readonly activityLogService = inject(StrategyLabActivityLogService);
+  /** Owns paper-trading initiation: the publishability guard, the start POST, and the initial results fetch. */
+  private readonly paperTradingService = inject(StrategyLabPaperTradingService);
 
   /** True while a destructive confirm dialog is open — blocks re-entrant opens. */
   private confirmingDestructive = false;
@@ -242,13 +244,8 @@ export class StrategyLabComponent implements OnInit {
   // Per-card trade ledger state (pagination index only — rendering lives in StrategyCardComponent)
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
 
-  // Paper trading state
-  /** True while a "run paper trading" POST is in flight for this record, before runService takes over. */
-  private readonly startingPaperTrade = signal<string | null>(null);
-  /** Lab record id currently being paper traded — see `running`'s doc comment for why this merges two sources. */
-  readonly paperTradingLabRecordId = computed(
-    () => this.startingPaperTrade() ?? this.runService.paperTradingLabRecordId(),
-  );
+  // Paper trading state — owned by paperTradingService.
+  readonly paperTradingLabRecordId = this.paperTradingService.paperTradingLabRecordId;
 
   // Activity log — owned by activityLogService.
   readonly activityLog = this.activityLogService.activityLog;
@@ -322,25 +319,46 @@ export class StrategyLabComponent implements OnInit {
     this.wasRunning = isRunning;
   });
 
+  /**
+   * Subscribes `source$` to mirror each of its emissions onto the `error`
+   * signal for the component's lifetime. Shared by every "forward this
+   * service's error stream into the banner" wiring site (`activityLogService`,
+   * `runService`, `paperTradingService`) instead of each hand-rolling the same
+   * `pipe(takeUntilDestroyed) -> subscribe` boilerplate.
+   *
+   * Preconditions: none.
+   * Postconditions: every value `source$` emits — including `null`, which
+   *   clears the banner — is set on `error` until the component is destroyed.
+   */
+  private mirrorErrorsIntoBanner<T extends string | null>(source$: Observable<T>): void {
+    source$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((message) => this.error.set(message));
+  }
+
+  /**
+   * Wires `paperTradingService.errors$` into the `error` signal. A field
+   * initializer (not wired inside `ngOnInit()`) so it's active the instant
+   * the component is constructed — `runPaperTrading()` can be called, and
+   * its guard/POST error surfaced, before `ngOnInit()` ever runs.
+   * `mirrorErrorsIntoBanner` returns `void`, so this field only exists to
+   * trigger that call at construction time — it holds no state of its own.
+   */
+  private readonly wirePaperTradingErrors = this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
+
   ngOnInit(): void {
     this.loadConfig();
     this.loadResults();
-    this.loadPaperTradingResults();
+    this.paperTradingService.loadPaperTradingResults();
     this.runService.checkForActiveRun();
     this.loadTradingViewStatus();
 
     this.activityLogService.resultsRefreshRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.loadResults());
-    this.activityLogService.terminalError$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((message) => this.error.set(message));
+    this.mirrorErrorsIntoBanner(this.activityLogService.terminalError$);
     this.activityLogService.scrollRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.logContainer?.nativeElement?.scrollTo({ top: 999999, behavior: 'smooth' }));
-    this.runService.errors$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((message) => this.error.set(message));
+    this.mirrorErrorsIntoBanner(this.runService.errors$);
   }
 
   /**
@@ -872,76 +890,26 @@ export class StrategyLabComponent implements OnInit {
   }
 
   // ---------------------------------------------------------------------------
-  // Paper Trading
+  // Paper Trading — delegates to paperTradingService.
   // ---------------------------------------------------------------------------
 
   /**
-   * Fetches paper trading sessions and hydrates run-service state from them.
-   *
-   * Preconditions: none.
-   * Postconditions: for each `lab_record_id`, only the most recent session
-   * (by `paperSessionRecencyKey`) is kept and handed to
-   * `runService.hydratePaperTradingSessions`, so any still-running sessions
-   * resume polling.
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: delegates entirely to `paperTradingService.runPaperTrading`
+   *   (see its own contract) — this method has no logic of its own beyond
+   *   forwarding the call.
    */
-  loadPaperTradingResults(): void {
-    this.api
-      .getPaperTradingResults()
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: (res) => {
-        const sessions: Record<string, PaperTradingSession> = {};
-        for (const s of res.items) {
-          // Keep the newest session per lab record, using started_at as the
-          // recency key (completed_at is empty for still-running sessions, so
-          // relying on it would systematically lose to older completed ones).
-          const existing = sessions[s.lab_record_id];
-          if (!existing || this.paperSessionRecencyKey(s) > this.paperSessionRecencyKey(existing)) {
-            sessions[s.lab_record_id] = s;
-          }
-        }
-        // Resumes polling for any sessions still running (e.g. after a page reload).
-        this.runService.hydratePaperTradingSessions(sessions);
-      },
-    });
-  }
-
-  /** Sortable recency key for a paper-trading session. */
-  private paperSessionRecencyKey(s: PaperTradingSession): string {
-    return s.started_at || s.completed_at || '';
-  }
-
   runPaperTrading(record: StrategyLabRecord): void {
-    if (!record.is_publishable) {
-      const reason = this.publishabilitySkipLabel(record);
-      this.error.set(
-        'This strategy is not publishable and cannot be paper traded' +
-        (reason ? ` (${reason})` : '.'),
-      );
-      return;
-    }
-    this.error.set(null);
-    this.startingPaperTrade.set(record.lab_record_id);
-    this.api
-      .runPaperTrading({ lab_record_id: record.lab_record_id })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: (res) => {
-        // Backend returns a "running" session immediately; runService stores it
-        // so the UI shows in-progress state, then polls until the worker finishes.
-        this.runService.trackPaperTradingSession(record.lab_record_id, res.session);
-        this.startingPaperTrade.set(null);
-      },
-      error: (err) => {
-        this.startingPaperTrade.set(null);
-        this.error.set(extractErrorDetail(err, 'Paper trading failed.'));
-      },
-    });
+    this.paperTradingService.runPaperTrading(record);
   }
 
-  readonly publishabilitySkipLabel = publishabilitySkipLabel;
-
+  /**
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: returns `paperTradingService.getPaperSession(record)`
+   *   verbatim (see its own contract) — this method has no logic of its own
+   *   beyond forwarding the call.
+   */
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
-    return this.runService.paperTradingSessions()[record.lab_record_id] ?? null;
+    return this.paperTradingService.getPaperSession(record);
   }
 }
