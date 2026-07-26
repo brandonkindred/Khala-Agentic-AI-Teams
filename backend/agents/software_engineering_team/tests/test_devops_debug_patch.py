@@ -135,6 +135,24 @@ class TestDebugPatchStateMalformedResults:
         state = _DebugPatchState(exec_results=[None, "bad", {"success": True, "checks": {}}])
         assert state.exec_failures == []
 
+    def test_exec_failures_normalizes_malformed_findings(self) -> None:
+        """A failing entry with non-list ``findings`` (e.g. ``None``) is normalized to ``[]``.
+
+        Guards against ``_debug_patch_once``'s unguarded
+        ``"\\n".join(ef.get("findings", []))``, whose default only applies
+        when the key is absent — not when it's present with the wrong type.
+        """
+        state = _DebugPatchState(
+            exec_results=[
+                {"success": False, "tool": "terraform", "findings": None},
+                {"success": False, "tool": "terraform", "findings": "not-a-list"},
+                {"success": False, "tool": "terraform", "findings": ["ok"]},
+            ],
+        )
+        assert [f["findings"] for f in state.exec_failures] == [[], [], ["ok"]]
+        for failure in state.exec_failures:
+            "\n".join(failure["findings"])  # must not raise
+
 
 # ---------------------------------------------------------------------------
 # Debug Agent tests

@@ -249,7 +249,11 @@ class _DebugPatchState:
         Postconditions: only dict entries are included — a non-dict entry is
         logged and excluded rather than being surfaced as a "failure" that
         downstream ``.get()`` calls (e.g. in ``_debug_patch_once``) cannot
-        safely handle.
+        safely handle. A non-list ``findings`` value is normalized to ``[]``
+        (on a shallow copy) so ``_debug_patch_once``'s unguarded
+        ``"\\n".join(ef.get("findings", []))`` — which only falls back to its
+        default when the key is *absent*, not when it's present but the wrong
+        type — never receives a non-iterable.
         """
         failures = []
         for er in self.exec_results:
@@ -257,6 +261,13 @@ class _DebugPatchState:
                 logger.warning("DevOps execution result is not a dict: %r", er)
                 continue
             if not er.get("success", True):
+                findings = er.get("findings")
+                if not isinstance(findings, list):
+                    if findings is not None:
+                        logger.warning(
+                            "DevOps execution result has non-list findings: %r", findings
+                        )
+                    er = {**er, "findings": []}
                 failures.append(er)
         return failures
 
