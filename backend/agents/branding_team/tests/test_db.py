@@ -125,6 +125,25 @@ def test_duplicate_client_insert_raises_unique_violation(fake_pg: dict) -> None:
     assert fake_pg["clients"]["client_1"]["data"] == original
 
 
+def test_duplicate_brand_insert_raises_unique_violation(fake_pg: dict) -> None:
+    """Duplicate branding_brands insert raises UniqueViolation and keeps the row."""
+    probe = _Probe()
+    original = {"id": "brand_1", "name": "Acme Brand"}
+    probe._execute(
+        "INSERT INTO branding_brands (id, client_id, data) VALUES (%s, %s, %s)",
+        ("brand_1", "client_1", Json(original)),
+    )
+
+    with pytest.raises(UniqueViolation, match="branding_brands_pkey"):
+        probe._execute(
+            "INSERT INTO branding_brands (id, client_id, data) VALUES (%s, %s, %s)",
+            ("brand_1", "client_2", Json({"id": "brand_1", "name": "Overwrite"})),
+        )
+
+    assert fake_pg["brands"]["brand_1"]["data"] == original
+    assert fake_pg["brands"]["brand_1"]["client_id"] == "client_1"
+
+
 def test_duplicate_session_insert_raises_unique_violation(fake_pg: dict) -> None:
     """Duplicate branding_sessions insert raises UniqueViolation and keeps the row."""
     probe = _Probe()
