@@ -1163,43 +1163,57 @@ def test_parallel_qa_security_gate_exception_propagates_without_hanging(tmp_path
 
 
 @pytest.mark.parametrize(
-    "qa_delay, sec_delay",
+    "first_to_finish",
     [
-        pytest.param(0.05, 0.0, id="qa_finishes_last"),
-        pytest.param(0.0, 0.05, id="security_finishes_last"),
+        pytest.param("qa", id="qa_finishes_first"),
+        pytest.param("security", id="security_finishes_first"),
     ],
 )
 def test_parallel_qa_security_aggregation_is_order_independent_under_timing_variance(
-    tmp_path, qa_delay: float, sec_delay: float
+    tmp_path, first_to_finish: str
 ) -> None:
-    """No flakiness under concurrent execution: real (small) timing variance is
-    introduced via ``time.sleep`` in each gate stub so real thread-scheduling
-    determines completion order, rather than both stubs returning instantly.
-    Regardless of which of the two concurrent gates actually finishes first,
-    the combined batch-fix issue sources must be identical (order-independent).
+    """No flakiness under concurrent execution: each gate's completion order is
+    forced deterministically via a ``threading.Event`` (the second gate blocks
+    until the first signals) rather than a fixed ``time.sleep`` race -- a bare
+    sleep does not guarantee which gate actually finishes first under a loaded
+    runner, so it could silently exercise the same order in both parametrized
+    cases without the test ever noticing. The actual completion order is
+    recorded and asserted here, and the combined batch-fix issue sources must
+    be identical (order-independent) regardless of which gate finished first.
     """
     qa_issue = ReviewIssue(source="qa", severity="high", description="qa issue", file_path="f")
     sec_issue = ReviewIssue(
         source="security", severity="high", description="security issue", file_path="f"
     )
 
-    def _make_flaky_gate(delay: float, issue: ReviewIssue, summary: str):
-        # Fails (after the timing-variance delay) on the first cycle only, then
-        # passes -- so the fan-out's single failing cycle still races the two
-        # gates' completion order, without exhausting the retry budget.
+    completion_order: List[str] = []
+    order_lock = threading.Lock()
+    release_event = threading.Event()
+
+    def _make_flaky_gate(name: str, issue: ReviewIssue, *, goes_first: bool):
+        # Fails on the first cycle only, then passes -- so the fan-out's single
+        # failing cycle still exercises the forced completion order, without
+        # exhausting the retry budget.
         calls = {"n": 0}
 
         def _gate(**kwargs: Any) -> GateOutcome:
             calls["n"] += 1
             if calls["n"] == 1:
-                time.sleep(delay)
-                return GateOutcome(passed=False, issues=[issue], summary=summary)
+                if goes_first:
+                    with order_lock:
+                        completion_order.append(name)
+                    release_event.set()
+                else:
+                    assert release_event.wait(timeout=2), f"{name} gate: dependency never finished"
+                    with order_lock:
+                        completion_order.append(name)
+                return GateOutcome(passed=False, issues=[issue], summary=name)
             return GateOutcome(passed=True)
 
         return _gate
 
-    _qa_gate = _make_flaky_gate(qa_delay, qa_issue, "qa")
-    _sec_gate = _make_flaky_gate(sec_delay, sec_issue, "sec")
+    _qa_gate = _make_flaky_gate("qa", qa_issue, goes_first=(first_to_finish == "qa"))
+    _sec_gate = _make_flaky_gate("security", sec_issue, goes_first=(first_to_finish == "security"))
 
     batch_fix_calls: List[Dict[str, Any]] = []
 
@@ -1225,6 +1239,9 @@ def test_parallel_qa_security_aggregation_is_order_independent_under_timing_vari
     )
 
     assert mt.status == MS.COMPLETED
+    assert completion_order == (
+        ["qa", "security"] if first_to_finish == "qa" else ["security", "qa"]
+    )
     assert len(batch_fix_calls) == 1
     sources = {issue.source for issue in batch_fix_calls[0]["issues"]}
     assert sources == {"qa", "security"}
