@@ -73,13 +73,28 @@ function `MarketResearchOrchestrator.assemble` (`orchestrator.py:231-291`), bran
 only on `human_review.approved` (`True` → `READY_FOR_EXECUTION`, `False` →
 `NEEDS_HUMAN_DECISION`). `DRAFT` is defined but currently dead — no code path produces it.
 
-**investment_team**: no comparable `WorkflowStatus` enum exists. `api/main.py`'s
+**investment_team**: no `WorkflowStatus` enum exists. `api/main.py`'s
 `WorkflowStatusResponse` (`mode`, `audit_log`, `queue_counts`) is an unrelated API DTO
 backed by `WorkflowMode` (`models.py:116-120`: `ADVISORY`/`PAPER`/`LIVE`/`MONITOR_ONLY`) —
-a trading-mode setting, not a run-lifecycle status. Its actual status vocabularies
+a trading-mode setting, not a run-lifecycle status. Its other status vocabularies
 (`AdvisorSessionStatus`, `PaperTradingStatus`, `ValidationStatus`, `JOB_STATUS_*`,
-`STRATEGY_LAB_TERMINAL_STATUSES`) serve job/backtest/paper-trading lifecycles that don't
-map onto the human-approval-gate concept `WorkflowStatus` models in the other two teams.
+`STRATEGY_LAB_TERMINAL_STATUSES`) serve job/backtest/paper-trading lifecycles unrelated
+to human approval.
+
+The one investment_team enum that *is* approval-derived, and so was explicitly evaluated
+against `WorkflowStatus`, is **`PromotionStage`** (`models.py:103-107`: `REJECT` /
+`REVISE` / `PAPER` / `LIVE`), returned by `PromotionGateAgent.decide`
+(`agents.py:136-300`). Unlike `WorkflowStatus`, its outcome isn't a single
+`human_review.approved` branch — `decide` walks five independent, ordered gates
+(separation-of-duties, risk veto, validation checklist, IPS live-trading permission,
+then `ips.human_approval_required_for_live and not human_live_approval`), any of which
+can short-circuit to `REJECT`/`REVISE`/`PAPER` before human approval is even checked;
+only the last gate reaching `LIVE` depends on approval. Each decision also carries a
+`gate_results: List[GateCheckResult]` trace and an `AuditContext` (`models.py:1124-1138`)
+that `WorkflowStatus` has no equivalent of. Given the different shape (five-gate
+checklist producing an audited decision, vs. a single boolean gate producing a display
+tag) and the complete non-overlap in member names, `PromotionStage` was evaluated and
+kept out of this comparison rather than silently omitted.
 
 **Decision: keep independent (no shared enum).** Only the string `"needs_human_decision"`
 is genuinely common between branding and market research; each team's terminal state
@@ -87,8 +102,10 @@ names a different domain outcome (`ready_for_rollout` vs. `ready_for_execution`)
 market research carries an extra, currently-unused `DRAFT`. A shared enum would need
 either an awkward union of all per-team terminal values (defeating the point of an enum
 as a closed set) or a lossy shared subset still requiring a per-team extension — more
-complexity than the current two ~10-line enums. `investment_team` isn't part of the
-overlap at all. The one piece that *was* genuinely duplicated across teams — the
+complexity than the current two ~10-line enums. `investment_team`'s only
+approval-adjacent enum, `PromotionStage`, was evaluated above and excluded on shape
+(multi-gate audited checklist, not a boolean-derived tag) and naming, not overlooked.
+The one piece that *was* genuinely duplicated across teams — the
 `HumanReview` approve/reject gate — is already shared here; each team derives its own
 `WorkflowStatus` from `human_review.approved` at the orchestrator boundary, which is
 exactly why `WorkflowStatus` itself was not folded into this package.
