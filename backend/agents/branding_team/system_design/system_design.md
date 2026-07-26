@@ -265,10 +265,13 @@ wraps `shared.postgres.get_conn` with `_fetch_one`/`_fetch_all`/`_execute`/
 
 Unit tests run against `tests/_fake_postgres.py`, an in-memory fake that
 matches the SQL emitted by each store by prefix, so the test suites stay
-independent without a live database. `real_postgres`-marked tests (e.g.
-`tests/test_store_real_postgres.py`) exercise the same SQL against a live
-Postgres instance in CI, so the fake can't silently drift from what the real
-database accepts.
+independent without a live database. `real_postgres`-marked tests
+(`tests/test_store_real_postgres.py`) exercise `BrandingStore`'s and
+`BrandingConversationStore`'s SQL against a live Postgres instance in CI, so
+the fake can't silently drift from what the real database accepts for those
+two stores. `BrandingSessionStore`'s create/get/save queries are currently
+validated only against the fake — that table is truncated for isolation but
+its own queries aren't exercised live.
 
 ### Postgres schema
 

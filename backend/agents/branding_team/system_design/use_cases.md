@@ -222,7 +222,11 @@ flowchart LR
 - **Actor:** Brand Strategist
 - **Trigger:** The agency needs to organize many clients, each with one
   or more brands.
-- **Preconditions:** None.
+- **Preconditions:** `POSTGRES_HOST` is configured and reachable, and the
+  branding schema is registered (`register_team_schemas(SCHEMA)`
+  in `api/main.py`'s lifespan) — `BrandingStore` calls
+  `shared.postgres.get_conn`, which raises `RuntimeError` when
+  `POSTGRES_HOST` is unset.
 - **Main flow:**
   1. Strategist creates clients via `POST /clients`
      (`api/main.py:445`) and lists / fetches them via
