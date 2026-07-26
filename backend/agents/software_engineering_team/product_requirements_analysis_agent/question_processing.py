@@ -387,6 +387,7 @@ def _fetch_llm_list(
     prompt: str,
     response_key: str,
     operation_name: str,
+    allow_empty: bool = False,
 ) -> List[Any] | None:
     """Call the LLM, parse JSON, and extract a named list field.
 
@@ -397,10 +398,11 @@ def _fetch_llm_list(
     Preconditions: ``model`` is a Strands ``Model``; ``prompt`` is a non-empty
         string; ``response_key``/``operation_name`` are non-empty strings.
     Postconditions: returns the list found under ``response_key`` when the LLM
-        call succeeds and yields a non-empty list; returns ``None`` on any
-        failure (LLM exception, non-dict response, or a missing/empty/non-list
-        key) — callers fall back to their original list on ``None``. Never
-        raises.
+        call succeeds and yields a list that is non-empty, or empty when
+        ``allow_empty`` is True; returns ``None`` on any failure (LLM
+        exception, non-dict response, a missing/non-list key, or an empty
+        list when ``allow_empty`` is False) — callers fall back to their
+        original list on ``None``. Never raises.
     """
     try:
         raw = call_llm_json(model, prompt)
@@ -410,7 +412,9 @@ def _fetch_llm_list(
     if not isinstance(raw, dict):
         return None
     items = raw.get(response_key)
-    if not isinstance(items, list) or len(items) == 0:
+    if not isinstance(items, list):
+        return None
+    if not items and not allow_empty:
         return None
     return items
 
@@ -608,7 +612,9 @@ def add_recommendations(
         spec_excerpt=spec_excerpt,
         questions_json=questions_json,
     )
-    recs = _fetch_llm_list(model, prompt, "recommendations", "Recommendation generation")
+    recs = _fetch_llm_list(
+        model, prompt, "recommendations", "Recommendation generation", allow_empty=True
+    )
     if recs is None:
         return list(open_questions)
     try:
