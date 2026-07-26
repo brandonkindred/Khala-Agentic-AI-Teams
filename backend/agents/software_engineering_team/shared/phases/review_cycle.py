@@ -646,7 +646,7 @@ def _run_review_cycles(
             # parallel_map and their issues are collected and batch-fixed
             # together in a single restart-from-Code-Review, rather than
             # fixing QA and Security one gate at a time.
-            mt.status = gate_config.status_qa
+            mt.status = gate_config.status_qa_security or gate_config.status_qa
             logger.info(
                 "[%s] Microtask %s: Cycle %d - Running QA + security testing phases concurrently",
                 task_id,
@@ -655,25 +655,33 @@ def _run_review_cycles(
             )
 
             if progress_callback:
+                # A single combined-phase announcement, made before parallel_map
+                # even starts either gate. Reporting "qa_testing" then
+                # "security_testing" here (as this used to) would make the
+                # persisted current_microtask_phase land on "security_testing"
+                # for virtually the whole concurrent run, and the frontend's
+                # phase tracker infers "later phase observed" as "earlier phase
+                # passed" -- a false "QA passed" checkmark before QA's outcome
+                # is even known.
                 progress_callback(
                     current_idx,
                     len(completed_ids),
                     total,
                     mt.title or mt.id,
-                    "qa_testing",
-                    f"QA testing (cycle {total_cycles})...",
-                )
-                progress_callback(
-                    current_idx,
-                    len(completed_ids),
-                    total,
-                    mt.title or mt.id,
-                    "security_testing",
-                    f"Security testing (cycle {total_cycles})...",
+                    "qa_security_testing",
+                    f"QA + security testing (cycle {total_cycles})...",
                 )
 
             from shared.concurrency import parallel_map
 
+            # Both gates' detail callbacks are tagged with the same combined
+            # "qa_security_testing" phase (not their individual "qa_testing" /
+            # "security_testing" names) -- each forwards into progress_callback
+            # via detail_cb, and since the two gates run concurrently their
+            # ticks can interleave. Tagging either with its own bare phase name
+            # would flip the persisted current_microtask_phase to
+            # "security_testing" mid-run, reintroducing the false "QA passed"
+            # checkmark this branch exists to avoid.
             qa_outcome, sec_outcome = parallel_map(
                 [
                     lambda: gate_config.run_qa_gate(
@@ -683,7 +691,7 @@ def _run_review_cycles(
                         repo_path=repo_path,
                         files=microtask_files,
                         deps=deps,
-                        detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                        detail_callback=lambda d: detail_cb(d, current_idx, "qa_security_testing"),
                         cache=agent_review_cache,
                     ),
                     lambda: gate_config.run_security_gate(
@@ -693,7 +701,7 @@ def _run_review_cycles(
                         repo_path=repo_path,
                         files=microtask_files,
                         deps=deps,
-                        detail_callback=lambda d: detail_cb(d, current_idx, "security_testing"),
+                        detail_callback=lambda d: detail_cb(d, current_idx, "qa_security_testing"),
                         cache=agent_review_cache,
                     ),
                 ],
@@ -735,7 +743,7 @@ def _run_review_cycles(
                         len(completed_ids),
                         total,
                         mt.title or mt.id,
-                        "qa_testing",
+                        "qa_security_testing",
                         f"Batch fixing {len(combined_issues)} QA/security issues...",
                     )
 
@@ -748,7 +756,7 @@ def _run_review_cycles(
                     repo_path=str(repo_path),
                     task_id=task_id,
                     phase_name="qa_security",
-                    detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                    detail_callback=lambda d: detail_cb(d, current_idx, "qa_security_testing"),
                 )
 
                 microtask_files = ps_result.files
