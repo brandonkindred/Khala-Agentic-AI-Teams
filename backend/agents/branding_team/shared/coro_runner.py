@@ -114,6 +114,14 @@ async def _run_with_pool_cleanup(coroutine: Awaitable[_T]) -> _T:
     ephemeral loop closes. Closing here, while the loop is still running and
     guaranteed to run no other coroutine afterward, is always safe.
 
+    The cleanup is scoped to *this* loop (``only_current_loop=True``): the
+    offload path in :func:`run_coroutine` can have several ``run_coroutine``
+    calls executing concurrently, each on its own worker thread with its own
+    ephemeral loop. An unscoped ``aclose_async_pool()`` closes every pooled
+    client process-wide, including ones owned by those other still-running
+    loops — severing an unrelated concurrent request mid-flight. Scoping to
+    the current loop closes only what *this* call created.
+
     Postconditions:
         Returns *coroutine*'s result, or propagates whatever it raises;
         ``aclose_async_pool`` runs in a ``finally`` so cleanup happens on
@@ -122,7 +130,7 @@ async def _run_with_pool_cleanup(coroutine: Awaitable[_T]) -> _T:
     try:
         return await coroutine
     finally:
-        await aclose_async_pool()
+        await aclose_async_pool(only_current_loop=True)
 
 
 def run_coroutine(coroutine: Awaitable[_T]) -> _T:
