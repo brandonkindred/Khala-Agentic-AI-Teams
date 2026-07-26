@@ -23,6 +23,7 @@ from .store import (
     record_association,
     record_association_safe,
     remove_association,
+    remove_association_safe,
     upsert_profile,
 )
 
@@ -56,4 +57,5 @@ __all__ = [
     "record_association_safe",
     "list_associations",
     "remove_association",
+    "remove_association_safe",
 ]

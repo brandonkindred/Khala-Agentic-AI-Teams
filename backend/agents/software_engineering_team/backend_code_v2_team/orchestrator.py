@@ -25,7 +25,6 @@ from . import models as _models
 from .models import (
     BackendCodeV2WorkflowResult,
     MicrotaskReviewConfig,
-    MicrotaskReviewFailedError,
     ToolAgentKind,
 )
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
@@ -97,12 +96,14 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
     ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
-    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
-    ``_run_deliver_and_finalize`` / ``_run_development_workflow`` from
-    :class:`BaseV2DevelopmentAgent`; supplies the backend tooling detection,
-    repo-briefing sets, and a thin ``run_workflow`` that forwards this
-    module's own tool-agent builder, planning/execution/deliver functions, and
-    review classes into ``_run_development_workflow``.
+    ``_run_execution_phase`` / ``_record_execution_bookkeeping`` /
+    ``_run_documentation_phase`` / ``_run_deliver_and_finalize`` /
+    ``_run_development_workflow`` from :class:`BaseV2DevelopmentAgent`
+    (the job-update closure itself comes from the shared
+    ``team_lead_base.make_job_updater``); supplies the backend tooling
+    detection, repo-briefing sets, and a thin ``run_workflow`` that forwards
+    this module's own tool-agent builder, planning/execution/deliver
+    functions, and review classes into ``_run_development_workflow``.
     """
 
     _TEAM_LABEL = "Backend"
@@ -235,7 +236,6 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             execution_status_text="Starting code implementation",
             review_deps_cls=ReviewDependencies,
             review_config_cls=MicrotaskReviewConfig,
-            review_failed_exc_cls=MicrotaskReviewFailedError,
             run_execution_with_review_gates=run_execution_with_review_gates,
             documentation_status_text="Generating documentation and API specs",
             run_documentation_phase=run_documentation_phase,

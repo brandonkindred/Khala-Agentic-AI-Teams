@@ -162,6 +162,27 @@ def _dispatch() -> DispatchTable:
         }
         cur.rowcount = 1
 
+    def match_delete_brand(norm: str) -> bool:
+        return norm.startswith("delete from branding_brands")
+
+    def handle_delete_brand(cur: FakeCursor, params: tuple) -> None:
+        """Emulate DELETE FROM branding_brands WHERE id = %s AND client_id = %s.
+
+        Preconditions:
+            ``params`` is ``(brand_id, client_id)``.
+        Postconditions:
+            On ownership match, removes the row and sets ``rowcount`` to 1;
+            on miss (unknown id, or a client_id mismatch), ``rowcount`` is 0
+            and the row (if any) is left untouched.
+        """
+        brand_id, client_id = params
+        row = cur.db["brands"].get(brand_id)
+        if row and row["client_id"] == client_id:
+            del cur.db["brands"][brand_id]
+            cur.rowcount = 1
+        else:
+            cur.rowcount = 0
+
     def match_select_brand_data_owned(norm: str) -> bool:
         return norm.startswith("select data from branding_brands where id = %s and client_id")
 
@@ -621,6 +642,7 @@ def _dispatch() -> DispatchTable:
         (match_select_clients, handle_select_clients),
         (match_exists_client, handle_exists_client),
         (match_insert_brand, handle_insert_brand),
+        (match_delete_brand, handle_delete_brand),
         (match_select_brand_data_owned, handle_select_brand_data_owned),
         (match_select_brand_version, handle_select_brand_version),
         (match_exists_brand, handle_exists_brand),
