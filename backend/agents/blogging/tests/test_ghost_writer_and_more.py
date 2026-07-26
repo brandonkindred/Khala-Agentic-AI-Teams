@@ -678,6 +678,51 @@ def test_ghost_conduct_interview_no_experience_quick_exit(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# _is_no_experience
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I have a passion for this",
+        "None of that applied",
+        "I am skipping ahead",
+        "nonetheless, it was fine",
+        "I have no time",
+        "please skip ahead to the next part",
+    ],
+)
+def test_is_no_experience_false_positives(message: str) -> None:
+    """Ordinary prose containing 'pass'/'none'/'skip'/'no' substrings must not match."""
+    from agents.blogging.ghost_writer_agent.agent import _is_no_experience
+
+    assert _is_no_experience(message) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "skip",
+        "skip.",
+        "none",
+        "pass",
+        "skip this one",
+        "n/a for now",
+        "I have no experience",
+        "I have no relevant experience",
+        "I don't have a story",
+        "no relevant experience",
+    ],
+)
+def test_is_no_experience_true_positives(message: str) -> None:
+    """Intended no-experience refusal signals must still be detected."""
+    from agents.blogging.ghost_writer_agent.agent import _is_no_experience
+
+    assert _is_no_experience(message) is True
+
+
+# ---------------------------------------------------------------------------
 # _notify_job_updater
 # ---------------------------------------------------------------------------
 
