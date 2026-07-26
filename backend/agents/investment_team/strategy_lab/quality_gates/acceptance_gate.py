@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import ClassVar, List, Optional
 
 from ...models import BacktestConfig, BacktestResult
-from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
+from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase, join_gate_details
 
 GATE = "acceptance_gate"
 
@@ -131,4 +131,4 @@ def summarize_acceptance_reason(results: List[QualityGateResult]) -> str:
     fails = [r for r in results if not r.passed]
     if not fails:
         return "all four criteria met"
-    return "; ".join(r.details for r in fails)
+    return join_gate_details(fails)
