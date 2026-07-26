@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.json_retry import call_json_with_retry
+from agents.blogging.shared.word_count import count_words
 from strands import Agent
 from strands.types.exceptions import EventLoopException
 
@@ -121,8 +122,10 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         Postconditions:
             - Returns the assembled context (draft last), as one string.
             - Has no side effects on self or the inputs.
+            - Word count is computed via :func:`count_words`, a naive
+              whitespace-token heuristic (not a linguistic word count).
         """
-        actual_word_count = len(draft.split())
+        actual_word_count = count_words(draft)
         target_word_count = copy_editor_input.target_word_count
         soft_min = copy_editor_input.soft_min_words
         soft_max = copy_editor_input.soft_max_words
@@ -337,7 +340,8 @@ class BlogCopyEditorAgent(_BlogAgentBase):
 
         Preconditions:
             - ``actual_word_count`` equals the word count of the reviewed draft
-              (e.g. computed as ``len(draft.split())`` by the caller).
+              (computed by the caller via :func:`count_words`, a naive
+              whitespace-token heuristic).
             - ``target_word_count > 0`` to inject any length items; non-positive
               targets are treated as "no length target" and leave
               ``feedback_items`` unchanged.
@@ -490,7 +494,7 @@ class BlogCopyEditorAgent(_BlogAgentBase):
             len(style_guide_text),
         )
 
-        actual_word_count = len(draft.split())
+        actual_word_count = count_words(draft)
 
         prompt = self._build_editor_prompt(copy_editor_input, draft, style_guide_text)
         data = self._invoke_editor_llm(prompt, on_llm_request=on_llm_request)
