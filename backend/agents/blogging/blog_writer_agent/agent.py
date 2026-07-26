@@ -1095,8 +1095,6 @@ class BlogWriterAgent(_BlogAgentBase):
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     return revised.strip()
-            except LLMJsonParseError as e:
-                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
@@ -1239,8 +1237,6 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
-            except LLMJsonParseError as e:
-                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
@@ -1499,8 +1495,6 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
-            except LLMJsonParseError as e:
-                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
