@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _task(**overrides):
     from software_engineering_team.shared.models import Task, TaskType
@@ -80,6 +82,15 @@ def test_fe_format_all_code_truncates():
     huge = {f"f{i}.ts": "x" * 1000 for i in range(50)}
     out = _format_all_code(huge, max_chars=2000)
     assert "truncated" in out
+
+
+def test_fe_format_all_code_raises_on_nonpositive_max_chars():
+    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+        _format_all_code,
+    )
+
+    with pytest.raises(ValueError):
+        _format_all_code({"a.ts": "code"}, max_chars=0)
 
 
 def test_fe_format_issues_for_batch():

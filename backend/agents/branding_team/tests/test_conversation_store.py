@@ -190,6 +190,26 @@ def test_update_mission_and_set_brand(fake_pg: dict) -> None:
     assert store.get_conversation_brand_id(cid) is None
 
 
+def test_attach_and_update_mission(fake_pg: dict) -> None:
+    """attach_and_update_mission sets brand_id and mission in one call, and
+    returns False for an unknown conversation without raising."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_acme_mission())
+
+    updated = make_mission(
+        company_name="Beta",
+        company_description="Updated description",
+        target_audience="operators",
+    )
+    assert store.attach_and_update_mission(cid, "brand_atomic", updated) is True
+    assert store.get_conversation_brand_id(cid) == "brand_atomic"
+    state = store.get_state(cid)
+    assert state is not None
+    assert state.mission.company_name == "Beta"
+
+    assert store.attach_and_update_mission("missing", "brand_atomic", updated) is False
+
+
 def test_list_conversations_with_and_without_brand_filter(fake_pg: dict) -> None:
     """list_conversations returns summaries, optionally filtered by brand_id."""
     store = BrandingConversationStore()

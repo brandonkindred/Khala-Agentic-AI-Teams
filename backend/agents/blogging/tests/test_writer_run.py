@@ -188,6 +188,26 @@ def test_writer_run_wrapped_json_parse_error_then_json_fallback(monkeypatch) -> 
     assert "Unwrapped Fallback" in out.draft
 
 
+def test_writer_run_json_fallback_non_dict_returns_placeholder(monkeypatch) -> None:
+    """A non-dict/None return from _call_agent_json in the fallback must not raise
+    AttributeError — it should fall through to the placeholder draft."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMJsonParseError
+
+    a = _agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(
+            LLMJsonParseError("bad draft text")
+        ),
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: None)
+    out = a.run(_writer_input())
+    assert "No draft was generated" in out.draft
+
+
 def test_writer_run_json_parse_error_and_fallback_also_fails(monkeypatch) -> None:
     """LLMJsonParseError on both text and JSON paths yields the placeholder draft."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent

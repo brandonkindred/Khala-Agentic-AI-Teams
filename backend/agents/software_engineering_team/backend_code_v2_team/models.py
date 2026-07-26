@@ -16,7 +16,9 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.v2_models import (
+    BaseExecutionResult,
     BaseMicrotaskReviewConfig,
+    BasePlanningResult,
     BatchFixResult,
     DeliverResult,
     DocumentationPhaseResult,
@@ -125,22 +127,14 @@ class Microtask(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PlanningResult(BaseModel):
+class PlanningResult(BasePlanningResult[Microtask]):
     """Output of the Planning phase."""
 
-    microtasks: List[Microtask] = Field(default_factory=list)
     language: str = Field(default="python", description="Detected language: python or java")
-    summary: str = Field(default="")
 
 
-class ExecutionResult(BaseModel):
+class ExecutionResult(BaseExecutionResult[Microtask]):
     """Aggregated output of the Execution phase."""
-
-    files: Dict[str, str] = Field(default_factory=dict, description="All files produced")
-    microtasks: List[Microtask] = Field(
-        default_factory=list, description="Microtasks with updated status"
-    )
-    summary: str = Field(default="")
 
 
 # ---------------------------------------------------------------------------

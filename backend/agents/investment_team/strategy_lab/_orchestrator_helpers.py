@@ -32,6 +32,7 @@ from ..models import (
     TradeRecord,
 )
 from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
+from .alignment_findings import entry_rule_id, signal_exit_rule_id
 from .coverage_probe import run_coverage_stage, should_run_probes
 from .exceptions import OrchestratorContractError
 from .quality_gates.models import QualityGateResult
@@ -478,6 +479,35 @@ class _DriftCollector:
         )
 
 
+def _has_short_period_stall(window: Sequence[Any]) -> bool:
+    """True when ``window`` is exactly periodic with some short period.
+
+    Detects both the original "all entries identical" case (period 1) and
+    short-period oscillation (e.g. an A/B/A/B... 2-cycle) — any period ``p``
+    for which the window repeats with at least two full cycles of evidence.
+
+    Preconditions:
+      ``window`` is an ordered, finite sequence of comparable (``==``-able)
+      entries, oldest first.
+    Postconditions:
+      Returns ``False`` for an empty window. Returns ``True`` for a
+      single-entry window (trivially "unchanged"). Otherwise returns
+      ``True`` iff there exists a period ``p`` in ``[1, len(window) // 2]``
+      such that ``window[i] == window[i - p]`` for every ``i >= p`` — i.e.
+      the window consists of at least two full repetitions of a length-``p``
+      cycle. Returns ``False`` if no such period exists.
+    """
+    n = len(window)
+    if n == 0:
+        return False
+    if n == 1:
+        return True
+    for period in range(1, n // 2 + 1):
+        if all(window[i] == window[i - period] for i in range(period, n)):
+            return True
+    return False
+
+
 @dataclass
 class RefinementStallTracker:
     """Rolling-window ``(hash(code), hash(failure_details))`` signature
@@ -517,20 +547,24 @@ class RefinementStallTracker:
         self._history.append((code_hash, failure_hash))
 
     def is_stalled(self, n: int) -> bool:
-        """True when the last ``n`` recorded signatures are all identical.
+        """True when the last ``n`` recorded signatures show no real progress.
+
+        Recognizes both windows of identical repeats and short-period
+        oscillating signatures (e.g. an A/B/A/B... 2-cycle) — see
+        :func:`_has_short_period_stall`.
 
         Preconditions:
           ``n`` is the consecutive-round stall threshold (sub-1 floored).
         Postconditions:
           Returns True only when at least ``n`` rounds have been recorded
-          and the last ``n`` ``(code_hash, failure_hash)`` pairs are equal.
+          and the last ``n`` ``(code_hash, failure_hash)`` pairs are exactly
+          periodic with some period ``p <= n // 2`` (or the window is a
+          single round).
         """
         n = max(n, 1)
         if len(self._history) < n:
             return False
-        window = self._history[-n:]
-        first = window[0]
-        return all(sig == first for sig in window)
+        return _has_short_period_stall(self._history[-n:])
 
     @property
     def rounds_recorded(self) -> int:
@@ -589,16 +623,33 @@ def _build_rule_implementation_map(
 
     rule_ids: List[str] = []
     for i, _ in enumerate(getattr(spec, "entry_rules", None) or []):
-        rule_ids.append(f"entry[{i}]")
+        rule_ids.append(entry_rule_id(i))
     kind_counts: Dict[str, int] = defaultdict(int)
     # Map suffixed finding IDs to the specific rule instance based on
     # distinguishing attributes (e.g. StopLossRule.basis).
     _suffix_to_instance: Dict[str, str] = {}
-    for er in getattr(spec, "exit_rules", None) or []:
+    for absolute_idx, er in enumerate(getattr(spec, "exit_rules", None) or []):
         if hasattr(er, "kind"):
-            idx = kind_counts[er.kind]
-            kind_counts[er.kind] += 1
-            canonical = f"exit:{er.kind}[{idx}]"
+            if er.kind == "signal_exit":
+                # Signal-exit findings are keyed by the rule's ABSOLUTE
+                # ``spec.exit_rules`` index (``signal_exit_rule_id``,
+                # shared with ``alignment_checks.py`` and
+                # ``RuleFiringRateGate``) — it must match here too, or a
+                # spec mixing exit-rule kinds (e.g. ``[StopLossRule,
+                # SignalExitRule]``) desyncs this map's canonical
+                # ``exit:signal_exit[0]`` (per-kind count) from the
+                # findings' ``exit:signal_exit[1]`` (absolute index),
+                # silently reporting ``traded_count=0`` for a rule that
+                # fired on every trade. Other kinds keep the per-kind
+                # counter: the engine's own stop_loss/take_profit
+                # reasons are never index-stamped (always ambiguous
+                # among same-kind rules), so an arbitrary per-instance id
+                # is all any consumer can offer for those anyway.
+                canonical = signal_exit_rule_id(absolute_idx)
+            else:
+                idx = kind_counts[er.kind]
+                kind_counts[er.kind] += 1
+                canonical = f"exit:{er.kind}[{idx}]"
             rule_ids.append(canonical)
             basis = getattr(er, "basis", None)
             if basis:

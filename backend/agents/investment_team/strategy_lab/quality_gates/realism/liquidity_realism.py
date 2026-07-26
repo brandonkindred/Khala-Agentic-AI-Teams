@@ -22,6 +22,16 @@ Wired from
 :meth:`StrategyLabOrchestrator._run_realism_gates`. Skipped (info) when
 the market data is not in scope at the call site — the orchestrator
 threads it through on the verification-phase invocation.
+
+Custom-code strategies: this gate takes no ``spec`` and never branches on
+``requires_custom_code``. Its only inputs are ``TradeRecord.position_value``
+/ ``entry_date`` / ``symbol`` (fill-simulator output populated identically
+regardless of code path) and ``market_data``. Unlike
+:class:`~investment_team.strategy_lab.quality_gates.realism.rule_firing.RuleFiringRateGate`,
+which depends on the compiler's per-rule reason annotation and has no
+signal for LLM-authored code, this gate has no compiler dependency to lose
+— it already applies the same scrutiny to custom-code and compiled
+strategies alike.
 """
 
 from __future__ import annotations

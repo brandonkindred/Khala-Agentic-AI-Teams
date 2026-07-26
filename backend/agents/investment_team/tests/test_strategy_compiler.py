@@ -23,7 +23,7 @@ from typing import Any, List
 import pytest
 
 from investment_team.models import StrategySpec
-from investment_team.strategy_lab.quality_gates.code_conformance import CodeConformanceGate
+from investment_team.strategy_lab.quality_gates.code_conformance.gate import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.code_safety import CodeSafetyChecker
 from investment_team.strategy_lab.spec_dsl import (
     AllOf,

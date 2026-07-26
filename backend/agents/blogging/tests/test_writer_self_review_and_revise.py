@@ -91,6 +91,31 @@ def test_writer_llm_self_review_with_issues(monkeypatch) -> None:
     assert "Better draft" in out
 
 
+def test_writer_llm_self_review_with_markdown_fenced_array(monkeypatch) -> None:
+    """Issues array wrapped in markdown fences must still be extracted correctly.
+
+    Regression test: the old naive ``find('[')``/``rfind(']')`` slicing would
+    grab the fence markers' surrounding prose incorrectly whenever the array
+    was wrapped in a ```json code block; the shared ``extract_json_from_response``
+    helper strips fences before parsing.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            issues = json.dumps([{"location": "intro", "issue": "vague", "fix": "be specific"}])
+            return f"Here is my review:\n```json\n{issues}\n```"
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+
+
 def test_writer_llm_self_review_no_array(monkeypatch) -> None:
     """No JSON array → return draft unchanged."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent

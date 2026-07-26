@@ -16,6 +16,8 @@ import logging
 from difflib import SequenceMatcher
 from typing import Any, List
 
+from strands.models.model import Model
+
 from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
 
 from .llm_io import call_llm_json
@@ -368,7 +370,7 @@ def dedupe_questions_by_answer_similarity(
 
 
 def consolidate_open_questions(
-    model: Any, open_questions: List[OpenQuestion]
+    model: Model, open_questions: List[OpenQuestion]
 ) -> List[OpenQuestion]:
     """Merge duplicate or semantically equivalent questions before sending to user.
 
@@ -378,7 +380,9 @@ def consolidate_open_questions(
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the consolidated list, or the unmodified list on <=1
-        input or any LLM/parse failure; never raises.
+        input or a full-batch LLM/parse failure; never raises. Items that
+        individually fail to parse are skipped and logged rather than discarding
+        the whole batch.
     """
     if len(open_questions) <= 1:
         return list(open_questions)
@@ -416,8 +420,11 @@ def consolidate_open_questions(
             return list(open_questions)
         result = []
         for i, q_data in enumerate(consolidated):
-            result.append(parse_open_question(q_data, i))
-        return result
+            try:
+                result.append(parse_open_question(q_data, i))
+            except Exception as e:
+                logger.warning("Failed to parse consolidated question %d: %s", i, e)
+        return result if result else list(open_questions)
     except Exception as e:
         logger.warning(
             "Question consolidation failed, using original list: %s",
@@ -427,16 +434,29 @@ def consolidate_open_questions(
 
 
 def review_question_answer_alignment(
-    model: Any, open_questions: List[OpenQuestion]
+    model: Model, open_questions: List[OpenQuestion]
 ) -> List[OpenQuestion]:
     """Ensure each question and its options make sense together (e.g. no Yes/No for open-ended questions).
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
-    Postconditions: returns the aligned list, or the unmodified list on empty input
-        or any LLM/parse failure; never raises.
+    Postconditions: returns the aligned list, or the unmodified list (in its
+        original order) on empty input or when no item in the batch parses
+        successfully; never raises. This is a per-question review (ids are
+        preserved), so an item that individually fails to parse, that carries
+        an id not present in ``open_questions`` (a hallucinated/unrecognized
+        id), or that repeats an id already placed in the result (a
+        duplicate), falls back to its original (unaligned) question by id —
+        unless that original id is already in the result, in which case the
+        item is dropped outright. Any original question whose id never
+        appears in the result is appended at the end. If no item in the batch
+        parses successfully, the LLM-provided order carries no meaning, so
+        the original list is returned unchanged rather than in fallback
+        (LLM-provided) order. The result therefore contains exactly one entry
+        per original id: no question is ever dropped, added, or duplicated.
     """
     if len(open_questions) == 0:
         return []
+    original_by_id = {q.id: q for q in open_questions}
     questions_payload = [
         {
             "id": q.id,
@@ -477,8 +497,33 @@ def review_question_answer_alignment(
         if not isinstance(aligned, list) or len(aligned) == 0:
             return list(open_questions)
         result = []
+        seen_ids = set()
+        any_parsed = False
         for i, q_data in enumerate(aligned):
-            result.append(parse_open_question(q_data, i))
+            try:
+                parsed = parse_open_question(q_data, i)
+                if parsed.id not in original_by_id:
+                    raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
+                if parsed.id in seen_ids:
+                    raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
+                result.append(parsed)
+                seen_ids.add(parsed.id)
+                any_parsed = True
+            except Exception as e:
+                logger.warning("Failed to parse aligned question %d: %s", i, e)
+                fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
+                original = original_by_id.get(fallback_id) if fallback_id else None
+                if original is not None and original.id not in seen_ids:
+                    result.append(original)
+                    seen_ids.add(original.id)
+        if not any_parsed:
+            # Nothing in the batch was genuinely realigned, so the LLM-provided
+            # order (which any fallbacks above were assembled in) carries no
+            # meaning — return the original list in its original order instead.
+            return list(open_questions)
+        for q in open_questions:
+            if q.id not in seen_ids:
+                result.append(q)
         return result
     except Exception as e:
         logger.warning(
@@ -489,7 +534,7 @@ def review_question_answer_alignment(
 
 
 def add_recommendations(
-    model: Any, open_questions: List[OpenQuestion], spec_content: str
+    model: Model, open_questions: List[OpenQuestion], spec_content: str
 ) -> List[OpenQuestion]:
     """Add a short recommendation (which option and why) to each question.
 
@@ -532,7 +577,7 @@ def add_recommendations(
         rec_by_id = {
             r.get("id"): str(r.get("recommendation", "") or "")
             for r in recs
-            if isinstance(r, dict) and r.get("id")
+            if isinstance(r, dict) and "id" in r
         }
         result = []
         for q in open_questions:

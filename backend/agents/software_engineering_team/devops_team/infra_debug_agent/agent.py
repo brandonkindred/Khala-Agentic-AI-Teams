@@ -17,7 +17,22 @@ _FIXABLE_TYPES = frozenset({"syntax", "validation"})
 
 
 class InfraDebugAgent:
+    """Classifies IaC (terraform/cdk/compose/helm) execution errors from CLI output.
+
+    Given the raw output of a failed IaC command, this agent uses an LLM to
+    identify and classify the individual errors, summarize the failure, and
+    judge whether the errors are automatically fixable.
+    """
+
     def __init__(self, llm_client: LLMClient) -> None:
+        """Initialize the agent with an LLM client.
+
+        Preconditions:
+            llm_client must not be None.
+        Postconditions:
+            self.llm holds the given client; self._model holds the strands
+            model resolved for the "devops" agent key.
+        """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
         self._model = resolve_strands_model(
@@ -25,6 +40,22 @@ class InfraDebugAgent:
         )
 
     def run(self, input_data: IaCDebugInput) -> IaCDebugOutput:
+        """Classify the errors in a failed IaC execution and judge fixability.
+
+        Builds a context prompt from the tool name, command, execution output,
+        and up to 5 IaC artifact files, then asks the LLM to classify the
+        errors present.
+
+        Preconditions:
+            input_data is a valid IaCDebugInput.
+        Postconditions:
+            Returns an IaCDebugOutput whose errors list holds one
+            IaCExecutionError per classified error (each carrying the raw
+            execution output), whose summary describes the failure, and
+            whose fixable flag is true only when there is at least one error
+            and every error's type is in {"syntax", "validation"} (or the LLM
+            explicitly overrides this via its own "fixable" response field).
+        """
         artifacts_snippet = ""
         for fname, content in list(input_data.artifacts.items())[:5]:
             artifacts_snippet += f"\n### {fname} ###\n{content[:2000]}\n"

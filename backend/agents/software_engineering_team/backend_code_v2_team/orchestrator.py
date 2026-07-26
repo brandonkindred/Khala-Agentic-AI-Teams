@@ -16,11 +16,13 @@ from llm_service import LLMClient
 from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.team_lead_base import BaseTeamLead
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
+from . import models as _models
 from .models import (
     BackendCodeV2WorkflowResult,
     MicrotaskReviewConfig,
@@ -28,12 +30,18 @@ from .models import (
     Phase,
     ToolAgentKind,
 )
-from .phases.deliver import run_deliver
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .phases.planning import run_planning
 from .phases.setup import configure_quality_tooling, run_setup
+from .prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
 logger = logging.getLogger(__name__)
+
+run_deliver = make_run_deliver(
+    models=_models,
+    commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
+    logger=logger,
+)
 
 # Backend repo-briefing filter contract: the extensions read into the development
 # agent's context and the directories pruned from the walk. Single-sourced here so
@@ -207,8 +215,8 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
             if job_updater:
                 try:
                     job_updater(**kwargs)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("[%s] job_updater callback failed: %s", task_id, e)
 
         logger.info(
             "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id

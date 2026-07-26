@@ -17,6 +17,7 @@ from shared.command_runner.angular_repair import (
 from shared.command_runner.nvm import _get_nvm_script_prefix
 from shared.command_runner.runner import (
     CommandResult,
+    _detect_python_linter,
     detect_frontend_framework,
     is_ng_build_environment_failure,
     patch_json_file,
@@ -648,3 +649,61 @@ def test_ensure_frontend_project_initialized_produces_material_theme_fonts_provi
     app_config = tmp_path / "src" / "app" / "app.config.ts"
     assert app_config.exists()
     assert "provideAnimations" in app_config.read_text(encoding="utf-8")
+
+
+def test_detect_python_linter_defaults_to_ruff_with_no_config(tmp_path: Path) -> None:
+    assert _detect_python_linter(tmp_path) == "ruff"
+
+
+def test_detect_python_linter_prefers_ruff_toml(tmp_path: Path) -> None:
+    (tmp_path / "ruff.toml").write_text("", encoding="utf-8")
+    (tmp_path / ".flake8").write_text("[flake8]\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "ruff"
+
+
+def test_detect_python_linter_pyproject_with_tool_ruff_section(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.ruff]\nline-length = 120\n", encoding="utf-8")
+    (tmp_path / ".flake8").write_text("[flake8]\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "ruff"
+
+
+def test_detect_python_linter_pyproject_without_ruff_falls_back_to_flake8_cfg(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.black]\n", encoding="utf-8")
+    (tmp_path / ".flake8").write_text("[flake8]\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "flake8"
+
+
+def test_detect_python_linter_pyproject_without_ruff_falls_back_to_setup_cfg(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.black]\n", encoding="utf-8")
+    (tmp_path / "setup.cfg").write_text("[flake8]\nmax-line-length = 120\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "flake8"
+
+
+def test_detect_python_linter_pyproject_without_ruff_or_flake8_config_defaults_to_ruff(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.black]\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "ruff"
+
+
+def test_detect_python_linter_bare_flake8_file_no_pyproject(tmp_path: Path) -> None:
+    (tmp_path / ".flake8").write_text("[flake8]\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "flake8"
+
+
+def test_detect_python_linter_bare_setup_cfg_no_pyproject_no_flake8_file(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "setup.cfg").write_text("[flake8]\nmax-line-length = 120\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "flake8"
+
+
+def test_detect_python_linter_setup_cfg_without_flake8_section_defaults_to_ruff(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "setup.cfg").write_text("[metadata]\nname = foo\n", encoding="utf-8")
+    assert _detect_python_linter(tmp_path) == "ruff"

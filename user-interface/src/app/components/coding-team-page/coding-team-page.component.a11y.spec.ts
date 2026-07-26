@@ -119,7 +119,7 @@ describe('CodingTeamPageComponent a11y', () => {
     localStorage.clear();
   });
 
-  /** Switch the visible view (the page opens on 'chat') and re-render. */
+  /** Switch the visible view (the page opens on 'jobs') and re-render. */
   function showView(view: 'chat' | 'github' | 'jobs'): void {
     component.activeView = view;
     fixture.detectChanges();
@@ -148,8 +148,16 @@ describe('CodingTeamPageComponent a11y', () => {
     fixture.detectChanges();
   }
 
-  it('has no axe violations on the default Chat view', async () => {
+  it('has no axe violations on the default Jobs view', async () => {
     await setup();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.jobs-panel')).not.toBeNull();
+    await expectNoAxeViolations(el);
+  }, 15000);
+
+  it('has no axe violations on the Chat view', async () => {
+    await setup();
+    showView('chat');
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('app-team-assistant-chat')).not.toBeNull();
     await expectNoAxeViolations(el);

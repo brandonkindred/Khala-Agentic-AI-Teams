@@ -20,6 +20,8 @@ from typing import Any, Iterator, Optional
 
 import httpx
 
+from shared.http.retry import retry_delay
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.github.com"
@@ -387,7 +389,6 @@ class GitHubClient:
     ) -> httpx.Response:
         url = self._absolute_url(path)
         last_exc: Optional[Exception] = None
-        backoff = 1.0
         for attempt in range(self._max_retries):
             try:
                 response = self._client.request(
@@ -402,8 +403,7 @@ class GitHubClient:
                 logger.warning(
                     "GitHub %s %s transport error: %s (attempt %d)", method, url, exc, attempt + 1
                 )
-                self._sleep(backoff)
-                backoff *= 2
+                self._sleep(retry_delay(attempt, 1.0, RATE_LIMIT_CAP_S))
                 continue
 
             if response.status_code in (502, 503, 504):
@@ -414,8 +414,7 @@ class GitHubClient:
                     response.status_code,
                     attempt + 1,
                 )
-                self._sleep(backoff)
-                backoff *= 2
+                self._sleep(retry_delay(attempt, 1.0, RATE_LIMIT_CAP_S))
                 continue
 
             if (

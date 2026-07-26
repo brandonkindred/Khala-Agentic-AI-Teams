@@ -639,6 +639,8 @@ class BlogWriterAgent(_BlogAgentBase):
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
             - Unexpected programming errors from the LLM call path propagate.
+        Invariants:
+            - The agent's configuration, style guide, and brand spec are not mutated.
         """
         self._assert_guidelines_present()
         outline = draft_input.outline_for_prompt().strip()
@@ -754,20 +756,22 @@ class BlogWriterAgent(_BlogAgentBase):
             )
             try:
                 data = self._call_agent_json(prompt)
-                raw_draft = data.get("draft")
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    draft = raw_draft.strip()
+                if isinstance(data, dict):
+                    raw_draft = data.get("draft")
+                    if isinstance(raw_draft, str) and raw_draft.strip():
+                        draft = raw_draft.strip()
             except Exception as e2:
                 cause2 = _unwrap_llm_cause(e2)
                 if not isinstance(cause2, LLMJsonParseError):
                     raise
+                logger.warning("JSON draft fallback also failed: %s", cause2)
 
         if not draft:
             logger.warning("LLM returned no draft content; returning placeholder.")
             draft = _PLACEHOLDER_DRAFT
 
         logger.info("Draft generated: length=%s", len(draft))
-        if draft and not draft.startswith(_PLACEHOLDER_DRAFT):
+        if draft != _PLACEHOLDER_DRAFT:
             if on_llm_request:
                 on_llm_request("Running self-review...")
             draft = self._self_review(draft)
@@ -845,7 +849,8 @@ class BlogWriterAgent(_BlogAgentBase):
         if revise_input.persistent_issues:
             pi_lines = []
             for i, pi in enumerate(revise_input.persistent_issues, 1):
-                loc = f" [{pi.location}]" if getattr(pi, "location", None) else ""
+                location = getattr(pi, "location", None)
+                loc = f" [{location}]" if location else ""
                 occurrence_count = getattr(pi, "occurrence_count", 0)
                 severity = getattr(pi, "severity", "unknown")
                 category = getattr(pi, "category", "")
@@ -853,8 +858,9 @@ class BlogWriterAgent(_BlogAgentBase):
                     f"{i}. [{severity}] {category}{loc} "
                     f"(flagged {occurrence_count} times): {getattr(pi, 'issue', '')}"
                 )
-                if getattr(pi, "suggestion", None):
-                    line += f'\n   REQUIRED FIX: "{pi.suggestion}"'
+                suggestion = getattr(pi, "suggestion", None)
+                if suggestion:
+                    line += f'\n   REQUIRED FIX: "{suggestion}"'
                 pi_lines.append(line)
             prompt_parts.extend(
                 [
@@ -1401,10 +1407,12 @@ class BlogWriterAgent(_BlogAgentBase):
         concrete guideline updates that can be persisted to the writing style guide.
 
         Returns an empty list when the feedback has no guideline-relevant content,
-        the response is malformed / non-dict, or a non-transient LLM failure was
-        soft-failed after logging. Transient ``LLMRateLimitError`` /
-        ``LLMTemporaryError`` (including when wrapped in ``EventLoopException``)
-        propagate so Temporal can retry the draft stage.
+        the response is malformed / non-dict, or the model returned unparsable
+        JSON (``LLMJsonParseError``, soft-failed with a logged traceback).
+        Transient ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when
+        wrapped in ``EventLoopException``) propagate so Temporal can retry the
+        draft stage. Any other exception is an unexpected bug and propagates
+        rather than being swallowed.
         """
         prompt = ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT.format(
             user_feedback=user_feedback,
@@ -1435,7 +1443,9 @@ class BlogWriterAgent(_BlogAgentBase):
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
-            logger.warning("Guideline update analysis failed: %s", e)
+            if not isinstance(cause, LLMJsonParseError):
+                raise
+            logger.exception("Guideline update analysis failed: %s", cause)
             return []
 
     def revise_from_user_feedback(

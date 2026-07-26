@@ -142,8 +142,10 @@ class LlmToolAgentBase:
     def _agent_factory(self):
         """Resolve ``Agent`` from the concrete subclass's defining module.
 
-        This is what lets ``monkeypatch.setattr(<agent_module>, "Agent", ...)``
-        intercept LLM calls made from this shared base.
+        Tests must ``monkeypatch.setattr(<subclass_module>, "Agent", ...)`` on
+        the *subclass's* module to intercept LLM calls — patching ``Agent`` on
+        this base class's module (``llm_tool_agent_base``) has no effect,
+        since resolution always uses ``type(self).__module__``.
 
         Preconditions:
             ``type(self).__module__`` names a module that defines an ``Agent``
@@ -171,7 +173,11 @@ class LlmToolAgentBase:
 
         Postconditions:
             Returns the stripped string result. Exceptions from building or
-            running the agent propagate unchanged.
+            running the agent propagate unchanged on both paths:
+            ``run_strands_agent`` (used when ``use_run_strands_agent`` is
+            true) is a thin passthrough with no internal retry or exception
+            handling, so it behaves identically to the inline call for
+            propagation purposes.
         """
         if self.use_run_strands_agent:
             from llm_service.strands_model import run_strands_agent

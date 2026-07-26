@@ -405,6 +405,9 @@ def finalize_review_activity(
           ``not_reviewed_issues`` the coverage findings, ``skipped_issues`` the
           empty-file info findings, and ``approved_flags`` one bool per successful
           sub-review.
+        - ``approved_flags`` is non-empty: the workflow's total-failure guard
+          (``CodeReviewWorkflow.run`` in ``workflows.py``) raises before this
+          activity is ever invoked when no chunk produced a verdict.
 
     Postconditions:
         - Returns ``{"approved": bool, "issues": [issue dicts]}`` computed by
@@ -421,7 +424,8 @@ def finalize_review_activity(
     skipped = [CodeReviewIssue.model_validate(i) for i in skipped_issues]
 
     deduped = _dedupe_issues([*verified, *not_reviewed, *skipped])
-    all_llm_approved = bool(approved_flags) and all(approved_flags)
+    assert approved_flags, "unreachable: workflow raises before calling this activity when empty"
+    all_llm_approved = all(approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
     return {"approved": approved, "issues": [i.model_dump(mode="json") for i in deduped]}
 
