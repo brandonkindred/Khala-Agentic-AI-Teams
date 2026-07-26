@@ -224,6 +224,21 @@ def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
 
 
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
+    """Render prior lab strategies as the "Prior Strategy Results" block for the design prompt.
+
+    Each record is labeled LOSING / WINNING · PUBLISHABLE / WINNING · NOT PUBLISHABLE
+    (with the joined gate codes when available) from ``is_winning`` / ``is_publishable`` /
+    ``publishability_skip_reason``, followed by its asset class, hypothesis, backtest
+    metrics, ideation rationale, and post-backtest analysis — each field truncated to
+    keep the entry prompt-sized.
+
+    Preconditions:
+      - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 0``.
+    Postconditions:
+      - Returns a non-empty string. Empty ``records`` → a "first strategy" sentinel.
+      - When ``len(records) > max_records``, only the ``max_records`` most recently
+        created records (by ``created_at``) are rendered, oldest first.
+    """
     if not records:
         return "None yet — this is the first strategy."
     ordered = sorted(records, key=lambda x: x.created_at)
