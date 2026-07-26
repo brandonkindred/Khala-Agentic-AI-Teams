@@ -1,16 +1,14 @@
 """
-Command runner utility for executing build/test/serve commands.
-
-Provides a safe way for the orchestrator to run frontend build commands
-(npm run build, ng build, etc.), `python -m pytest`, and capture their
-output for feedback to coding agents.
+Command runner utility for executing build/test/serve/lint commands for
+both frontend (Angular, React, Vue) and backend (Python/FastAPI) projects.
 
 This is the base module of the ``shared.command_runner`` package: subprocess
-primitives, frontend framework detection, and backend test/lint/syntax-check
-runners. NVM management, Angular-specific repair, project scaffolding, and
-frontend serve smoke tests live in sibling modules (``nvm``,
-``angular_repair``, ``scaffolding``, ``smoke_test``) that import from here —
-this module has no dependency on any of them at module load time.
+primitives, frontend framework detection, frontend build/test execution, and
+backend pytest/lint/syntax-check runners. NVM management, Angular-specific
+repair, project scaffolding, and frontend serve smoke tests live in sibling
+modules (``nvm``, ``angular_repair``, ``scaffolding``, ``smoke_test``) that
+import from here — this module has no dependency on any of them at module
+load time.
 """
 
 from __future__ import annotations
