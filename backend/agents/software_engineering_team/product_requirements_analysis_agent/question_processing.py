@@ -201,6 +201,19 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     )
 
 
+def _safe_constraint_layer(value: Any) -> int:
+    """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns an int; non-numeric or missing input yields 0,
+        matching the "not a constraint question" default in :class:`OpenQuestion`.
+    """
+    try:
+        return int(value or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
 def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     """Parse a single open question from LLM output.
 
@@ -244,7 +257,7 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             category=str(q_data.get("category", "general")),
             priority=str(q_data.get("priority", "medium")),
             constraint_domain=str(q_data.get("constraint_domain", "")),
-            constraint_layer=int(q_data.get("constraint_layer", 0) or 0),
+            constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
             blocking=bool(q_data.get("blocking", True)),
             owner=str(q_data.get("owner", "user")),
