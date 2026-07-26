@@ -500,7 +500,10 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         data = self._invoke_editor_llm(prompt, on_llm_request=on_llm_request)
 
         summary = (data.get("summary") or "").strip() or "No summary generated."
-        feedback_items = self._parse_feedback_items(data.get("feedback_items") or [])
+        raw_feedback_items = data.get("feedback_items")
+        feedback_items = self._parse_feedback_items(
+            raw_feedback_items if isinstance(raw_feedback_items, list) else []
+        )
         feedback_items = self._inject_length_feedback(
             feedback_items, copy_editor_input, actual_word_count
         )
