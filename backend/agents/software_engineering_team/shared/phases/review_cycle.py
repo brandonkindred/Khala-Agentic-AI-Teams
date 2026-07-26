@@ -218,11 +218,14 @@ def _apply_code_review_retry_exhausted(
         When ``phase_failed`` is True, ``write_microtask_output_or_fail`` already
         marked the microtask and rolled back files.
     Postconditions:
-        When ``phase_failed`` was False: sets REVIEW_FAILED notes/status, records
-        ``code_review_retry_exhausted``, rolls back this microtask's contributions
-        from ``all_files`` and the worktree, and returns True.
-        When ``phase_failed`` was True: leaves notes/status/telemetry untouched
-        and returns True (caller still stops the outer review cycle).
+        When ``phase_failed`` was False: sets ``mt.status`` to
+        ``review_failed_status``, adds ``mt.id`` to ``review_failed_ids``, sets
+        ``mt.notes`` to a retry-exhaustion message, records
+        ``code_review_retry_exhausted``, rolls back this microtask's
+        contributions from ``all_files`` and the worktree, and returns True.
+        When ``phase_failed`` was True: leaves ``mt.status``/``mt.notes``/
+        ``review_failed_ids``/telemetry untouched and returns True (caller
+        still stops the outer review cycle).
     """
     if phase_failed:
         return True
