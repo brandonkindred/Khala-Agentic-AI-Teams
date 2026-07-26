@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_service.clients.dummy import DummyLLMClient
+from llm_service.interface import LLMClient
 from software_engineering_team.devops_team.infra_debug_agent import (
     IaCDebugInput,
     IaCDebugOutput,
@@ -17,6 +18,33 @@ from software_engineering_team.devops_team.orchestrator import (
     MAX_INFRA_FIX_ITERATIONS,
     _DebugPatchState,
 )
+
+
+def _make_llm_tripwire() -> DummyLLMClient:
+    """Build a DummyLLMClient whose every public method raises.
+
+    Generic over whatever public methods LLMClient currently declares
+    (complete_json, complete, complete_text, chat, ...) instead of
+    hardcoding a couple of names, so a method added to the interface
+    later is caught automatically instead of silently letting a real
+    LLM call through undetected.
+    """
+
+    def _raiser(name: str) -> Any:
+        def _method(self: Any, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError(
+                f"LLM must not be called ({name}) when debug_output.fixable is False"
+            )
+
+        return _method
+
+    overrides = {
+        name: _raiser(name)
+        for name in vars(LLMClient)
+        if not name.startswith("_") and callable(getattr(LLMClient, name))
+    }
+    tripwire_cls = type("_TripWire", (DummyLLMClient,), overrides)
+    return tripwire_cls()
 
 
 class _StubClient(DummyLLMClient):
@@ -272,16 +300,7 @@ class TestInfraPatchAgent:
             fixable=False,
         )
 
-        class _TripWire(DummyLLMClient):
-            """Raises if the patch agent invokes the LLM on a non-fixable debug result."""
-
-            def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
-                raise AssertionError("LLM must not be called when debug_output.fixable is False")
-
-            def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
-                raise AssertionError("LLM must not be called when debug_output.fixable is False")
-
-        agent = InfraPatchAgent(llm_client=_TripWire())
+        agent = InfraPatchAgent(llm_client=_make_llm_tripwire())
         result = agent.run(
             IaCPatchInput(
                 debug_output=debug_out,
