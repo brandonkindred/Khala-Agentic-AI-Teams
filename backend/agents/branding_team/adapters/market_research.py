@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
 from branding_team.shared.coro_runner import run_coroutine
 from shared.env_config import env_float
+from shared.http.base_url import resolve_base_url
 from shared.http.job_polling import (
     DEFAULT_TERMINAL_STATUSES,
     async_get_json,
@@ -29,7 +29,7 @@ def _request_timeout_s() -> float:
 
 
 def _base_url() -> Optional[str]:
-    return os.environ.get("UNIFIED_API_BASE_URL") or os.environ.get("BRANDING_MARKET_RESEARCH_URL")
+    return resolve_base_url("UNIFIED_API_BASE_URL", "BRANDING_MARKET_RESEARCH_URL")
 
 
 def _build_payload(mission: BrandingMission) -> dict:

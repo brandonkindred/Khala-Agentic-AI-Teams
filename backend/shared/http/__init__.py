@@ -50,6 +50,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from shared.http.base_url import resolve_base_url
 from shared.http.retry import backoff_sleep, parse_retry_env_config, retry_delay
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "backoff_sleep",
     "parse_retry_env_config",
     "retry_delay",
+    "resolve_base_url",
 ]
 
 logger = logging.getLogger(__name__)
