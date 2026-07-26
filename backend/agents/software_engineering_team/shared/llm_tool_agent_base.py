@@ -69,9 +69,10 @@ class LlmToolAgentBase:
     ``__init__`` enables them automatically.
 
     Recipes:
-        Review-like — ``resolve_models = True`` (defaults give text mode; set
-        ``uses_json_model = True`` for a second JSON-mode model);
-        ``use_run_strands_agent = True``.
+        Review-like — ``resolve_models = True`` (defaults:
+        ``response_format="text"``, ``uses_json_model=False``,
+        ``use_run_strands_agent=False``; set ``uses_json_model = True`` for a
+        second JSON-mode model); ``use_run_strands_agent = True``.
         Plan/Json-like — ``resolve_models = True``, ``response_format = "json"``,
         ``get_strands_model_fn = <callable>``; leave
         ``use_run_strands_agent`` false for the inline path.
