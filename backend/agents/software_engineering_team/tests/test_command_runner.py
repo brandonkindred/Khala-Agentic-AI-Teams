@@ -14,8 +14,7 @@ from shared.command_runner.angular_repair import (
     _ensure_tsconfig_module_resolution,
     ensure_frontend_dependencies_installed,
 )
-from shared.command_runner.nvm import _get_nvm_script_prefix
-from shared.command_runner.runner import (
+from shared.command_runner.executor import (
     CommandResult,
     _detect_python_linter,
     detect_frontend_framework,
@@ -24,6 +23,7 @@ from shared.command_runner.runner import (
     patch_text_file,
     run_command,
 )
+from shared.command_runner.nvm import _get_nvm_script_prefix
 from shared.command_runner.scaffolding import ensure_frontend_project_initialized
 from shared.command_runner.smoke_test import run_ng_serve_smoke_test
 
@@ -196,7 +196,7 @@ def test_detect_frontend_framework_unknown(tmp_path: Path) -> None:
     assert detect_frontend_framework(tmp_path) == "unknown"
 
 
-@patch("shared.command_runner.runner.subprocess.run")
+@patch("shared.command_runner.executor.subprocess.run")
 def test_run_command_success(mock_run: object, tmp_path: Path) -> None:
     """run_command returns success when subprocess succeeds."""
     mock_run.return_value = subprocess.CompletedProcess(
@@ -207,7 +207,7 @@ def test_run_command_success(mock_run: object, tmp_path: Path) -> None:
     assert r.stdout == "ok"
 
 
-@patch("shared.command_runner.runner.subprocess.run")
+@patch("shared.command_runner.executor.subprocess.run")
 def test_run_command_failure(mock_run: object, tmp_path: Path) -> None:
     """run_command returns failure when subprocess fails."""
     mock_run.return_value = subprocess.CompletedProcess(
@@ -218,7 +218,7 @@ def test_run_command_failure(mock_run: object, tmp_path: Path) -> None:
     assert r.exit_code == 1
 
 
-@patch("shared.command_runner.runner.subprocess.run")
+@patch("shared.command_runner.executor.subprocess.run")
 def test_run_command_file_not_found(mock_run: object, tmp_path: Path) -> None:
     """run_command returns failure when command not found."""
     mock_run.side_effect = FileNotFoundError()
@@ -227,7 +227,7 @@ def test_run_command_file_not_found(mock_run: object, tmp_path: Path) -> None:
     assert "not found" in r.stderr.lower()
 
 
-@patch("shared.command_runner.runner.subprocess.run")
+@patch("shared.command_runner.executor.subprocess.run")
 def test_run_command_timeout(mock_run: object, tmp_path: Path) -> None:
     """run_command returns timed_out when subprocess times out."""
     mock_run.side_effect = subprocess.TimeoutExpired("sleep", 1)
@@ -236,7 +236,7 @@ def test_run_command_timeout(mock_run: object, tmp_path: Path) -> None:
     assert r.timed_out
 
 
-@patch("shared.command_runner.runner.subprocess.run")
+@patch("shared.command_runner.executor.subprocess.run")
 def test_run_command_generic_exception(mock_run: object, tmp_path: Path) -> None:
     """run_command returns failure on unexpected exception."""
     mock_run.side_effect = RuntimeError("unexpected")
@@ -245,7 +245,7 @@ def test_run_command_generic_exception(mock_run: object, tmp_path: Path) -> None
     assert "unexpected" in r.stderr
 
 
-@patch("shared.command_runner.runner.subprocess.run")
+@patch("shared.command_runner.executor.subprocess.run")
 def test_run_command_env_override(mock_run: object, tmp_path: Path) -> None:
     """run_command passes env_override to subprocess."""
     mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")

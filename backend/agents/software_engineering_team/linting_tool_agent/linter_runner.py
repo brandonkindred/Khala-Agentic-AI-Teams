@@ -10,7 +10,7 @@ import re
 import shutil
 from pathlib import Path
 
-from shared.command_runner.runner import run_command
+from shared.command_runner.executor import run_command
 
 from .models import LintExecutionResult, LintIssue, LintPlan
 

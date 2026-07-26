@@ -15,14 +15,14 @@ import signal
 import subprocess
 from pathlib import Path
 
-from shared.command_runner.nvm import _get_nvm_script_prefix
-from shared.command_runner.runner import (
+from shared.command_runner.executor import (
     FRONTEND_NODE_VERSION,
     NVM_NODE_FALLBACK_VERSION,
     SERVE_TIMEOUT,
     CommandResult,
     detect_frontend_framework,
 )
+from shared.command_runner.nvm import _get_nvm_script_prefix
 
 logger = logging.getLogger(__name__)
 

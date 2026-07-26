@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
-from shared.command_runner.runner import run_command
+from shared.command_runner.executor import run_command
 from shared.subprocess_timeouts import DEVOPS_POLICY_AS_CODE_TIMEOUT_S
 
 
