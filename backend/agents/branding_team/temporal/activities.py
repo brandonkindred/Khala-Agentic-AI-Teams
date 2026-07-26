@@ -93,10 +93,11 @@ def run_branding_phase_activity(
           output dicts (accumulated by the workflow from earlier phase returns).
     Postconditions:
         - Returns the phase output as a JSON-safe dict (``model_dump(mode="json")``).
-        - Idempotency: if a checkpoint for this phase already exists (a prior
-          attempt finished the LLM work then crashed before returning), the stored
-          output is returned without re-running the phase. Otherwise the freshly
-          computed output is checkpointed before return.
+        - Idempotency: if a checkpoint for this phase already exists with a
+          non-None payload (a prior attempt finished the LLM work then crashed
+          before returning), the stored output is returned without re-running
+          the phase. A checkpoint with a ``None`` payload does not short-circuit.
+          Otherwise the freshly computed output is checkpointed before return.
     """
     from branding_team.models import BrandingMission, BrandPhase
     from branding_team.orchestrator import orchestrator

@@ -76,7 +76,11 @@ def copy_development_result_fields(dst: Any, src: Any) -> None:
       corresponding field on ``src``; every other attribute of ``dst``
       (notably ``setup_result``) is left untouched.
     """
+    assert dst is not None, "dst is required"
+    assert src is not None, "src is required"
     for field in _DEVELOPMENT_RESULT_FIELDS:
+        assert hasattr(src, field), f"src must expose {field}"
+        assert hasattr(dst, field), f"dst must expose {field}"
         setattr(dst, field, getattr(src, field))
 
 

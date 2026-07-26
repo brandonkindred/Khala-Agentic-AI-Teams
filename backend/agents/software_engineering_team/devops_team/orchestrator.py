@@ -280,8 +280,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     # this class so ``self._run_gated_phases`` / ``self._run_bounded_retry_loop``
     # work without subclassing BaseTeamLead. The helpers only need ``self`` for
     # the Python method call signature — they do not read BaseTeamLead fields.
-    # ``_run_phase_gates`` (called via BaseTeamLead._run_phase_gates) delegates
-    # to ``self._run_gated_phases``, so that alias must exist on this class.
+    # Alias BaseTeamLead._run_gated_phases onto this class as
+    # self._run_gated_phases. This is required because BaseTeamLead._run_phase_gates
+    # (invoked unbound elsewhere in this file) internally calls
+    # self._run_gated_phases, and DevOpsTeamLead does not inherit from
+    # BaseTeamLead.
     _run_gated_phases = BaseTeamLead._run_gated_phases
     _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
     # Tool-dispatch logic lives in ``tool_dispatch.py``; aliased here so
@@ -1020,6 +1023,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                             notes=[deliver_result.summary],
                         ),
                     )
+                merge_status = "merged" if head_ok else "merged_sha_unknown"
+                if not head_ok:
+                    completion.notes.append(
+                        "Merge succeeded but HEAD SHA could not be read after merge; commit hash unknown."
+                    )
                 git_ops = GitOperationsMetadata(
                     branch_created=deliver_result.branch_name,
                     commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
@@ -1027,7 +1035,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         target_branch=DEVELOPMENT_BRANCH,
                         strategy="merge",
                         merge_commit_hash=sha,
-                        status="merged",
+                        status=merge_status,
                     ),
                 )
             completion.git_operations = git_ops
