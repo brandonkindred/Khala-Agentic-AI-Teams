@@ -220,6 +220,7 @@ def run_batch_coding_fixes_impl(
     addressed_count = len(issues_addressed)
 
     unresolved_issues: List[Any] = []
+    unresolved_indices: set = set()
     if addressed_count < len(actionable):
         addressed_indices = set()
         for item in issues_addressed:
@@ -236,18 +237,23 @@ def run_batch_coding_fixes_impl(
         for idx, issue in enumerate(actionable):
             if idx not in addressed_indices:
                 unresolved_issues.append(issue)
+                unresolved_indices.add(idx)
 
     # A rejected file's issue must stay unresolved even if the LLM claimed to
-    # have addressed it -- the merge kept the prior (unfixed) version.
+    # have addressed it -- the merge kept the prior (unfixed) version. Tracked
+    # by position in ``actionable`` rather than ``id(issue)``: ``ReviewIssue``
+    # is an unhashable, value-equal Pydantic model with no unique id/key
+    # field, so object identity would silently misbehave if issues were ever
+    # copied/reconstructed, while the list index is stable for the duration
+    # of this call and distinguishes duplicate-content issues correctly.
     if rejected_files:
-        already_unresolved = set(id(issue) for issue in unresolved_issues)
-        for issue in actionable:
+        for idx, issue in enumerate(actionable):
             if (
                 getattr(issue, "file_path", None) in rejected_files
-                and id(issue) not in already_unresolved
+                and idx not in unresolved_indices
             ):
                 unresolved_issues.append(issue)
-                already_unresolved.add(id(issue))
+                unresolved_indices.add(idx)
 
     resolved = len(unresolved_issues) == 0
 

@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
+from software_engineering_team.shared.team_lead_base import make_job_updater
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 from software_engineering_team.shared.v2_models import Phase
 
@@ -593,7 +594,10 @@ class BaseV2DevelopmentAgent:
         working unchanged, matching the pattern ``_run_preflight`` and
         ``_run_planning_and_branch_setup`` already use. ``logger`` is likewise
         injected so log records keep each team's own module name rather than
-        this shared module's.
+        this shared module's. The job-update closure itself is built via
+        ``team_lead_base.make_job_updater`` — the same factory
+        ``BaseTeamLead._run_setup_and_delegate`` uses — so this is now the
+        second, not third, place that closure is defined.
 
         Preconditions: ``repo_path`` is an existing directory. ``result_cls``
           constructs a workflow-result object accepting a ``task_id`` keyword
@@ -620,12 +624,7 @@ class BaseV2DevelopmentAgent:
         start_time = time.monotonic()
         result = result_cls(task_id=task_id)
 
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as exc:
-                    logger.debug("[%s] job_updater callback failed: %s", task_id, exc)
+        _update_job = make_job_updater(job_updater, task_id, logger)
 
         logger.info(
             "[%s] WORKFLOW START: %s Development Agent (per-microtask review gates)",

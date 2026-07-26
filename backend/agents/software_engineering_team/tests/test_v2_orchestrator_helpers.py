@@ -1470,4 +1470,4 @@ class TestRunDevelopmentWorkflow:
             result = self._call(repo_path=tmp_path, job_updater=_raise)
 
         assert result.success is True
-        assert "job_updater callback failed: updater boom" in caplog.text
+        assert "job_updater failed: updater boom" in caplog.text

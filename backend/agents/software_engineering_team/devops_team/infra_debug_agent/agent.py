@@ -56,9 +56,10 @@ class InfraDebugAgent:
             and every error's type is in {"syntax", "validation"} (or the LLM
             explicitly overrides this via its own "fixable" response field).
         """
-        artifacts_snippet = ""
-        for fname, content in list(input_data.artifacts.items())[:5]:
-            artifacts_snippet += f"\n### {fname} ###\n{content[:2000]}\n"
+        artifacts_snippet = "".join(
+            f"\n### {fname} ###\n{content[:2000]}\n"
+            for fname, content in list(input_data.artifacts.items())[:5]
+        )
 
         context = (
             f"Tool: {input_data.tool_name}\n"
