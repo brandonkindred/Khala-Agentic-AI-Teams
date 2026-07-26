@@ -8,20 +8,21 @@ fast path), their tool-runner construction, their planning + feature-branch
 setup (``_run_planning_and_branch_setup``), their per-microtask-review-gated
 execution phase (``_run_execution_phase``), their post-execution bookkeeping
 (``_record_execution_bookkeeping``), their documentation phase
-(``_run_documentation_phase``), and their deliver + final status/logging
-(``_run_deliver_and_finalize``) verbatim; only the per-team tool-agent roster,
-tooling detection, repo extension/exclude sets, and each team's own
-``ReviewDependencies``/``MicrotaskReviewConfig`` construction (the config
-class differs per team) remain in ``run_workflow`` itself. This base holds
-the shared members; each team subclasses it and supplies the divergent parts
-via class attributes (``_TEAM_LABEL``, ``_DELIVER_IN_PROGRESS_STATUS``) and
-overrides. The job-update closure each ``run_workflow`` builds comes from the
-shared ``team_lead_base.make_job_updater`` rather than from this base, since
-``BaseTeamLead`` needs the identical closure for its own Setup phase.
-
-``run_workflow`` itself deliberately stays per-team: it remains
-``# pragma: no cover`` integration code that wires team-specific tool agents
-and result types, but every phase of it now delegates to a base-class helper.
+(``_run_documentation_phase``), their deliver + final status/logging
+(``_run_deliver_and_finalize``), and the full ``run_workflow`` sequencing that
+calls all of the above in order (``_run_development_workflow``) verbatim; only
+the per-team tool-agent roster, tooling detection, repo extension/exclude
+sets, and a handful of team-specific classes/callables/strings differ. This
+base holds the shared members; each team subclasses it, supplies the
+divergent parts via class attributes (``_TEAM_LABEL``,
+``_DELIVER_IN_PROGRESS_STATUS``) and overrides (``_read_repo_code``,
+``_detect_tooling``), and exposes a thin ``run_workflow`` that forwards its
+own module-level names into ``_run_development_workflow`` — mirroring how
+``BaseTeamLead._run_setup_and_delegate`` already does this one level up for
+the team-lead classes. The job-update closure each ``run_workflow`` uses
+comes from the shared ``team_lead_base.make_job_updater`` rather than from
+this base, since ``BaseTeamLead`` needs the identical closure for its own
+Setup phase.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
+from software_engineering_team.shared.team_lead_base import make_job_updater
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 from software_engineering_team.shared.v2_models import MicrotaskReviewFailedError, Phase
 
@@ -41,9 +43,11 @@ class BaseV2DevelopmentAgent:
     """Shared base for the code-v2 Development Agents.
 
     Subclasses provide the per-team ``_read_repo_code`` (extension/exclude sets +
-    briefing budget), ``_detect_tooling``, tool-agent roster, ``run_workflow``,
-    and class attributes ``_TEAM_LABEL`` / ``_DELIVER_IN_PROGRESS_STATUS`` used
-    by ``_run_deliver_and_finalize``.
+    briefing budget), ``_detect_tooling``, tool-agent roster, and class attributes
+    ``_TEAM_LABEL`` / ``_DELIVER_IN_PROGRESS_STATUS``; their public ``run_workflow``
+    is a thin wrapper that forwards its own module-level names (tool-agent
+    builder, planning/execution/deliver functions, review classes, git-branch
+    tool-agent kind) into ``_run_development_workflow``.
 
     Invariants: instance state is limited to ``llm`` and ``_repo_context_cache``,
     so a subclass built via ``__new__`` and given those two attributes behaves
@@ -644,6 +648,240 @@ class BaseV2DevelopmentAgent:
             failed_count,
         )
         return None
+
+    def _run_development_workflow(
+        self,
+        *,
+        repo_path: Path,
+        task: Any,
+        architecture: Any = None,
+        spec_content: str = "",
+        qa_agent: Any = None,
+        security_agent: Any = None,
+        code_review_agent: Any = None,
+        build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
+        linting_tool_agent: Any = None,
+        job_updater: Optional[Callable[..., None]] = None,
+        review_config: Any = None,
+        merge_to_development: bool = True,
+        repo_context_cache: Optional[RepoContextCache] = None,
+        result_cls: Callable[..., Any],
+        team_label: str,
+        deliver_in_progress_status: str,
+        logger: logging.Logger,
+        checkout_branch: Callable[[Path, str], Tuple[bool, str]],
+        configure_quality_tooling: Callable[[Path], Any],
+        detect_tooling: Callable[[Path], Tuple[bool, bool]],
+        emit_branch_ready_progress: bool,
+        build_tool_agents: Callable[[LLMClient], Dict[Any, Any]],
+        git_branch_management_kind: Any,
+        run_planning: Callable[..., Any],
+        review_label: str,
+        execution_status_text: str,
+        review_deps_cls: Callable[..., Any],
+        review_config_cls: Callable[..., Any],
+        run_execution_with_review_gates: Callable[..., Any],
+        documentation_status_text: str,
+        run_documentation_phase: Callable[..., Any],
+        run_deliver: Callable[..., Any],
+    ) -> Any:
+        """Run the full 5-phase lifecycle (Pre-flight -> Planning -> Execution ->
+        Documentation -> Deliver) shared verbatim by every code-v2 Development Agent.
+
+        Extracted from each team's ``run_workflow`` so the phase-sequencing glue
+        that calls ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
+        ``_build_progress_callback`` / ``_run_execution_phase`` /
+        ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
+        ``_run_deliver_and_finalize`` in order is defined once. The
+        ``review_deps`` / ``review_config`` construction stays here (rather
+        than inside ``_run_execution_phase``) since ``ReviewDependencies`` and
+        ``MicrotaskReviewConfig`` are still genuinely per-team classes; the
+        execution try/except itself — including the
+        ``MicrotaskReviewFailedError`` catch, now a single shared exception
+        imported directly in ``_run_execution_phase`` rather than injected —
+        is not duplicated here. Every team-specific piece — which module-level
+        function/class to call, the one real behavioral divergence
+        (``emit_branch_ready_progress``), and a couple of status strings — is
+        taken as a parameter rather than imported here, so callers pass their
+        *own* module-level names (not copies) and existing tests that
+        monkeypatch a team's orchestrator module (e.g. ``orch.checkout_branch``,
+        ``orch._build_tool_agents``, ``orch.run_planning``,
+        ``orch.run_execution_with_review_gates``, ``orch.run_deliver``) keep
+        working unchanged, matching the pattern ``_run_preflight`` and
+        ``_run_planning_and_branch_setup`` already use. ``logger`` is likewise
+        injected so log records keep each team's own module name rather than
+        this shared module's. The job-update closure itself is built via
+        ``team_lead_base.make_job_updater`` — the same factory
+        ``BaseTeamLead._run_setup_and_delegate`` uses — so this is now the
+        second, not third, place that closure is defined.
+
+        Preconditions: ``repo_path`` is an existing directory. ``result_cls``
+          constructs a workflow-result object accepting a ``task_id`` keyword
+          and exposing the attributes every helper above already requires
+          (``current_phase``, ``failure_reason``, ``planning_result``,
+          ``execution_result``, ``iterations_used``, ``final_files``,
+          ``documentation_result``, ``deliver_result``, ``success``,
+          ``summary``, ``needs_followup``). ``review_deps_cls`` accepts the
+          same keywords as ``ReviewDependencies`` in either team's
+          ``phases.execution`` module. ``review_config_cls`` is callable with
+          no arguments when ``review_config`` is falsy.
+        Postconditions: returns a ``result_cls`` instance. On a pre-flight,
+          planning, or execution failure (including an empty
+          ``exec_result.files``), returns early with ``result.failure_reason``
+          set and later phases not run — identical short-circuiting to the
+          former per-team ``run_workflow`` bodies. On success, threads through
+          bookkeeping, documentation, and deliver exactly as
+          ``_run_deliver_and_finalize`` documents, and returns ``result``.
+          Never raises on its own; propagates only what the injected
+          callables raise outside their documented failure paths.
+        """
+        self._repo_context_cache = repo_context_cache
+        task_id = task.id
+        start_time = time.monotonic()
+        result = result_cls(task_id=task_id)
+
+        _update_job = make_job_updater(job_updater, task_id, logger)
+
+        logger.info(
+            "[%s] WORKFLOW START: %s Development Agent (per-microtask review gates)",
+            task_id,
+            team_label,
+        )
+
+        # ── Check out the review feature branch, then ensure tooling ───
+        # Setup commits lint/test scaffolding to ``development``, but a handoff
+        # feature branch created before setup does not inherit it. Configure the
+        # tooling on the branch we will actually edit so the pre-flight check and
+        # later quality gates see the config (idempotent when already present).
+        feature_branch_name = (task.feature_branch_name or "").strip() or None
+        preflight_failure = self._run_preflight(
+            task_id=task_id,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            detect_tooling=detect_tooling,
+            checkout_branch=checkout_branch,
+            configure_quality_tooling=configure_quality_tooling,
+            update_job=_update_job,
+            logger=logger,
+            emit_branch_ready_progress=emit_branch_ready_progress,
+        )
+        if preflight_failure is not None:
+            result.failure_reason = preflight_failure
+            return result
+
+        existing_code = self._read_existing_code(repo_path)
+        tool_agents = build_tool_agents(self.llm)
+        tool_runners = self._build_tool_runners(tool_agents)
+        git_agent = tool_agents.get(git_branch_management_kind)
+
+        result.current_phase = Phase.PLANNING
+        planning_result, feature_branch_name, failure_reason = self._run_planning_and_branch_setup(
+            task_id=task_id,
+            task=task,
+            repo_path=repo_path,
+            architecture=architecture,
+            existing_code=existing_code,
+            tool_agents=tool_agents,
+            git_agent=git_agent,
+            feature_branch_name=feature_branch_name,
+            llm=self.llm,
+            run_planning=run_planning,
+            update_job=_update_job,
+            logger=logger,
+        )
+        if failure_reason is not None:
+            result.failure_reason = failure_reason
+            return result
+        result.planning_result = planning_result
+
+        # ── Execution with per-microtask review gates ──────────────────
+        progress_callback = self._build_progress_callback(_update_job, review_label=review_label)
+
+        review_deps = review_deps_cls(
+            build_verifier=build_verifier,
+            qa_agent=qa_agent,
+            security_agent=security_agent,
+            code_review_agent=code_review_agent,
+            linting_tool_agent=linting_tool_agent,
+            tool_agents=tool_agents,
+        )
+
+        config = review_config or review_config_cls()
+
+        current_files = self._run_execution_phase(
+            task_id=task_id,
+            task=task,
+            planning_result=planning_result,
+            repo_path=repo_path,
+            architecture=architecture,
+            spec_content=spec_content,
+            existing_code=existing_code,
+            tool_runners=tool_runners,
+            progress_callback=progress_callback,
+            review_deps=review_deps,
+            review_config=config,
+            llm=self.llm,
+            result=result,
+            run_execution_with_review_gates=run_execution_with_review_gates,
+            update_job=_update_job,
+            logger=logger,
+            status_text=execution_status_text,
+        )
+        if current_files is None:
+            return result
+        exec_result = result.execution_result
+
+        completed_count, failed_count = self._record_execution_bookkeeping(
+            task_id=task_id,
+            result=result,
+            exec_result=exec_result,
+            repo_path=repo_path,
+            feature_branch_name=feature_branch_name,
+            git_agent=git_agent,
+            logger=logger,
+        )
+
+        result.final_files = current_files
+
+        # ── Documentation ────────────────────────────────────────────
+        current_files = self._run_documentation_phase(
+            task_id=task_id,
+            task=task,
+            repo_path=repo_path,
+            llm=self.llm,
+            exec_result=exec_result,
+            planning_result=planning_result,
+            tool_agents=tool_agents,
+            result=result,
+            current_files=current_files,
+            run_documentation_phase=run_documentation_phase,
+            update_job=_update_job,
+            logger=logger,
+            status_text=documentation_status_text,
+        )
+
+        # ── Deliver ─────────────────────────────────────────────────
+        self._run_deliver_and_finalize(
+            task_id=task_id,
+            repo_path=repo_path,
+            current_files=current_files,
+            exec_summary=exec_result.summary,
+            task_title=task.title or "",
+            task_description=task.description or "",
+            tool_agents=tool_agents,
+            feature_branch_name=feature_branch_name,
+            merge_to_development=merge_to_development,
+            failed_count=failed_count,
+            completed_count=completed_count,
+            start_time=start_time,
+            result=result,
+            run_deliver=run_deliver,
+            update_job=_update_job,
+            logger=logger,
+            team_label=team_label,
+            deliver_in_progress_status=deliver_in_progress_status,
+        )
+        return result
 
     def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
         """Per-team repo briefing reader.
