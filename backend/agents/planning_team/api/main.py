@@ -75,11 +75,9 @@ app.add_middleware(
 )
 
 
-# Reuse the shared HITL answer schema rather than a local loosely-typed copy. This
-# endpoint is a placeholder — Planning resolves open questions inline (PRA's
-# auto-answer callback) and never sets waiting_for_answers, so it always 400s today —
-# so tightening the request type is behavior-neutral. (E402: must follow the sys.path
-# insert above, like the other agents-path imports in this module.)
+# Reuse the shared HITL answer schema (see submit_answers below) rather than a
+# local loosely-typed copy. (E402: must follow the sys.path insert above, like
+# the other agents-path imports in this module.)
 from shared.hitl.models import SubmitAnswersRequest  # noqa: E402
 
 
@@ -394,9 +392,16 @@ def list_planning_jobs() -> dict:
 def submit_answers(job_id: str, request: SubmitAnswersRequest) -> PlanningStatusResponse:
     """Submit answers to a Planning job's open questions.
 
-    Placeholder for interactive question gates: the workflow currently
-    resolves open questions inline (PRA's auto-answer callback) and never
-    sets ``waiting_for_answers``, so this endpoint always 400s today.
+    Preconditions:
+        - ``job_id`` identifies an existing job (checked via ``_get_job_or_404``).
+        - ``request`` has passed Pydantic validation as a ``SubmitAnswersRequest``.
+    Postconditions:
+        - When the job is waiting for answers, ``waiting_for_answers`` is cleared
+          and the job's current status is returned.
+        - Planning resolves open questions inline today, via PRA's auto-answer
+          callback, and never sets ``waiting_for_answers``; this endpoint is
+          wired up for the interactive question-gate workflow that will set it,
+          so until that lands every call here raises 400.
 
     Args:
         job_id: The job identifier.
@@ -407,13 +412,12 @@ def submit_answers(job_id: str, request: SubmitAnswersRequest) -> PlanningStatus
 
     Raises:
         HTTPException: 404 if the job does not exist; 400 if the job is not
-            waiting for answers.
+            waiting for answers (unconditionally true until the interactive
+            question-gate workflow lands).
     """
     data = _get_job_or_404(job_id)
     if not data.get("waiting_for_answers"):
         raise HTTPException(status_code=400, detail="Job is not waiting for answers")
-    # Planning currently does not pause for answers mid-run; PRA is called with auto-answer callback.
-    # This endpoint is for future use or when we add interactive question gates.
     update_job(job_id, waiting_for_answers=False)
     return get_status(job_id)
 
