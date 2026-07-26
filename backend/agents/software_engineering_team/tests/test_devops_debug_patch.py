@@ -70,6 +70,9 @@ class _ScriptedClient(DummyLLMClient):
         (or ``{}`` if the list was empty), unless ``strict=True`` was
         passed, in which case an ``AssertionError`` is raised instead
       - Does not validate temperature, tools, or other call parameters
+      - ``assert_exhausted`` lets a caller confirm every scripted response
+        was consumed exactly once, catching a caller that returns early
+        and skips later scripted calls
     """
 
     def __init__(self, responses: List[Dict[str, Any]], *, strict: bool = False) -> None:
@@ -95,6 +98,13 @@ class _ScriptedClient(DummyLLMClient):
         if self._strict:
             raise AssertionError(f"complete_json called more than {len(self._responses)} times")
         return self._responses[-1] if self._responses else {}
+
+    def assert_exhausted(self) -> None:
+        """Assert every scripted response was consumed exactly once."""
+        if self._idx != len(self._responses):
+            raise AssertionError(
+                f"expected {len(self._responses)} complete_json calls, got {self._idx}"
+            )
 
 
 def _failing_debug_patch_state() -> _DebugPatchState:
@@ -428,6 +438,7 @@ class TestDevOpsPipelineDebugPatchLoop:
         assert len(phase46_details) == MAX_INFRA_FIX_ITERATIONS
         for i, detail in enumerate(phase46_details, start=1):
             assert f"iteration {i}/{MAX_INFRA_FIX_ITERATIONS}" in detail
+        client.assert_exhausted()
 
     def test_loop_soft_aborts_when_debug_not_fixable(self) -> None:
         """Unfixable debug result aborts the retry loop after a single attempt."""
@@ -512,6 +523,7 @@ class TestDevOpsPipelineDebugPatchLoop:
         # Soft-abort leaves unresolved exec failures in the gate map, but those
         # are not currently folded into quality_gates — so the pipeline may still
         # complete. Termination is verified by the single debug / zero patch counts.
+        client.assert_exhausted()
 
     def test_loop_converges_on_fixable_error(self) -> None:
         """Execution fails once, patch fixes it, second execution succeeds."""
@@ -609,6 +621,7 @@ class TestDevOpsPipelineDebugPatchLoop:
         assert result.success
         assert debug_calls[0] >= 1
         assert call_count[0] >= 2
+        client.assert_exhausted()
 
 
 # ---------------------------------------------------------------------------
