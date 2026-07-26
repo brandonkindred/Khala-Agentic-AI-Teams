@@ -547,6 +547,22 @@ def test_ghost_generate_friendly_seeds_list_wrong_len_fallback(monkeypatch) -> N
     assert all("topic" in s.lower() for s in out)
 
 
+def test_ghost_generate_friendly_seeds_non_string_items_fallback(monkeypatch) -> None:
+    """LLM returns a right-length list of non-string items → falls back to generic seeds
+    instead of returning stringified garbage (e.g. "42", "{'q': 'x'}")."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    _patch_agent(monkeypatch, [json.dumps([{"q": "x"}, 42])])  # right length, wrong item types
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    out = agent._generate_friendly_seeds(["topic a", "topic b"])
+    # Fallback: generic seeds (one per opp), not stringified dict/int garbage
+    assert len(out) == 2
+    assert all("topic" in s.lower() for s in out)
+    assert not any(s in ("42", "{'q': 'x'}") for s in out)
+
+
 # ---------------------------------------------------------------------------
 # conduct_interview — fast-path skipped via cancellation
 # ---------------------------------------------------------------------------
