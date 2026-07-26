@@ -887,7 +887,10 @@ def _verify_group(
     Postconditions:
         - Returns ``{finding_index: _Verdict}`` for the findings the model gave
           a parseable, in-range verdict on; findings with no verdict are absent
-          (and therefore kept by the caller).
+          (and therefore kept by the caller). ``finding_index`` is the 0-based
+          position of the finding within ``issues`` (i.e. a valid index into
+          the ``issues``/``group`` list the caller passed in), so callers may
+          index back into their own list with it.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data, max_inline_chars)
     agent = Agent(

@@ -84,7 +84,21 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("insert into branding_clients")
 
     def handle_insert_client(cur: FakeCursor, params: tuple) -> None:
+        """Emulate INSERT into branding_clients (id PRIMARY KEY).
+
+        Preconditions:
+            ``params`` is ``(client_id, data)``.
+        Postconditions:
+            On success, ``cur.db["clients"][client_id]`` holds the new row and
+            ``cur.rowcount`` is 1.
+            If ``client_id`` already exists, raises ``UniqueViolation`` and
+            leaves the existing row unchanged (matches Postgres PK semantics).
+        """
         client_id, data = params
+        if client_id in cur.db["clients"]:
+            raise UniqueViolation(
+                'duplicate key value violates unique constraint "branding_clients_pkey"'
+            )
         cur.db["clients"][client_id] = {
             "id": client_id,
             "data": unwrap_json(data),

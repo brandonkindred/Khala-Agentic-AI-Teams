@@ -7,7 +7,7 @@ step (lenient vs extract), and an opt-in fallback-handling step (no-model /
 call-error / empty-parse, plus partial-failure-tolerant calls). Deliberately
 imports nothing from ``code_review_agent`` so it can be depended on from any
 team without pulling in the code-review engine. Fallback helpers are available
-capability and are not auto-wired into subclasses.
+as capabilities but are not auto-wired into subclasses.
 
 Preconditions:
     None beyond standard Python import semantics.
@@ -69,9 +69,10 @@ class LlmToolAgentBase:
     ``__init__`` enables them automatically.
 
     Recipes:
-        Review-like — ``resolve_models = True`` (defaults give text mode; set
-        ``uses_json_model = True`` for a second JSON-mode model);
-        ``use_run_strands_agent = True``.
+        Review-like — ``resolve_models = True`` (defaults:
+        ``response_format="text"``, ``uses_json_model=False``,
+        ``use_run_strands_agent=False``; set ``uses_json_model = True`` for a
+        second JSON-mode model); ``use_run_strands_agent = True``.
         Plan/Json-like — ``resolve_models = True``, ``response_format = "json"``,
         ``get_strands_model_fn = <callable>``; leave
         ``use_run_strands_agent`` false for the inline path.
@@ -298,7 +299,8 @@ class LlmToolAgentBase:
 
         Postconditions:
             Returns a list of successful ``fn(item)`` results in encounter order.
-            Failures are logged at warning and omitted. Does not build a
+            Any ``Exception`` raised by ``fn`` is treated as a failure: it is
+            logged at warning and the item is omitted. Does not build a
             ``FallbackPayload``.
         """
         label = log_label or type(self).__name__
