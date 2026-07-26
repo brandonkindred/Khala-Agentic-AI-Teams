@@ -140,7 +140,9 @@ def run_batch_coding_fixes_impl(
 
     microtask_id = microtask.id
     actionable = [
-        i for i in issues if getattr(i, "severity", None) in ("critical", "high", "medium")
+        i
+        for i in issues
+        if (getattr(i, "severity", None) or "medium") in ("critical", "high", "medium")
     ]
 
     if not actionable:
@@ -522,7 +524,7 @@ def run_problem_solving_impl(
     actionable = [
         i
         for i in review_result.issues
-        if getattr(i, "severity", None) in ("critical", "high", "medium")
+        if (getattr(i, "severity", None) or "medium") in ("critical", "high", "medium")
     ]
     if not actionable:
         logger.info("[%s] Problem-solving: no actionable issues.", task_id)
@@ -617,7 +619,7 @@ def run_problem_solving_for_microtask_impl(
     actionable = [
         i
         for i in review_result.issues
-        if getattr(i, "severity", None) in ("critical", "high", "medium")
+        if (getattr(i, "severity", None) or "medium") in ("critical", "high", "medium")
     ]
     if not actionable:
         return problem_solving_result_cls(
