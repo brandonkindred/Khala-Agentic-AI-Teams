@@ -369,6 +369,7 @@ def test_run_paper_trading_background_crashes_into_failed(
     updated = api_main._paper_trading_sessions.get("pt-crash")
     assert updated.status == PaperTradingStatus.FAILED
     assert "Paper trading crashed" in (updated.divergence_analysis or "")
+    assert "Paper trading crashed" in (updated.error or "")
 
 
 # ---------------------------------------------------------------------------
