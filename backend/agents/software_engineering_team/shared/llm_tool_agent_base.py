@@ -266,8 +266,8 @@ class LlmToolAgentBase:
             ``fn`` is a zero-argument callable.
 
         Postconditions:
-            Success → ``("ok", fn())``. Any ``Exception`` → warning log on the
-            subclass module logger, then ``("error", FallbackPayload)`` with
+            Success → ``("ok", fn())``. Any ``Exception`` (not ``BaseException``) →
+            warning log on the subclass module logger, then ``("error", FallbackPayload)`` with
             ``tier="call_error"`` and the ``llm_error_*`` class attrs (lists
             copied).
         """
