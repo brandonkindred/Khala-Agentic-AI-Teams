@@ -231,6 +231,7 @@ def _make_gate_config(
     status_cr=MS.IN_CODE_REVIEW,
     status_qa=MS.IN_QA_TESTING,
     status_sec=MS.IN_SECURITY_TESTING,
+    status_qa_sec=MS.IN_QA_SECURITY_TESTING,
     parallelize_qa_security: bool = False,
 ) -> GatedExecutionConfig:
     return GatedExecutionConfig(
@@ -252,6 +253,7 @@ def _make_gate_config(
         startup_log_message=lambda tid, total, c: f"start {tid} {total} on_failure={c.on_failure}",
         gate_issue_log_verb=verb,
         parallelize_qa_security=parallelize_qa_security,
+        status_qa_security=status_qa_sec,
     )
 
 
@@ -329,6 +331,7 @@ def test_progress_callback_contract(tmp_path):
         "code_review",
         "qa_testing",
         "security_testing",
+        "qa_security_testing",
         "documentation",
         "completed",
     }
@@ -853,6 +856,72 @@ def test_parallel_qa_security_runs_both_gates_every_cycle(tmp_path):
     assert mt.status == MS.COMPLETED
     assert len(qa.calls_kwargs) == 2
     assert len(sec.calls_kwargs) == 2  # ran on cycle 1 too, concurrently with the failing QA call
+
+
+def test_parallel_qa_security_reports_combined_phase_not_premature_security(tmp_path):
+    """The concurrent branch must not announce "qa_testing" then immediately
+    "security_testing" before either gate has actually run -- that's the exact
+    mechanism behind the false "QA passed" checkmark this test guards against.
+    It should announce a single combined "qa_security_testing" phase instead,
+    with ``mt.status`` set to the matching status at the same time.
+    """
+    phases_seen: List[str] = []
+    statuses_during_qa_security_phase: List[Any] = []
+
+    def _progress(current_index, completed, total, title, phase, detail):
+        phases_seen.append(phase)
+        if phase == "qa_security_testing":
+            statuses_during_qa_security_phase.append(mt.status)
+
+    qa = _CapturingGate()
+    sec = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(qa_gate=qa, security_gate=sec, parallelize_qa_security=True),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+        progress=_progress,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    # The combined phase was announced (both the top-level announcement and
+    # each gate's own detail ticks, which forward through progress_callback),
+    # and mt.status was IN_QA_SECURITY_TESTING at every point it fired -- never
+    # IN_SECURITY_TESTING, which would imply QA had already passed.
+    assert statuses_during_qa_security_phase
+    assert set(statuses_during_qa_security_phase) == {MS.IN_QA_SECURITY_TESTING}
+    # Neither gate's bare phase name (which would let current_microtask_phase
+    # land on "security_testing" mid-run) is ever reported while concurrent.
+    assert "qa_testing" not in phases_seen
+    assert "security_testing" not in phases_seen
+
+
+def test_parallel_qa_security_batch_fix_uses_combined_phase(tmp_path):
+    """The "batch fixing" progress message on a failing concurrent cycle must also
+    use the combined "qa_security_testing" phase, not "qa_testing" alone -- both
+    gates' issues are being fixed together, not just QA's.
+    """
+    phases_seen: List[str] = []
+    qa = _CapturingGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
+    sec = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(qa_gate=qa, security_gate=sec, parallelize_qa_security=True),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: phases_seen.append(a[4]),
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert "qa_security_testing" in phases_seen
+    # No bare "qa_testing"/"security_testing" announcement while the cycle's
+    # outcome was still unresolved (only the combined phase).
+    assert phases_seen.count("qa_testing") == 0
+    assert phases_seen.count("security_testing") == 0
 
 
 def test_parallel_qa_security_combines_both_gates_issues_into_one_batch_fix(tmp_path):
