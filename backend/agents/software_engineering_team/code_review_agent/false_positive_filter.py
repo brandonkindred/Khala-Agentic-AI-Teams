@@ -39,6 +39,7 @@ import os
 import re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -47,7 +48,10 @@ from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+from software_engineering_team.shared.context_sizing import (
+    compute_code_review_map_chunk_chars,
+    parse_env_int,
+)
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .code_boundaries import node_end_line, node_start_line
@@ -87,6 +91,25 @@ _LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
 # bound; this keeps an unbounded task/criteria field from dominating the prompt
 # or overflowing context. Normal task text is far below this.
 _CONTEXT_FIELD_CHARS = 4_000
+
+# Default per-group verification call timeout (seconds); see
+# ``_verify_timeout_seconds`` below.
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 60
+
+
+def _verify_timeout_seconds() -> int:
+    """Per-group verification call timeout (seconds).
+
+    Bounds how long a single ``_verify_one`` call (one LLM verification round
+    for one cited file's group of findings) may run before its group is
+    treated as a failure (fail-safe: keep its findings, log a warning). Env-
+    overridable via ``CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`` (see
+    docs/ENV_VARS.md).
+
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    return parse_env_int("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", DEFAULT_VERIFY_TIMEOUT_SECONDS, 1)
 
 
 def _verify_parallelism() -> int:
@@ -1046,8 +1069,32 @@ def _verify_and_filter(
     if workers <= 1:
         group_verdicts = [_verify_one(item) for item in group_items]
     else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            group_verdicts = list(executor.map(_verify_one, group_items))
+        # Per-future ``result(timeout=...)`` (rather than ``executor.map(...,
+        # timeout=...)``) so a single stuck verification call can never block
+        # the whole pass: a ``map`` timeout raises out of ``list(...)``
+        # instead of being caught per-group, and would abort the merge below
+        # for every group, not just the slow one.
+        timeout = _verify_timeout_seconds()
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = [executor.submit(_verify_one, item) for item in group_items]
+            group_verdicts = []
+            for (file_path, _group), future in zip(group_items, futures):
+                try:
+                    group_verdicts.append(future.result(timeout=timeout))
+                except FuturesTimeoutError:
+                    logger.warning(
+                        "FalsePositiveFilter: verification timed out after %ss for %s; keeping its findings",
+                        timeout,
+                        file_path,
+                    )
+                    group_verdicts.append({})
+        finally:
+            # ``wait=False``/``cancel_futures=True``: a future that already
+            # timed out above may still be running in its worker thread: a
+            # plain ``with ThreadPoolExecutor(...)`` would block on exit
+            # waiting for it, reintroducing the same hang this fix removes.
+            executor.shutdown(wait=False, cancel_futures=True)
 
     removed_indices: set[int] = set()
     for (file_path, group), verdicts in zip(group_items, group_verdicts):
