@@ -4,22 +4,24 @@
 Pure move (issue #1732, PR 1 of 6 decomposing the StrategyLabOrchestrator
 god-class tracking issue): every method and helper below is relocated
 verbatim from ``orchestrator.py``. No behavior changes. ``DesignMixin`` is
-mixed into ``StrategyLabOrchestrator``
-(``class StrategyLabOrchestrator(DesignMixin):``); its methods expect the
-attributes ``StrategyLabOrchestrator.__init__`` sets on ``self``
-(``self.design_agent``, ``self.design_review_agent``,
-``self.spec_readiness_gate``, ``self.strategy_validator``, plus the
-``self.record_gates`` / ``self._build_short_circuit_record`` /
-``self._synthesize_initial_code`` / ``self._orchestrate_refinement_and_alignment``
-/ ``self._orchestrate_verification_and_analysis`` /
+mixed into ``StrategyLabOrchestrator`` — see the class statement in
+``orchestrator.py`` for the current base order (more mixins have since
+joined it); its methods expect the attributes
+``StrategyLabOrchestrator.__init__`` sets on ``self`` (``self.design_agent``,
+``self.design_review_agent``, ``self.spec_readiness_gate``,
+``self.strategy_validator``, plus the ``self.record_gates`` /
+``self._build_short_circuit_record`` / ``self._synthesize_initial_code`` /
+``self._orchestrate_refinement_and_alignment`` /
+``self._orchestrate_verification_and_analysis`` /
 ``self._extract_findings_and_assemble_record`` methods) — all of which stay
 on the base class and resolve via MRO on the final composed instance.
 
 This module must not import anything from ``orchestrator.py`` (that would be
 circular: ``orchestrator.py`` imports ``DesignMixin`` from here before its
-own class statement executes). Pure helpers shared by both this cluster and
-code that stays in ``orchestrator.py`` live in ``_orchestrator_helpers.py``
-instead (see ``_env_flag``, ``_emit_phase_transition``).
+own class statement executes). Pure helpers shared across this cluster, the
+other extracted mixins, and code that stays in ``orchestrator.py`` live in
+``_orchestrator_helpers.py`` instead (see ``_env_flag``,
+``_emit_phase_transition``).
 """
 
 from __future__ import annotations
