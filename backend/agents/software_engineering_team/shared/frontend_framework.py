@@ -76,7 +76,7 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
             # Check for Vue
             if "vue" in all_deps:
                 return "vue"
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             pass
 
     # Check for framework-specific files
