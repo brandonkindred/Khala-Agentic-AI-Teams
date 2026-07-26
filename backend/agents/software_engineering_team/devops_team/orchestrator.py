@@ -1020,6 +1020,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                             notes=[deliver_result.summary],
                         ),
                     )
+                merge_status = "merged" if head_ok else "merged_sha_unknown"
+                if not head_ok:
+                    completion.notes.append(
+                        "Merge succeeded but HEAD SHA could not be read after merge; commit hash unknown."
+                    )
                 git_ops = GitOperationsMetadata(
                     branch_created=deliver_result.branch_name,
                     commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
@@ -1027,7 +1032,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         target_branch=DEVELOPMENT_BRANCH,
                         strategy="merge",
                         merge_commit_hash=sha,
-                        status="merged",
+                        status=merge_status,
                     ),
                 )
             completion.git_operations = git_ops
