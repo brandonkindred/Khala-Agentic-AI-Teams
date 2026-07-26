@@ -547,6 +547,22 @@ def test_format_prior_results_truncates_to_tail() -> None:
     assert "h-0" not in out
 
 
+def test_format_prior_results_labels_mixed_states_in_single_call() -> None:
+    """A single render pass over losing / publishable-winning / non-publishable-
+    winning records must label each independently — the label attaches to the
+    record's own state, not to whichever record rendered first or the raw
+    return the records share."""
+    records = [
+        _attr_record(i=0, annual_return=2.0),  # losing
+        _attr_record(i=1, annual_return=10.0, is_publishable=True),  # winning, publishable
+        _attr_record(i=2, annual_return=10.0, is_publishable=False),  # winning, not publishable
+    ]
+    out = format_prior_results(records)
+    assert "[LOSING] stocks | h-0" in out, out
+    assert "[WINNING · PUBLISHABLE] stocks | h-1" in out, out
+    assert "[WINNING · NOT PUBLISHABLE] stocks | h-2" in out, out
+
+
 # ---------------------------------------------------------------------------
 # Prior-results performance attribution (aggregate_prior_results /
 # format_prior_attribution + the entry/exit classifiers).

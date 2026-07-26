@@ -343,6 +343,18 @@ def test_edge_steer_ranks_by_publishable_stats_within_the_publishable_tier() -> 
     assert "stocks scores best among publishable wins" in out, out
 
 
+def test_edge_steer_tie_breaks_on_win_rate_within_publishable_tier() -> None:
+    """When two buckets tie on publishable_annual_return, the higher
+    publishable_win_rate wins — the dual-objective tie-break applies within
+    the publishable tier too, not just the raw-stats tier."""
+    records = [
+        _record("crypto", annual=10.0, win=55.0, is_winning=True, is_publishable=True),
+        _record("stocks", annual=10.0, win=60.0, is_winning=True, is_publishable=True),
+    ]
+    out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
+    assert "stocks scores best among publishable wins" in out, out
+
+
 def test_edge_steer_falls_back_to_raw_stats_when_nothing_is_publishable() -> None:
     """With no publishable evidence anywhere in the allowed classes, the
     message text is identical to the original raw-stats-only behavior."""
