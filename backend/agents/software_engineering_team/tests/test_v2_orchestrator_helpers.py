@@ -826,6 +826,191 @@ class TestRunPlanningAndBranchSetup:
         assert failure_reason is None
 
 
+class _FakeExecutionOutput:
+    def __init__(self, files=None, summary="impl done"):
+        self.files = {} if files is None else files
+        self.summary = summary
+
+
+class TestBuildJobUpdater:
+    """Tests for the shared ``BaseV2DevelopmentAgent._build_job_updater`` helper."""
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_build_job_updater")
+
+    def test_none_job_updater_is_a_noop(self):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        update_job = BaseV2DevelopmentAgent._build_job_updater(
+            None, task_id="t1", logger=self._logger()
+        )
+        update_job(progress=10, status_text="hi")  # must not raise
+
+    def test_forwards_kwargs_to_job_updater(self):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        calls = []
+        update_job = BaseV2DevelopmentAgent._build_job_updater(
+            lambda **kw: calls.append(kw), task_id="t1", logger=self._logger()
+        )
+        update_job(progress=10, status_text="hi")
+        assert calls == [{"progress": 10, "status_text": "hi"}]
+
+    def test_job_updater_exception_is_swallowed_and_logged(self, caplog):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        def _boom(**kw):
+            raise RuntimeError("job update boom")
+
+        update_job = BaseV2DevelopmentAgent._build_job_updater(
+            _boom, task_id="t1", logger=self._logger()
+        )
+        with caplog.at_level("DEBUG", logger="test_build_job_updater"):
+            update_job(progress=10)  # must not raise
+        assert "job_updater callback failed: job update boom" in caplog.text
+
+
+class TestRunExecutionPhase:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_execution_phase`` helper."""
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_execution_phase")
+
+    @staticmethod
+    def _call(**overrides):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        result = overrides.pop("result", _FakeWorkflowResult())
+        kwargs = {
+            "task_id": "t1",
+            "task": MagicMock(),
+            "planning_result": MagicMock(),
+            "repo_path": overrides.pop("repo_path"),
+            "architecture": None,
+            "spec_content": "",
+            "existing_code": "existing",
+            "tool_runners": {},
+            "progress_callback": lambda *a, **kw: None,
+            "review_deps": MagicMock(name="review_deps"),
+            "review_config": MagicMock(name="review_config"),
+            "llm": MagicMock(),
+            "result": result,
+            "run_execution_with_review_gates": lambda **kw: _FakeExecutionOutput(
+                files={"app.py": "print('ok')"}
+            ),
+            "update_job": lambda **kw: None,
+            "logger": TestRunExecutionPhase._logger(),
+            "status_text": "Starting code implementation",
+        }
+        kwargs.update(overrides)
+        out = BaseV2DevelopmentAgent._run_execution_phase(**kwargs)
+        return out, result
+
+    def test_success_returns_files_and_sets_phase(self, tmp_path: Path):
+        from software_engineering_team.shared.v2_models import Phase
+
+        update_calls = []
+        exec_out = _FakeExecutionOutput(files={"app.py": "code"}, summary="done")
+
+        out, result = self._call(
+            repo_path=tmp_path,
+            update_job=lambda **kw: update_calls.append(kw),
+            run_execution_with_review_gates=lambda **kw: exec_out,
+        )
+
+        assert out == {"app.py": "code"}
+        assert result.current_phase == Phase.EXECUTION
+        assert result.execution_result is exec_out
+        assert update_calls == [
+            {
+                "current_phase": "execution",
+                "current_microtask": "",
+                "progress": 15,
+                "status_text": "Starting code implementation",
+            }
+        ]
+
+    def test_passes_review_deps_config_and_progress_callback_through(self, tmp_path: Path):
+        captured = {}
+
+        def _fake_run(**kw):
+            captured.update(kw)
+            return _FakeExecutionOutput(files={"a.py": "a"})
+
+        review_deps = MagicMock(name="review_deps")
+        review_config = MagicMock(name="review_config")
+        progress_cb = lambda *a, **kw: None  # noqa: E731
+
+        self._call(
+            repo_path=tmp_path,
+            review_deps=review_deps,
+            review_config=review_config,
+            progress_callback=progress_cb,
+            run_execution_with_review_gates=_fake_run,
+        )
+
+        assert captured["review_deps"] is review_deps
+        assert captured["review_config"] is review_config
+        assert captured["progress_callback"] is progress_cb
+
+    def test_microtask_review_failed_error_sets_failure_reason(self, tmp_path: Path, caplog):
+        from types import SimpleNamespace
+
+        from software_engineering_team.shared.v2_models import MicrotaskReviewFailedError
+
+        mt = SimpleNamespace(id="mt-3")
+        review_result = SimpleNamespace(summary="lint failed")
+        err = MicrotaskReviewFailedError(mt, review_result)
+
+        def _boom(**kw):
+            raise err
+
+        with caplog.at_level("ERROR", logger="test_run_execution_phase"):
+            out, result = self._call(repo_path=tmp_path, run_execution_with_review_gates=_boom)
+
+        assert out is None
+        assert result.failure_reason == "Microtask mt-3 failed review: lint failed"
+        assert "Microtask mt-3 failed review" in caplog.text
+
+    def test_generic_exception_sets_failure_reason(self, tmp_path: Path, caplog):
+        def _boom(**kw):
+            raise RuntimeError("llm boom")
+
+        with caplog.at_level("ERROR", logger="test_run_execution_phase"):
+            out, result = self._call(repo_path=tmp_path, run_execution_with_review_gates=_boom)
+
+        assert out is None
+        assert result.failure_reason == "Execution failed: llm boom"
+        assert "Execution failed: llm boom" in caplog.text
+
+    def test_empty_files_sets_failure_reason_without_logging(self, tmp_path: Path, caplog):
+        with caplog.at_level("ERROR", logger="test_run_execution_phase"):
+            out, result = self._call(
+                repo_path=tmp_path,
+                run_execution_with_review_gates=lambda **kw: _FakeExecutionOutput(files={}),
+            )
+
+        assert out is None
+        assert result.failure_reason == "Execution produced no files."
+        assert result.execution_result is not None  # set before the empty-files check runs
+        assert caplog.text == ""
+
+    def test_status_text_is_parameterized_per_team(self, tmp_path: Path):
+        update_calls = []
+        self._call(
+            repo_path=tmp_path,
+            status_text="Starting code implementation...",
+            update_job=lambda **kw: update_calls.append(kw),
+        )
+        assert update_calls[0]["status_text"] == "Starting code implementation..."
+
+
 class _FakeMicrotask:
     def __init__(self, status: str):
         self.status = status
@@ -859,6 +1044,7 @@ class _FakeWorkflowResult:
     def __init__(self):
         self.iterations_used = 0
         self.current_phase = None
+        self.execution_result = None
         self.documentation_result = None
         self.final_files = None
         self.deliver_result = None
