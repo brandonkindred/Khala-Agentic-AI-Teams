@@ -64,14 +64,16 @@ class _ScriptedClient(DummyLLMClient):
     Constraints:
       - Responses are consumed in order from the provided list
       - Extra calls after the list is exhausted return the last response
-        (or ``{}`` if the list was empty)
+        (or ``{}`` if the list was empty), unless ``strict=True`` was
+        passed, in which case an ``AssertionError`` is raised instead
       - Does not validate temperature, tools, or other call parameters
     """
 
-    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+    def __init__(self, responses: List[Dict[str, Any]], *, strict: bool = False) -> None:
         super().__init__()
         self._responses = list(responses)
         self._idx = 0
+        self._strict = strict
 
     def complete_json(
         self,
@@ -87,6 +89,8 @@ class _ScriptedClient(DummyLLMClient):
             resp = self._responses[self._idx]
             self._idx += 1
             return resp
+        if self._strict:
+            raise AssertionError(f"complete_json called more than {len(self._responses)} times")
         return self._responses[-1] if self._responses else {}
 
 
