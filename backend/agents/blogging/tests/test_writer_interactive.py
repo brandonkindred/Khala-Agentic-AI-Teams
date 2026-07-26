@@ -871,3 +871,50 @@ def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
         ),
     )
     assert out.summary == "Plain text plan"
+
+
+def test_revise_generate_revision_plan_fallback_rate_limit_reraises(monkeypatch) -> None:
+    """A transient LLM error from the plain-text fallback itself must also re-raise.
+
+    Regression test: the structured-planning call fails with a non-transient error
+    (entering the plain-text fallback), and the fallback's `_call_text` call raises
+    a transient `LLMRateLimitError`. That error must propagate to the caller so the
+    orchestrator can retry, instead of being swallowed into a failed `RevisionPlan`.
+    """
+    import pytest
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import LLMRateLimitError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+
+    def boom_json(self, p, **kw):
+        raise RuntimeError("nope")
+
+    def boom_text(self, p, **kw):
+        raise LLMRateLimitError("rate limited")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom_text)
+    with pytest.raises(LLMRateLimitError, match="rate limited"):
+        a._generate_revision_plan(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            revise_input=ReviseWriterInput(
+                draft="# x",
+                feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+                feedback_summary="s",
+                content_plan=plan,
+            ),
+        )
