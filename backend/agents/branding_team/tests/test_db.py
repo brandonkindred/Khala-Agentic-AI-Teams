@@ -107,6 +107,24 @@ def test_execute_rowcount_reflects_matched_rows(fake_pg: dict) -> None:
     assert affected == 0
 
 
+def test_duplicate_client_insert_raises_unique_violation(fake_pg: dict) -> None:
+    """Duplicate branding_clients insert raises UniqueViolation and keeps the row."""
+    probe = _Probe()
+    original = {"id": "client_1", "name": "Acme"}
+    probe._execute(
+        "INSERT INTO branding_clients (id, data) VALUES (%s, %s)",
+        ("client_1", Json(original)),
+    )
+
+    with pytest.raises(UniqueViolation, match="branding_clients_pkey"):
+        probe._execute(
+            "INSERT INTO branding_clients (id, data) VALUES (%s, %s)",
+            ("client_1", Json({"id": "client_1", "name": "Overwrite"})),
+        )
+
+    assert fake_pg["clients"]["client_1"]["data"] == original
+
+
 def test_duplicate_session_insert_raises_unique_violation(fake_pg: dict) -> None:
     """Duplicate branding_sessions insert raises UniqueViolation and keeps the row."""
     probe = _Probe()
