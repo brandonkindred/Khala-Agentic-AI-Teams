@@ -331,6 +331,16 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         )
 
     def review(self, inp) -> ToolAgentPhaseOutput:
+        """Run this agent's review phase.
+
+        Preconditions: when neither :attr:`build_runner` nor
+        :attr:`review_via_engine` is set, :attr:`review_prompt` must be a
+        non-``None`` template string — the base class declares it as
+        ``Optional[str] = None`` for subclasses that take one of those other
+        two paths, so a subclass using the default one-shot LLM path must
+        set it.
+        Postconditions: returns a :class:`ToolAgentPhaseOutput`.
+        """
         if self.build_runner is not None:
             return self._build_review(inp)
         if self.review_via_engine:
@@ -341,6 +351,12 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         code_text = self._build_code_text(inp.current_files)
         if not code_text.strip():
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no code).")
+        if self.review_prompt is None:
+            raise ValueError(
+                f"{type(self).__name__} has no review_prompt set; subclasses must set "
+                "review_prompt, review_via_engine=True, or build_runner when using the "
+                "default review() path."
+            )
         prompt = self.review_prompt.format(
             task_description=inp.task_description or "N/A",
             code=code_text,

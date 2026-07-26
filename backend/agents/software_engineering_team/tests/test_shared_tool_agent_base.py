@@ -210,6 +210,16 @@ def test_review_no_code():
     assert "no code" in agent.review(_Input(current_files={})).summary
 
 
+def test_review_no_prompt_raises():
+    class _NoPromptAgent(_DemoAgent):
+        review_prompt = None
+
+    agent = _NoPromptAgent.__new__(_NoPromptAgent)
+    agent._model = object()
+    with pytest.raises(ValueError, match="_NoPromptAgent.*review_prompt"):
+        agent.review(_Input(current_files={"a": "b"}))
+
+
 def test_review_finds_issues(monkeypatch):
     agent = _make(monkeypatch, "raw-review")
     out = agent.review(_Input(current_files={"a.ts": "code"}))
