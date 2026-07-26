@@ -18,7 +18,7 @@ from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.team_lead_base import BaseTeamLead
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, make_job_updater
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
@@ -211,12 +211,7 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
         start_time = time.monotonic()
         result = BackendCodeV2WorkflowResult(task_id=task_id)
 
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as e:
-                    logger.debug("[%s] job_updater callback failed: %s", task_id, e)
+        _update_job = make_job_updater(job_updater, task_id, logger)
 
         logger.info(
             "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id
