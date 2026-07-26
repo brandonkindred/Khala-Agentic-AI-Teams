@@ -636,6 +636,114 @@ class TestDevOpsPipelineDebugPatchLoop:
         assert result.success
         assert debug_calls[0] >= 1
         assert call_count[0] >= 2
+        assert result.iterations == 1
+
+    def test_iterations_reflects_multiple_debug_patch_attempts(self) -> None:
+        """Two failed attempts before convergence should report iterations=3."""
+        from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
+
+        client = _ScriptedClient(
+            [
+                {"approved_for_execution": True, "clarification_requests": []},
+                {"artifacts": {"main.tf": "resource {"}, "summary": "infra"},
+                {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
+                {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
+                # Debug/patch attempt 1 (still fails after patch)
+                {
+                    "errors": [{"error_type": "syntax", "error_message": "missing brace"}],
+                    "summary": "err",
+                    "fixable": True,
+                },
+                {
+                    "patched_artifacts": {"main.tf": "resource { }"},
+                    "summary": "fixed attempt 1",
+                    "edits_applied": 1,
+                },
+                # Debug/patch attempt 2 (still fails after patch)
+                {
+                    "errors": [{"error_type": "syntax", "error_message": "missing brace"}],
+                    "summary": "err",
+                    "fixable": True,
+                },
+                {
+                    "patched_artifacts": {"main.tf": "resource { } "},
+                    "summary": "fixed attempt 2",
+                    "edits_applied": 1,
+                },
+                # Debug/patch attempt 3 (converges)
+                {
+                    "errors": [{"error_type": "syntax", "error_message": "missing brace"}],
+                    "summary": "err",
+                    "fixable": True,
+                },
+                {
+                    "patched_artifacts": {"main.tf": "resource {}"},
+                    "summary": "fixed attempt 3",
+                    "edits_applied": 1,
+                },
+                # DevSecOps review
+                {"approved": True, "summary": "ok", "findings": []},
+                # Change review
+                {"approved": True, "summary": "ok"},
+                # Test validation
+                {"quality_gates": {}, "summary": "ok"},
+                # Doc runbook
+                {"files": {}, "summary": "doc ok"},
+            ]
+        )
+
+        agent = DevOpsTeamLeadAgent(llm_client=client)
+
+        call_count = [0]
+
+        def exec_tools(repo_str: str, artifacts: Dict[str, str]) -> List[Dict[str, Any]]:
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                return [
+                    {
+                        "tool": "terraform",
+                        "command": "validate",
+                        "success": False,
+                        "checks": {"terraform_validate": "fail"},
+                        "findings": ["Error: missing brace"],
+                        "failure_class": "execution",
+                    }
+                ]
+            return [
+                {
+                    "tool": "terraform",
+                    "command": "validate",
+                    "success": True,
+                    "checks": {"terraform_validate": "pass"},
+                    "findings": [],
+                    "failure_class": "",
+                }
+            ]
+
+        agent._run_execution_tools = exec_tools  # type: ignore[assignment]
+
+        from software_engineering_team.devops_team.models import DevOpsTaskSpec
+
+        spec = DevOpsTaskSpec(
+            task_id="t1",
+            title="Test",
+            goal={"summary": "test"},
+            platform_scope={"cloud": "on-premises", "environments": ["dev"]},
+            acceptance_criteria=["IaC validates"],
+            constraints={"secrets": {"source": "env"}},
+        )
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            result = agent._run_pipeline(
+                repo_path=Path(td),
+                task_spec=spec,
+                build_verifier=None,
+                write_changes=False,
+            )
+        assert result.success
+        assert result.iterations == MAX_INFRA_FIX_ITERATIONS
 
 
 # ---------------------------------------------------------------------------
