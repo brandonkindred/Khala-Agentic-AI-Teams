@@ -224,13 +224,15 @@ MAX_INFRA_FIX_ITERATIONS = 3
 class _DebugPatchState:
     """Mutable bag for one Phase 4.6 debug-patch retry session.
 
-    Invariants: ``exec_failures`` is derived from ``exec_results`` (entries where
-    ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` always mirror
-    ``exec_results`` — established in ``__post_init__`` and refreshed via
-    :meth:`refresh_aggregates` after each re-exec. Malformed entries (not a
+    Invariants: ``exec_failures`` is derived from ``exec_results`` (dict entries
+    where ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` always
+    mirror ``exec_results`` — established in ``__post_init__`` and refreshed
+    via :meth:`refresh_aggregates` after each re-exec. Malformed entries (not a
     dict, or with non-dict ``checks`` / non-list ``findings``) are skipped
     rather than raising, since execution-tool output is untrusted external
-    input.
+    input; consumers of ``exec_failures`` (e.g. the Phase 4.6 debug-patch loop)
+    call ``.get()`` on each entry without further isinstance checks, so
+    non-dict entries must never reach that list.
     """
 
     exec_results: List[Dict[str, Any]]
@@ -242,10 +244,21 @@ class _DebugPatchState:
 
     @property
     def exec_failures(self) -> List[Dict[str, Any]]:
-        """Failing execution-tool results derived from ``exec_results``."""
-        return [
-            er for er in self.exec_results if not (isinstance(er, dict) and er.get("success", True))
-        ]
+        """Failing execution-tool results derived from ``exec_results``.
+
+        Postconditions: only dict entries are included — a non-dict entry is
+        logged and excluded rather than being surfaced as a "failure" that
+        downstream ``.get()`` calls (e.g. in ``_debug_patch_once``) cannot
+        safely handle.
+        """
+        failures = []
+        for er in self.exec_results:
+            if not isinstance(er, dict):
+                logger.warning("DevOps execution result is not a dict: %r", er)
+                continue
+            if not er.get("success", True):
+                failures.append(er)
+        return failures
 
     def refresh_aggregates(self) -> None:
         """Rebuild ``exec_gate_map`` / ``exec_findings`` from ``exec_results``.

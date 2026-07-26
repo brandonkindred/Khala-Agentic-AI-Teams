@@ -123,9 +123,17 @@ class TestDebugPatchStateMalformedResults:
         )
         assert state.exec_gate_map == {"a": "fail"}
         assert state.exec_findings == ["x"]
-        # Malformed entries are treated as failing (safe default) rather than
-        # raising when accessed.
-        assert len(state.exec_failures) == 3
+        # Non-dict entries are excluded from exec_failures entirely (not
+        # merely tolerated), since the Phase 4.6 debug-patch loop calls
+        # `.get()` on each exec_failures entry without further checks.
+        assert state.exec_failures == [
+            {"success": False, "checks": {"a": "fail"}, "findings": ["x"]}
+        ]
+
+    def test_exec_failures_excludes_non_dict_entries(self) -> None:
+        """A non-dict entry (e.g. None) is logged and dropped, not surfaced as a failure."""
+        state = _DebugPatchState(exec_results=[None, "bad", {"success": True, "checks": {}}])
+        assert state.exec_failures == []
 
 
 # ---------------------------------------------------------------------------
