@@ -59,7 +59,8 @@ SCHEMA = TeamSchema(
             event_type TEXT NOT NULL,
             phase      TEXT NOT NULL DEFAULT '',
             gate       TEXT NOT NULL DEFAULT '',
-            detail     JSONB NOT NULL DEFAULT '{}'::jsonb
+            detail     JSONB NOT NULL DEFAULT '{}'::jsonb,
+            trace_id   TEXT NOT NULL DEFAULT ''
         )""",
         "CREATE INDEX IF NOT EXISTS idx_se_events_type_ts ON se_events(event_type, ts)",
         "CREATE INDEX IF NOT EXISTS idx_se_events_job ON se_events(job_id)",
