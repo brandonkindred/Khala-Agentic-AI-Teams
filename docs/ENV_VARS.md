@@ -610,6 +610,19 @@ Temporal worker's own activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVIT
 (below) — raising `CODE_REVIEW_MAP_PARALLELISM` does nothing to speed up a large
 PR review running in the (default) Temporal mode.
 
+### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
+Int (default `60`, floor `1`). Per-group timeout for the false-positive
+verification phase's LLM calls (one call per cited file, fanned out across
+`CODE_REVIEW_MAP_PARALLELISM` worker threads when there is more than one
+group). A group whose verification call exceeds this timeout is treated the
+same as any other verification failure — fail-safe: its findings are kept
+and a warning is logged — rather than blocking the rest of the phase
+indefinitely. Unlike `CODE_REVIEW_MAP_PARALLELISM`'s map-phase restriction,
+this applies in **both** dispatch modes: the verification phase always runs
+its per-file calls via an in-process `ThreadPoolExecutor`, even under the
+default Temporal dispatch mode, where it executes inside the single
+`code_review_verify_false_positives` activity.
+
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Ceiling on how many `code_review-queue` activities
 the code review Temporal worker runs at once — this is what actually bounds

@@ -547,6 +547,22 @@ def test_ghost_generate_friendly_seeds_list_wrong_len_fallback(monkeypatch) -> N
     assert all("topic" in s.lower() for s in out)
 
 
+def test_ghost_generate_friendly_seeds_non_string_items_fallback(monkeypatch) -> None:
+    """LLM returns a right-length list of non-string items → falls back to generic seeds
+    instead of returning stringified garbage (e.g. "42", "{'q': 'x'}")."""
+    from agents.blogging.ghost_writer_agent.agent import GhostWriterElicitationAgent
+
+    from llm_service import DummyLLMClient
+
+    _patch_agent(monkeypatch, [json.dumps([{"q": "x"}, 42])])  # right length, wrong item types
+    agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
+    out = agent._generate_friendly_seeds(["topic a", "topic b"])
+    # Fallback: generic seeds (one per opp), not stringified dict/int garbage
+    assert len(out) == 2
+    assert all("topic" in s.lower() for s in out)
+    assert not any(s in ("42", "{'q': 'x'}") for s in out)
+
+
 # ---------------------------------------------------------------------------
 # conduct_interview — fast-path skipped via cancellation
 # ---------------------------------------------------------------------------
@@ -659,6 +675,51 @@ def test_ghost_conduct_interview_no_experience_quick_exit(monkeypatch) -> None:
     agent = GhostWriterElicitationAgent(llm_client=DummyLLMClient())
     result = agent.conduct_interview(gap=_gap(), job_id="job-1", gap_index=0, max_rounds=2)
     assert result.skipped is True
+
+
+# ---------------------------------------------------------------------------
+# _is_no_experience
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I have a passion for this",
+        "None of that applied",
+        "I am skipping ahead",
+        "nonetheless, it was fine",
+        "I have no time",
+        "please skip ahead to the next part",
+    ],
+)
+def test_is_no_experience_false_positives(message: str) -> None:
+    """Ordinary prose containing 'pass'/'none'/'skip'/'no' substrings must not match."""
+    from agents.blogging.ghost_writer_agent.agent import _is_no_experience
+
+    assert _is_no_experience(message) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "skip",
+        "skip.",
+        "none",
+        "pass",
+        "skip this one",
+        "n/a for now",
+        "I have no experience",
+        "I have no relevant experience",
+        "I don't have a story",
+        "no relevant experience",
+    ],
+)
+def test_is_no_experience_true_positives(message: str) -> None:
+    """Intended no-experience refusal signals must still be detected."""
+    from agents.blogging.ghost_writer_agent.agent import _is_no_experience
+
+    assert _is_no_experience(message) is True
 
 
 # ---------------------------------------------------------------------------

@@ -197,8 +197,21 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         issues=issues,
         gaps=gaps,
         open_questions=open_questions,
-        summary=str(raw.get("summary", "") or "Spec review complete"),
+        summary=str(raw.get("summary") or "Spec review complete"),
     )
+
+
+def _safe_constraint_layer(value: Any) -> int:
+    """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns an int; non-numeric or missing input yields 0,
+        matching the "not a constraint question" default in :class:`OpenQuestion`.
+    """
+    try:
+        return int(value or 0)
+    except (ValueError, TypeError):
+        return 0
 
 
 def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
@@ -237,21 +250,21 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             id=str(q_data.get("id", f"q{index}")),
             question_text=str(q_data.get("question_text", "")),
             context=str(q_data.get("context", "")),
-            recommendation=str(q_data.get("recommendation", "") or ""),
+            recommendation=str(q_data.get("recommendation", "")),
             options=options,
             allow_multiple=bool(q_data.get("allow_multiple", False)),
             source=str(q_data.get("source", "spec_review")),
             category=str(q_data.get("category", "general")),
             priority=str(q_data.get("priority", "medium")),
             constraint_domain=str(q_data.get("constraint_domain", "")),
-            constraint_layer=int(q_data.get("constraint_layer", 0) or 0),
+            constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
             blocking=bool(q_data.get("blocking", True)),
             owner=str(q_data.get("owner", "user")),
-            section_impact=list(q_data.get("section_impact", []) or []),
+            section_impact=list(q_data.get("section_impact", [])),
             due_date=str(q_data.get("due_date", "")),
             status=str(q_data.get("status", "open")),
-            asked_via=list(q_data.get("asked_via", []) or []),
+            asked_via=list(q_data.get("asked_via", [])),
         )
 
     return OpenQuestion(
@@ -575,7 +588,7 @@ def add_recommendations(
         if not isinstance(recs, list):
             return list(open_questions)
         rec_by_id = {
-            r.get("id"): str(r.get("recommendation", "") or "")
+            r.get("id"): str(r.get("recommendation", ""))
             for r in recs
             if isinstance(r, dict) and "id" in r
         }

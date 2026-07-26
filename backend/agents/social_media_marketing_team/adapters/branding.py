@@ -6,8 +6,9 @@ import logging
 import os
 from typing import List, Optional
 
-import httpx
 from pydantic import BaseModel
+
+from shared.http.job_polling import get_json_with_status
 
 logger = logging.getLogger(__name__)
 
@@ -103,17 +104,14 @@ def fetch_brand(client_id: str, brand_id: str) -> dict:
             "Branding API URL not configured. Set UNIFIED_API_BASE_URL or SOCIAL_MARKETING_BRANDING_URL."
         )
     url = f"{base.rstrip('/')}/api/branding/clients/{client_id}/brands/{brand_id}"
-    try:
-        with httpx.Client(timeout=30.0) as client_http:
-            resp = client_http.get(url)
-            if resp.status_code == 404:
-                raise BrandNotFoundError(client_id, brand_id)
-            resp.raise_for_status()
-            return resp.json()
-    except BrandNotFoundError:
-        raise
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError) as e:
-        raise RuntimeError(f"Failed to fetch brand from branding API: {e}") from e
+    status_code, body = get_json_with_status(
+        url, timeout=30.0, log_context=f"fetch brand {brand_id} for client {client_id}"
+    )
+    if status_code == 404:
+        raise BrandNotFoundError(client_id, brand_id)
+    if status_code is None or not (200 <= status_code < 300) or body is None:
+        raise RuntimeError(f"Failed to fetch brand from branding API (status={status_code})")
+    return body
 
 
 # ---------------------------------------------------------------------------
