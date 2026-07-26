@@ -403,8 +403,8 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                     if key in data and isinstance(data[key], list):
                         data = data[key]
                         break
-            if isinstance(data, list) and len(data) == len(opportunities):
-                cleaned = [str(s).strip().strip('"') for s in data]
+            if isinstance(data, list) and len(data) == len(opportunities) and all(isinstance(s, str) for s in data):
+                cleaned = [s.strip().strip('"') for s in data]
                 # Treat empty/whitespace-only items as failures — fall through to fallback
                 if all(cleaned):
                     return cleaned

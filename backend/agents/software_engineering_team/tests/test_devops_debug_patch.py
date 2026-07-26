@@ -262,6 +262,9 @@ class TestInfraPatchAgent:
             )
         )
         assert "main.tf" in result.patched_artifacts
+        assert result.patched_artifacts["main.tf"] == (
+            'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n'
+        )
         assert result.edits_applied == 1
 
     def test_returns_empty_when_not_fixable(self) -> None:
@@ -275,13 +278,20 @@ class TestInfraPatchAgent:
         class _TripWire(DummyLLMClient):
             """Raises if the patch agent invokes the LLM on a non-fixable debug result."""
 
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
             def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+                self.calls += 1
                 raise AssertionError("LLM must not be called when debug_output.fixable is False")
 
             def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+                self.calls += 1
                 raise AssertionError("LLM must not be called when debug_output.fixable is False")
 
-        agent = InfraPatchAgent(llm_client=_TripWire())
+        tripwire = _TripWire()
+        agent = InfraPatchAgent(llm_client=tripwire)
         result = agent.run(
             IaCPatchInput(
                 debug_output=debug_out,
@@ -289,6 +299,7 @@ class TestInfraPatchAgent:
             )
         )
         assert not result.patched_artifacts
+        assert tripwire.calls == 0
 
 
 # ---------------------------------------------------------------------------

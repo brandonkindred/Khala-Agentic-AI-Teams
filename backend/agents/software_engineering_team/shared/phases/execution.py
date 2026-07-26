@@ -25,6 +25,7 @@ from software_engineering_team.shared.repo_writer import (
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
+from software_engineering_team.shared.v2_models import BaseExecutionResult
 from software_engineering_team.shared.v2_review import _review_steps_run_sequentially
 
 logger = logging.getLogger(__name__)
@@ -257,7 +258,7 @@ def run_execution_impl(
     only_microtask_ids: Optional[List[str]],
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
-) -> Any:
+) -> BaseExecutionResult[Any]:
     """Execute microtasks in the planner's stated order, best-effort on dependencies.
 
     If ``only_microtask_ids`` is set, only those microtasks are run (e.g. fix
@@ -1606,6 +1607,14 @@ def run_gated_execution_impl(
     max_total_cycles = gate_config.max_total_cycles(config)
     code_review_retry_cap = gate_config.code_review_retry_cap(config)
 
+    _current_mt = [None]
+
+    def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
+        """Forward phase detail to progress callback."""
+        if progress_callback:
+            mt = _current_mt[0]
+            progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
+
     for idx, mt in enumerate(microtasks):
         deps_met = all(d in completed_ids for d in mt.depends_on)
         if not deps_met:
@@ -1629,6 +1638,7 @@ def run_gated_execution_impl(
             )
 
         mt.status = microtask_status.IN_PROGRESS
+        _current_mt[0] = mt
         logger.info(
             "[%s] Execution: microtask %d/%d — %s (%s)",
             task_id,
@@ -1649,13 +1659,6 @@ def run_gated_execution_impl(
                 "coding",
                 "Generating code...",
             )
-
-        def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
-            """Forward phase detail to progress callback."""
-            if progress_callback:
-                progress_callback(
-                    _idx, len(completed_ids), total, mt.title or mt.id, _phase, detail
-                )
 
         coding_result = _execute_coding_phase(
             llm=llm,

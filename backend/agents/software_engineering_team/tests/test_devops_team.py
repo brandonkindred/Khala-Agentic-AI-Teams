@@ -1666,6 +1666,33 @@ class TestDevOpsTeamLeadAgentIntegration:
         # The feature branch was cleaned up after the merge.
         assert "feature/" not in branches
 
+    def test_completion_package_merge_sha_unknown_on_head_read_failure(self, monkeypatch) -> None:
+        """When the merge succeeds but the post-merge HEAD read fails, the
+        pipeline must not report ``status == "merged"`` with an empty SHA — it
+        reports ``merged_sha_unknown`` and notes the failure instead of
+        fabricating a successful-looking record."""
+        import software_engineering_team.devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "get_head_sha", lambda *a, **k: (False, ""))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_workflow(
+                repo_path=Path(tmp),
+                task_description="Add backend deployment automation",
+                requirements="Include prod approval gate and rollback plan",
+                build_verifier=MagicMock(return_value=(True, "")),
+                task_id="devops-head-sha-unknown",
+            )
+        assert result.success
+        gitops = result.completion_package.git_operations
+        assert gitops.merge is not None
+        assert gitops.merge.status == "merged_sha_unknown"
+        assert gitops.merge.merge_commit_hash == ""
+        assert any("HEAD SHA" in note for note in result.completion_package.notes)
+
     def test_delivery_merge_failure_blocks(self, monkeypatch) -> None:
         """When the real merge fails, the pipeline reports failure and a blocked
         completion package with an honest ``merge.status == "failed"`` — it does

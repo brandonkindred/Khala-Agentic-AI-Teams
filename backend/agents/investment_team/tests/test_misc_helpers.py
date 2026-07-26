@@ -368,7 +368,122 @@ def test_format_prior_results_truncates_long_text() -> None:
     out = format_prior_results([rec])
     # Truncation markers ("...") were added when each field exceeded the cap.
     assert "..." in out
-    assert "[WINNING]" in out
+    # is_publishable defaults to False (legacy/ungated row) and no skip reason
+    # was set, so the label reflects "won but not confirmed publishable".
+    assert "[WINNING · NOT PUBLISHABLE]" in out
+
+
+def test_format_prior_results_labels_publishable_winner() -> None:
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    strat = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    res = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=10.0,
+        volatility_pct=10.0,
+        sharpe_ratio=0.1,
+        max_drawdown_pct=1.0,
+        win_rate_pct=50.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt",
+        strategy_id="s",
+        strategy=strat,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=res,
+        trades=[],
+    )
+    rec = StrategyLabRecord(
+        lab_record_id="l1",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        is_publishable=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    out = format_prior_results([rec])
+    assert "[WINNING · PUBLISHABLE]" in out
+
+
+def test_format_prior_results_labels_winning_with_skip_reason() -> None:
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    strat = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    res = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=10.0,
+        volatility_pct=10.0,
+        sharpe_ratio=0.1,
+        max_drawdown_pct=1.0,
+        win_rate_pct=50.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt",
+        strategy_id="s",
+        strategy=strat,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=res,
+        trades=[],
+    )
+    rec = StrategyLabRecord(
+        lab_record_id="l1",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        is_publishable=False,
+        publishability_skip_reason="realism_failed",
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    out = format_prior_results([rec])
+    assert "[WINNING · NOT PUBLISHABLE (realism_failed)]" in out
 
 
 def test_format_prior_results_truncates_to_tail() -> None:

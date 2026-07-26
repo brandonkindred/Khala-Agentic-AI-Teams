@@ -39,10 +39,6 @@ except ImportError:  # pragma: no cover - defensive; artifacts may be unavailabl
 
 logger = logging.getLogger(__name__)
 
-_RESEARCH_DIGEST_CHAR_CAP = 8000
-_BRAND_SPEC_CHAR_CAP = 16000
-_WRITING_GUIDELINES_CHAR_CAP = 16000
-
 
 def _fallback_report(reason: str) -> PlanCriticReport:
     """When the critic LLM cannot be parsed, fail closed with an actionable note."""

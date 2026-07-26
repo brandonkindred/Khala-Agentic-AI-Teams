@@ -116,7 +116,7 @@ def atr(bars: Sequence[Any], period: int = 14) -> float:
 
 
 def adx(bars: Sequence[Any], period: int = 14) -> float:
-    """Wilder's ADX, smoothed once."""
+    """Average directional index (un-smoothed single-DX form). See ``IndicatorRegistry.adx``."""
     return _or_nan(IndicatorRegistry().adx(bars, period=period))
 
 

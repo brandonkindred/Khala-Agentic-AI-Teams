@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 from temporalio import activity
 
 from shared.concurrency import BackgroundHeartbeat
+from shared.observability import bind_trace_id, current_trace_id, new_trace_id
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
@@ -36,13 +37,17 @@ def run_orchestrator_activity(
     spec_content_override: Optional[str] = None,
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
     planning_only: bool = False,
+    trace_id: str = "",
 ) -> None:
     """Execute the main Tech Lead orchestrator (run_orchestrator).
 
     Postconditions:
         On failure the job is marked FAILED and the exception is re-raised so
         Temporal can retry (per the workflow retry policy) and fail the workflow.
+        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
+        forwarded to ``run_orchestrator``, which binds it for the whole 4-phase run.
     """
+    resolved_trace_id = trace_id or new_trace_id()
     try:
         from software_engineering_team.orchestrator import run_orchestrator
 
@@ -52,27 +57,31 @@ def run_orchestrator_activity(
             spec_content_override=spec_content_override,
             resolved_questions_override=resolved_questions_override,
             planning_only=planning_only,
+            trace_id=resolved_trace_id,
         )
     except Exception as e:
-        logger.exception("Orchestrator activity failed")
+        logger.exception("Orchestrator activity failed", extra={"trace_id": resolved_trace_id})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
 @activity.defn(name="retry_failed")
-def retry_failed_activity(job_id: str) -> None:
+def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
     """Re-run failed tasks for a job (run_failed_tasks).
 
     Postconditions:
         On failure the job is marked FAILED and the exception is re-raised so
         Temporal can retry (per the workflow retry policy) and fail the workflow.
+        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
+        forwarded to ``run_failed_tasks``, which binds it for the retry.
     """
+    resolved_trace_id = trace_id or new_trace_id()
     try:
         from software_engineering_team.orchestrator import run_failed_tasks
 
-        run_failed_tasks(job_id)
+        run_failed_tasks(job_id, trace_id=resolved_trace_id)
     except Exception as e:
-        logger.exception("Retry failed activity failed")
+        logger.exception("Retry failed activity failed", extra={"trace_id": resolved_trace_id})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -196,7 +205,7 @@ def run_frontend_code_v2_activity(
     try:
         _run_frontend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
-        logger.exception("Frontend-code-v2 activity failed")
+        logger.exception("Frontend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -240,7 +249,7 @@ def run_backend_code_v2_activity(
     try:
         _run_backend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
-        logger.exception("Backend-code-v2 activity failed")
+        logger.exception("Backend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -266,7 +275,11 @@ def _run_product_analysis_impl(
 
     context_files = gather_context_files(repo_path)
     if context_files:
-        logger.info("Product analysis: Gathered %d context files", len(context_files))
+        logger.info(
+            "Product analysis: Gathered %d context files",
+            len(context_files),
+            extra={"trace_id": current_trace_id()},
+        )
 
     agent = ProductRequirementsAnalysisAgent(get_client("backend"))
     result = agent.run_workflow(
@@ -308,7 +321,7 @@ def run_product_analysis_activity(
     try:
         _run_product_analysis_impl(job_id, repo_path, spec_content, initial_spec_path)
     except Exception as e:
-        logger.exception("Product analysis activity failed")
+        logger.exception("Product analysis activity failed", extra={"trace_id": current_trace_id()})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -323,10 +336,30 @@ def parse_spec_activity(
     job_id: str,
     repo_path: str,
     spec_content_override: Optional[str] = None,
+    trace_id: str = "",
 ) -> Dict[str, Any]:
     """Phase 1: Parse spec + run Product Requirements Analysis.
 
-    Returns SpecParseResult as a dict.
+    Returns SpecParseResult as a dict. ``trace_id`` (workflow-supplied, or freshly
+    generated when blank) is bound for the duration of this activity — this activity
+    runs in its own process/thread, so unlike the thread-mode orchestrator the id
+    must be passed explicitly rather than inherited via contextvars.
+    """
+    with bind_trace_id(trace_id or new_trace_id()):
+        return _parse_spec_activity_body(job_id, repo_path, spec_content_override)
+
+
+def _parse_spec_activity_body(
+    job_id: str,
+    repo_path: str,
+    spec_content_override: Optional[str],
+) -> Dict[str, Any]:
+    """Body of :func:`parse_spec_activity`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`parse_spec_activity`).
+    Postconditions: returns a ``SpecParseResult`` dict; on failure the job is marked
+        FAILED and the exception propagates to the activity wrapper.
     """
     from software_engineering_team.temporal.phase_models import SpecParseResult
 
@@ -408,7 +441,11 @@ def parse_spec_activity(
         ).model_dump()
 
     except Exception as e:
-        logger.exception("parse_spec_activity failed for job %s", job_id)
+        logger.exception(
+            "parse_spec_activity failed for job %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -418,10 +455,30 @@ def plan_project_activity(
     job_id: str,
     repo_path: str,
     spec_parse_result: Dict[str, Any],
+    trace_id: str = "",
 ) -> Dict[str, Any]:
     """Phase 2: Run Planning workflow.
 
-    Returns PlanResult as a dict.
+    Returns PlanResult as a dict. ``trace_id`` (workflow-supplied, or freshly
+    generated when blank) is bound for the duration of this activity — see
+    ``parse_spec_activity`` for why it must be passed explicitly here rather than
+    inherited via contextvars.
+    """
+    with bind_trace_id(trace_id or new_trace_id()):
+        return _plan_project_activity_body(job_id, repo_path, spec_parse_result)
+
+
+def _plan_project_activity_body(
+    job_id: str,
+    repo_path: str,
+    spec_parse_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Body of :func:`plan_project_activity`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`plan_project_activity`); ``spec_parse_result`` validates as a ``SpecParseResult``.
+    Postconditions: returns a ``PlanResult`` dict; on failure the job is marked FAILED and
+        the exception propagates to the activity wrapper.
     """
     from software_engineering_team.temporal.phase_models import PlanResult, SpecParseResult
 
@@ -496,7 +553,11 @@ def plan_project_activity(
         ).model_dump()
 
     except Exception as e:
-        logger.exception("plan_project_activity failed for job %s", job_id)
+        logger.exception(
+            "plan_project_activity failed for job %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -539,10 +600,37 @@ def execute_coding_team_activity(
     repo_path: str,
     plan_result: Dict[str, Any],
     resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
+    trace_id: str = "",
 ) -> Dict[str, Any]:
     """Phase 3: Build CodingTeamPlanInput and run coding team.
 
-    Returns ExecutionResult as a dict.
+    Returns ExecutionResult as a dict. ``trace_id`` (workflow-supplied, or freshly
+    generated when blank) is bound for the duration of this activity, including the
+    ``parallel_map`` fan-out inside ``run_coding_team_orchestrator``. Note the V2
+    workflow defines no Phase-4 activity, so the integration finalize step
+    (``_emit_coding_team_metrics`` / ``_finalize_from_coding_snapshot``) runs on the
+    thread-mode path only and is not covered by this activity's bound id.
+    """
+    with bind_trace_id(trace_id or new_trace_id()):
+        return _execute_coding_team_activity_body(
+            job_id, repo_path, plan_result, resolved_questions_override
+        )
+
+
+def _execute_coding_team_activity_body(
+    job_id: str,
+    repo_path: str,
+    plan_result: Dict[str, Any],
+    resolved_questions_override: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Body of :func:`execute_coding_team_activity`, run inside its ``bind_trace_id`` block.
+
+    Preconditions: a trace id is already bound (callers must go through
+        :func:`execute_coding_team_activity`); ``plan_result`` validates as a ``PlanResult``
+        whose ``adapter_result_dict`` reconstructs a ``PlanningAdapterResult``.
+    Postconditions: returns an ``ExecutionResult`` dict; the coding-team orchestrator owns
+        the job's terminal status on every exit path, and the bound trace id is visible to
+        its ``parallel_map`` workers via ``contextvars.copy_context()``.
     """
     from software_engineering_team.temporal.phase_models import ExecutionResult
     from software_engineering_team.temporal.phase_models import PlanResult as PlanResultModel
@@ -610,6 +698,10 @@ def execute_coding_team_activity(
         return ExecutionResult(merged_count=0).model_dump()
 
     except Exception as e:
-        logger.exception("execute_coding_team_activity failed for job %s", job_id)
+        logger.exception(
+            "execute_coding_team_activity failed for job %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise

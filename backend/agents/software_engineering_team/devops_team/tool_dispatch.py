@@ -35,7 +35,7 @@ def run_execution_tools(
         k in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
         for k in artifacts
     )
-    has_chart = any(k.endswith("Chart.yaml") or k == "Chart.yaml" for k in artifacts)
+    has_chart = any(k.endswith("Chart.yaml") for k in artifacts)
 
     if has_tf:
         for cmd in ("init", "validate", "plan"):
