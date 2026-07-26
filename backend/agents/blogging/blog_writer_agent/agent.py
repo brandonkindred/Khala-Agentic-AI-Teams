@@ -966,13 +966,18 @@ class BlogWriterAgent(_BlogAgentBase):
             data = self._call_agent_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             if not data or not isinstance(data, dict):
                 return RevisionPlan(summary="Planning produced no output.", changes=[], risks=[])
+            changes: list[RevisionPlanChange] = []
+            for c in data.get("changes") or []:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    changes.append(RevisionPlanChange(**c))
+                except (TypeError, ValueError) as change_exc:
+                    logger.debug("Skipping malformed revision plan change: %s", change_exc)
+                    continue
             return RevisionPlan(
                 summary=data.get("summary", ""),
-                changes=[
-                    RevisionPlanChange(**c)
-                    for c in (data.get("changes") or [])
-                    if isinstance(c, dict)
-                ],
+                changes=changes,
                 risks=data.get("risks") or [],
             )
         except Exception as e:
