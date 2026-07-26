@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_service.clients.dummy import DummyLLMClient
+from llm_service.interface import LLMClient
 from software_engineering_team.devops_team.infra_debug_agent import (
     IaCDebugInput,
     IaCDebugOutput,
@@ -17,6 +18,54 @@ from software_engineering_team.devops_team.orchestrator import (
     MAX_INFRA_FIX_ITERATIONS,
     _DebugPatchState,
 )
+
+# Public LLMClient methods that resolve without issuing an LLM request — pure
+# capability/metadata queries (see their docstrings in llm_service/interface.py).
+# Excluded from the trip wire so a caller that merely inspects client
+# capabilities (e.g. to pick a code path) doesn't trip a "must not call the
+# LLM" assertion.
+_LLM_CLIENT_NON_REQUEST_METHODS = frozenset(
+    {"supports_structured_output", "get_max_context_tokens"}
+)
+
+
+def _make_llm_tripwire() -> DummyLLMClient:
+    """Build a DummyLLMClient whose every request-producing method raises and counts its calls.
+
+    Generic over whatever request-producing public methods LLMClient
+    currently declares (complete_json, complete, complete_text, chat, ...)
+    instead of hardcoding a couple of names, so a method added to the
+    interface later is caught automatically instead of silently letting a
+    real LLM call through undetected. Capability/metadata methods that don't
+    issue a request (see ``_LLM_CLIENT_NON_REQUEST_METHODS``) are left alone.
+    Each override also increments ``self.calls`` before raising, so callers
+    can assert zero invocations even if the AssertionError itself is
+    swallowed by a broad try/except somewhere in the call path.
+    """
+
+    def _raiser(name: str) -> Any:
+        def _method(self: Any, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
+            raise AssertionError(
+                f"LLM must not be called ({name}) when debug_output.fixable is False"
+            )
+
+        return _method
+
+    def _init(self: Any) -> None:
+        DummyLLMClient.__init__(self)
+        self.calls = 0
+
+    overrides = {
+        name: _raiser(name)
+        for name in vars(LLMClient)
+        if not name.startswith("_")
+        and callable(getattr(LLMClient, name))
+        and name not in _LLM_CLIENT_NON_REQUEST_METHODS
+    }
+    overrides["__init__"] = _init
+    tripwire_cls = type("_TripWire", (DummyLLMClient,), overrides)
+    return tripwire_cls()
 
 
 class _StubClient(DummyLLMClient):
@@ -262,6 +311,9 @@ class TestInfraPatchAgent:
             )
         )
         assert "main.tf" in result.patched_artifacts
+        assert result.patched_artifacts["main.tf"] == (
+            'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n'
+        )
         assert result.edits_applied == 1
 
     def test_returns_empty_when_not_fixable(self) -> None:
@@ -272,16 +324,8 @@ class TestInfraPatchAgent:
             fixable=False,
         )
 
-        class _TripWire(DummyLLMClient):
-            """Raises if the patch agent invokes the LLM on a non-fixable debug result."""
-
-            def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
-                raise AssertionError("LLM must not be called when debug_output.fixable is False")
-
-            def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
-                raise AssertionError("LLM must not be called when debug_output.fixable is False")
-
-        agent = InfraPatchAgent(llm_client=_TripWire())
+        tripwire = _make_llm_tripwire()
+        agent = InfraPatchAgent(llm_client=tripwire)
         result = agent.run(
             IaCPatchInput(
                 debug_output=debug_out,
@@ -289,6 +333,7 @@ class TestInfraPatchAgent:
             )
         )
         assert not result.patched_artifacts
+        assert tripwire.calls == 0
 
 
 # ---------------------------------------------------------------------------

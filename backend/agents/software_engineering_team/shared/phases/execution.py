@@ -27,6 +27,7 @@ from software_engineering_team.shared.repo_writer import (
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
+from software_engineering_team.shared.v2_models import BaseExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ def run_execution_impl(
     only_microtask_ids: Optional[List[str]],
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
-) -> Any:
+) -> BaseExecutionResult[Any]:
     """Execute microtasks in the planner's stated order, best-effort on dependencies.
 
     If ``only_microtask_ids`` is set, only those microtasks are run (e.g. fix
@@ -331,6 +332,11 @@ class GatedExecutionConfig:
     run_documentation_self_review: Callable[..., Any]
     # ``mt.status`` set at each gate's entry (backend: distinct per phase;
     # frontend: ``IN_REVIEW`` for all three — a no-op re-assign after code review).
+    # When ``parallelize_qa_security`` is in effect, QA and Security run at once,
+    # so there is no per-gate entry point for Security to set ``status_security``
+    # at — ``mt.status`` is set to ``status_qa`` once for the whole combined
+    # phase and intentionally never reaches ``status_security`` (see
+    # ``_run_review_cycles``'s concurrent branch).
     status_code_review: Any
     status_qa: Any
     status_security: Any
@@ -345,6 +351,12 @@ class GatedExecutionConfig:
     # Verb in the QA/security "…%s %d issues" INFO line (backend "failed with";
     # frontend "found").
     gate_issue_log_verb: str
+    # When True, QA and Security run concurrently via parallel_map against the
+    # same post-Code-Review snapshot (backend only — see
+    # docs/GATE_DEPENDENCY_GRAPH.md). Defaults False (today's fully sequential
+    # QA -> Security behavior), so the frontend config is unaffected until its
+    # tool-agent fan-out is scoped per gate the way the backend's already is.
+    parallelize_qa_security: bool = False
 
 
 def _execute_coding_phase(
@@ -662,6 +674,14 @@ def run_gated_execution_impl(
     max_total_cycles = gate_config.max_total_cycles(config)
     code_review_retry_cap = gate_config.code_review_retry_cap(config)
 
+    _current_mt = [None]
+
+    def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
+        """Forward phase detail to progress callback."""
+        if progress_callback:
+            mt = _current_mt[0]
+            progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
+
     for idx, mt in enumerate(microtasks):
         deps_met = all(d in completed_ids for d in mt.depends_on)
         if not deps_met:
@@ -685,6 +705,7 @@ def run_gated_execution_impl(
             )
 
         mt.status = microtask_status.IN_PROGRESS
+        _current_mt[0] = mt
         logger.info(
             "[%s] Execution: microtask %d/%d — %s (%s)",
             task_id,
@@ -705,13 +726,6 @@ def run_gated_execution_impl(
                 "coding",
                 "Generating code...",
             )
-
-        def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
-            """Forward phase detail to progress callback."""
-            if progress_callback:
-                progress_callback(
-                    _idx, len(completed_ids), total, mt.title or mt.id, _phase, detail
-                )
 
         coding_result = _execute_coding_phase(
             llm=llm,

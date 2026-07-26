@@ -364,7 +364,7 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# Recovered",
+        lambda self, p, system_prompt="": "# Recovered",
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
@@ -449,7 +449,7 @@ def test_writer_revise_single_item_transient_retries_then_fallback(monkeypatch) 
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# Recovered transient",
+        lambda self, p, system_prompt="": "# Recovered transient",
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
@@ -489,7 +489,9 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
     monkeypatch.setattr(
         BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
     )
-    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_fallback_draft_via_json", lambda self, p, system_prompt="": None
+    )
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
         overarching_topic="x",
@@ -529,7 +531,7 @@ def test_writer_revise_single_item_fallback_unexpected_keeps_original(monkeypatc
         BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
     )
 
-    def boom_fallback(self, p):
+    def boom_fallback(self, p, system_prompt=""):
         raise RuntimeError("fallback boom")
 
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)
@@ -574,7 +576,7 @@ def test_writer_revise_single_item_fallback_transient_reraises(monkeypatch) -> N
         BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
     )
 
-    def boom_fallback(self, p):
+    def boom_fallback(self, p, system_prompt=""):
         raise LLMRateLimitError("429")
 
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)

@@ -15,7 +15,6 @@ from ...models import ReviewIssue
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
-MAX_PERFORMANCE_CODE_CHARS = 25_000
 MAX_RELEVANT_CODE_CHARS = 8_000
 
 PERFORMANCE_REVIEW_PROMPT = """You are a Performance Engineer Agent. Your job is to protect the app from shipping a 14 MB JavaScript novella. You own speed, responsiveness, bundle size, and runtime cost.
@@ -87,7 +86,6 @@ class PerformanceToolAgent(BaseReviewToolAgent):
     problem_solve_sources = ("performance", "tool_performance")
     review_prompt = PERFORMANCE_REVIEW_PROMPT
     problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-    max_code_chars = MAX_PERFORMANCE_CODE_CHARS
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "json"
     uses_json_model = True

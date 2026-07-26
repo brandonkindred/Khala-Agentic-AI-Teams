@@ -204,8 +204,9 @@ class LlmToolAgentBase:
         Postconditions:
             Returns a ``dict`` for lenient/text paths (``{}`` on lenient JSON
             failure). Returns ``dict | None`` for extract (``None`` on failure).
-            Does not import ``tool_agent_base`` or ``shared.llm_recovery`` until
-            the corresponding branch runs.
+            Does not import ``shared.llm_recovery`` or
+            ``tool_agent_base.lenient_json_object`` until the corresponding
+            branch runs.
         """
         strategy = type(self).json_parse_strategy
         assert strategy in ("lenient", "extract"), strategy
@@ -266,8 +267,8 @@ class LlmToolAgentBase:
             ``fn`` is a zero-argument callable.
 
         Postconditions:
-            Success → ``("ok", fn())``. Any ``Exception`` → warning log on the
-            subclass module logger, then ``("error", FallbackPayload)`` with
+            Success → ``("ok", fn())``. Any ``Exception`` (not ``BaseException``) →
+            warning log on the subclass module logger, then ``("error", FallbackPayload)`` with
             ``tier="call_error"`` and the ``llm_error_*`` class attrs (lists
             copied).
         """
@@ -330,9 +331,10 @@ class LlmToolAgentBase:
         Postconditions:
             Returns ``tier="empty_parse"``. Empty or ``None`` recommendations
             become a copy of ``empty_recommendations``. Summary starts as
-            ``summary`` when not ``None``, else ``default_summary``; if that
-            value is falsy and ``empty_summary_override`` is not ``None``, the
-            override is used. Does not log.
+            ``summary`` when not ``None`` (even if an empty string), else
+            ``default_summary``; if that value is falsy and
+            ``empty_summary_override`` is not ``None``, the override is used.
+            Does not log.
         """
         cls = type(self)
         if recommendations:
