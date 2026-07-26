@@ -56,6 +56,7 @@ def record_event(
     gate: str = "",
     detail: Optional[dict] = None,
     ts: Optional[datetime] = None,
+    trace_id: str = "",
 ) -> bool:
     """Append one lifecycle event to ``se_events``.
 
@@ -67,6 +68,10 @@ def record_event(
         - Returns ``True`` when a row was written, ``False`` when Postgres is
           disabled or the write failed (an operational failure is logged at DEBUG,
           never raised).
+        - The persisted ``trace_id`` is the given ``trace_id`` if non-empty,
+          otherwise the caller's bound :func:`shared.observability.current_trace_id`
+          (``""`` if none is bound) — so existing call sites inside a job's
+          ``bind_trace_id`` scope need no change to have their events correlated.
     Raises:
         - ``ValueError`` if ``event_type`` is empty — a caller contract violation
           (programming error), distinct from the operational failures above which
@@ -78,6 +83,7 @@ def record_event(
         with pg_cursor() as cur:
             if cur is None:
                 return False
+            from shared.observability import current_trace_id
             from shared.postgres import Json
 
             # Normalize to an aware UTC timestamp: a naive datetime would be read
@@ -85,10 +91,11 @@ def record_event(
             when = ts or _utc_now()
             if when.tzinfo is None:
                 when = when.replace(tzinfo=timezone.utc)
+            resolved_trace_id = trace_id or current_trace_id()
             cur.execute(
-                "INSERT INTO se_events (ts, job_id, task_id, event_type, phase, gate, detail) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (when, job_id, task_id, event_type, phase, gate, Json(detail or {})),
+                "INSERT INTO se_events (ts, job_id, task_id, event_type, phase, gate, detail, trace_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (when, job_id, task_id, event_type, phase, gate, Json(detail or {}), resolved_trace_id),
             )
         return True
     except Exception:
@@ -103,7 +110,8 @@ def fetch_events_since(cutoff: datetime) -> list[dict[str, Any]]:
         - ``cutoff`` is a timezone-aware datetime.
     Postconditions:
         - Returns a list of dict rows (keys: ts, job_id, task_id, event_type,
-          phase, gate, detail); ``[]`` when Postgres is disabled or on error.
+          phase, gate, detail, trace_id); ``[]`` when Postgres is disabled or on
+          error.
     Raises:
         - ``ValueError`` if ``cutoff`` is naive — a naive bound is compared in the
           session TimeZone and would silently shift the window (caller bug).
@@ -115,7 +123,7 @@ def fetch_events_since(cutoff: datetime) -> list[dict[str, Any]]:
             if cur is None:
                 return []
             cur.execute(
-                "SELECT ts, job_id, task_id, event_type, phase, gate, detail "
+                "SELECT ts, job_id, task_id, event_type, phase, gate, detail, trace_id "
                 "FROM se_events WHERE ts >= %s ORDER BY ts",
                 (cutoff,),
             )

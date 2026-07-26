@@ -67,7 +67,7 @@ from .agents._llm_budget import DesignBudgetExhausted
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
-from .quality_gates.models import QualityGateResult
+from .quality_gates.models import QualityGateResult, join_gate_details
 from .quality_gates.universe_injection import inject_universe_and_guard
 
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
@@ -149,7 +149,7 @@ class SynthesisMixin:
             short_circuit_status="failed: spec_validation",
             short_circuit_reason=(
                 "Spec validation failed before code synthesis: "
-                + "; ".join(g.details for g in criticals)
+                + join_gate_details(criticals)
             ),
             emit=emit,
             design_context=design_context,
