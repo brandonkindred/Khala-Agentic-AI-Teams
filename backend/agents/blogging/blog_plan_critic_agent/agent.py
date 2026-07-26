@@ -39,10 +39,6 @@ except ImportError:  # pragma: no cover - defensive; artifacts may be unavailabl
 
 logger = logging.getLogger(__name__)
 
-_RESEARCH_DIGEST_CHAR_CAP = 8000
-_BRAND_SPEC_CHAR_CAP = 16000
-_WRITING_GUIDELINES_CHAR_CAP = 16000
-
 
 def _fallback_report(reason: str) -> PlanCriticReport:
     """When the critic LLM cannot be parsed, fail closed with an actionable note."""
@@ -112,10 +108,9 @@ class BlogPlanCriticAgent(_BlogAgentBase):
               persisted as ``artifact_name`` (default ``plan_critic_report.json``).
         """
         user_prompt = PLAN_CRITIC_USER_TEMPLATE.format(
-            brand_spec_prompt=(brand_spec_prompt or "").strip()[:_BRAND_SPEC_CHAR_CAP],
-            writing_guidelines=(writing_guidelines or "").strip()[:_WRITING_GUIDELINES_CHAR_CAP],
-            research_digest=(research_digest or "").strip()[:_RESEARCH_DIGEST_CHAR_CAP]
-            or "(no research digest supplied)",
+            brand_spec_prompt=(brand_spec_prompt or "").strip(),
+            writing_guidelines=(writing_guidelines or "").strip(),
+            research_digest=(research_digest or "").strip() or "(no research digest supplied)",
             plan_json=json.dumps(plan.model_dump(mode="json"), indent=2),
         )
 
