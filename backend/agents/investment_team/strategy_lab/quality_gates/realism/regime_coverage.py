@@ -22,6 +22,16 @@ enforces two contracts:
 The gate is skipped (info) when ``regime_results`` is missing or empty
 — the orchestrator's regime evaluator handles that case defensively
 (returns ``[]`` on internal exceptions or insufficient bars).
+
+Custom-code strategies: this gate takes no ``spec`` and never branches on
+``requires_custom_code``. ``regime_results`` is built by
+:meth:`~investment_team.strategy_lab.orchestrator.StrategyLabOrchestrator._evaluate_regimes`
+purely from the trade-ledger equity curve and benchmark bars — it has no
+dependency on the compiler's per-rule reason annotation, so it is
+populated identically whether the strategy compiled deterministically or
+ran as LLM-authored code. Unlike
+:class:`~investment_team.strategy_lab.quality_gates.realism.rule_firing.RuleFiringRateGate`,
+there is no compiler-only signal here to lose on the custom-code path.
 """
 
 from __future__ import annotations
