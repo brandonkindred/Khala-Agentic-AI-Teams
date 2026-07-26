@@ -330,9 +330,10 @@ class LlmToolAgentBase:
         Postconditions:
             Returns ``tier="empty_parse"``. Empty or ``None`` recommendations
             become a copy of ``empty_recommendations``. Summary starts as
-            ``summary`` when not ``None``, else ``default_summary``; if that
-            value is falsy and ``empty_summary_override`` is not ``None``, the
-            override is used. Does not log.
+            ``summary`` when not ``None`` (even if an empty string), else
+            ``default_summary``; if that value is falsy and
+            ``empty_summary_override`` is not ``None``, the override is used.
+            Does not log.
         """
         cls = type(self)
         if recommendations:
