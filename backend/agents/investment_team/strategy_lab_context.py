@@ -444,10 +444,15 @@ def aggregate_prior_results(
     Preconditions:
       - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 0``.
     Postconditions:
-      - Returns ``{(dimension, value): {"win_rate", "annual_return", "n"}}``.
+      - Returns ``{(dimension, value): {"win_rate", "annual_return", "n",
+        "publishable_n", "publishable_win_rate", "publishable_annual_return"}}``.
       - Empty / all-non-executed / ``max_records == 0`` input → ``{}``.
       - Every value dict has ``n >= 1`` and means equal to the arithmetic mean of
         the contributing records' ``win_rate_pct`` / ``annualized_return_pct``.
+      - ``publishable_n`` counts the contributing records that are
+        ``is_publishable``; ``publishable_win_rate``/``publishable_annual_return``
+        are the same means restricted to that subset, or ``None`` when
+        ``publishable_n == 0`` (never a misleading 0.0).
       - A record with a parseable design contributes to exactly one
         ``asset_class``/``entry``/``sizing`` bucket and to one ``exit`` bucket
         per distinct exit type it uses. A redesign-pending / unparsed-rules
@@ -458,33 +463,53 @@ def aggregate_prior_results(
     if not executed:
         return {}
 
-    # bucket_key -> [sum_win_rate, sum_annual_return, count]
+    # bucket_key -> [sum_win_rate, sum_annual_return, n, pub_sum_win_rate, pub_sum_annual_return, pub_n]
     acc: dict[tuple[str, str], list[float]] = {}
 
-    def _add(dimension: str, value: str, win_rate: float, annual_return: float) -> None:
-        slot = acc.setdefault((dimension, value), [0.0, 0.0, 0.0])
+    def _add(
+        dimension: str, value: str, win_rate: float, annual_return: float, is_publishable: bool
+    ) -> None:
+        slot = acc.setdefault((dimension, value), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         slot[0] += win_rate
         slot[1] += annual_return
         slot[2] += 1.0
+        if is_publishable:
+            slot[3] += win_rate
+            slot[4] += annual_return
+            slot[5] += 1.0
 
     for r in executed:
         res = r.backtest.result
         win = float(res.win_rate_pct)
         ann = float(res.annualized_return_pct)
         strat = r.strategy
+        publishable = bool(r.is_publishable)
         # asset_class is genuine even for legacy redesign-pending rows, so it
         # always counts; the structured design dimensions only count when the
         # spec actually carries parseable rules (see _has_parseable_design).
-        _add("asset_class", normalize_asset_class(strat.asset_class), win, ann)
+        _add("asset_class", normalize_asset_class(strat.asset_class), win, ann, publishable)
         if _has_parseable_design(strat):
-            _add("entry", _entry_archetype(strat), win, ann)
-            _add("sizing", str(getattr(strat.sizing, "kind", "") or "unknown"), win, ann)
+            _add("entry", _entry_archetype(strat), win, ann, publishable)
+            _add(
+                "sizing",
+                str(getattr(strat.sizing, "kind", "") or "unknown"),
+                win,
+                ann,
+                publishable,
+            )
             for exit_label in _exit_archetypes(strat):
-                _add("exit", exit_label, win, ann)
+                _add("exit", exit_label, win, ann, publishable)
 
     return {
-        key: {"win_rate": sw / n, "annual_return": sa / n, "n": int(n)}
-        for key, (sw, sa, n) in acc.items()
+        key: {
+            "win_rate": sw / n,
+            "annual_return": sa / n,
+            "n": int(n),
+            "publishable_n": int(pn),
+            "publishable_win_rate": (pw / pn) if pn else None,
+            "publishable_annual_return": (pa / pn) if pn else None,
+        }
+        for key, (sw, sa, n, pw, pa, pn) in acc.items()
     }
 
 
@@ -553,13 +578,18 @@ def _or_join(items: List[str]) -> str:
 def _edge_exploitation_steer(
     records: List[StrategyLabRecord], allowed: List[str], menu: str, *, tail: int
 ) -> str:
-    """Steer toward the allowed asset class with the best demonstrated edge.
+    """Steer toward the allowed asset class with the best demonstrated *robust* edge.
 
     The objective-aware counterpart to the diversity nudge. Ranks the marginal
     ``asset_class`` attribution buckets from :func:`aggregate_prior_results`
-    (restricted to ``allowed``) by mean annualized return, then mean win rate as
-    the dual-objective tie-break, and names the leader so the designer leans into
-    its edge rather than rotating away from it.
+    (restricted to ``allowed``) in two tiers: any bucket with at least one
+    ``is_publishable`` record outranks every bucket with none, so a class whose
+    apparent edge is only backed by overfit or unrealistic "wins" never beats a
+    class with genuine robust evidence — regardless of raw return. Within each
+    tier, buckets are ranked by mean annualized return (publishable-only mean
+    for the first tier, raw mean for the second), then mean win rate as the
+    dual-objective tie-break, and the leader is named so the designer leans
+    into its edge rather than rotating away from it.
 
     The edge map is bounded to the same ``tail`` window of executed records that
     the caller's recent-counts line uses, so the steering can never name a class
@@ -569,27 +599,43 @@ def _edge_exploitation_steer(
     ``tail >= 1``.
     Postconditions: returns a non-empty string. When no per-class edge is
     attributable yet (legacy / unparsed history), returns neutral menu text
-    rather than fabricating a preference.
+    rather than fabricating a preference. When no in-bounds bucket has any
+    publishable evidence, the message text is identical to the raw-stats-only
+    behavior (no publishable-evidence framing is fabricated).
     """
     assert allowed, "allowed must be non-empty"
     assert menu, "menu must be provided"
     assert tail >= 1, f"tail must be >= 1, got {tail}"
     agg = aggregate_prior_results(records, max_records=tail)
-    buckets = sorted(
-        (
-            (value, stats)
-            for (dim, value), stats in agg.items()
-            if dim == "asset_class" and value in allowed
-        ),
-        key=lambda kv: (kv[1]["annual_return"], kv[1]["win_rate"]),
-        reverse=True,
-    )
+    buckets = [
+        (value, stats)
+        for (dim, value), stats in agg.items()
+        if dim == "asset_class" and value in allowed
+    ]
     if not buckets:
         return (
             f"No per-class edge attributable yet — choose **asset_class** from {menu}: "
             "pick the class that best fits your strongest multi-signal edge."
         )
+
+    def _rank_key(item: tuple[str, dict]) -> tuple:
+        _, stats = item
+        if stats["publishable_n"]:
+            return (1, stats["publishable_annual_return"], stats["publishable_win_rate"])
+        return (0, stats["annual_return"], stats["win_rate"])
+
+    buckets.sort(key=_rank_key, reverse=True)
     top_value, top_stats = buckets[0]
+    if top_stats["publishable_n"]:
+        return (
+            "Objective is return/win-rate — **lean into your demonstrated robust edge**: "
+            f"{top_value} scores best among publishable wins (annual "
+            f"{top_stats['publishable_annual_return']:.1f}%, win "
+            f"{top_stats['publishable_win_rate']:.1f}%, n={top_stats['publishable_n']} "
+            f"publishable of {top_stats['n']} total). Prefer the highest-scoring "
+            "publishable-backed class when a coherent thesis fits rather than rotating "
+            "away from it; pick another class only when its robust edge is clearly stronger."
+        )
     return (
         "Objective is return/win-rate — **lean into your demonstrated edge**: "
         f"{top_value} scores best so far (annual {top_stats['annual_return']:.1f}%, "
