@@ -571,7 +571,8 @@ def _dispatch() -> DispatchTable:
         Preconditions:
             ``params`` is ``(session_id, session_json, updated_at)``.
         Postconditions:
-            On success, ``cur.db["sessions"][session_id]`` holds the new row.
+            On success, ``cur.db["sessions"][session_id]`` holds the new row and
+            ``cur.rowcount`` is 1.
             If ``session_id`` already exists, raises ``UniqueViolation`` and
             leaves the existing row unchanged (matches Postgres PK semantics).
         """
@@ -585,6 +586,7 @@ def _dispatch() -> DispatchTable:
             "session_json": unwrap_json(session_json),
             "updated_at": updated_at,
         }
+        cur.rowcount = 1
 
     def match_select_session(norm: str) -> bool:
         return norm.startswith("select session_json from branding_sessions where session_id")
@@ -598,11 +600,19 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("update branding_sessions set session_json")
 
     def handle_update_session(cur: FakeCursor, params: tuple) -> None:
+        """Emulate update_session SET session_json + updated_at.
+
+        Params: ``(session_json, updated_at, session_id)``.
+        Sets ``rowcount`` to 1 on match, else 0.
+        """
         session_json, ts, session_id = params
         row = cur.db["sessions"].get(session_id)
         if row:
             row["session_json"] = unwrap_json(session_json)
             row["updated_at"] = ts
+            cur.rowcount = 1
+        else:
+            cur.rowcount = 0
 
     return [
         (match_insert_client, handle_insert_client),
