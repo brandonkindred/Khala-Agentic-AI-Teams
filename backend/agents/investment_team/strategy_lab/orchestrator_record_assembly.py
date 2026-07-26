@@ -1,17 +1,29 @@
 """RecordAssemblyMixin — the record-assembly cluster extracted from
 :mod:`orchestrator`.
 
-Pure move: every method below is relocated verbatim from ``orchestrator.py``.
-No behavior changes. ``RecordAssemblyMixin`` is mixed into
-``StrategyLabOrchestrator`` (see the class statement in ``orchestrator.py``
-for the current base order); its methods expect the attribute
-``StrategyLabOrchestrator.__init__`` sets on ``self``
-(``self.convergence_tracker``) — set on the base class and resolved via MRO
-on the final composed instance.
+Pure move: every method below is relocated verbatim from ``orchestrator.py``,
+with one narrow exception — ``_build_short_circuit_record`` resolves
+``compute_metrics`` through a function-local
+``from . import orchestrator as _orchestrator_module`` deferred import
+instead of a static module-level import. This is required (not a stylistic
+choice): ``test_acceptance_gate_integration.py`` / ``_walk_forward_test_helpers.py``
+monkeypatch ``investment_team.strategy_lab.orchestrator.compute_metrics``
+directly, and a static import here would bind a private reference in this
+module's globals that such a patch would never reach. Do not "clean up" this
+deferred import back into a static one — see the identical, pre-existing
+idiom in ``orchestrator_alignment.py``'s ``_evaluate_alignment_proposal`` and
+``orchestrator_synthesis.py``'s ``_cached_run_strategy_code`` for precedent.
+
+``RecordAssemblyMixin`` is mixed into ``StrategyLabOrchestrator`` (see the
+class statement in ``orchestrator.py`` for the current base order); its
+methods expect the attribute ``StrategyLabOrchestrator.__init__`` sets on
+``self`` (``self.convergence_tracker``) — set on the base class and resolved
+via MRO on the final composed instance.
 
 This module must not import anything from ``orchestrator.py`` at module level
 (that would be circular: ``orchestrator.py`` imports ``RecordAssemblyMixin``
-from here before its own class statement executes). Pure helpers shared by
+from here before its own class statement executes) — the deferred import
+above is function-local specifically to sidestep that. Pure helpers shared by
 both this cluster and code that stays in ``orchestrator.py`` live in
 ``_orchestrator_helpers.py`` instead. ``_finalize_loop_telemetry`` is private
 to this cluster (used only by the two methods below) and lives here rather
@@ -36,7 +48,6 @@ from ..models import (
     StrategySpec,
     TradeRecord,
 )
-from ..trade_simulator import compute_metrics
 from ._orchestrator_helpers import (
     _build_rule_implementation_map,
     _DesignPersistContext,
@@ -308,7 +319,15 @@ class RecordAssemblyMixin:
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        short_circuit_metrics = compute_metrics(
+        # Local import — same deferred-import rationale as
+        # ``SynthesisMixin._cached_run_strategy_code`` / ``AlignmentMixin``'s
+        # ``_evaluate_alignment_proposal``: keeps test monkeypatches of
+        # ``orchestrator.compute_metrics`` honored (a static module-level
+        # import here would bind a private reference this module's globals
+        # that such a patch would never reach).
+        from . import orchestrator as _orchestrator_module
+
+        short_circuit_metrics = _orchestrator_module.compute_metrics(
             [], config.initial_capital, config.start_date, config.end_date
         )
         status_suffix = short_circuit_status.removeprefix("failed: ") or short_circuit_status
