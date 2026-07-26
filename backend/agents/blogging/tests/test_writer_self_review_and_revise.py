@@ -10,6 +10,7 @@ are tested directly in ``test_content_planning_loop.py`` — not duplicated here
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -23,6 +24,7 @@ def _make_agent_with_guidelines():
 
 
 def test_writer_fix_deterministic_violations(monkeypatch) -> None:
+    """A clean LLM response with a draft marker applies the fixed draft."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -38,6 +40,7 @@ def test_writer_fix_deterministic_violations(monkeypatch) -> None:
 
 
 def test_writer_fix_deterministic_violations_unexpected_error_propagates(monkeypatch) -> None:
+    """An unexpected programming error (not an LLM error) propagates unhandled."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -61,6 +64,7 @@ def test_writer_fix_deterministic_violations_empty_response(monkeypatch) -> None
 
 
 def test_writer_llm_self_review_no_issues(monkeypatch) -> None:
+    """An empty JSON array review response returns the draft unchanged."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -239,6 +243,7 @@ def test_writer_llm_self_review_markdown_link_before_unfenced_array(monkeypatch)
 
 
 def test_writer_llm_self_review_unexpected_error_propagates(monkeypatch) -> None:
+    """An unexpected programming error (not an LLM error) propagates unhandled."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -270,6 +275,7 @@ def test_writer_self_review_combines_both(monkeypatch) -> None:
 
 
 def test_writer_format_feedback_item_line() -> None:
+    """A well-formed FeedbackItem renders as a single formatted line."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 
     a = _make_agent_with_guidelines()
@@ -409,6 +415,7 @@ def test_writer_revise_none_draft_is_treated_as_empty() -> None:
 
 
 def test_writer_revise_no_feedback_items() -> None:
+    """An empty feedback_items list leaves the draft unchanged."""
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
@@ -433,6 +440,7 @@ def test_writer_revise_no_feedback_items() -> None:
 
 
 def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
+    """Markdown code fences around a JSON response are stripped before parsing."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -446,6 +454,7 @@ def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
 
 
 def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) -> None:
+    """LLMRateLimitError propagates unwrapped so the retry funnel can catch it."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMRateLimitError
@@ -461,6 +470,7 @@ def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) ->
 
 
 def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> None:
+    """LLMTemporaryError propagates unwrapped so the retry funnel can catch it."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMTemporaryError
@@ -476,6 +486,7 @@ def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> 
 
 
 def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
+    """LLMRateLimitError during self-review propagates unwrapped."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMRateLimitError
@@ -491,6 +502,7 @@ def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
 
 
 def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
+    """LLMTemporaryError during self-review propagates unwrapped."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMTemporaryError
@@ -508,8 +520,7 @@ def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
 def test_writer_fix_deterministic_violations_soft_fails_permanent_error(
     monkeypatch, caplog
 ) -> None:
-    import logging
-
+    """Non-transient LLM errors are soft-failed: original draft returned, error logged."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMPermanentError
@@ -528,8 +539,7 @@ def test_writer_fix_deterministic_violations_soft_fails_permanent_error(
 
 
 def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) -> None:
-    import logging
-
+    """Non-transient LLM errors during self-review are soft-failed and logged."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMPermanentError
@@ -549,8 +559,6 @@ def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) 
 
 def test_writer_llm_self_review_malformed_bracket_text_returns_draft(monkeypatch, caplog) -> None:
     """Malformed bracket text is treated as no issues, not an exception soft-fail."""
-    import logging
-
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -567,6 +575,7 @@ def test_writer_llm_self_review_malformed_bracket_text_returns_draft(monkeypatch
 
 
 def test_writer_fix_deterministic_violations_unwraps_wrapped_rate_limit(monkeypatch) -> None:
+    """A rate-limit error wrapped in EventLoopException is unwrapped before re-raising."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from strands.types.exceptions import EventLoopException
 
@@ -586,8 +595,7 @@ def test_writer_fix_deterministic_violations_unwraps_wrapped_rate_limit(monkeypa
 
 
 def test_writer_llm_self_review_unwraps_wrapped_permanent_error(monkeypatch, caplog) -> None:
-    import logging
-
+    """A permanent error wrapped in EventLoopException is unwrapped before soft-failing."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from strands.types.exceptions import EventLoopException
 
