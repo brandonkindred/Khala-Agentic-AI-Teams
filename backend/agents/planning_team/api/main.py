@@ -1,7 +1,9 @@
 """
-FastAPI app for Planning team.
+FastAPI app for the Planning team.
 
-Mount at /api/planning: routes are /run, /status/{job_id}, /result/{job_id}, /jobs, /{job_id}/answers.
+Routes: /run, /status/{job_id}, /result/{job_id}, /jobs, /{job_id}/answers.
+The /api/planning prefix is applied externally by the Unified API gateway
+(see backend/unified_api/config.py), not by this module.
 """
 
 from __future__ import annotations
