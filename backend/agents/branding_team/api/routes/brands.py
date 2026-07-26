@@ -69,6 +69,11 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         result, attached_brand = _main.branding_store.attach_conversation(
             client_id, brand.id, existing_conv_id, mission
         )
+        if result is not AttachConversationResult.OK:
+            # The attach failed after create_brand already committed the brand
+            # row above — roll it back so a failed request never leaves a
+            # listable, conversation-less orphan behind.
+            _main.branding_store.delete_brand(client_id, brand.id)
         if result is AttachConversationResult.CONVERSATION_NOT_FOUND:
             raise HTTPException(status_code=404, detail="Conversation not found")
         if result is AttachConversationResult.ALREADY_ATTACHED:
@@ -81,11 +86,12 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         return attached_brand
 
     conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
-    brand = _main.branding_store.update_brand(client_id, brand.id, conversation_id=conv_id)
-    if not brand:
+    updated_brand = _main.branding_store.update_brand(client_id, brand.id, conversation_id=conv_id)
+    if not updated_brand:
+        _main.branding_store.delete_brand(client_id, brand.id)
         raise HTTPException(status_code=404, detail="Brand not found")
 
-    return brand
+    return updated_brand
 
 
 @router.get("/clients/{client_id}/brands/{brand_id}", response_model=Brand)

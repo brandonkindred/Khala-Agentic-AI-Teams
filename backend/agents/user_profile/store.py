@@ -6,9 +6,11 @@ is registered from the unified_api FastAPI lifespan.
 
 The store is stateless; the connection pool is owned by shared.postgres.
 Every public function that issues SQL is wrapped in ``@timed_query`` so slow
-reads/writes surface as structured log lines. (``record_association_safe`` is the
-exception: it is a thin best-effort wrapper that delegates to the timed
-``record_association``, so its DB time is already captured there.)
+reads/writes surface as structured log lines. (``record_association_safe`` and
+``remove_association_safe`` are the exception: they are thin best-effort
+wrappers — the former delegates to the timed ``record_association``; the
+latter issues its own untimed one-off DELETE, matching the rollback paths
+that call it.)
 """
 
 from __future__ import annotations
@@ -361,3 +363,47 @@ def remove_association(association_id: str, user_id: str = DEFAULT_USER_ID) -> b
         )
         deleted = cur.rowcount
     return deleted > 0
+
+
+def remove_association_safe(
+    artifact_type: str,
+    artifact_id: str,
+    *,
+    user_id: str = DEFAULT_USER_ID,
+) -> None:
+    """Best-effort unlink for artifact-rollback paths (mirrors ``record_association_safe``).
+
+    Targets the same ``(user_id, artifact_type, artifact_id)`` triple that
+    ``record_association``'s ``ON CONFLICT`` arbiter treats as unique, so no
+    association id is needed.
+
+    Postconditions:
+        - Never raises: an *operational* failure (Postgres disabled, transient
+          error) is logged and swallowed so it cannot break the caller's own
+          rollback.
+        - Invalid inputs (empty ``artifact_type``/``artifact_id``) are a caller
+          bug; they are logged and skipped here rather than asserted, so this
+          wrapper never hides a contract failure inside a broad ``except``.
+    """
+    if not (user_id and artifact_type and artifact_id):
+        logger.warning(
+            "user_profile: skipping association removal with empty fields user=%r type=%r id=%r",
+            user_id,
+            artifact_type,
+            artifact_id,
+        )
+        return
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM user_profile_associations "
+                "WHERE user_id = %s AND artifact_type = %s AND artifact_id = %s",
+                (user_id, artifact_type, artifact_id),
+            )
+    except Exception:  # noqa: BLE001 - operational best-effort, never propagate
+        logger.warning(
+            "user_profile: failed to remove association type=%s id=%s",
+            artifact_type,
+            artifact_id,
+            exc_info=True,
+        )

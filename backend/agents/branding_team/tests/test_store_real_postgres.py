@@ -187,3 +187,23 @@ def test_attach_conversation_real_postgres() -> None:
     assert missing_result is AttachConversationResult.BRAND_NOT_FOUND
     assert missing_brand is None
     assert conv_store.get_conversation_brand_id(orphan_cid) is None
+
+
+def test_delete_brand_real_postgres() -> None:
+    """delete_brand's DELETE FROM branding_brands works against real Postgres."""
+    store = BrandingStore()
+    client = store.create_client(f"RealPGDelete {uuid.uuid4().hex[:8]}")
+    brand = store.create_brand(
+        client.id,
+        make_mission(
+            company_name="DeleteRealCo",
+            company_description="A real company description long enough.",
+            target_audience="developers",
+        ),
+    )
+    assert brand is not None
+
+    assert store.delete_brand(client.id, brand.id) is True
+    assert store.get_brand(client.id, brand.id) is None
+    # Deleting again is a no-op, not an error.
+    assert store.delete_brand(client.id, brand.id) is False
