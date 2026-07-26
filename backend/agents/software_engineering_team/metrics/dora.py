@@ -53,6 +53,7 @@ class DoraMetrics:
     crash_resolved_count: int = 0
     total_cost_usd: float = 0.0
     cost_by_job: dict[str, float] = field(default_factory=dict)
+    trace_ids_by_job: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -105,6 +106,9 @@ def compute_from_events(
           dropped; it falls back to the in-window ``task_created`` otherwise.
         - MTTR pairs ``crash_resolved`` with the oldest unmatched
           ``crash_detected`` for the same ``(job_id, task_id)``.
+        - ``trace_ids_by_job`` maps each ``job_id`` that had at least one event
+          carrying a non-empty ``trace_id`` to the most recent such value, for
+          cross-referencing structured logs; jobs with no trace_id are omitted.
     """
     if window_days <= 0:
         raise ValueError("window_days must be > 0")
@@ -145,6 +149,14 @@ def compute_from_events(
         job_id = event.get("job_id") or ""
         key = (job_id, task_id)
         ts = event["ts"]
+
+        trace_id = event.get("trace_id") or ""
+        if job_id and trace_id:
+            # Last-write-wins: events are processed in ts order, and a job binds
+            # exactly one trace_id per run today, so the latest sighting is at
+            # least as reliable as the first (and reflects a resumed job's newer
+            # trace_id if one was rebound mid-run).
+            metrics.trace_ids_by_job[job_id] = trace_id
 
         if etype == se_events.TASK_CREATED:
             created_by_task.setdefault(key, ts)
