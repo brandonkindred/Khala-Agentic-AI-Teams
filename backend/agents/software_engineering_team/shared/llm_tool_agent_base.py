@@ -7,7 +7,7 @@ step (lenient vs extract), and an opt-in fallback-handling step (no-model /
 call-error / empty-parse, plus partial-failure-tolerant calls). Deliberately
 imports nothing from ``code_review_agent`` so it can be depended on from any
 team without pulling in the code-review engine. Fallback helpers are available
-capability and are not auto-wired into subclasses.
+as capabilities but are not auto-wired into subclasses.
 
 Preconditions:
     None beyond standard Python import semantics.
