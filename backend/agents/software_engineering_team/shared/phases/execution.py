@@ -1445,6 +1445,14 @@ def run_gated_execution_impl(
     max_total_cycles = gate_config.max_total_cycles(config)
     code_review_retry_cap = gate_config.code_review_retry_cap(config)
 
+    _current_mt = [None]
+
+    def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
+        """Forward phase detail to progress callback."""
+        if progress_callback:
+            mt = _current_mt[0]
+            progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
+
     for idx, mt in enumerate(microtasks):
         deps_met = all(d in completed_ids for d in mt.depends_on)
         if not deps_met:
@@ -1468,6 +1476,7 @@ def run_gated_execution_impl(
             )
 
         mt.status = microtask_status.IN_PROGRESS
+        _current_mt[0] = mt
         logger.info(
             "[%s] Execution: microtask %d/%d — %s (%s)",
             task_id,
@@ -1488,13 +1497,6 @@ def run_gated_execution_impl(
                 "coding",
                 "Generating code...",
             )
-
-        def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
-            """Forward phase detail to progress callback."""
-            if progress_callback:
-                progress_callback(
-                    _idx, len(completed_ids), total, mt.title or mt.id, _phase, detail
-                )
 
         coding_result = _execute_coding_phase(
             llm=llm,
