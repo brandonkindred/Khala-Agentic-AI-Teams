@@ -25,6 +25,7 @@ from software_engineering_team.shared.repo_writer import (
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
+from software_engineering_team.shared.v2_models import BaseExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +257,7 @@ def run_execution_impl(
     only_microtask_ids: Optional[List[str]],
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
-) -> Any:
+) -> BaseExecutionResult[Any]:
     """Execute microtasks in the planner's stated order, best-effort on dependencies.
 
     If ``only_microtask_ids`` is set, only those microtasks are run (e.g. fix
