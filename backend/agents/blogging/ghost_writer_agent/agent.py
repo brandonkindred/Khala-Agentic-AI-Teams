@@ -403,8 +403,8 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
                     if key in data and isinstance(data[key], list):
                         data = data[key]
                         break
-            if isinstance(data, list) and len(data) == len(opportunities):
-                cleaned = [str(s).strip().strip('"') for s in data]
+            if isinstance(data, list) and len(data) == len(opportunities) and all(isinstance(s, str) for s in data):
+                cleaned = [s.strip().strip('"') for s in data]
                 # Treat empty/whitespace-only items as failures — fall through to fallback
                 if all(cleaned):
                     return cleaned
@@ -744,6 +744,14 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
         """Generate a single conversational follow-up question.
 
         Uses the evaluator's ``missing`` and ``story_context`` fields to know what to ask.
+
+        Args:
+            gap: The story gap being explored.
+            conversation: The interview conversation history as role/content dicts.
+            evaluation: The sufficiency evaluation containing ``missing`` and ``story_context``.
+
+        Returns:
+            A follow-up question string, or ``None`` if the LLM call fails.
         """
         missing = evaluation.get("missing") or "more detail about what happened"
         story_context = evaluation.get("story_context")

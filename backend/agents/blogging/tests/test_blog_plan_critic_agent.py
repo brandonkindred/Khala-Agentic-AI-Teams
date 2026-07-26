@@ -328,6 +328,97 @@ def test_critic_event_loop_exception_unwraps_transient(err_cls) -> None:
     assert exc_info.value is cause
 
 
+def test_critic_coerces_non_string_status_to_fail() -> None:
+    """A non-string `status` (e.g. bool) must not crash _coerce_report."""
+    fake_agent = _FakeAgentFactory(
+        responses=[
+            json.dumps(
+                {
+                    "status": True,
+                    "approved": True,
+                    "violations": [],
+                    "notes": None,
+                    "rubric_version": "v1",
+                }
+            )
+        ]
+    )
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+        report = critic.run(
+            plan=_minimal_plan(),
+            brand_spec_prompt="b",
+            writing_guidelines="g",
+        )
+    assert report.status == "FAIL"
+    assert report.approved is False
+
+
+def test_critic_coerces_non_string_violation_fields() -> None:
+    """Non-string violation fields (description/suggested_fix) must not crash."""
+    fake_agent = _FakeAgentFactory(
+        responses=[
+            json.dumps(
+                {
+                    "status": "FAIL",
+                    "approved": False,
+                    "violations": [
+                        {
+                            "rule_id": "x",
+                            "severity": "must_fix",
+                            "description": 1,
+                            "suggested_fix": True,
+                        }
+                    ],
+                    "rubric_version": "v1",
+                }
+            )
+        ]
+    )
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+        report = critic.run(
+            plan=_minimal_plan(),
+            brand_spec_prompt="b",
+            writing_guidelines="g",
+        )
+    assert report.status == "FAIL"
+    assert len(report.violations) == 1
+    assert report.violations[0].description == "1"
+    assert report.violations[0].suggested_fix == "True"
+
+
+def test_critic_coerce_report_unexpected_exception_falls_back() -> None:
+    """Any unanticipated exception during coercion still yields a FAIL report."""
+    fake_agent = _FakeAgentFactory(
+        responses=[
+            json.dumps(
+                {
+                    "status": "PASS",
+                    "approved": True,
+                    "violations": [{"rule_id": "x"}],
+                    "rubric_version": "v1",
+                }
+            )
+        ]
+    )
+    critic = BlogPlanCriticAgent(llm_client=DummyLLMClient())
+    with patch("agents.blogging.blog_plan_critic_agent.agent.Agent", fake_agent):
+        with patch(
+            "agents.blogging.blog_plan_critic_agent.agent.PlanViolation",
+            side_effect=RuntimeError("boom"),
+        ):
+            report = critic.run(
+                plan=_minimal_plan(),
+                brand_spec_prompt="b",
+                writing_guidelines="g",
+            )
+    assert report.status == "FAIL"
+    assert report.approved is False
+    assert report.notes is not None
+    assert "boom" in report.notes
+
+
 def test_critic_persists_report_to_work_dir(tmp_path) -> None:
     fake_agent = _FakeAgentFactory(
         responses=[

@@ -84,7 +84,21 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("insert into branding_clients")
 
     def handle_insert_client(cur: FakeCursor, params: tuple) -> None:
+        """Emulate INSERT into branding_clients (id PRIMARY KEY).
+
+        Preconditions:
+            ``params`` is ``(client_id, data)``.
+        Postconditions:
+            On success, ``cur.db["clients"][client_id]`` holds the new row and
+            ``cur.rowcount`` is 1.
+            If ``client_id`` already exists, raises ``UniqueViolation`` and
+            leaves the existing row unchanged (matches Postgres PK semantics).
+        """
         client_id, data = params
+        if client_id in cur.db["clients"]:
+            raise UniqueViolation(
+                'duplicate key value violates unique constraint "branding_clients_pkey"'
+            )
         cur.db["clients"][client_id] = {
             "id": client_id,
             "data": unwrap_json(data),
@@ -126,7 +140,21 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("insert into branding_brands")
 
     def handle_insert_brand(cur: FakeCursor, params: tuple) -> None:
+        """Emulate INSERT into branding_brands (id PRIMARY KEY).
+
+        Preconditions:
+            ``params`` is ``(brand_id, client_id, data)``.
+        Postconditions:
+            On success, ``cur.db["brands"][brand_id]`` holds the new row and
+            ``cur.rowcount`` is 1.
+            If ``brand_id`` already exists, raises ``UniqueViolation`` and
+            leaves the existing row unchanged (matches Postgres PK semantics).
+        """
         brand_id, client_id, data = params
+        if brand_id in cur.db["brands"]:
+            raise UniqueViolation(
+                'duplicate key value violates unique constraint "branding_brands_pkey"'
+            )
         cur.db["brands"][brand_id] = {
             "id": brand_id,
             "client_id": client_id,
@@ -441,6 +469,25 @@ def _dispatch() -> DispatchTable:
         else:
             cur.rowcount = 0
 
+    def match_update_conv_brand_and_mission(norm: str) -> bool:
+        return norm.startswith("update branding_conversations set brand_id = %s, mission_json")
+
+    def handle_update_conv_brand_and_mission(cur: FakeCursor, params: tuple) -> None:
+        """Emulate attach_and_update_mission SET brand_id + mission_json + updated_at.
+
+        Params: ``(brand_id, mission_json, updated_at, conversation_id)``.
+        Sets ``rowcount`` to 1 on match, else 0.
+        """
+        brand_id, mission, ts, cid = params
+        conv = cur.db["conversations"].get(cid)
+        if conv:
+            conv["brand_id"] = brand_id
+            conv["mission_json"] = unwrap_json(mission)
+            conv["updated_at"] = ts
+            cur.rowcount = 1
+        else:
+            cur.rowcount = 0
+
     def match_update_conv_brand(norm: str) -> bool:
         return norm.startswith("update branding_conversations set brand_id")
 
@@ -524,7 +571,8 @@ def _dispatch() -> DispatchTable:
         Preconditions:
             ``params`` is ``(session_id, session_json, updated_at)``.
         Postconditions:
-            On success, ``cur.db["sessions"][session_id]`` holds the new row.
+            On success, ``cur.db["sessions"][session_id]`` holds the new row and
+            ``cur.rowcount`` is 1.
             If ``session_id`` already exists, raises ``UniqueViolation`` and
             leaves the existing row unchanged (matches Postgres PK semantics).
         """
@@ -538,6 +586,7 @@ def _dispatch() -> DispatchTable:
             "session_json": unwrap_json(session_json),
             "updated_at": updated_at,
         }
+        cur.rowcount = 1
 
     def match_select_session(norm: str) -> bool:
         return norm.startswith("select session_json from branding_sessions where session_id")
@@ -551,11 +600,19 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("update branding_sessions set session_json")
 
     def handle_update_session(cur: FakeCursor, params: tuple) -> None:
+        """Emulate update_session SET session_json + updated_at.
+
+        Params: ``(session_json, updated_at, session_id)``.
+        Sets ``rowcount`` to 1 on match, else 0.
+        """
         session_json, ts, session_id = params
         row = cur.db["sessions"].get(session_id)
         if row:
             row["session_json"] = unwrap_json(session_json)
             row["updated_at"] = ts
+            cur.rowcount = 1
+        else:
+            cur.rowcount = 0
 
     return [
         (match_insert_client, handle_insert_client),
@@ -581,6 +638,7 @@ def _dispatch() -> DispatchTable:
         (match_cte_insert_message, handle_cte_insert_message),
         (match_update_conv_mission, handle_update_conv_mission),
         (match_update_conv_output, handle_update_conv_output),
+        (match_update_conv_brand_and_mission, handle_update_conv_brand_and_mission),
         (match_update_conv_brand, handle_update_conv_brand),
         (match_list_conversations, handle_list_conversations),
         (match_select_conv_brand_id, handle_select_conv_brand_id),

@@ -670,6 +670,76 @@ def test_attach_conversation_unknown_conversation_404() -> None:
     assert resp.status_code == 404
 
 
+def test_create_brand_with_existing_conversation_id_attaches_it() -> None:
+    """POST /clients/{id}/brands with a conversation_id attaches that
+    conversation atomically instead of auto-creating a new one."""
+    create_c = client.post("/clients", json={"name": "ExistingConv Client"})
+    client_id = create_c.json()["id"]
+    conv_id = client.post("/conversations", json={}).json()["conversation_id"]
+
+    create_b = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "ExistingConvCo",
+            "company_description": "Company created with a pre-existing conversation",
+            "target_audience": "teams",
+            "conversation_id": conv_id,
+        },
+    )
+    assert create_b.status_code == 201, create_b.text
+    brand = create_b.json()
+    assert brand["conversation_id"] == conv_id
+
+    conv_resp = client.get(f"/clients/{client_id}/brands/{brand['id']}/conversation")
+    assert conv_resp.status_code == 200
+    assert conv_resp.json()["conversation_id"] == conv_id
+
+
+def test_create_brand_with_conversation_already_attached_returns_409() -> None:
+    """Reusing a conversation_id already attached to another brand is a conflict."""
+    create_c = client.post("/clients", json={"name": "ConflictConv Client"})
+    client_id = create_c.json()["id"]
+
+    first = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "FirstCo",
+            "company_description": "First brand owning the conversation",
+            "target_audience": "teams",
+        },
+    )
+    assert first.status_code == 201
+    taken_conv_id = first.json()["conversation_id"]
+
+    second = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "SecondCo",
+            "company_description": "Second brand trying to reuse the conversation",
+            "target_audience": "teams",
+            "conversation_id": taken_conv_id,
+        },
+    )
+    assert second.status_code == 409
+
+
+def test_create_brand_with_unknown_conversation_id_returns_404() -> None:
+    """A conversation_id that doesn't exist yields 404, not a silent auto-create."""
+    create_c = client.post("/clients", json={"name": "MissingConv Client"})
+    client_id = create_c.json()["id"]
+
+    resp = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "MissingConvCo",
+            "company_description": "Company referencing an unknown conversation",
+            "target_audience": "teams",
+            "conversation_id": "conv_does_not_exist",
+        },
+    )
+    assert resp.status_code == 404
+
+
 def test_list_clients_pagination_query_params() -> None:
     """GET /clients honors limit/offset and returns non-overlapping pages."""
     created = {

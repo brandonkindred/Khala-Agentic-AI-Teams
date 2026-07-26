@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+from shared.observability import bind_trace_id
 from software_engineering_team import coding_team_orchestrator as orch_mod
 from software_engineering_team import progress_config as progress_mod
 from software_engineering_team.coding_team_orchestrator import (
@@ -264,6 +265,33 @@ def test_rejection_routes_back_to_same_engineer(tmp_path, monkeypatch):
 def test_max_task_revisions_is_20():
     """The shipped per-task revision cap is 20."""
     assert orch_mod.MAX_TASK_REVISIONS == 20
+
+
+@pytest.mark.parametrize(
+    "progress_base, progress_span",
+    [
+        (-1, 10),  # negative base
+        (10, -1),  # negative span
+        (60, 50),  # sum exceeds 100
+    ],
+)
+def test_invalid_progress_bounds_raise_value_error_not_assert(
+    tmp_path, progress_base, progress_span
+):
+    """The progress_base/progress_span precondition raises ValueError, surviving `python -O`."""
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    with pytest.raises(ValueError):
+        run_coding_team_orchestrator(
+            "j1",
+            tmp_path,
+            plan,
+            update_job_fn=lambda **kw: None,
+            get_job_fn=lambda jid: {},
+            cache_dir=tmp_path,
+            get_llm=lambda key: None,
+            progress_base=progress_base,
+            progress_span=progress_span,
+        )
 
 
 def test_failed_task_cascades_to_dependents(tmp_path, monkeypatch):
@@ -2455,9 +2483,13 @@ def test_task_creation_grooms_every_task_after_planning(tmp_path, monkeypatch):
     assert graph.get_task("t2").dependencies == ["t1"]  # planner's deps preserved, not grooming's
 
 
-def test_task_creation_grooming_failure_falls_back_for_that_task_only(tmp_path, monkeypatch):
+def test_task_creation_grooming_failure_falls_back_for_that_task_only(
+    tmp_path, monkeypatch, caplog
+):
     """One task's run_groom_task raising must not abort the round (parallel_map is fast-fail by
-    default) -- that task falls back to ungroomed defaults while its sibling grooms normally."""
+    default) -- that task falls back to ungroomed defaults while its sibling grooms normally.
+
+    Also asserts the grooming-failure log carries the job's bound trace id via extra=."""
 
     class PartiallyFailingTL:
         def __init__(self, llm):
@@ -2503,20 +2535,26 @@ def test_task_creation_grooming_failure_falls_back_for_that_task_only(tmp_path, 
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
-    run_coding_team_orchestrator(
-        "j1",
-        tmp_path,
-        CodingTeamPlanInput(repo_path=str(tmp_path)),
-        update_job_fn=lambda **kw: None,
-        get_job_fn=lambda jid: {},
-        cache_dir=tmp_path,
-        get_llm=lambda key: None,
-    )
+    caplog.set_level(logging.WARNING)
+    with bind_trace_id("groom-failure-trace-id"):
+        run_coding_team_orchestrator(
+            "j1",
+            tmp_path,
+            CodingTeamPlanInput(repo_path=str(tmp_path)),
+            update_job_fn=lambda **kw: None,
+            get_job_fn=lambda jid: {},
+            cache_dir=tmp_path,
+            get_llm=lambda key: None,
+        )
 
     graph = captured["graph"]
     assert graph.get_task("t1").acceptance_criteria == ["AC"]  # groomed normally
     assert graph.get_task("t2").acceptance_criteria == []  # fell back to ungroomed defaults
     assert graph.get_task("t2").description == "d2"  # ungroomed description preserved
+
+    failure_records = [r for r in caplog.records if "Tech Lead grooming failed" in r.message]
+    assert failure_records, "expected the grooming-failure log to be emitted"
+    assert failure_records[-1].trace_id == "groom-failure-trace-id"
 
 
 def test_groom_fanout_runs_concurrently(tmp_path, monkeypatch):

@@ -13,7 +13,10 @@ from software_engineering_team.devops_team.infra_debug_agent import (
     InfraDebugAgent,
 )
 from software_engineering_team.devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
-from software_engineering_team.devops_team.orchestrator import _DebugPatchState
+from software_engineering_team.devops_team.orchestrator import (
+    MAX_INFRA_FIX_ITERATIONS,
+    _DebugPatchState,
+)
 
 
 class _StubClient(DummyLLMClient):
@@ -194,7 +197,11 @@ class TestInfraDebugAgent:
                 artifacts={},
             )
         )
+        assert len(result.errors) == 2
+        assert result.errors[0].error_type == "syntax"
+        assert result.errors[1].error_type == "validation"
         assert result.fixable
+        assert result.summary == "Two fixable errors"
 
     def test_sets_fixable_false_when_runtime_present(self) -> None:
         """Marks results not fixable when any runtime error is mixed in."""
@@ -259,6 +266,9 @@ class TestInfraPatchAgent:
             )
         )
         assert "main.tf" in result.patched_artifacts
+        assert result.patched_artifacts["main.tf"] == (
+            'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n'
+        )
         assert result.edits_applied == 1
 
     def test_returns_empty_when_not_fixable(self) -> None:
@@ -272,13 +282,20 @@ class TestInfraPatchAgent:
         class _TripWire(DummyLLMClient):
             """Raises if the patch agent invokes the LLM on a non-fixable debug result."""
 
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
             def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+                self.calls += 1
                 raise AssertionError("LLM must not be called when debug_output.fixable is False")
 
             def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+                self.calls += 1
                 raise AssertionError("LLM must not be called when debug_output.fixable is False")
 
-        agent = InfraPatchAgent(llm_client=_TripWire())
+        tripwire = _TripWire()
+        agent = InfraPatchAgent(llm_client=tripwire)
         result = agent.run(
             IaCPatchInput(
                 debug_output=debug_out,
@@ -286,6 +303,7 @@ class TestInfraPatchAgent:
             )
         )
         assert not result.patched_artifacts
+        assert tripwire.calls == 0
 
 
 # ---------------------------------------------------------------------------
@@ -303,14 +321,27 @@ class TestDevOpsPipelineDebugPatchLoop:
     def test_loop_terminates_after_max_iterations(self) -> None:
         """Always-failing execution runs exactly MAX_INFRA_FIX_ITERATIONS debug attempts.
 
-        Also spot-checks Phase 4.6 status details contain ``iteration N/3`` for each
-        attempt (N from 1 through ``MAX_INFRA_FIX_ITERATIONS``).
+        Also spot-checks Phase 4.6 status details contain
+        ``iteration {i}/{MAX_INFRA_FIX_ITERATIONS}`` for each attempt
+        (i from 1 through ``MAX_INFRA_FIX_ITERATIONS``).
         """
         from software_engineering_team.devops_team.orchestrator import (
             MAX_INFRA_FIX_ITERATIONS,
             DevOpsTeamLeadAgent,
         )
 
+        debug_patch_pair = [
+            {
+                "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                "summary": "err",
+                "fixable": True,
+            },
+            {
+                "patched_artifacts": {"main.tf": "resource { }"},
+                "summary": "fix",
+                "edits_applied": 1,
+            },
+        ]
         client = _ScriptedClient(
             [
                 # Task clarifier
@@ -321,37 +352,12 @@ class TestDevOpsPipelineDebugPatchLoop:
                 {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
                 # Deployment
                 {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
-                # Debug agent (will be called up to 3 times)
-                {
-                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                    "summary": "err",
-                    "fixable": True,
-                },
-                {
-                    "patched_artifacts": {"main.tf": "resource { }"},
-                    "summary": "fix",
-                    "edits_applied": 1,
-                },
-                {
-                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                    "summary": "err",
-                    "fixable": True,
-                },
-                {
-                    "patched_artifacts": {"main.tf": "resource { }"},
-                    "summary": "fix",
-                    "edits_applied": 1,
-                },
-                {
-                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                    "summary": "err",
-                    "fixable": True,
-                },
-                {
-                    "patched_artifacts": {"main.tf": "resource { }"},
-                    "summary": "fix",
-                    "edits_applied": 1,
-                },
+                # Debug + patch agents (one pair per MAX_INFRA_FIX_ITERATIONS)
+                *[
+                    response
+                    for _ in range(MAX_INFRA_FIX_ITERATIONS)
+                    for response in debug_patch_pair
+                ],
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
@@ -638,7 +644,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -661,7 +667,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -690,7 +696,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -720,7 +726,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is None
 
@@ -778,7 +784,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=True,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is not None
         assert execution_tools_call_count[0] == 1
@@ -821,7 +827,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is state
         assert out.exec_failures == []
@@ -870,7 +876,7 @@ class TestDebugPatchOnce:
             repo_str=".",
             write_changes=False,
             subdir="",
-            max_iterations=3,
+            max_iterations=MAX_INFRA_FIX_ITERATIONS,
         )
         assert out is not None
         assert out.exec_failures == []

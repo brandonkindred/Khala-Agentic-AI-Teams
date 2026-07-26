@@ -4,7 +4,6 @@ import {
   DestroyRef,
   ElementRef,
   Input,
-  OnDestroy,
   OnInit,
   ViewChild,
   computed,
@@ -27,12 +26,15 @@ import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import type { PageEvent } from '@angular/material/paginator';
 import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
-import { of } from 'rxjs';
+import { Observable, of } from 'rxjs';
 import { finalize, map } from 'rxjs/operators';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
+import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
+import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
+import { describeRunStatus } from '../../services/strategy-lab-log-message';
 import { NotificationService } from '../../core/notification.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
@@ -45,7 +47,6 @@ import {
   returnColor,
   returnColorLabel,
   getAssetClassIcon,
-  publishabilitySkipLabel,
 } from './strategy-lab.formatters';
 import { PhaseStepperComponent, phaseLabel } from './phase-stepper/phase-stepper.component';
 import { StrategyCardComponent } from './strategy-card/strategy-card.component';
@@ -54,17 +55,9 @@ import type {
   StrategyLabRecord,
   StrategyLabResultsResponse,
   StrategyLabRunStatus,
-  StrategyLabStreamEvent,
-  StrategyLabProgressEvent,
 } from '../../models';
 
 type FilterMode = 'all' | 'winning' | 'losing';
-
-interface ActivityLogEntry {
-  time: string;
-  status: 'active' | 'done' | 'error';
-  message: string;
-}
 
 interface AssetCategoryOption {
   value: string;
@@ -76,14 +69,6 @@ interface AssetCategoryOption {
 function categoryLabel(value: string): string {
   return value.length ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
-
-/**
- * Shared text for both places the run's fate is genuinely unknown (not a
- * known failure/cancellation/completion) — `describeRunStatus()`'s
- * null-status branch and `handleStreamEvent()`'s SSE-reclaim branch — so the
- * wording can't drift between the two.
- */
-const CONNECTION_LOST_MESSAGE = 'Strategy Lab lost track of the run — status unavailable.';
 
 /** Build selector options from category values, deriving label + Material icon. */
 function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
@@ -117,7 +102,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   selector: 'app-strategy-lab',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  providers: [StrategyLabRunService],
+  providers: [StrategyLabRunService, StrategyLabActivityLogService, StrategyLabPaperTradingService],
   imports: [
     CommonModule,
     DecimalPipe,
@@ -139,7 +124,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   templateUrl: './strategy-lab.component.html',
   styleUrl: './strategy-lab.component.scss',
 })
-export class StrategyLabComponent implements OnInit, OnDestroy {
+export class StrategyLabComponent implements OnInit {
   /**
    * Whether to render the component's own "Strategy Lab" `<h2>` heading.
    * Defaults to `true` (the dashboard-tab context, where this heading is the
@@ -156,6 +141,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   private readonly notify = inject(NotificationService);
   /** Owns SSE/polling/active-run tracking and per-record paper-trading polling. */
   readonly runService = inject(StrategyLabRunService);
+  /** Owns activity-log bookkeeping and the completion/error/warning banners driven by runService.events$. */
+  private readonly activityLogService = inject(StrategyLabActivityLogService);
+  /** Owns paper-trading initiation: the publishability guard, the start POST, and the initial results fetch. */
+  private readonly paperTradingService = inject(StrategyLabPaperTradingService);
 
   /** True while a destructive confirm dialog is open — blocks re-entrant opens. */
   private confirmingDestructive = false;
@@ -186,9 +175,9 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * Non-fatal notice banner (dismissible, non-error styling): shown when a run
    * finishes with errored/skipped cycles, when a non-fatal `batch_warning`
    * arrives mid-run, or when a run is cancelled by the user (a deliberate stop
-   * is a notice, not a red-banner error).
+   * is a notice, not a red-banner error). Owned by `activityLogService`.
    */
-  readonly completionWarning = signal<string | null>(null);
+  readonly completionWarning = this.activityLogService.completionWarning;
   /** Lab record id currently being deleted (disables actions on that card). */
   readonly deletingLabRecordId = signal<string | null>(null);
 
@@ -255,49 +244,26 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // Per-card trade ledger state (pagination index only — rendering lives in StrategyCardComponent)
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
 
-  // Paper trading state
-  /** True while a "run paper trading" POST is in flight for this record, before runService takes over. */
-  private readonly startingPaperTrade = signal<string | null>(null);
-  /** Lab record id currently being paper traded — see `running`'s doc comment for why this merges two sources. */
-  readonly paperTradingLabRecordId = computed(
-    () => this.startingPaperTrade() ?? this.runService.paperTradingLabRecordId(),
-  );
+  // Paper trading state — owned by paperTradingService.
+  readonly paperTradingLabRecordId = this.paperTradingService.paperTradingLabRecordId;
 
-  // Activity log
-  readonly activityLog = signal<ActivityLogEntry[]>([]);
-  private lastCycleIndex = -1;
+  // Activity log — owned by activityLogService.
+  readonly activityLog = this.activityLogService.activityLog;
 
   /**
    * Terminal-outcome text for the aria-live status region (`runAnnouncement`).
-   * A signal (not a plain field) so `runAnnouncement` can be a `computed()`
-   * that reactively tracks it. Set from `handleStreamEvent()`'s
-   * `complete`/`error` branches — using the terminal event's own data, while
-   * `runService.runStatus()` is still populated — or, when neither branch
-   * fires (SSE degrades to polling, or a reconnect gets only a terminal
-   * snapshot then `done`), backstopped by `refreshResultsOnRunFinish`'s
-   * fallback once `runStatus()` has already cleared. Reset to null when a
-   * new run starts so a stale outcome from a previous run can't leak into
-   * the next run's brief "Starting…" window.
+   * Owned by `activityLogService`, set from its `complete`/`error` handling
+   * — using the terminal event's own data, while `runService.runStatus()` is
+   * still populated — or, when neither branch fires (SSE degrades to
+   * polling, or a reconnect gets only a terminal snapshot then `done`),
+   * backstopped by `refreshResultsOnRunFinish`'s fallback below once
+   * `runStatus()` has already cleared. Reset to null when a new run starts
+   * so a stale outcome from a previous run can't leak into the next run's
+   * brief "Starting…" window.
    */
-  private readonly runOutcomeAnnouncement = signal<string | null>(null);
-
-  /**
-   * The red error-banner message a terminal 'error' stream event set for THIS
-   * run (the failure/interrupt detail, or the connection-lost message), or null
-   * if the run has not ended in an error. `refreshResultsOnRunFinish` re-asserts
-   * exactly this after `loadResults()` clears `error`, so ONLY a genuine
-   * terminal run error survives the run-finish refresh — an unrelated ambient
-   * error still showing (e.g. an `errors$` paper-trading poll failure) is left
-   * to be cleared, not resurrected onto a cleanly-completed run. A plain field
-   * (not a signal) so reading it in the effect adds no reactive dependency.
-   * Reset to null when a new run starts.
-   */
-  private terminalErrorBanner: string | null = null;
+  private readonly runOutcomeAnnouncement = this.activityLogService.runOutcomeAnnouncement;
 
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
-
-  /** Pending auto-scroll timer id, cleared on destroy. */
-  private autoScrollTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   /** Tracks the previous `runService.running()` value so the effect below can detect a true→false transition. */
   private wasRunning = false;
@@ -309,8 +275,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * or the REST-polling fallback detecting a terminal status) with one rule,
    * rather than duplicating a `loadResults()` call at each of those call sites.
    *
-   * Also backstops `runOutcomeAnnouncement` for the same transition: the
-   * `complete`/`error` branches of `handleStreamEvent()` already set it from
+   * Also backstops `runOutcomeAnnouncement` for the same transition:
+   * `activityLogService`'s `complete`/`error` handling already sets it from
    * the event's own data, but a run that ends WITHOUT either of those events
    * reaching this component (SSE degrades to polling and polling itself
    * observes the terminal status; or a reconnect's terminal `snapshot` is
@@ -322,22 +288,22 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   the component's lifetime.
    * Postconditions: on every `running()` true→false transition, `loadResults()`
    *   runs exactly once and `runOutcomeAnnouncement` holds a non-null value
-   *   (either one `handleStreamEvent()` already set, or this fallback's
+   *   (either one `activityLogService` already set, or this fallback's
    *   `describeRunStatus()` derivation) by the time the effect returns. A
    *   terminal failure/interrupt/connection-lost message (captured in
-   *   `terminalErrorBanner`) survives the `loadResults()` refresh — which
-   *   clears `error` before re-fetching — so the sighted banner is durable
-   *   rather than flashing and vanishing; an unrelated ambient error is NOT
-   *   preserved.
+   *   `activityLogService.terminalErrorBanner`) survives the `loadResults()`
+   *   refresh — which clears `error` before re-fetching — so the sighted
+   *   banner is durable rather than flashing and vanishing; an unrelated
+   *   ambient error is NOT preserved.
    */
   private readonly refreshResultsOnRunFinish = effect(() => {
     const isRunning = this.runService.running();
     if (!isRunning && this.wasRunning) {
       this.runOutcomeAnnouncement.update(
-        (current) => current ?? this.describeRunStatus(this.runService.lastTerminalStatus()),
+        (current) => current ?? describeRunStatus(this.runService.lastTerminalStatus()),
       );
       // loadResults() clears `error` synchronously before its async fetch, so a
-      // terminal 'error'/reclaim message set by handleStreamEvent() would be
+      // terminal 'error'/reclaim message activityLogService set would be
       // wiped on the very transition that produced it — leaving sighted users no
       // visible reason the run stopped. Re-assert it afterward. Crucially this
       // re-asserts only `terminalErrorBanner` (set solely by a terminal run
@@ -346,7 +312,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       // cleared, not resurrected onto a cleanly-completed run. (A cancellation
       // uses `completionWarning`, which loadResults() never clears.) If the
       // reload itself errors, its own handler's message wins — the run is over.
-      const terminalError = this.terminalErrorBanner;
+      const terminalError = this.activityLogService.terminalErrorBanner;
       this.loadResults();
       if (terminalError) this.error.set(terminalError);
     }
@@ -354,52 +320,45 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * The single source of terminal-outcome sentences for the aria-live region.
-   * Both `handleStreamEvent()`'s terminal branches (fed a minimal object built
-   * from the terminal event's own fields) and `refreshResultsOnRunFinish`'s
-   * fallback (fed `runService.lastTerminalStatus()`) route through here, so the
-   * live-SSE announcement and the poll-fallback announcement can never word the
-   * same outcome differently.
+   * Subscribes `source$` to mirror each of its emissions onto the `error`
+   * signal for the component's lifetime. Shared by every "forward this
+   * service's error stream into the banner" wiring site (`activityLogService`,
+   * `runService`, `paperTradingService`) instead of each hand-rolling the same
+   * `pipe(takeUntilDestroyed) -> subscribe` boilerplate.
    *
-   * Preconditions: `status` is `null` ONLY to mean "the run's fate is genuinely
-   *   unknown" (`StrategyLabRunService` clears `runStatus` before capturing it
-   *   into `lastTerminalStatus` specifically when its polling fallback itself
-   *   errors) — never "no run happened"; callers only invoke this at run end.
-   * Postconditions: returns a sentence reflecting `status.status`/
-   *   `errored_cycles`/`skipped_cycles` when `status` is non-null (errors
-   *   outrank skips outrank a clean finish); a distinct connection-lost
-   *   sentence when `status` is null — never the generic "complete" sentence
-   *   for an outcome that isn't actually known. Pure; always non-empty.
+   * Preconditions: none.
+   * Postconditions: every value `source$` emits — including `null`, which
+   *   clears the banner — is set on `error` until the component is destroyed.
    */
-  private describeRunStatus(
-    status: { status?: string; errored_cycles?: number; skipped_cycles?: number } | null,
-  ): string {
-    if (!status) return CONNECTION_LOST_MESSAGE;
-    if (status.status === 'failed') return 'Strategy Lab run failed.';
-    if (status.status === 'cancelled') return 'Strategy Lab run cancelled.';
-    if (status.status === 'interrupted') return 'Strategy Lab run interrupted.';
-    if (status.status === 'completed_with_errors' || (status.errored_cycles ?? 0) > 0) {
-      return 'Strategy Lab run finished with errors.';
-    }
-    if ((status.skipped_cycles ?? 0) > 0) {
-      return 'Strategy Lab run finished with some strategies skipped.';
-    }
-    return 'Strategy Lab run complete.';
+  private mirrorErrorsIntoBanner<T extends string | null>(source$: Observable<T>): void {
+    source$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((message) => this.error.set(message));
   }
+
+  /**
+   * Wires `paperTradingService.errors$` into the `error` signal. A field
+   * initializer (not wired inside `ngOnInit()`) so it's active the instant
+   * the component is constructed — `runPaperTrading()` can be called, and
+   * its guard/POST error surfaced, before `ngOnInit()` ever runs.
+   * `mirrorErrorsIntoBanner` returns `void`, so this field only exists to
+   * trigger that call at construction time — it holds no state of its own.
+   */
+  private readonly wirePaperTradingErrors = this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
 
   ngOnInit(): void {
     this.loadConfig();
     this.loadResults();
-    this.loadPaperTradingResults();
+    this.paperTradingService.loadPaperTradingResults();
     this.runService.checkForActiveRun();
     this.loadTradingViewStatus();
 
-    this.runService.events$
+    this.activityLogService.resultsRefreshRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((event) => this.handleStreamEvent(event));
-    this.runService.errors$
+      .subscribe(() => this.loadResults());
+    this.mirrorErrorsIntoBanner(this.activityLogService.terminalError$);
+    this.activityLogService.scrollRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((message) => this.error.set(message));
+      .subscribe(() => this.logContainer?.nativeElement?.scrollTo({ top: 999999, behavior: 'smooth' }));
+    this.mirrorErrorsIntoBanner(this.runService.errors$);
   }
 
   /**
@@ -472,136 +431,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
     const preserved = available.filter((v) => selected.has(v));
     this.selectedCategories.set(preserved.length ? preserved : available);
-  }
-
-  ngOnDestroy(): void {
-    if (this.autoScrollTimeoutId !== null) {
-      clearTimeout(this.autoScrollTimeoutId);
-      this.autoScrollTimeoutId = null;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // SSE stream event side effects (run-status folding itself is runService's job)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Reacts to a `runService.events$` emission for the side effects that
-   * aren't `StrategyLabRunStatus` fields: activity-log bookkeeping,
-   * refreshing results after a completed cycle, and the completion/error
-   * banners. Run-status folding already happened inside `runService` before
-   * this fires.
-   *
-   * Preconditions: none — every branch is safe regardless of `runService`
-   *   state.
-   * Postconditions: `activityLog`, `completionWarning`, `error`, and
-   *   `runOutcomeAnnouncement` are updated for event types that carry them
-   *   (`complete`/`error`/`cancelled` set `runOutcomeAnnouncement` directly
-   *   from the terminal event's own data); `loadResults()` runs after a completed
-   *   cycle (in addition to `refreshResultsOnRunFinish`'s once-per-run
-   *   refresh — a multi-cycle run's earlier cycles need this mid-run call
-   *   since `running()` stays true until the whole run ends).
-   */
-  private handleStreamEvent(event: StrategyLabStreamEvent): void {
-    if (event.type === 'progress' && this.runService.runStatus()) {
-      // Reset activity log when a new cycle starts.
-      if (event.cycle_index !== this.lastCycleIndex) {
-        this.activityLog.set([]);
-        this.lastCycleIndex = event.cycle_index;
-      }
-      this.addLogEntry(event.phase, event.sub_phase, event);
-    }
-
-    if (event.type === 'cycle_complete' && this.runService.runStatus()) {
-      this.activityLog.set([]);
-      this.lastCycleIndex = -1;
-      this.loadResults();
-    }
-
-    if (event.type === 'batch_warning' && this.runService.runStatus()) {
-      // Non-fatal pre-batch issue (e.g. signal-brief failure). Surface as a
-      // gentle warning; the run is still progressing. Guarded like the
-      // 'progress'/'cycle_complete' branches above so a stale event for a
-      // run that has already ended can't resurrect the warning banner.
-      this.completionWarning.set(
-        event.reason === 'signal_brief_failed'
-          ? 'Signal brief unavailable for a batch; strategies continued without it.'
-          : event.reason || 'A non-fatal warning occurred during a batch.',
-      );
-    }
-
-    if (event.type === 'complete') {
-      // completionWarning is the sighted dismissible banner — kept scoped to
-      // genuine errors only (its long-standing condition): a skip-only
-      // completion already has a dedicated in-progress skipped-badge, so a
-      // banner re-announcing it at the end would be new behavior. The aria-live
-      // sentence, by contrast, covers skips too — the badge disappears once
-      // `running()` goes false, so this terminal announcement is a
-      // screen-reader user's only remaining signal that not every requested
-      // strategy was produced.
-      const hasErrors = event.errored_count > 0 || event.status === 'completed_with_errors';
-      const hasSkips = event.skipped_count > 0;
-      if (hasErrors) {
-        const parts: string[] = [`${event.errored_count} cycle(s) errored`];
-        if (hasSkips) parts.push(`${event.skipped_count} cycle(s) skipped`);
-        this.completionWarning.set(`Run finished with ${parts.join(' and ')}. See details below.`);
-      }
-      // Route through describeRunStatus (fed the event's own counts) so the
-      // live-SSE sentence can never drift from the poll-fallback one.
-      this.runOutcomeAnnouncement.set(
-        this.describeRunStatus({
-          status: event.status,
-          errored_cycles: event.errored_count,
-          skipped_cycles: event.skipped_count,
-        }),
-      );
-    }
-
-    if (event.type === 'error') {
-      if (event.detail === undefined) {
-        // The shared-infra "subscription reclaimed" wire shape
-        // (StrategyLabErrorReclaimEvent) carries only `.error`, never
-        // `.detail` — a connection-level event (e.g. eviction under load),
-        // not necessarily a job failure, so it gets its own message rather
-        // than confidently announcing a failure the run may not have had.
-        this.setTerminalError(CONNECTION_LOST_MESSAGE);
-        this.runOutcomeAnnouncement.set(CONNECTION_LOST_MESSAGE);
-      } else {
-        // A genuine user cancellation is never routed through 'error' — it's
-        // its own 'cancelled' event type (branch below) — so every 'error'
-        // event reaching here is a real failure or an external stop. The
-        // backend marks an external stop 'failed' or 'interrupted' and carries
-        // that on `terminal_status`; describeRunStatus announces the two
-        // distinctly so an externally-interrupted run isn't spoken as "failed".
-        this.setTerminalError(event.detail || 'Run failed');
-        this.runOutcomeAnnouncement.set(
-          this.describeRunStatus({ status: event.terminal_status ?? 'failed' }),
-        );
-      }
-    }
-
-    if (event.type === 'cancelled') {
-      // A deliberate user cancellation is not an error — surface it in the
-      // non-error (dismissible warning) banner rather than the red error one,
-      // now that cancellation has its own event type. The aria-live region
-      // announces the outcome regardless.
-      this.completionWarning.set(event.detail || 'Run cancelled by user.');
-      this.runOutcomeAnnouncement.set(this.describeRunStatus({ status: 'cancelled' }));
-    }
-  }
-
-  /**
-   * Set the red error banner for a terminal run error AND record it in
-   * `terminalErrorBanner` so `refreshResultsOnRunFinish` re-asserts it across
-   * the run-finish `loadResults()` clear.
-   *
-   * Preconditions: called only from `handleStreamEvent()`'s terminal 'error'
-   *   branches (a real failure/interrupt, or a connection-lost reclaim).
-   * Postconditions: `error()` and `terminalErrorBanner` both hold `message`.
-   */
-  private setTerminalError(message: string): void {
-    this.error.set(message);
-    this.terminalErrorBanner = message;
   }
 
   // ---------------------------------------------------------------------------
@@ -682,7 +511,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.error.set(null);
     this.completionWarning.set(null);
     this.runOutcomeAnnouncement.set(null);
-    this.terminalErrorBanner = null;
+    this.activityLogService.terminalErrorBanner = null;
     this.api
       .runStrategyLab({
         batch_size: batchSize,
@@ -750,92 +579,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   readonly returnColorLabel = returnColorLabel;
   readonly getAssetClassIcon = getAssetClassIcon;
   readonly phaseLabel = phaseLabel;
-
-  // ---------------------------------------------------------------------------
-  // Activity log
-  // ---------------------------------------------------------------------------
-
-  private addLogEntry(phase: string, subPhase: string | undefined, data: StrategyLabProgressEvent): void {
-    const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-    const msg = this.buildLogMessage(phase, subPhase, data);
-    if (!msg) return;
-
-    const isTerminal = subPhase === 'completed' || subPhase === 'data_loaded';
-    const newEntry: ActivityLogEntry = { time: now, status: isTerminal ? 'done' : 'active', message: msg };
-
-    this.activityLog.update((log) => {
-      // Mark the previous active entry as done (if it's still active when a new entry arrives).
-      let lastActiveIndex = -1;
-      for (let i = log.length - 1; i >= 0; i--) {
-        if (log[i].status === 'active') {
-          lastActiveIndex = i;
-          break;
-        }
-      }
-      const closed = lastActiveIndex === -1
-        ? log
-        : log.map((entry, i) => (i === lastActiveIndex ? { ...entry, status: 'done' as const } : entry));
-      return [...closed, newEntry];
-    });
-
-    // Auto-scroll the log container. Track the timer so a destroy mid-wait
-    // cancels it — the callback would otherwise touch a detached element.
-    if (this.autoScrollTimeoutId !== null) {
-      clearTimeout(this.autoScrollTimeoutId);
-    }
-    this.autoScrollTimeoutId = setTimeout(() => {
-      this.autoScrollTimeoutId = null;
-      this.logContainer?.nativeElement?.scrollTo({ top: 999999, behavior: 'smooth' });
-    }, 50);
-  }
-
-  /**
-   * Render a human-readable activity-log message for one progress-event
-   * phase/sub-phase pair, used by `addLogEntry` to populate the Strategy Lab
-   * run's live activity feed.
-   *
-   * Preconditions: `phase`/`subPhase` are the `phase`/`sub_phase` of a
-   *   `StrategyLabProgressEvent`, and `data` is that same event (the three
-   *   are never mixed from different events).
-   * Postconditions: always returns a non-empty string — every known
-   *   phase/sub-phase combination returns a specific message; an unrecognized
-   *   sub-phase within a known phase falls back to that phase's generic
-   *   in-progress message, and an unrecognized phase falls back to
-   *   `` `${phase} — ${subPhase ?? 'processing'}` ``. Never mutates `data` or
-   *   any component state.
-   */
-  private buildLogMessage(phase: string, subPhase: string | undefined, data: StrategyLabProgressEvent): string {
-    const strategy = data['strategy'] as { asset_class?: string; hypothesis?: string } | undefined;
-    const round = data['refinement_round'] as number | undefined;
-
-    switch (phase) {
-      case 'ideating':
-        if (subPhase === 'started') return 'Ideating new trading strategy & generating code...';
-        if (subPhase === 'completed') return `Strategy ideated — ${strategy?.asset_class ?? 'unknown'} asset class`;
-        return 'Ideating...';
-      case 'coding':
-        if (subPhase === 'started') return 'Validating strategy spec and code safety...';
-        if (subPhase === 'completed') return `Code validated (${data['checks_total'] ?? '?'} checks, ${data['checks_passed'] ?? '?'} passed)`;
-        if (subPhase === 'failed') return `Validation failed (${(data['checks_total'] as number ?? 0) - (data['checks_passed'] as number ?? 0)} critical issue(s))`;
-        if (subPhase === 'refining') return `Refining code (round ${(round ?? 0) + 1}/10) — fixing ${data['failure_phase'] ?? 'issues'}...`;
-        if (subPhase === 'refined') return `Code refined — ${data['changes_made'] ?? 'code updated'}`;
-        return 'Coding...';
-      case 'backtesting':
-        if (subPhase === 'fetching_data') return 'Fetching historical market data...';
-        if (subPhase === 'data_loaded') return `Market data loaded (${data['symbols_count'] ?? '?'} symbols, ${(data['bars_count'] as number ?? 0).toLocaleString()} bars)`;
-        if (subPhase === 'running_code') return 'Executing strategy backtest in sandbox...';
-        if (subPhase === 'completed') return `Backtest complete — ${data['trades_count'] ?? '?'} trades in ${((data['execution_time'] as number) ?? 0).toFixed(1)}s`;
-        return 'Backtesting...';
-      case 'analyzing':
-        if (subPhase === 'draft') return 'Generating analysis narrative...';
-        if (subPhase === 'review') return 'Self-reviewing analysis against metrics...';
-        if (subPhase === 'completed') return `Analysis complete — ${data['is_winning'] ? 'WINNING' : 'LOSING'}`;
-        return 'Analyzing...';
-      default:
-        return `${phase} — ${subPhase ?? 'processing'}`;
-    }
-  }
 
   /**
    * Precomputed (via `computed()`, not a template-bound method call) so it's
@@ -1147,76 +890,26 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   // ---------------------------------------------------------------------------
-  // Paper Trading
+  // Paper Trading — delegates to paperTradingService.
   // ---------------------------------------------------------------------------
 
   /**
-   * Fetches paper trading sessions and hydrates run-service state from them.
-   *
-   * Preconditions: none.
-   * Postconditions: for each `lab_record_id`, only the most recent session
-   * (by `paperSessionRecencyKey`) is kept and handed to
-   * `runService.hydratePaperTradingSessions`, so any still-running sessions
-   * resume polling.
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: delegates entirely to `paperTradingService.runPaperTrading`
+   *   (see its own contract) — this method has no logic of its own beyond
+   *   forwarding the call.
    */
-  loadPaperTradingResults(): void {
-    this.api
-      .getPaperTradingResults()
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: (res) => {
-        const sessions: Record<string, PaperTradingSession> = {};
-        for (const s of res.items) {
-          // Keep the newest session per lab record, using started_at as the
-          // recency key (completed_at is empty for still-running sessions, so
-          // relying on it would systematically lose to older completed ones).
-          const existing = sessions[s.lab_record_id];
-          if (!existing || this.paperSessionRecencyKey(s) > this.paperSessionRecencyKey(existing)) {
-            sessions[s.lab_record_id] = s;
-          }
-        }
-        // Resumes polling for any sessions still running (e.g. after a page reload).
-        this.runService.hydratePaperTradingSessions(sessions);
-      },
-    });
-  }
-
-  /** Sortable recency key for a paper-trading session. */
-  private paperSessionRecencyKey(s: PaperTradingSession): string {
-    return s.started_at || s.completed_at || '';
-  }
-
   runPaperTrading(record: StrategyLabRecord): void {
-    if (!record.is_publishable) {
-      const reason = this.publishabilitySkipLabel(record);
-      this.error.set(
-        'This strategy is not publishable and cannot be paper traded' +
-        (reason ? ` (${reason})` : '.'),
-      );
-      return;
-    }
-    this.error.set(null);
-    this.startingPaperTrade.set(record.lab_record_id);
-    this.api
-      .runPaperTrading({ lab_record_id: record.lab_record_id })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: (res) => {
-        // Backend returns a "running" session immediately; runService stores it
-        // so the UI shows in-progress state, then polls until the worker finishes.
-        this.runService.trackPaperTradingSession(record.lab_record_id, res.session);
-        this.startingPaperTrade.set(null);
-      },
-      error: (err) => {
-        this.startingPaperTrade.set(null);
-        this.error.set(extractErrorDetail(err, 'Paper trading failed.'));
-      },
-    });
+    this.paperTradingService.runPaperTrading(record);
   }
 
-  readonly publishabilitySkipLabel = publishabilitySkipLabel;
-
+  /**
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: returns `paperTradingService.getPaperSession(record)`
+   *   verbatim (see its own contract) — this method has no logic of its own
+   *   beyond forwarding the call.
+   */
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
-    return this.runService.paperTradingSessions()[record.lab_record_id] ?? null;
+    return this.paperTradingService.getPaperSession(record);
   }
 }

@@ -39,10 +39,6 @@ except ImportError:  # pragma: no cover - defensive; artifacts may be unavailabl
 
 logger = logging.getLogger(__name__)
 
-_RESEARCH_DIGEST_CHAR_CAP = 8000
-_BRAND_SPEC_CHAR_CAP = 16000
-_WRITING_GUIDELINES_CHAR_CAP = 16000
-
 
 def _fallback_report(reason: str) -> PlanCriticReport:
     """When the critic LLM cannot be parsed, fail closed with an actionable note."""
@@ -176,65 +172,73 @@ class BlogPlanCriticAgent(_BlogAgentBase):
     def _coerce_report(data: dict[str, Any]) -> PlanCriticReport:
         """Best-effort coercion of raw LLM JSON into a PlanCriticReport.
 
-        When the LLM returns partial or slightly-malformed fields, coerce to a
-        conservative FAIL rather than crashing.
+        When the LLM returns partial, slightly-malformed, or wrongly-typed
+        fields, coerce to a conservative FAIL rather than crashing.
         """
-        status_raw = (data.get("status") or "FAIL").upper() if isinstance(data, dict) else "FAIL"
-        status = "PASS" if status_raw == "PASS" else "FAIL"
-
-        raw_violations = data.get("violations") or []
-        if not isinstance(raw_violations, list):
-            raw_violations = []
-
-        violations: list[PlanViolation] = []
-        for v in raw_violations:
-            if not isinstance(v, dict):
-                continue
-            rule_id = str(v.get("rule_id") or "unknown").strip() or "unknown"
-            severity_raw = str(v.get("severity") or "must_fix").lower()
-            if severity_raw not in ("must_fix", "should_fix", "consider"):
-                severity_raw = "must_fix"
-            description = (v.get("description") or "").strip() or "(no description provided)"
-            suggested_fix = (v.get("suggested_fix") or "").strip() or "(no suggested fix provided)"
-            evidence_quote = v.get("evidence_quote")
-            if isinstance(evidence_quote, str):
-                evidence_quote = evidence_quote.strip() or None
-            else:
-                evidence_quote = None
-            section = v.get("section")
-            if isinstance(section, str):
-                section = section.strip() or None
-            else:
-                section = None
-            violations.append(
-                PlanViolation(
-                    rule_id=rule_id,
-                    severity=severity_raw,  # type: ignore[arg-type]
-                    section=section,
-                    evidence_quote=evidence_quote,
-                    description=description,
-                    suggested_fix=suggested_fix,
-                )
+        try:
+            status_raw = (
+                str(data.get("status") or "FAIL").upper() if isinstance(data, dict) else "FAIL"
             )
+            status = "PASS" if status_raw == "PASS" else "FAIL"
 
-        approved_raw = data.get("approved")
-        approved = bool(approved_raw) if isinstance(approved_raw, bool) else (status == "PASS")
+            raw_violations = data.get("violations") or []
+            if not isinstance(raw_violations, list):
+                raw_violations = []
 
-        notes = data.get("notes")
-        if not isinstance(notes, str):
-            notes = None
+            violations: list[PlanViolation] = []
+            for v in raw_violations:
+                if not isinstance(v, dict):
+                    continue
+                rule_id = str(v.get("rule_id") or "unknown").strip() or "unknown"
+                severity_raw = str(v.get("severity") or "must_fix").lower()
+                if severity_raw not in ("must_fix", "should_fix", "consider"):
+                    severity_raw = "must_fix"
+                description = str(v.get("description") or "").strip() or "(no description provided)"
+                suggested_fix = (
+                    str(v.get("suggested_fix") or "").strip() or "(no suggested fix provided)"
+                )
+                evidence_quote = v.get("evidence_quote")
+                if isinstance(evidence_quote, str):
+                    evidence_quote = evidence_quote.strip() or None
+                else:
+                    evidence_quote = None
+                section = v.get("section")
+                if isinstance(section, str):
+                    section = section.strip() or None
+                else:
+                    section = None
+                violations.append(
+                    PlanViolation(
+                        rule_id=rule_id,
+                        severity=severity_raw,  # type: ignore[arg-type]
+                        section=section,
+                        evidence_quote=evidence_quote,
+                        description=description,
+                        suggested_fix=suggested_fix,
+                    )
+                )
 
-        rubric_version = data.get("rubric_version")
-        if not isinstance(rubric_version, str) or not rubric_version.strip():
-            rubric_version = "v1"
+            approved_raw = data.get("approved")
+            approved = bool(approved_raw) if isinstance(approved_raw, bool) else (status == "PASS")
 
-        return PlanCriticReport(
-            status=status,
-            approved=approved,
-            violations=violations,
-            notes=notes,
-            rubric_version=rubric_version,
-        )
+            notes = data.get("notes")
+            if not isinstance(notes, str):
+                notes = None
+
+            rubric_version = data.get("rubric_version")
+            if not isinstance(rubric_version, str) or not rubric_version.strip():
+                rubric_version = "v1"
+
+            return PlanCriticReport(
+                status=status,
+                approved=approved,
+                violations=violations,
+                notes=notes,
+                rubric_version=rubric_version,
+            )
+        except Exception as e:
+            logger.warning("Failed to coerce critic report: %s", e)
+            return _fallback_report(str(e))
 
 
 def build_refine_feedback_from_critic(report: PlanCriticReport) -> str:

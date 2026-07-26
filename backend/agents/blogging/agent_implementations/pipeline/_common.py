@@ -119,7 +119,7 @@ def _wait_for_hitl(
             raise
         except Exception as e:
             consecutive_read_errors += 1
-            if consecutive_read_errors > HITL_MAX_CONSECUTIVE_READ_ERRORS:
+            if consecutive_read_errors >= HITL_MAX_CONSECUTIVE_READ_ERRORS:
                 logger.warning(
                     "HITL wait for job %s: %d consecutive job-store read failures; giving up",
                     job_id,
@@ -714,6 +714,20 @@ def _fill_story_placeholders(
     subclass ``llm_service.interface.LLMClient``, while tests and failover paths
     may pass other client shapes. The runtime contract is non-None only.
 
+    Args:
+        draft_text: Draft content that may contain ``[Author: ...]`` placeholders.
+        plan: Blog plan object used for keyword extraction.
+        llm_client: LLM client passed to sub-agents.
+        job_id: Identifier of the active blog job.
+        job_updater: Callable that publishes phase, progress, and status text.
+        elicited_stories_text: Existing collected stories, if any.
+        draft_agent: Agent used to re-draft after stories are collected.
+        draft_input_kwargs: Base kwargs for ``WriterInput``; must not include
+            ``elicited_stories``.
+        work_dir: Optional directory for draft artifacts. If ``None``, no draft
+            artifact is persisted.
+        iteration: Current draft iteration number.
+
     Preconditions:
         - ``draft_text`` is a ``str``.
         - ``plan`` is a ``ContentPlan`` instance.
@@ -800,11 +814,11 @@ def _fill_story_placeholders(
             story_gaps=[gap.model_dump()],
             current_story_gap_index=0,
             current_gap_round=idx,
-            waiting_for_story_input=False,
+            waiting_for_story_input=True,
         )
         job_updater(
             phase="story_elicitation",
-            progress=35 + idx,
+            progress=min(35 + idx, 39),
             status_text=f"Chatting about your experience with: {gap.section_title}",
         )
 
@@ -1011,7 +1025,7 @@ def _run_title_selection(
             replacement = None
             try:
                 data = llm_client.complete_json(
-                    feedback_prompt, temperature=0.7, objective="regenerate blog titles"
+                    feedback_prompt, temperature=0.7, objective="regenerate blog titles", think=False
                 )
                 new_titles = data.get("titles", []) if data else []
                 if new_titles and isinstance(new_titles, list):

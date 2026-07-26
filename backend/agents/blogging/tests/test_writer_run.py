@@ -188,6 +188,26 @@ def test_writer_run_wrapped_json_parse_error_then_json_fallback(monkeypatch) -> 
     assert "Unwrapped Fallback" in out.draft
 
 
+def test_writer_run_json_fallback_non_dict_returns_placeholder(monkeypatch) -> None:
+    """A non-dict/None return from _call_agent_json in the fallback must not raise
+    AttributeError — it should fall through to the placeholder draft."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMJsonParseError
+
+    a = _agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda self, p, system_prompt="": (_ for _ in ()).throw(
+            LLMJsonParseError("bad draft text")
+        ),
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: None)
+    out = a.run(_writer_input())
+    assert "No draft was generated" in out.draft
+
+
 def test_writer_run_json_parse_error_and_fallback_also_fails(monkeypatch) -> None:
     """LLMJsonParseError on both text and JSON paths yields the placeholder draft."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
@@ -344,7 +364,7 @@ def test_writer_revise_single_item_fallback_path(monkeypatch) -> None:
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# Recovered",
+        lambda self, p, system_prompt="": "# Recovered",
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
@@ -429,7 +449,7 @@ def test_writer_revise_single_item_transient_retries_then_fallback(monkeypatch) 
     monkeypatch.setattr(
         BlogWriterAgent,
         "_fallback_draft_via_json",
-        lambda self, p: "# Recovered transient",
+        lambda self, p, system_prompt="": "# Recovered transient",
     )
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
@@ -469,7 +489,9 @@ def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -
     monkeypatch.setattr(
         BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
     )
-    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", lambda self, p: None)
+    monkeypatch.setattr(
+        BlogWriterAgent, "_fallback_draft_via_json", lambda self, p, system_prompt="": None
+    )
     item = FeedbackItem(category="x", severity="minor", issue="i")
     plan = make_content_plan(
         overarching_topic="x",
@@ -509,7 +531,7 @@ def test_writer_revise_single_item_fallback_unexpected_keeps_original(monkeypatc
         BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
     )
 
-    def boom_fallback(self, p):
+    def boom_fallback(self, p, system_prompt=""):
         raise RuntimeError("fallback boom")
 
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)
@@ -554,7 +576,7 @@ def test_writer_revise_single_item_fallback_transient_reraises(monkeypatch) -> N
         BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": "no marker"
     )
 
-    def boom_fallback(self, p):
+    def boom_fallback(self, p, system_prompt=""):
         raise LLMRateLimitError("429")
 
     monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", boom_fallback)

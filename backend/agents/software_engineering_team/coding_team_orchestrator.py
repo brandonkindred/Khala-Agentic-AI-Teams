@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from shared.dev_models import ReviewContext, SystemArchitecture
+from shared.observability import current_trace_id
 from software_engineering_team import hitl
 from software_engineering_team.activity import (
     ActivityBridge,  # noqa: F401 - late-bound via `_orch.ActivityBridge` in swarm_review.py
@@ -163,7 +164,12 @@ def _groom_one_task(
             plan_context=plan_context,
         )
     except Exception as e:  # noqa: BLE001 - one task's grooming failure must not abort the round
-        logger.warning("Tech Lead grooming failed for task %s: %s", task_id, e)
+        logger.warning(
+            "Tech Lead grooming failed for task %s: %s",
+            task_id,
+            e,
+            extra={"trace_id": current_trace_id()},
+        )
         return {
             "acceptance_criteria": [],
             "out_of_scope": "",
@@ -259,8 +265,29 @@ def run_coding_team_orchestrator(
     ``last_activity_at`` (read by the UI's stall warning) is stamped centrally by the
     job service on every real update — see job_service/db.py — so plain ``_update``
     writes count as activity while the 120s liveness heartbeat does not.
+
+    Preconditions:
+        - ``progress_base``/``progress_span`` are non-negative and sum to <= 100 (the band this run
+          owns on the job's overall progress bar); violated by raising ``ValueError``.
+        - ``repo_path`` is a git checkout the pipeline can branch/merge in; ``plan_input`` carries
+          the plan text (and any already-resolved HITL decisions) the Tech Lead plans from.
+    Postconditions:
+        - On a normal (non-raising) return, the pipeline has reached a terminal job status
+          (completed, completed-with-failures, already-complete, failed, or cancelled) via
+          ``update_job_fn``/the default job store, or ended early via a HITL pause whose own
+          cycle already recorded the terminal status. Only specific, individually-handled
+          failures (the progress-band precondition, worker construction) are guaranteed to end
+          this way; an exception from planning, job-store I/O, persistence, or ``swarm.run()``
+          itself is not caught here and propagates to the caller, which is then responsible for
+          recording/handling it — the job may be left without a terminal status in that case.
+        - The task graph's persist/flush coordinator is always stopped before this function exits,
+          on every exit path including an unexpected exception.
     """
-    assert 0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100
+    if not (0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100):
+        raise ValueError(
+            f"progress_base ({progress_base}) and progress_span ({progress_span}) "
+            "must be non-negative and sum to <= 100"
+        )
     # The implementation engines (v2 team leads, quality gates, code review) are injected, not
     # imported: prefer the provider passed explicitly (the software-engineering team supplies one
     # per call) and fall back to the process-wide default the standalone service installs at
@@ -341,7 +368,12 @@ def run_coding_team_orchestrator(
             plan_input.open_questions = []
 
         if snapshot_tasks:
-            logger.info("Resuming job %s from snapshot (%d tasks)", job_id, len(snapshot_tasks))
+            logger.info(
+                "Resuming job %s from snapshot (%d tasks)",
+                job_id,
+                len(snapshot_tasks),
+                extra={"trace_id": current_trace_id()},
+            )
             graph.restore(
                 {
                     "tasks": snapshot_tasks,
@@ -380,7 +412,10 @@ def run_coding_team_orchestrator(
                 # this status into a "recommend closing" comment with the evidence and creates no PR.
                 evidence = str(out.get("completion_evidence") or "").strip()
                 logger.info(
-                    "Job %s: Tech Lead judged the work already complete: %s", job_id, evidence
+                    "Job %s: Tech Lead judged the work already complete: %s",
+                    job_id,
+                    evidence,
+                    extra={"trace_id": current_trace_id()},
                 )
                 coord.update(
                     status=JobStatus.ALREADY_COMPLETE.value,
@@ -397,7 +432,12 @@ def run_coding_team_orchestrator(
             normalized_tasks: List[Dict[str, Any]] = []
             for idx, t in enumerate(tasks_raw, start=1):
                 if not isinstance(t, dict):
-                    logger.warning("Skipping malformed task graph entry at index %s: %r", idx, t)
+                    logger.warning(
+                        "Skipping malformed task graph entry at index %s: %r",
+                        idx,
+                        t,
+                        extra={"trace_id": current_trace_id()},
+                    )
                     continue
                 task_id = str(t.get("id") or f"task_{idx}")
                 normalized_tasks.append(
@@ -468,7 +508,11 @@ def run_coding_team_orchestrator(
                     )
                 )
         except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
-            logger.error("Failed to build coding-team implementation workers: %s", exc)
+            logger.error(
+                "Failed to build coding-team implementation workers: %s",
+                exc,
+                extra={"trace_id": current_trace_id()},
+            )
             coord.update(
                 status=JobStatus.FAILED.value,
                 phase="completed",
@@ -609,6 +653,20 @@ class CodingTeamSwarm(
     across four mixins by responsibility (assignment, implementation, review,
     revision-cap bookkeeping) — see swarm_assignment.py, swarm_implementation.py,
     swarm_review.py, swarm_revision_cap.py.
+
+    Invariants:
+        - ``_worktrees`` (a ``WorktreeManager``) is constructed in ``__init__`` but does no
+          filesystem/git I/O until ``run()`` calls ``prepare()``; ``run()`` always calls
+          ``cleanup()`` before returning, on every exit path, so the worktree lifecycle is
+          scoped exactly to one ``run()`` call and never leaks past it.
+        - ``_pause_lock``, ``_merge_lock``, and ``_review_verdict_cache_lock`` each guard one
+          piece of state shared across concurrently-running workers within a single ``run()``
+          (the pause-cycle round-trip, the shared checkout's merge/abort-merge calls, and
+          ``_review_verdict_cache`` respectively); they are held only for the instance's
+          lifetime and are never reused across a resume.
+        - ``aborted`` starts ``False`` and is the sole flag that both stops the ``run()`` loop
+          early and tells ``run_coding_team_orchestrator`` not to report the job as completed;
+          once set it is never cleared within the instance's lifetime.
     """
 
     def __init__(
@@ -623,6 +681,18 @@ class CodingTeamSwarm(
         engine_provider: Any = None,
         spec_content: str = "",
     ) -> None:
+        """Construct the swarm; performs no I/O (worktrees are created in ``run()``).
+
+        Preconditions:
+            - Every worker in ``workers`` has an ``agent_id`` that appears in ``agent_ids``
+              (the two rosters correspond 1:1); ``graph`` is a ``TaskGraphService`` the caller
+              owns and continues to control after construction.
+        Postconditions:
+            - Constructs exactly one ``WorktreeManager`` for ``path``/``agent_ids`` (unprepared —
+              see class invariants); ``aborted`` is ``False`` and ``_review_verdict_cache`` is
+              empty. ``resolved_questions`` is copied into an independent list, so later mutation
+              by the caller's original list does not affect this instance.
+        """
         TeamLeadSharedState.__init__(
             self,
             llm_getter=llm_getter,
@@ -678,6 +748,13 @@ class CodingTeamSwarm(
         self._worktrees = WorktreeManager(path, agent_ids)
 
     def _is_complete(self) -> bool:
+        """Whether this round's work is fully drained: nothing left to assign, run, or review.
+
+        Postconditions:
+            - Returns ``True`` iff no task is ``TO_DO``, no agent in ``agent_ids`` has a task
+              assigned to it, and no task is ``IN_REVIEW``. Pure: reads ``graph`` and
+              ``agent_ids``, no side effects.
+        """
         tasks = self.graph.get_tasks()
         remaining = [t for t in tasks if t.status == TaskStatus.TO_DO]
         active = sum(1 for aid in self.agent_ids if self.graph.get_task_for_agent(aid) is not None)
@@ -698,6 +775,9 @@ class CodingTeamSwarm(
         the user; when omitted, a worker that raises a decision fails its task closed (no silent
         decide). The loop stops early if a pause ends without answers (``self.aborted``).
 
+        Preconditions:
+            - The swarm was constructed with a non-empty ``workers``/``agent_ids`` roster and a
+              ``graph`` already seeded with the job's tasks (or empty, for a no-op run).
         Postconditions:
             - Every worker's git worktree (see WorktreeManager) is removed before this method
               returns, on every exit path (normal completion, cancellation, abort, a worktree-setup
@@ -720,7 +800,10 @@ class CodingTeamSwarm(
             try:
                 self._worktrees.prepare()
             except Exception as exc:  # noqa: BLE001 - a broken worktree setup fails the job, not the process
-                logger.exception("Failed to prepare implementation-worker git worktrees")
+                logger.exception(
+                    "Failed to prepare implementation-worker git worktrees",
+                    extra={"trace_id": current_trace_id()},
+                )
                 _update(
                     status=JobStatus.FAILED.value,
                     phase="completed",

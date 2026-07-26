@@ -30,6 +30,9 @@ from product_requirements_analysis_agent.question_data import (
     _context_discovery_fallback_questions,
     _sop_phase1_fallback_questions,
 )
+from product_requirements_analysis_agent.question_processing import (
+    parse_open_question as _real_parse_open_question,
+)
 
 from llm_service.clients.dummy import DummyLLMClient
 
@@ -627,6 +630,23 @@ def test_parse_open_question_preserves_extended_metadata() -> None:
     assert parsed.asked_via == ["slack", "web_ui"]
 
 
+def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
+    """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-003",
+            "question_text": "What is the constraint layer?",
+            "constraint_layer": "high",
+        },
+        index=0,
+    )
+
+    assert parsed.constraint_layer == 0
+
+
 def test_convert_to_pending_questions_includes_extended_metadata() -> None:
     """Pending question payload should include gate-aware metadata for UI and orchestration."""
     llm = MagicMock()
@@ -842,6 +862,255 @@ def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() 
     assert len(result) == 1
     assert result[0].id == "infra_q"
     assert result[0].question_text == "What platform category for deployment?"
+
+
+def test_consolidate_open_questions_skips_malformed_item_keeps_valid_ones() -> None:
+    """A single unparseable item should be skipped, not discard the whole consolidated batch."""
+    llm = _StubClient(
+        {
+            "consolidated_questions": [
+                {"id": "bad", "question_text": "malformed"},
+                {"id": "good", "question_text": "Which platform?"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    real_parse = _real_parse_open_question
+
+    def flaky_parse(q_data: Any, index: int) -> OpenQuestion:
+        if q_data.get("id") == "bad":
+            raise ValueError("simulated malformed item")
+        return real_parse(q_data, index)
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=flaky_parse,
+    ):
+        result = agent._consolidate_open_questions([q1, q2])
+
+    assert len(result) == 1
+    assert result[0].id == "good"
+
+
+def test_consolidate_open_questions_falls_back_when_all_items_fail() -> None:
+    """If every item in the batch fails to parse, the original list is returned unchanged."""
+    llm = _StubClient(
+        {
+            "consolidated_questions": [
+                {"id": "bad1", "question_text": "malformed"},
+                {"id": "bad2", "question_text": "also malformed"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=ValueError("simulated malformed item"),
+    ):
+        result = agent._consolidate_open_questions([q1, q2])
+
+    assert result == [q1, q2]
+
+
+def test_review_question_answer_alignment_retains_original_when_item_fails_to_parse() -> None:
+    """A single unparseable aligned item should fall back to its original question by id,
+    not be dropped from the batch (alignment is per-question; ids are preserved)."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "q1", "question_text": "malformed"},
+                {"id": "q2", "question_text": "Which platform?"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    real_parse = _real_parse_open_question
+
+    def flaky_parse(q_data: Any, index: int) -> OpenQuestion:
+        if q_data.get("id") == "q1":
+            raise ValueError("simulated malformed item")
+        return real_parse(q_data, index)
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=flaky_parse,
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"].question_text == "Which platform?"
+
+
+def test_review_question_answer_alignment_restores_original_for_unmatched_malformed_item() -> None:
+    """A malformed item whose id doesn't match any original question still has its original
+    restored (appended), since alignment must never drop a question from the batch."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "unknown", "question_text": "malformed"},
+                {"id": "q2", "question_text": "Which platform?"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    real_parse = _real_parse_open_question
+
+    def flaky_parse(q_data: Any, index: int) -> OpenQuestion:
+        if q_data.get("id") == "unknown":
+            raise ValueError("simulated malformed item")
+        return real_parse(q_data, index)
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=flaky_parse,
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"].question_text == "Which platform?"
+
+
+def test_review_question_answer_alignment_restores_original_when_two_items_fail_one_unmatched() -> None:
+    """Regression for dropping an original question when one failed item matches by id and
+    another failed item has an unrecognized id: both originals must survive, not just the
+    id-matched fallback."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "q1", "question_text": "malformed"},
+                {"id": "unknown", "question_text": "also malformed"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=ValueError("simulated malformed item"),
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"] is q2
+
+
+def test_review_question_answer_alignment_rejects_hallucinated_id() -> None:
+    """An aligned item that parses successfully but carries an id absent from the original
+    questions (a hallucinated id) must not be added to the result; the original question it
+    displaced is restored instead, and the batch is never inflated beyond the originals."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "unknown", "question_text": "A question that was never asked"},
+                {"id": "q2", "question_text": "Which platform?"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert set(result_by_id) == {"q1", "q2"}
+    assert result_by_id["q1"] is q1
+    assert result_by_id["q2"].question_text == "Which platform?"
+
+
+def test_review_question_answer_alignment_rejects_duplicate_id() -> None:
+    """If the LLM returns the same recognized id twice, only the first occurrence is kept;
+    the repeat is dropped rather than duplicating the question, and any omitted original
+    (here q2) is still restored."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "q1", "question_text": "Aligned once"},
+                {"id": "q1", "question_text": "Aligned again"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    result = agent._review_question_answer_alignment([q1, q2])
+
+    assert len(result) == 2
+    result_by_id = {q.id: q for q in result}
+    assert set(result_by_id) == {"q1", "q2"}
+    assert result_by_id["q1"].question_text == "Aligned once"
+    assert result_by_id["q2"] is q2
+    assert len([q for q in result if q.id == "q1"]) == 1
+
+
+def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> None:
+    """If every item in the batch fails to parse, the original list is returned unchanged."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "bad1", "question_text": "malformed"},
+                {"id": "bad2", "question_text": "also malformed"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=ValueError("simulated malformed item"),
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert result == [q1, q2]
+
+
+def test_review_question_answer_alignment_preserves_input_order_when_all_items_fail_but_ids_match() -> None:
+    """If every item fails to parse but each still carries a recognizable original id, the
+    id-matched fallbacks must not be returned in the LLM's (possibly reordered) order —
+    since nothing was genuinely realigned, the original input order is preserved instead."""
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {"id": "q2", "question_text": "malformed"},
+                {"id": "q1", "question_text": "also malformed"},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Original question 1?")
+    q2 = OpenQuestion(id="q2", question_text="Original question 2?")
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.parse_open_question",
+        side_effect=ValueError("simulated malformed item"),
+    ):
+        result = agent._review_question_answer_alignment([q1, q2])
+
+    assert result == [q1, q2]
 
 
 def test_dedupe_questions_by_answer_similarity_drops_question_when_we_already_have_that_answer() -> (

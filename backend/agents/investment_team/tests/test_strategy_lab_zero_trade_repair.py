@@ -29,7 +29,6 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
-from investment_team.strategy_lab import zero_trade_repair as zero_trade_repair_module
 from investment_team.strategy_lab.agents._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from investment_team.strategy_lab.agents.zero_trade_repair import (
     _ZERO_TRADE_REPAIR_SCHEMA_JSON,
@@ -248,10 +247,6 @@ def _make_orchestrator_with_stubs(
     sandbox_stub = _StubSandbox(sandbox_results or [])
     orch.zero_trade_repair_agent = repair_stub  # type: ignore[assignment]
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", sandbox_stub)
-    # The zero-trade repairer module imports ``run_strategy_code`` directly
-    # rather than going through ``orchestrator_module``, so it needs its own
-    # monkeypatch target.
-    monkeypatch.setattr(zero_trade_repair_module, "run_strategy_code", sandbox_stub)
     return orch, repair_stub, sandbox_stub
 
 
@@ -356,6 +351,67 @@ def test_zero_trade_repair_succeeds_on_first_proposal(
     assert outcome.new_gates, "committed outcome must surface its quality gates"
     gate_names = {g.gate_name for g in outcome.new_gates}
     assert any(name.startswith("zero_trade_repair_") for name in gate_names)
+
+
+def test_zero_trade_repair_reexecution_hits_backtest_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_re_execute`` re-checks a ``(code, market_data, config)`` triple the
+    alignment loop already ran within the same attempt — it must be served
+    from the orchestrator's ``BacktestCache`` rather than spawning a second
+    sandbox subprocess (#2573/#2594).
+    """
+    orch, repair_stub, sandbox_stub = _make_orchestrator_with_stubs(
+        monkeypatch,
+        repair_reports=[
+            ZeroTradeRepairReport(
+                root_cause_category="NO_ORDERS_EMITTED",
+                evidence="orders_emitted=0 with bars_processed=20",
+                code_issue="entry guard never true",
+                proposed_code=_REPAIRED_CODE,
+                expected_order_count_change=12,
+                expected_trade_count_change=6,
+                changes_made="loosened RSI guard so signals fire",
+            ),
+        ],
+        sandbox_results=[
+            _code_exec(success=True, raw_trades=_benign_sandbox_trades()),
+        ],
+    )
+    spec = _spec()
+    market_data = _market_data()
+    config = _config()
+
+    # Simulate the alignment loop having already re-checked this exact
+    # (code, market_data, config, spec) triple earlier in the same attempt —
+    # this populates ``orch._backtest_cache`` via the shared cached path and
+    # is the only sandbox invocation that should ever occur.
+    prewarm_result = orch._cached_run_strategy_code(
+        _REPAIRED_CODE, market_data, config, strategy=spec
+    )
+    assert sandbox_stub.calls == [_REPAIRED_CODE]
+
+    # ``report.proposed_spec_updates`` is unset, so ``_re_execute``'s
+    # ``proposed_spec`` differs from ``spec`` only in ``strategy_code`` —
+    # excluded from the cache's spec hash — so the key lines up with the
+    # pre-warmed entry above.
+    outcome, _events, _attempts = _drive_repair(
+        orch, spec=spec, market_data=market_data, config=config
+    )
+
+    assert outcome.committed is True
+    assert outcome.new_exec_result is prewarm_result, (
+        "re-execution must return the cached result object, not a fresh run"
+    )
+
+    # The sandbox was invoked exactly once total: the repair's re-execution
+    # was served from BacktestCache instead of spawning a second subprocess.
+    assert sandbox_stub.calls == [_REPAIRED_CODE]
+    assert len(repair_stub.calls) == 1
+
+    cache = orch._backtest_cache
+    assert cache.hits == 1
+    assert cache.misses == 1
 
 
 def test_zero_trade_repair_failed_proposal_preserves_state(

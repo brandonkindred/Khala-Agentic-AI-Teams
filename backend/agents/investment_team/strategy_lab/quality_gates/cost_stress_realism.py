@@ -24,6 +24,16 @@ contribute to ``is_publishable`` (and stamp ``acceptance_reason``) via
 the standard :func:`_apply_veto_to_acceptance_reason` path. They do
 **not** flip ``is_winning``, which remains the return-threshold
 reporting label.
+
+Custom-code strategies: this gate takes no ``spec`` and never branches on
+``requires_custom_code``. ``cost_stress_results`` comes from
+:mod:`investment_team.trading_service.modes.backtest`'s cost-stress
+replay, which reruns the full ``TradingService`` (including
+``strategy_code``, executed identically regardless of compile path) at
+each scaled cost multiplier — it has no dependency on the compiler's
+per-rule reason annotation. Unlike
+:class:`~investment_team.strategy_lab.quality_gates.realism.rule_firing.RuleFiringRateGate`,
+there is no compiler-only signal here to lose on the custom-code path.
 """
 
 from __future__ import annotations

@@ -15,20 +15,17 @@ Both retry layers consume this one policy:
     Strategy Lab agents that build strands models directly and bypass the
     central client).
 
-This is a leaf module: it imports only stdlib + ``llm_service.config`` (which is
-itself stdlib-only), so it cannot create an import cycle with either consumer.
+The retry/backoff math itself lives in ``shared.http.retry`` (generic, usable
+by non-LLM HTTP clients too); this module is a thin LLM-flavored wrapper that
+supplies the ``LLM_RATE_LIMIT_*`` env var names and defaults, and preserves the
+names both consumers above already import.
 """
 
 from __future__ import annotations
 
-import logging
-import os
-import random
-import time
+from shared.http.retry import backoff_sleep, parse_retry_env_config, retry_delay
 
 from . import config as llm_config
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "parse_rate_limit_retry_config",
@@ -50,45 +47,21 @@ def parse_rate_limit_retry_config() -> tuple[int, float, float]:
     """Parse the rate-limit backoff env vars.
 
     Returns ``(max_retries, initial_seconds, cap_seconds)`` for the 429 schedule.
-    Mirrors ``ollama._parse_retry_config``'s garbage-tolerant pattern: each value
-    is read independently and a non-integer/non-float (or empty) env falls back
-    to its documented default rather than raising — env misconfiguration must not
-    crash an LLM call.
+    Delegates to ``shared.http.retry.parse_retry_env_config`` with the
+    ``LLM_RATE_LIMIT_*`` env var names and this module's defaults.
 
     Preconditions: none.
     Postconditions: returns a 3-tuple with ``max_retries >= 0``,
     ``initial_seconds > 0``, ``cap_seconds >= initial_seconds``; never raises.
     """
-    raw_retries = os.environ.get(llm_config.ENV_LLM_RATE_LIMIT_MAX_RETRIES) or str(
-        _DEFAULT_MAX_RETRIES
+    return parse_retry_env_config(
+        llm_config.ENV_LLM_RATE_LIMIT_MAX_RETRIES,
+        llm_config.ENV_LLM_RATE_LIMIT_BACKOFF_INITIAL,
+        llm_config.ENV_LLM_RATE_LIMIT_BACKOFF_MAX,
+        default_max_retries=_DEFAULT_MAX_RETRIES,
+        default_initial_seconds=_DEFAULT_INITIAL_SECONDS,
+        default_cap_seconds=_DEFAULT_CAP_SECONDS,
     )
-    raw_initial = os.environ.get(llm_config.ENV_LLM_RATE_LIMIT_BACKOFF_INITIAL) or str(
-        _DEFAULT_INITIAL_SECONDS
-    )
-    raw_cap = os.environ.get(llm_config.ENV_LLM_RATE_LIMIT_BACKOFF_MAX) or str(_DEFAULT_CAP_SECONDS)
-
-    try:
-        max_retries = max(0, int(raw_retries))
-    except ValueError:
-        max_retries = _DEFAULT_MAX_RETRIES
-
-    try:
-        initial_seconds = float(raw_initial)
-    except ValueError:
-        initial_seconds = _DEFAULT_INITIAL_SECONDS
-    if initial_seconds <= 0:
-        initial_seconds = _DEFAULT_INITIAL_SECONDS
-
-    try:
-        cap_seconds = float(raw_cap)
-    except ValueError:
-        cap_seconds = _DEFAULT_CAP_SECONDS
-    # A cap below the initial wait would silently shorten the first retry below
-    # its floor; clamp it up so the postcondition (cap >= initial) always holds.
-    if cap_seconds < initial_seconds:
-        cap_seconds = initial_seconds
-
-    return max_retries, initial_seconds, cap_seconds
 
 
 def rate_limit_retry_delay(
@@ -99,41 +72,17 @@ def rate_limit_retry_delay(
 ) -> float:
     """Seconds to wait before the next 429 retry.
 
-    Exponential: ``base = initial_seconds * 2**failed_attempt_index``. Jitter is
-    strictly ADDITIVE (``uniform(0, ...)``, capped at 2s) — it can only lengthen
-    the wait, so the first retry (``index == 0``) is always ``>= initial_seconds``
-    (the initial floor is never violated). When ``retry_after_seconds`` is provided
-    and positive (a provider ``Retry-After`` header), the wait is raised to at
-    least that value. The result is finally capped at ``cap_seconds``.
+    Delegates to ``shared.http.retry.retry_delay`` — see that function for the
+    full contract (exponential schedule, additive jitter, optional
+    ``retry_after_seconds`` floor, capped at ``cap_seconds``).
 
     Preconditions:
-        * ``failed_attempt_index >= 0`` — 0 after the first failure. A negative
-          index is a programmer error and raises ``ValueError`` (NOT a silent
-          env-style fallback).
+        * ``failed_attempt_index >= 0``.
         * ``initial_seconds > 0``.
         * ``cap_seconds >= initial_seconds``.
-    Postconditions:
-        * When ``retry_after_seconds`` is ``None``/non-positive, returns a value
-          in ``[initial_seconds, cap_seconds]``.
-        * When ``retry_after_seconds`` is positive, returns
-          ``min(max(initial_progression + jitter, retry_after_seconds), cap_seconds)``.
-        * Pure (no I/O); only raises ``ValueError`` on a precondition breach.
+    Postconditions: same as ``shared.http.retry.retry_delay``.
     """
-    if failed_attempt_index < 0:
-        raise ValueError(f"failed_attempt_index must be >= 0, got {failed_attempt_index}")
-    if initial_seconds <= 0:
-        raise ValueError(f"initial_seconds must be > 0, got {initial_seconds}")
-    if cap_seconds < initial_seconds:
-        raise ValueError(
-            f"cap_seconds ({cap_seconds}) must be >= initial_seconds ({initial_seconds})"
-        )
-
-    base = initial_seconds * (2**failed_attempt_index)
-    jitter = random.uniform(0, min(2.0, max(0.25, base * 0.1)))
-    computed = base + jitter
-    if retry_after_seconds is not None and retry_after_seconds > 0:
-        computed = max(computed, retry_after_seconds)
-    return min(computed, cap_seconds)
+    return retry_delay(failed_attempt_index, initial_seconds, cap_seconds, retry_after_seconds)
 
 
 def rate_limit_backoff_sleep(
@@ -150,10 +99,7 @@ def rate_limit_backoff_sleep(
     """Compute the 429 backoff for ``attempt``, log one warning, and sleep it.
 
     Single home for the "wait, warn, sleep" step shared by the Claude and Ollama
-    rate-limit retry loops, so the schedule, the log line, and the sleep have one
-    implementation. The caller passes the already-resolved ``request_id`` and
-    attribution ``context`` as plain strings, so this stays a leaf module (stdlib +
-    ``llm_service.config`` only) with no dependency on the attribution layer.
+    rate-limit retry loops. Delegates to ``shared.http.retry.backoff_sleep``.
 
     Preconditions:
         * ``0 <= attempt < max_retries`` — the caller enforces the retry-budget
@@ -167,16 +113,13 @@ def rate_limit_backoff_sleep(
         exactly one warning. Only raises ``ValueError`` on a
         ``rate_limit_retry_delay`` precondition breach.
     """
-    wait = rate_limit_retry_delay(attempt, initial_seconds, cap_seconds, retry_after_seconds)
-    ctx = f", {context}" if context else ""
-    logger.warning(
-        "%s 429 (rid=%s%s, rate-limit attempt %d/%d). Retrying in %.1fs",
-        provider,
-        request_id,
-        ctx,
-        attempt + 1,
-        max_retries + 1,
-        wait,
+    return backoff_sleep(
+        attempt,
+        max_retries,
+        initial_seconds,
+        cap_seconds,
+        retry_after_seconds,
+        provider=provider,
+        request_id=request_id,
+        context=context,
     )
-    time.sleep(wait)
-    return wait

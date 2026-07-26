@@ -38,7 +38,7 @@ from ..models import (
     TradeRecord,
 )
 from ..trade_simulator import compute_metrics
-from ..trading_service.modes.sandbox_compat import StrategyRunResult, run_strategy_code
+from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from .agents._llm_budget import DesignBudgetExhausted
 from .agents.zero_trade_repair import ZeroTradeRepairReport
 from .exceptions import OrchestratorContractError
@@ -550,7 +550,7 @@ class ZeroTradeRepairer:
         report onto ``new_metrics`` when the post-fix run produced
         zero/low trades.
         """
-        repair_exec = run_strategy_code(
+        repair_exec = self._orch._cached_run_strategy_code(
             report.proposed_code, ctx.market_data, ctx.config, strategy=proposed_spec
         )
         if not repair_exec.success:

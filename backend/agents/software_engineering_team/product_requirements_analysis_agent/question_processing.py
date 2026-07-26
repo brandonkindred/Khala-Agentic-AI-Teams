@@ -16,6 +16,8 @@ import logging
 from difflib import SequenceMatcher
 from typing import Any, List
 
+from strands.models.model import Model
+
 from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
 
 from .llm_io import call_llm_json
@@ -195,8 +197,21 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
         issues=issues,
         gaps=gaps,
         open_questions=open_questions,
-        summary=str(raw.get("summary", "") or "Spec review complete"),
+        summary=str(raw.get("summary") or "Spec review complete"),
     )
+
+
+def _safe_constraint_layer(value: Any) -> int:
+    """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns an int; non-numeric or missing input yields 0,
+        matching the "not a constraint question" default in :class:`OpenQuestion`.
+    """
+    try:
+        return int(value or 0)
+    except (ValueError, TypeError):
+        return 0
 
 
 def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
@@ -235,21 +250,21 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             id=str(q_data.get("id", f"q{index}")),
             question_text=str(q_data.get("question_text", "")),
             context=str(q_data.get("context", "")),
-            recommendation=str(q_data.get("recommendation", "") or ""),
+            recommendation=str(q_data.get("recommendation", "")),
             options=options,
             allow_multiple=bool(q_data.get("allow_multiple", False)),
             source=str(q_data.get("source", "spec_review")),
             category=str(q_data.get("category", "general")),
             priority=str(q_data.get("priority", "medium")),
             constraint_domain=str(q_data.get("constraint_domain", "")),
-            constraint_layer=int(q_data.get("constraint_layer", 0) or 0),
+            constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
             blocking=bool(q_data.get("blocking", True)),
             owner=str(q_data.get("owner", "user")),
-            section_impact=list(q_data.get("section_impact", []) or []),
+            section_impact=list(q_data.get("section_impact", [])),
             due_date=str(q_data.get("due_date", "")),
             status=str(q_data.get("status", "open")),
-            asked_via=list(q_data.get("asked_via", []) or []),
+            asked_via=list(q_data.get("asked_via", [])),
         )
 
     return OpenQuestion(
@@ -367,8 +382,45 @@ def dedupe_questions_by_answer_similarity(
     return kept
 
 
+def _fetch_llm_list(
+    model: Model,
+    prompt: str,
+    response_key: str,
+    operation_name: str,
+    allow_empty: bool = False,
+) -> List[Any] | None:
+    """Call the LLM, parse JSON, and extract a named list field.
+
+    Shared seam for the "call LLM -> validate response shape -> fall back to
+    caller's original list" pattern common to the consolidate/align/recommend
+    steps below. Per-item parsing and reconciliation stay with each caller.
+
+    Preconditions: ``model`` is a Strands ``Model``; ``prompt`` is a non-empty
+        string; ``response_key``/``operation_name`` are non-empty strings.
+    Postconditions: returns the list found under ``response_key`` when the LLM
+        call succeeds and yields a list that is non-empty, or empty when
+        ``allow_empty`` is True; returns ``None`` on any failure (LLM
+        exception, non-dict response, a missing/non-list key, or an empty
+        list when ``allow_empty`` is False) — callers fall back to their
+        original list on ``None``. Never raises.
+    """
+    try:
+        raw = call_llm_json(model, prompt)
+    except Exception as e:
+        logger.warning("%s failed, using original list: %s", operation_name, str(e))
+        return None
+    if not isinstance(raw, dict):
+        return None
+    items = raw.get(response_key)
+    if not isinstance(items, list):
+        return None
+    if not items and not allow_empty:
+        return None
+    return items
+
+
 def consolidate_open_questions(
-    model: Any, open_questions: List[OpenQuestion]
+    model: Model, open_questions: List[OpenQuestion]
 ) -> List[OpenQuestion]:
     """Merge duplicate or semantically equivalent questions before sending to user.
 
@@ -378,7 +430,9 @@ def consolidate_open_questions(
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
     Postconditions: returns the consolidated list, or the unmodified list on <=1
-        input or any LLM/parse failure; never raises.
+        input or a full-batch LLM/parse failure; never raises. Items that
+        individually fail to parse are skipped and logged rather than discarding
+        the whole batch.
     """
     if len(open_questions) <= 1:
         return list(open_questions)
@@ -407,36 +461,48 @@ def consolidate_open_questions(
         indent=2,
     )
     prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
+    consolidated = _fetch_llm_list(
+        model, prompt, "consolidated_questions", "Question consolidation"
+    )
+    if consolidated is None:
+        return list(open_questions)
     try:
-        raw = call_llm_json(model, prompt)
-        if not isinstance(raw, dict):
-            return list(open_questions)
-        consolidated = raw.get("consolidated_questions", [])
-        if not isinstance(consolidated, list) or len(consolidated) == 0:
-            return list(open_questions)
         result = []
         for i, q_data in enumerate(consolidated):
-            result.append(parse_open_question(q_data, i))
-        return result
+            try:
+                result.append(parse_open_question(q_data, i))
+            except Exception as e:
+                logger.warning("Failed to parse consolidated question %d: %s", i, e)
+        return result if result else list(open_questions)
     except Exception as e:
-        logger.warning(
-            "Question consolidation failed, using original list: %s",
-            str(e),
-        )
+        logger.warning("Question consolidation failed, using original list: %s", str(e))
         return list(open_questions)
 
 
 def review_question_answer_alignment(
-    model: Any, open_questions: List[OpenQuestion]
+    model: Model, open_questions: List[OpenQuestion]
 ) -> List[OpenQuestion]:
     """Ensure each question and its options make sense together (e.g. no Yes/No for open-ended questions).
 
     Preconditions: ``model`` is a Strands ``Model``; ``open_questions`` a list.
-    Postconditions: returns the aligned list, or the unmodified list on empty input
-        or any LLM/parse failure; never raises.
+    Postconditions: returns the aligned list, or the unmodified list (in its
+        original order) on empty input or when no item in the batch parses
+        successfully; never raises. This is a per-question review (ids are
+        preserved), so an item that individually fails to parse, that carries
+        an id not present in ``open_questions`` (a hallucinated/unrecognized
+        id), or that repeats an id already placed in the result (a
+        duplicate), falls back to its original (unaligned) question by id —
+        unless that original id is already in the result, in which case the
+        item is dropped outright. Any original question whose id never
+        appears in the result is appended at the end. If no item in the batch
+        parses successfully, the LLM-provided order carries no meaning, so
+        the original list is returned unchanged rather than in fallback
+        (LLM-provided) order. The result therefore contains exactly one entry
+        per original id: no question is ever dropped, added, or duplicated.
     """
     if len(open_questions) == 0:
         return []
+    original_by_id = {q.id: q for q in open_questions}
     questions_payload = [
         {
             "id": q.id,
@@ -469,16 +535,40 @@ def review_question_answer_alignment(
     ]
     questions_json = json.dumps(questions_payload, indent=2)
     prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
+    aligned = _fetch_llm_list(
+        model, prompt, "aligned_questions", "Question-answer alignment review"
+    )
+    if aligned is None:
+        return list(open_questions)
     try:
-        raw = call_llm_json(model, prompt)
-        if not isinstance(raw, dict):
-            return list(open_questions)
-        aligned = raw.get("aligned_questions", [])
-        if not isinstance(aligned, list) or len(aligned) == 0:
-            return list(open_questions)
         result = []
+        seen_ids = set()
+        any_parsed = False
         for i, q_data in enumerate(aligned):
-            result.append(parse_open_question(q_data, i))
+            try:
+                parsed = parse_open_question(q_data, i)
+                if parsed.id not in original_by_id:
+                    raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
+                if parsed.id in seen_ids:
+                    raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
+                result.append(parsed)
+                seen_ids.add(parsed.id)
+                any_parsed = True
+            except Exception as e:
+                logger.warning("Failed to parse aligned question %d: %s", i, e)
+                fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
+                original = original_by_id.get(fallback_id) if isinstance(fallback_id, str) else None
+                if original is not None and original.id not in seen_ids:
+                    result.append(original)
+                    seen_ids.add(original.id)
+        if not any_parsed:
+            # Nothing in the batch was genuinely realigned, so the LLM-provided
+            # order (which any fallbacks above were assembled in) carries no
+            # meaning — return the original list in its original order instead.
+            return list(open_questions)
+        for q in open_questions:
+            if q.id not in seen_ids:
+                result.append(q)
         return result
     except Exception as e:
         logger.warning(
@@ -489,7 +579,7 @@ def review_question_answer_alignment(
 
 
 def add_recommendations(
-    model: Any, open_questions: List[OpenQuestion], spec_content: str
+    model: Model, open_questions: List[OpenQuestion], spec_content: str
 ) -> List[OpenQuestion]:
     """Add a short recommendation (which option and why) to each question.
 
@@ -522,17 +612,16 @@ def add_recommendations(
         spec_excerpt=spec_excerpt,
         questions_json=questions_json,
     )
+    recs = _fetch_llm_list(
+        model, prompt, "recommendations", "Recommendation generation", allow_empty=True
+    )
+    if recs is None:
+        return list(open_questions)
     try:
-        raw = call_llm_json(model, prompt)
-        if not isinstance(raw, dict):
-            return list(open_questions)
-        recs = raw.get("recommendations", [])
-        if not isinstance(recs, list):
-            return list(open_questions)
         rec_by_id = {
-            r.get("id"): str(r.get("recommendation", "") or "")
+            r.get("id"): str(r.get("recommendation", ""))
             for r in recs
-            if isinstance(r, dict) and r.get("id")
+            if isinstance(r, dict) and "id" in r and isinstance(r.get("id"), str)
         }
         result = []
         for q in open_questions:
