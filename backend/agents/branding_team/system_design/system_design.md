@@ -14,9 +14,8 @@ backend/agents/branding_team/
 ├── agents.py                # 5 phase agents + compliance + 5 specialist agents
 ├── orchestrator.py          # BrandingTeamOrchestrator (run / run_phase / brand book builder)
 ├── models.py                # All Pydantic models (mission, phase outputs, TeamOutput, Client, Brand)
-├── store.py                 # BrandingStore — SQLite client/brand CRUD with version history
-├── db.py                    # get_db_path() — resolves BRANDING_DB_PATH or default
-├── data/                    # Default SQLite file location (created at runtime)
+├── store.py                 # BrandingStore — Postgres-backed client/brand CRUD with version history
+├── _db.py                   # PostgresHelperMixin — shared fetch/execute helpers over shared.postgres.get_conn
 ├── api/
 │   └── main.py              # FastAPI app, request models, session store, route handlers
 ├── assistant/
@@ -253,89 +252,48 @@ the unified API. Three sets of endpoints coexist:
 ### Why three stores
 
 The team has three distinct persistence concerns and each has its own
-SQLite-backed store:
+Postgres-backed store, all built on `PostgresHelperMixin` (`_db.py`), which
+wraps `shared.postgres.get_conn` with `_fetch_one`/`_fetch_all`/`_execute`/
+`_transaction` helpers:
 
 1. **Clients + brands + versioned history** — `BrandingStore`
-   (`store.py`).
+   (`store.py:101`).
 2. **Interactive sessions + open question feed** — `BrandingSessionStore`
-   (`api/main.py:246-327`).
+   (`api/state.py:39`).
 3. **Chat conversations + messages + mission + latest output** —
-   `BrandingConversationStore` (`assistant/store.py`).
+   `BrandingConversationStore` (`assistant/store.py:161`).
 
-All three share the same DB path resolver (`db.py:11-19`). Passing
-`db_path=None` to any store produces an isolated per-instance
-`:memory:` database — this is how the test suites stay independent.
-Passing a path produces a WAL-mode file-backed database shared across
-worker processes.
+Unit tests run against `tests/_fake_postgres.py`, an in-memory fake that
+matches the SQL emitted by each store by prefix, so the test suites stay
+independent without a live database. `real_postgres`-marked tests (e.g.
+`tests/test_store_real_postgres.py`) exercise the same SQL against a live
+Postgres instance in CI, so the fake can't silently drift from what the real
+database accepts.
 
-### SQLite schemas
+### Postgres schema
 
-**`BrandingStore` (`store.py:30-41`)**:
+`postgres/__init__.py:13-71` declares a pure-data `TeamSchema` with five
+tables, all sharing the `branding_` prefix to avoid collisions in the shared
+`POSTGRES_DB`:
 
-```sql
-CREATE TABLE IF NOT EXISTS clients (
-    id   TEXT PRIMARY KEY,
-    data TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS brands (
-    id        TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
-    data      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_brands_client ON brands(client_id);
-```
+| Table | Purpose | Columns |
+|---|---|---|
+| `branding_clients` | Client rows | `id TEXT PK`, `data JSONB`, `created_at` |
+| `branding_brands` | Brand rows (indexed on `client_id`) | `id TEXT PK`, `client_id TEXT`, `data JSONB`, `created_at` |
+| `branding_sessions` | Session rows | `session_id TEXT PK`, `session_json JSONB`, `updated_at` |
+| `branding_conversations` | Conversation headers | `conversation_id TEXT PK`, `brand_id` (unique where not null), `mission_json JSONB`, `latest_output_json JSONB` |
+| `branding_conv_messages` | Conversation messages (indexed on `conversation_id`) | `id BIGSERIAL PK`, `conversation_id`, `role`, `content`, `timestamp` |
 
 Clients and brands are stored as JSON-serialized Pydantic models in the
-`data` column (`store.py:129-133`, `store.py:179-182`). Versions are
-appended in place — `append_brand_version` (`store.py:218-252`) reads
-the existing brand, increments `version`, appends a
-`BrandVersionSummary` to `history`, updates `latest_output`, and
-re-writes the row.
+`data` column (`store.py:147` `create_client`, `store.py:270` `create_brand`).
+Versions are appended in place — `append_brand_version` (`store.py:399`)
+reads the existing brand, increments `version`, appends a
+`BrandVersionSummary` to `history`, updates `latest_output`, and re-writes
+the row. Reads go through `store.py:125` (`list_clients`) and friends.
 
-**`BrandingSessionStore` (`api/main.py:222-227`)**:
-
-```sql
-CREATE TABLE IF NOT EXISTS branding_sessions (
-    session_id   TEXT PRIMARY KEY,
-    session_json TEXT NOT NULL
-);
-```
-
-Each row is a JSON dict containing the mission, list of questions, and
-latest output (`_session_to_dict`, `api/main.py:230-243`).
-
-**`BrandingConversationStore` (`assistant/store.py`)** stores two tables
-— one for conversation headers and one for individual messages — and
-enforces a unique constraint that prevents more than one live
-conversation per brand.
-
-### Postgres schema (future migration)
-
-`postgres/__init__.py:17-71` declares a pure-data `TeamSchema` with five
-tables that mirror the SQLite layout:
-
-| Table | Purpose | Storage type |
-|---|---|---|
-| `branding_clients` | Client rows | `JSONB` |
-| `branding_brands` | Brand rows (indexed on `client_id`) | `JSONB` |
-| `branding_sessions` | Session rows | `JSONB` |
-| `branding_conversations` | Conversation headers | `JSONB` + `brand_id` unique-where-not-null |
-| `branding_conv_messages` | Conversation messages (FK `conversation_id`) | `TEXT` columns |
-
-The `_lifespan` hook in `api/main.py:44-53` calls
-`register_team_schemas(BRANDING_POSTGRES_SCHEMA)` at startup, which is a
-no-op when `POSTGRES_HOST` is not set.
-
-### SQLite vs. Postgres — at a glance
-
-| Aspect | SQLite (today) | Postgres (ready) |
-|---|---|---|
-| Trigger | Default; no env vars | `POSTGRES_HOST` set, schema registered in lifespan |
-| Isolation | Per-instance `:memory:` for tests; shared file for prod | Shared schema in `POSTGRES_DB` with `branding_` prefix |
-| JSON columns | `TEXT` containing serialized Pydantic | Native `JSONB` |
-| Brand indexing | `idx_brands_client` on `client_id` | `idx_branding_brands_client` on `client_id` |
-| Per-brand conversation uniqueness | Enforced via migration in `assistant/store.py` | Partial unique index on `brand_id IS NOT NULL` |
-| Concurrency | WAL mode with `synchronous=NORMAL` | Native Postgres MVCC |
+The `_lifespan` hook in `api/main.py` calls
+`register_team_schemas(SCHEMA)` at startup, which is a no-op when
+`POSTGRES_HOST` is not set.
 
 ## LLM integration
 
@@ -480,7 +438,6 @@ unchanged.
 
 | Variable | Consumer | Default | Purpose |
 |---|---|---|---|
-| `BRANDING_DB_PATH` | `db.py:13` | `{team_dir}/data/branding.db` | SQLite path shared by all three stores |
 | `UNIFIED_API_BASE_URL` | `adapters/market_research.py:14`, `adapters/design_assets.py:13` | unset | Base URL for sibling team API calls |
 | `BRANDING_MARKET_RESEARCH_URL` | `adapters/market_research.py:14` | unset | Explicit override for Market Research base URL |
 | `BRANDING_DESIGN_SERVICE_URL` | `adapters/design_assets.py:13` | unset | Reserved for the future design service |
