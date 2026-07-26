@@ -739,14 +739,20 @@ def _fill_story_placeholders(
         - Returns ``(updated_draft_result, updated_elicited_stories_text)``.
         - When no placeholders exist, returns a ``WriterOutput`` wrapping the
           original ``draft_text`` and the unchanged ``elicited_stories_text``.
+        - If the post-story re-draft call raises a non-cancellation
+          exception, the original ``draft_text`` — including any unfilled
+          ``[Author: ...]`` placeholders — is returned unchanged alongside
+          the updated ``elicited_stories_text``; the failure is logged but
+          not raised.
 
     Raises:
         TypeError: a precondition on ``draft_text``, ``plan``, ``llm_client``,
             or ``draft_agent`` is violated.
         ValueError: ``draft_input_kwargs`` already contains ``elicited_stories``.
         CancelledError: a Temporal-native (or otherwise external) cancellation
-            propagates unchanged — the non-fatal story-bank-save guard below
-            never swallows it.
+            propagates unchanged from both the non-fatal story-bank-save
+            guard below and the non-fatal re-draft guard — neither ever
+            swallows it.
     """
     # Local imports so GhostWriterElicitationAgent is resolved from
     # agents.blogging.ghost_writer_agent at call time — tests monkeypatch that
@@ -915,7 +921,11 @@ def _fill_story_placeholders(
             len(redraft_result.draft),
         )
         return redraft_result, elicited_stories_text
+    except CancelledError:
+        raise
     except Exception as e:
+        if _is_external_cancellation(e):
+            raise
         logger.warning("Post-draft re-draft failed (keeping original): %s", e)
         return WriterOutput(draft=draft_text), elicited_stories_text
 
