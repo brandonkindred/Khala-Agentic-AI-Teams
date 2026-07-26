@@ -120,8 +120,10 @@ class _ScriptedClient(DummyLLMClient):
         passed, in which case an ``AssertionError`` is raised instead
       - Does not validate temperature, tools, or other call parameters
       - ``assert_exhausted`` lets a caller confirm every scripted response
-        was consumed exactly once, catching a caller that returns early
-        and skips later scripted calls
+        was consumed exactly once *and* that no over-budget call was made,
+        catching both a caller that returns early and skips later scripted
+        calls, and a caller whose own exception handling swallows the
+        ``strict`` ``AssertionError`` from an unexpected extra call
     """
 
     def __init__(self, responses: List[Dict[str, Any]], *, strict: bool = False) -> None:
@@ -129,6 +131,7 @@ class _ScriptedClient(DummyLLMClient):
         self._responses = list(responses)
         self._idx = 0
         self._strict = strict
+        self.call_count = 0
 
     def complete_json(
         self,
@@ -140,6 +143,7 @@ class _ScriptedClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        self.call_count += 1
         if self._idx < len(self._responses):
             resp = self._responses[self._idx]
             self._idx += 1
@@ -149,10 +153,17 @@ class _ScriptedClient(DummyLLMClient):
         return self._responses[-1] if self._responses else {}
 
     def assert_exhausted(self) -> None:
-        """Assert every scripted response was consumed exactly once."""
-        if self._idx != len(self._responses):
+        """Assert every scripted response was consumed exactly once, with no over-budget calls.
+
+        Tracks ``call_count`` (every attempted call, including one rejected
+        by ``strict``) separately from ``_idx`` (only successfully-served
+        calls) so an over-budget call whose ``AssertionError`` gets caught
+        and swallowed by the caller's own exception handling is still
+        detected here instead of silently passing.
+        """
+        if self.call_count != len(self._responses):
             raise AssertionError(
-                f"expected {len(self._responses)} complete_json calls, got {self._idx}"
+                f"expected {len(self._responses)} complete_json calls, got {self.call_count}"
             )
 
 
