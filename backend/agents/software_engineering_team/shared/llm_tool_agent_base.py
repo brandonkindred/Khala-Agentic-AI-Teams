@@ -171,7 +171,11 @@ class LlmToolAgentBase:
 
         Postconditions:
             Returns the stripped string result. Exceptions from building or
-            running the agent propagate unchanged.
+            running the agent propagate unchanged on both paths:
+            ``run_strands_agent`` (used when ``use_run_strands_agent`` is
+            true) is a thin passthrough with no internal retry or exception
+            handling, so it behaves identically to the inline call for
+            propagation purposes.
         """
         if self.use_run_strands_agent:
             from llm_service.strands_model import run_strands_agent
