@@ -786,6 +786,56 @@ def test_run_batch_coding_fixes_impl_skips_non_dict_issues_addressed():
     assert len(result.unresolved_issues) == 2
 
 
+def test_run_batch_coding_fixes_impl_tracks_unresolved_by_index_not_identity():
+    """A rejected file's issue stays unresolved by list position, not ``id(issue)``.
+
+    Two issues share identical field values (same ``file_path``/description) so
+    they compare equal under Pydantic's value-based ``__eq__`` -- proving the
+    tracking can't rely on object identity or value equality, only position.
+    Issue 1 (a.py) and issue 3 (b.py) are claimed addressed; issue 2 (a.py) is
+    left unaddressed by the first pass. The LLM's rewrite of a.py is rejected
+    as invalid Python, so issue 1's a.py fix never actually landed -- issue 1
+    must be added back as unresolved without duplicating issue 2 (already
+    unresolved and also pointing at a.py).
+    """
+    parsed = {
+        "files": {"a.py": "def broken(:\n", "b.py": "fixed"},
+        "issues_addressed": [{"issue_index": 1}, {"issue_index": 3}],
+        "summary": "did it",
+    }
+    issue1 = _issue(file_path="a.py")
+    issue2 = _issue(file_path="a.py")
+    issue3 = _issue(file_path="b.py")
+    assert issue1 == issue2  # identical field values -- equality can't disambiguate them
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[issue1, issue2, issue3],
+        current_files={"a.py": "orig", "b.py": "orig"},
+        language="python",
+        repo_path="",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("ignored — parse stub returns the parsed dict"),
+    )
+    # a.py's invalid rewrite is discarded -- the prior version is kept.
+    assert result.files["a.py"] == "orig"
+    assert result.files["b.py"] == "fixed"
+    # Both a.py issues (issue1 from the rejected-file pass, issue2 from the
+    # not-addressed pass) surface exactly once each; b.py's issue3 resolved.
+    # ``issue1 == issue2`` (identical field values), so identity (``is``),
+    # not equality, is what must distinguish them here.
+    assert len(result.unresolved_issues) == 2
+    assert sum(1 for u in result.unresolved_issues if u is issue1) == 1
+    assert sum(1 for u in result.unresolved_issues if u is issue2) == 1
+    assert not any(u is issue3 for u in result.unresolved_issues)
+
+
 def test_fix_issues_one_at_a_time_impl_resolves_then_reports_unresolved():
     """First issue resolves via a file fix; second never resolves → unresolved."""
     responses = iter(
