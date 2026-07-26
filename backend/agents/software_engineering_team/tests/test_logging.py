@@ -1,5 +1,7 @@
 """
-Tests that verify agents emit expected log messages.
+Tests that verify agents emit expected log messages, plus TraceIdFilter behavior,
+LOG_FORMAT rendering, and the extra={"trace_id": ...} logger call pattern used
+across the pipeline.
 
 Run with visible logs: pytest tests/test_logging.py -v --log-cli-level=INFO
 """
