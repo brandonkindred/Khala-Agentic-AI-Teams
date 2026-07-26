@@ -382,6 +382,43 @@ def dedupe_questions_by_answer_similarity(
     return kept
 
 
+def _fetch_llm_list(
+    model: Model,
+    prompt: str,
+    response_key: str,
+    operation_name: str,
+    allow_empty: bool = False,
+) -> List[Any] | None:
+    """Call the LLM, parse JSON, and extract a named list field.
+
+    Shared seam for the "call LLM -> validate response shape -> fall back to
+    caller's original list" pattern common to the consolidate/align/recommend
+    steps below. Per-item parsing and reconciliation stay with each caller.
+
+    Preconditions: ``model`` is a Strands ``Model``; ``prompt`` is a non-empty
+        string; ``response_key``/``operation_name`` are non-empty strings.
+    Postconditions: returns the list found under ``response_key`` when the LLM
+        call succeeds and yields a list that is non-empty, or empty when
+        ``allow_empty`` is True; returns ``None`` on any failure (LLM
+        exception, non-dict response, a missing/non-list key, or an empty
+        list when ``allow_empty`` is False) — callers fall back to their
+        original list on ``None``. Never raises.
+    """
+    try:
+        raw = call_llm_json(model, prompt)
+    except Exception as e:
+        logger.warning("%s failed, using original list: %s", operation_name, str(e))
+        return None
+    if not isinstance(raw, dict):
+        return None
+    items = raw.get(response_key)
+    if not isinstance(items, list):
+        return None
+    if not items and not allow_empty:
+        return None
+    return items
+
+
 def consolidate_open_questions(
     model: Model, open_questions: List[OpenQuestion]
 ) -> List[OpenQuestion]:
@@ -424,13 +461,12 @@ def consolidate_open_questions(
         indent=2,
     )
     prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
+    consolidated = _fetch_llm_list(
+        model, prompt, "consolidated_questions", "Question consolidation"
+    )
+    if consolidated is None:
+        return list(open_questions)
     try:
-        raw = call_llm_json(model, prompt)
-        if not isinstance(raw, dict):
-            return list(open_questions)
-        consolidated = raw.get("consolidated_questions", [])
-        if not isinstance(consolidated, list) or len(consolidated) == 0:
-            return list(open_questions)
         result = []
         for i, q_data in enumerate(consolidated):
             try:
@@ -439,10 +475,7 @@ def consolidate_open_questions(
                 logger.warning("Failed to parse consolidated question %d: %s", i, e)
         return result if result else list(open_questions)
     except Exception as e:
-        logger.warning(
-            "Question consolidation failed, using original list: %s",
-            str(e),
-        )
+        logger.warning("Question consolidation failed, using original list: %s", str(e))
         return list(open_questions)
 
 
@@ -502,13 +535,12 @@ def review_question_answer_alignment(
     ]
     questions_json = json.dumps(questions_payload, indent=2)
     prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
+    aligned = _fetch_llm_list(
+        model, prompt, "aligned_questions", "Question-answer alignment review"
+    )
+    if aligned is None:
+        return list(open_questions)
     try:
-        raw = call_llm_json(model, prompt)
-        if not isinstance(raw, dict):
-            return list(open_questions)
-        aligned = raw.get("aligned_questions", [])
-        if not isinstance(aligned, list) or len(aligned) == 0:
-            return list(open_questions)
         result = []
         seen_ids = set()
         any_parsed = False
@@ -525,7 +557,7 @@ def review_question_answer_alignment(
             except Exception as e:
                 logger.warning("Failed to parse aligned question %d: %s", i, e)
                 fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
-                original = original_by_id.get(fallback_id) if fallback_id else None
+                original = original_by_id.get(fallback_id) if isinstance(fallback_id, str) else None
                 if original is not None and original.id not in seen_ids:
                     result.append(original)
                     seen_ids.add(original.id)
@@ -580,17 +612,16 @@ def add_recommendations(
         spec_excerpt=spec_excerpt,
         questions_json=questions_json,
     )
+    recs = _fetch_llm_list(
+        model, prompt, "recommendations", "Recommendation generation", allow_empty=True
+    )
+    if recs is None:
+        return list(open_questions)
     try:
-        raw = call_llm_json(model, prompt)
-        if not isinstance(raw, dict):
-            return list(open_questions)
-        recs = raw.get("recommendations", [])
-        if not isinstance(recs, list):
-            return list(open_questions)
         rec_by_id = {
             r.get("id"): str(r.get("recommendation", ""))
             for r in recs
-            if isinstance(r, dict) and "id" in r
+            if isinstance(r, dict) and "id" in r and isinstance(r.get("id"), str)
         }
         result = []
         for q in open_questions:
