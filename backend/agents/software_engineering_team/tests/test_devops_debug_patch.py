@@ -21,28 +21,37 @@ from software_engineering_team.devops_team.orchestrator import (
 
 
 def _make_llm_tripwire() -> DummyLLMClient:
-    """Build a DummyLLMClient whose every public method raises.
+    """Build a DummyLLMClient whose every public method raises and counts its calls.
 
     Generic over whatever public methods LLMClient currently declares
     (complete_json, complete, complete_text, chat, ...) instead of
     hardcoding a couple of names, so a method added to the interface
     later is caught automatically instead of silently letting a real
-    LLM call through undetected.
+    LLM call through undetected. Each override also increments
+    ``self.calls`` before raising, so callers can assert zero invocations
+    even if the AssertionError itself is swallowed by a broad try/except
+    somewhere in the call path.
     """
 
     def _raiser(name: str) -> Any:
         def _method(self: Any, *args: Any, **kwargs: Any) -> Any:
+            self.calls += 1
             raise AssertionError(
                 f"LLM must not be called ({name}) when debug_output.fixable is False"
             )
 
         return _method
 
+    def _init(self: Any) -> None:
+        DummyLLMClient.__init__(self)
+        self.calls = 0
+
     overrides = {
         name: _raiser(name)
         for name in vars(LLMClient)
         if not name.startswith("_") and callable(getattr(LLMClient, name))
     }
+    overrides["__init__"] = _init
     tripwire_cls = type("_TripWire", (DummyLLMClient,), overrides)
     return tripwire_cls()
 
@@ -290,6 +299,9 @@ class TestInfraPatchAgent:
             )
         )
         assert "main.tf" in result.patched_artifacts
+        assert result.patched_artifacts["main.tf"] == (
+            'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n'
+        )
         assert result.edits_applied == 1
 
     def test_returns_empty_when_not_fixable(self) -> None:
@@ -300,7 +312,8 @@ class TestInfraPatchAgent:
             fixable=False,
         )
 
-        agent = InfraPatchAgent(llm_client=_make_llm_tripwire())
+        tripwire = _make_llm_tripwire()
+        agent = InfraPatchAgent(llm_client=tripwire)
         result = agent.run(
             IaCPatchInput(
                 debug_output=debug_out,
@@ -308,6 +321,7 @@ class TestInfraPatchAgent:
             )
         )
         assert not result.patched_artifacts
+        assert tripwire.calls == 0
 
 
 # ---------------------------------------------------------------------------
