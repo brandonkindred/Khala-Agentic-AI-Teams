@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -27,7 +26,6 @@ from .models import (
     FrontendCodeV2WorkflowResult,
     MicrotaskReviewConfig,
     MicrotaskReviewFailedError,
-    Phase,
     ToolAgentKind,
 )
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
@@ -121,11 +119,11 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
     ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
     ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
-    ``_run_deliver_and_finalize`` from :class:`BaseV2DevelopmentAgent`; supplies
-    the frontend tooling detection, repo-briefing sets, and the
-    integration-only ``run_workflow``, which calls the base helpers for
-    preflight, planning/branch setup, bookkeeping, documentation, and
-    deliver/finalize.
+    ``_run_deliver_and_finalize`` / ``_run_development_workflow`` from
+    :class:`BaseV2DevelopmentAgent`; supplies the frontend tooling detection,
+    repo-briefing sets, and a thin ``run_workflow`` that forwards this
+    module's own tool-agent builder, planning/execution/deliver functions, and
+    review classes into ``_run_development_workflow``.
     """
 
     _TEAM_LABEL = "Frontend"
@@ -214,176 +212,43 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
         a feature branch and leaves it ready for external Tech Lead review instead of
         merging it into the development branch.
         """
-        self._repo_context_cache = repo_context_cache
-        task_id = task.id
-        start_time = time.monotonic()
-        result = FrontendCodeV2WorkflowResult(task_id=task_id)
+        from .phases.documentation import run_documentation_phase
 
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as exc:
-                    # A job-update failure must not crash the workflow, but log it
-                    # at DEBUG so a persistently broken updater callback stays
-                    # observable during debugging instead of vanishing silently.
-                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
-
-        logger.info(
-            "[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id
-        )
-
-        # ── Check out the review feature branch, then ensure tooling ───
-        # Setup commits lint/test scaffolding to ``development``, but a handoff
-        # feature branch created before setup does not inherit it. Configure the
-        # tooling on the branch we will actually edit so the pre-flight check and
-        # later quality gates see the config (idempotent when already present).
-        feature_branch_name = (task.feature_branch_name or "").strip() or None
-        preflight_failure = self._run_preflight(
-            task_id=task_id,
+        return self._run_development_workflow(
             repo_path=repo_path,
-            feature_branch_name=feature_branch_name,
-            detect_tooling=self._detect_tooling,
-            checkout_branch=checkout_branch,
-            configure_quality_tooling=configure_quality_tooling,
-            update_job=_update_job,
-            logger=logger,
-        )
-        if preflight_failure is not None:
-            result.failure_reason = preflight_failure
-            return result
-
-        existing_code = self._read_existing_code(repo_path)
-        tool_agents = _build_tool_agents(self.llm)
-        tool_runners = self._build_tool_runners(tool_agents)
-        git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-
-        result.current_phase = Phase.PLANNING
-        planning_result, feature_branch_name, failure_reason = self._run_planning_and_branch_setup(
-            task_id=task_id,
             task=task,
-            repo_path=repo_path,
             architecture=architecture,
-            existing_code=existing_code,
-            tool_agents=tool_agents,
-            git_agent=git_agent,
-            feature_branch_name=feature_branch_name,
-            llm=self.llm,
-            run_planning=run_planning,
-            update_job=_update_job,
-            logger=logger,
-        )
-        if failure_reason is not None:
-            result.failure_reason = failure_reason
-            return result
-        result.planning_result = planning_result
-
-        logger.info("[%s] Next step -> Starting Phase: Execution", task_id)
-        result.current_phase = Phase.EXECUTION
-        _update_job(
-            current_phase="execution",
-            current_microtask="",
-            progress=15,
-            status_text="Starting code implementation...",
-        )
-
-        progress_callback = self._build_progress_callback(_update_job, review_label="Reviewing")
-
-        review_deps = ReviewDependencies(
-            build_verifier=build_verifier,
+            spec_content=spec_content,
             qa_agent=qa_agent,
             security_agent=security_agent,
             code_review_agent=code_review_agent,
+            build_verifier=build_verifier,
             linting_tool_agent=linting_tool_agent,
-            tool_agents=tool_agents,
-        )
-
-        config = review_config or MicrotaskReviewConfig()
-
-        try:  # pragma: no cover  # integration-only: runs review-gated execution loop against live LLM + npm/ng
-            exec_result = run_execution_with_review_gates(
-                llm=self.llm,
-                task=task,
-                planning_result=planning_result,
-                repo_path=repo_path,
-                architecture=architecture,
-                spec_content=spec_content,
-                existing_code=existing_code,
-                tool_runners=tool_runners,
-                progress_callback=progress_callback,
-                review_config=config,
-                review_deps=review_deps,
-            )
-            result.execution_result = exec_result
-        except MicrotaskReviewFailedError as err:
-            result.failure_reason = (
-                f"Microtask {err.microtask.id} failed review: {err.review_result.summary}"
-            )
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-        except Exception as exc:
-            result.failure_reason = f"Execution failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-
-        current_files = exec_result.files
-        if not current_files:
-            result.failure_reason = "Execution produced no files."
-            return result
-
-        completed_count, failed_count = self._record_execution_bookkeeping(
-            task_id=task_id,
-            result=result,
-            exec_result=exec_result,
-            repo_path=repo_path,
-            feature_branch_name=feature_branch_name,
-            git_agent=git_agent,
-            logger=logger,
-        )
-
-        result.final_files = current_files
-
-        # ── Phase: Documentation ────────────────────────────────────────
-        from .phases.documentation import run_documentation_phase
-
-        current_files = self._run_documentation_phase(
-            task_id=task_id,
-            task=task,
-            repo_path=repo_path,
-            llm=self.llm,
-            exec_result=exec_result,
-            planning_result=planning_result,
-            tool_agents=tool_agents,
-            result=result,
-            current_files=current_files,
-            run_documentation_phase=run_documentation_phase,
-            update_job=_update_job,
-            logger=logger,
-            status_text="Generating documentation and API docs...",
-        )
-
-        # ── Phase: Deliver ───────────────────────────────────────────
-        self._run_deliver_and_finalize(
-            task_id=task_id,
-            repo_path=repo_path,
-            current_files=current_files,
-            exec_summary=exec_result.summary,
-            task_title=task.title or "",
-            task_description=task.description or "",
-            tool_agents=tool_agents,
-            feature_branch_name=feature_branch_name,
+            job_updater=job_updater,
+            review_config=review_config,
             merge_to_development=merge_to_development,
-            failed_count=failed_count,
-            completed_count=completed_count,
-            start_time=start_time,
-            result=result,
-            run_deliver=run_deliver,
-            update_job=_update_job,
-            logger=logger,
+            repo_context_cache=repo_context_cache,
+            result_cls=FrontendCodeV2WorkflowResult,
             team_label=self._TEAM_LABEL,
             deliver_in_progress_status=self._DELIVER_IN_PROGRESS_STATUS,
+            logger=logger,
+            checkout_branch=checkout_branch,
+            configure_quality_tooling=configure_quality_tooling,
+            detect_tooling=self._detect_tooling,
+            emit_branch_ready_progress=False,
+            build_tool_agents=_build_tool_agents,
+            git_branch_management_kind=ToolAgentKind.GIT_BRANCH_MANAGEMENT,
+            run_planning=run_planning,
+            review_label="Reviewing",
+            execution_status_text="Starting code implementation...",
+            review_deps_cls=ReviewDependencies,
+            review_config_cls=MicrotaskReviewConfig,
+            review_failed_exc_cls=MicrotaskReviewFailedError,
+            run_execution_with_review_gates=run_execution_with_review_gates,
+            documentation_status_text="Generating documentation and API docs...",
+            run_documentation_phase=run_documentation_phase,
+            run_deliver=run_deliver,
         )
-        return result
 
 
 class FrontendCodeV2TeamLead(BaseTeamLead):

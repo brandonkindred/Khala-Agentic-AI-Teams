@@ -608,9 +608,17 @@ class _FakePlanningResult:
 
 
 class _FakeTask:
-    def __init__(self, task_id: str = "t1", title: str = "Do the thing"):
+    def __init__(
+        self,
+        task_id: str = "t1",
+        title: str = "Do the thing",
+        feature_branch_name: str | None = None,
+        description: str = "",
+    ):
         self.id = task_id
         self.title = title
+        self.feature_branch_name = feature_branch_name
+        self.description = description
 
 
 class TestRunPlanningAndBranchSetup:
@@ -856,9 +864,12 @@ class _FakeDeliverResult:
 
 
 class _FakeWorkflowResult:
-    def __init__(self):
+    def __init__(self, task_id: str = ""):
+        self.task_id = task_id
         self.iterations_used = 0
         self.current_phase = None
+        self.planning_result = None
+        self.execution_result = None
         self.documentation_result = None
         self.final_files = None
         self.deliver_result = None
@@ -1234,3 +1245,229 @@ class TestRunDeliverAndFinalize:
         assert (
             "WORKFLOW SUCCEEDED in 12.5s (3 microtasks completed, 0 failed review)" in caplog.text
         )
+
+
+class _FakeReviewDeps:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+class _FakeReviewConfig:
+    pass
+
+
+class _FakeReviewFailedError(Exception):
+    def __init__(self, microtask, review_result):
+        super().__init__("review failed")
+        self.microtask = microtask
+        self.review_result = review_result
+
+
+class _FakeMicrotaskRef:
+    def __init__(self, id: str):
+        self.id = id
+
+
+class _FakeReviewResult:
+    def __init__(self, summary: str):
+        self.summary = summary
+
+
+_GIT_KIND = "git_branch_management"
+
+
+class TestRunDevelopmentWorkflow:
+    """Tests for the shared ``BaseV2DevelopmentAgent._run_development_workflow`` template
+    method — the glue that both ``BackendDevelopmentAgent.run_workflow`` and
+    ``FrontendDevelopmentAgent.run_workflow`` now delegate to. Every team-specific
+    callable/class is injected with a fake here, mirroring ``TestRunPreflight`` /
+    ``TestRunPlanningAndBranchSetup`` / ``TestRunDeliverAndFinalize``'s style, so the
+    full phase sequencing is unit-isolated from either team's orchestrator module.
+    """
+
+    @staticmethod
+    def _logger():
+        import logging
+
+        return logging.getLogger("test_run_development_workflow")
+
+    @staticmethod
+    def _call(**overrides):
+        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
+
+        agent = BaseV2DevelopmentAgent.__new__(BaseV2DevelopmentAgent)
+        agent.llm = MagicMock()
+        agent._repo_context_cache = None
+        agent._read_repo_code = lambda repo_path, max_chars=None: "existing code"
+
+        git_agent = overrides.pop("git_agent", MagicMock())
+        exec_result = overrides.pop(
+            "exec_result",
+            _FakeExecResult(["completed", "completed"]),
+        )
+        exec_result.files = overrides.pop("exec_files", {"a.py": "a"})
+        exec_result.summary = overrides.pop("exec_summary", "exec done")
+        run_execution_with_review_gates = overrides.pop(
+            "run_execution_with_review_gates", lambda **kw: exec_result
+        )
+
+        kwargs = {
+            "repo_path": overrides.pop("repo_path"),
+            "task": _FakeTask(),
+            "architecture": None,
+            "spec_content": "",
+            "qa_agent": None,
+            "security_agent": None,
+            "code_review_agent": None,
+            "build_verifier": None,
+            "linting_tool_agent": None,
+            "job_updater": overrides.pop("job_updater", None),
+            "review_config": None,
+            "merge_to_development": True,
+            "repo_context_cache": None,
+            "result_cls": _FakeWorkflowResult,
+            "team_label": "Backend",
+            "deliver_in_progress_status": "Committing changes and preparing delivery",
+            "logger": TestRunDevelopmentWorkflow._logger(),
+            "checkout_branch": lambda *a: (True, "ok"),
+            "configure_quality_tooling": lambda p: None,
+            "detect_tooling": lambda p: (True, True),
+            "emit_branch_ready_progress": False,
+            "build_tool_agents": lambda llm: {_GIT_KIND: git_agent},
+            "git_branch_management_kind": _GIT_KIND,
+            "run_planning": lambda **kw: _FakePlanningResult(),
+            "review_label": "Reviewing code",
+            "execution_status_text": "Starting code implementation",
+            "review_deps_cls": _FakeReviewDeps,
+            "review_config_cls": _FakeReviewConfig,
+            "review_failed_exc_cls": _FakeReviewFailedError,
+            "run_execution_with_review_gates": run_execution_with_review_gates,
+            "documentation_status_text": "Generating documentation and API specs",
+            "run_documentation_phase": lambda **kw: _FakeDocResult(summary="docs done"),
+            "run_deliver": lambda **kw: _FakeDeliverResult(merged=True, summary="delivered"),
+        }
+        kwargs.update(overrides)
+        return agent._run_development_workflow(**kwargs)
+
+    def test_happy_path_runs_every_phase_and_succeeds(self, tmp_path: Path):
+        result = self._call(repo_path=tmp_path)
+
+        assert result.task_id == "t1"
+        assert result.failure_reason is None
+        assert result.planning_result is not None
+        assert result.execution_result is not None
+        assert result.documentation_result is not None
+        assert result.deliver_result is not None
+        assert result.success is True
+        assert result.iterations_used == 2
+
+    def test_preflight_failure_short_circuits(self, tmp_path: Path):
+        planning_calls = []
+        result = self._call(
+            repo_path=tmp_path,
+            detect_tooling=lambda p: (False, True),
+            run_planning=lambda **kw: planning_calls.append(kw) or _FakePlanningResult(),
+        )
+
+        assert result.failure_reason is not None
+        assert "linting" in result.failure_reason
+        assert planning_calls == []
+        assert result.deliver_result is None
+
+    def test_planning_failure_short_circuits(self, tmp_path: Path):
+        def _raise_run_planning(**kwargs):
+            raise ValueError("planning boom")
+
+        result = self._call(repo_path=tmp_path, run_planning=_raise_run_planning)
+
+        assert result.failure_reason == "Planning failed: planning boom"
+        assert result.execution_result is None
+        assert result.deliver_result is None
+
+    def test_review_failed_exception_sets_failure_reason(self, tmp_path: Path):
+        def _raise_review_failed(**kwargs):
+            raise _FakeReviewFailedError(
+                microtask=_FakeMicrotaskRef("mt-1"),
+                review_result=_FakeReviewResult("needs work"),
+            )
+
+        result = self._call(
+            repo_path=tmp_path,
+            run_execution_with_review_gates=_raise_review_failed,
+        )
+
+        assert result.failure_reason == "Microtask mt-1 failed review: needs work"
+        assert result.deliver_result is None
+
+    def test_generic_execution_exception_sets_failure_reason(self, tmp_path: Path):
+        def _raise(**kwargs):
+            raise RuntimeError("exec boom")
+
+        result = self._call(repo_path=tmp_path, run_execution_with_review_gates=_raise)
+
+        assert result.failure_reason == "Execution failed: exec boom"
+        assert result.deliver_result is None
+
+    def test_empty_execution_files_sets_failure_reason(self, tmp_path: Path):
+        result = self._call(repo_path=tmp_path, exec_files={})
+
+        assert result.failure_reason == "Execution produced no files."
+        assert result.deliver_result is None
+
+    def test_emit_branch_ready_progress_forwarded_to_preflight(self, tmp_path: Path):
+        update_calls = []
+
+        self._call(
+            repo_path=tmp_path,
+            task=_FakeTask(feature_branch_name="feature/x"),
+            emit_branch_ready_progress=True,
+            job_updater=lambda **kw: update_calls.append(kw),
+        )
+
+        assert any(call.get("status_text") == "Branch feature/x ready" for call in update_calls)
+
+    def test_emit_branch_ready_progress_false_suppresses_it(self, tmp_path: Path):
+        update_calls = []
+
+        self._call(
+            repo_path=tmp_path,
+            task=_FakeTask(feature_branch_name="feature/x"),
+            emit_branch_ready_progress=False,
+            job_updater=lambda **kw: update_calls.append(kw),
+        )
+
+        assert not any(call.get("status_text") == "Branch feature/x ready" for call in update_calls)
+
+    def test_review_label_forwarded_to_progress_callback(self, tmp_path: Path):
+        captured_callback = {}
+
+        def _run_exec(**kwargs):
+            captured_callback["cb"] = kwargs["progress_callback"]
+            exec_result = _FakeExecResult(["completed"])
+            exec_result.files = {"a.py": "a"}
+            exec_result.summary = "exec done"
+            return exec_result
+
+        update_calls = []
+        self._call(
+            repo_path=tmp_path,
+            review_label="Reviewing",
+            run_execution_with_review_gates=_run_exec,
+            job_updater=lambda **kw: update_calls.append(kw),
+        )
+
+        captured_callback["cb"](1, 0, 1, "Do the thing", microtask_phase="review")
+        assert any(
+            call.get("status_text", "").startswith("Reviewing: Do the thing")
+            for call in update_calls
+        )
+
+    def test_job_updater_exception_is_swallowed(self, tmp_path: Path, caplog):
+        def _raise(**kwargs):
+            raise RuntimeError("updater boom")
+
+        with caplog.at_level("DEBUG", logger="test_run_development_workflow"):
+            result = self._call(repo_path=tmp_path, job_updater=_raise)
+
+        assert result.success is True
+        assert "job_updater callback failed: updater boom" in caplog.text
