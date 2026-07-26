@@ -653,6 +653,8 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         quality_gates: Dict[str, str] = {}
         acceptance_trace: List[Dict[str, object]] = []
         completion: Any = None  # filled by Phase 5 on success
+        # Phase 4.6 debug-patch attempts consumed; 1 = no retry needed.
+        infra_fix_iterations = 1
 
         def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
             """Phase 1: environment policy + task clarification gates.
@@ -775,11 +777,12 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
               may be empty).
             Postconditions: runs tool validation, execution verification, the
               debug-patch loop, and independent reviews; sets nonlocal
-              ``quality_gates``. Returns a failed ``DevOpsTeamResult`` on quality-
-              gate or build-verifier failure via ``_run_phase_gates``; otherwise
-              returns ``None`` so Phase 5 runs.
+              ``quality_gates`` and ``infra_fix_iterations`` (Phase 4.6 attempts
+              consumed; stays 1 when no retry was needed). Returns a failed
+              ``DevOpsTeamResult`` on quality-gate or build-verifier failure via
+              ``_run_phase_gates``; otherwise returns ``None`` so Phase 5 runs.
             """
-            nonlocal aggregated_artifacts, quality_gates, acceptance_trace
+            nonlocal aggregated_artifacts, quality_gates, acceptance_trace, infra_fix_iterations
 
             # Phase 4: tool validation + independent reviews
             self._report_status(
@@ -818,9 +821,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             # preserved).
             state = _DebugPatchState(exec_results=exec_results)
             if state.exec_failures:
-                self._run_bounded_retry_loop(
-                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                    attempt=lambda i: self._debug_patch_once(
+
+                def _debug_patch_attempt(i: int) -> Optional[_DebugPatchState]:
+                    nonlocal infra_fix_iterations
+                    infra_fix_iterations = i + 1
+                    return self._debug_patch_once(
                         i,
                         state=state,
                         aggregated_artifacts=aggregated_artifacts,
@@ -829,7 +834,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         write_changes=write_changes,
                         subdir=subdir,
                         max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                    ),
+                    )
+
+                self._run_bounded_retry_loop(
+                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                    attempt=_debug_patch_attempt,
                     is_success=lambda s: not s.exec_failures,
                 )
 
@@ -1055,4 +1064,6 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             return early_exit
 
         assert completion is not None  # phase 5 success path always assigns it
-        return DevOpsTeamResult(success=True, iterations=1, completion_package=completion)
+        return DevOpsTeamResult(
+            success=True, iterations=infra_fix_iterations, completion_package=completion
+        )
