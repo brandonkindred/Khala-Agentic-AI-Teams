@@ -19,18 +19,28 @@ from software_engineering_team.devops_team.orchestrator import (
     _DebugPatchState,
 )
 
+# Public LLMClient methods that resolve without issuing an LLM request — pure
+# capability/metadata queries (see their docstrings in llm_service/interface.py).
+# Excluded from the trip wire so a caller that merely inspects client
+# capabilities (e.g. to pick a code path) doesn't trip a "must not call the
+# LLM" assertion.
+_LLM_CLIENT_NON_REQUEST_METHODS = frozenset(
+    {"supports_structured_output", "get_max_context_tokens"}
+)
+
 
 def _make_llm_tripwire() -> DummyLLMClient:
-    """Build a DummyLLMClient whose every public method raises and counts its calls.
+    """Build a DummyLLMClient whose every request-producing method raises and counts its calls.
 
-    Generic over whatever public methods LLMClient currently declares
-    (complete_json, complete, complete_text, chat, ...) instead of
-    hardcoding a couple of names, so a method added to the interface
-    later is caught automatically instead of silently letting a real
-    LLM call through undetected. Each override also increments
-    ``self.calls`` before raising, so callers can assert zero invocations
-    even if the AssertionError itself is swallowed by a broad try/except
-    somewhere in the call path.
+    Generic over whatever request-producing public methods LLMClient
+    currently declares (complete_json, complete, complete_text, chat, ...)
+    instead of hardcoding a couple of names, so a method added to the
+    interface later is caught automatically instead of silently letting a
+    real LLM call through undetected. Capability/metadata methods that don't
+    issue a request (see ``_LLM_CLIENT_NON_REQUEST_METHODS``) are left alone.
+    Each override also increments ``self.calls`` before raising, so callers
+    can assert zero invocations even if the AssertionError itself is
+    swallowed by a broad try/except somewhere in the call path.
     """
 
     def _raiser(name: str) -> Any:
@@ -49,7 +59,9 @@ def _make_llm_tripwire() -> DummyLLMClient:
     overrides = {
         name: _raiser(name)
         for name in vars(LLMClient)
-        if not name.startswith("_") and callable(getattr(LLMClient, name))
+        if not name.startswith("_")
+        and callable(getattr(LLMClient, name))
+        and name not in _LLM_CLIENT_NON_REQUEST_METHODS
     }
     overrides["__init__"] = _init
     tripwire_cls = type("_TripWire", (DummyLLMClient,), overrides)
