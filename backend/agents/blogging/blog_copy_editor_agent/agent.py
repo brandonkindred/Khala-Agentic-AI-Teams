@@ -499,7 +499,10 @@ class BlogCopyEditorAgent(_BlogAgentBase):
         prompt = self._build_editor_prompt(copy_editor_input, draft, style_guide_text)
         data = self._invoke_editor_llm(prompt, on_llm_request=on_llm_request)
 
-        summary = (data.get("summary") or "").strip() or "No summary generated."
+        raw_summary = data.get("summary")
+        summary = (
+            raw_summary.strip() if isinstance(raw_summary, str) else ""
+        ) or "No summary generated."
         raw_feedback_items = data.get("feedback_items")
         feedback_items = self._parse_feedback_items(
             raw_feedback_items if isinstance(raw_feedback_items, list) else []
