@@ -953,7 +953,8 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 """Fail the phase when an injected build verifier rejects the repo.
 
                 Preconditions: quality gates already passed (prior gate returned
-                  ``None``); ``build_verifier`` may be ``None``.
+                  ``None``); ``build_verifier`` may be ``None``; ``repo_path`` and
+                  ``task_spec`` are set by Phase 4 setup above.
                 Postconditions: when ``build_verifier`` is set and returns a
                   failing result, returns ``DevOpsTeamResult(success=False, …)``
                   with the verifier error (or the default failure string);
