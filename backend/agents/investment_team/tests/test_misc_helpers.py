@@ -1012,6 +1012,22 @@ def test_aggregate_prior_results_max_records_zero_yields_empty() -> None:
     assert aggregate_prior_results(recs, max_records=0) == {}
 
 
+def test_aggregate_prior_results_cache_reused_across_calls_and_windows() -> None:
+    # A shared cache dict must let a second call against the same ``records``
+    # object reuse the sorted/filtered pass instead of recomputing it — even
+    # when the two calls use different ``max_records`` windows.
+    recs = [_attr_record(i=i, entry_rules=[_rsi_entry()], annual_return=float(i)) for i in range(5)]
+    cache: dict = {}
+    first = aggregate_prior_results(recs, max_records=5, cache=cache)
+    assert len(cache) == 1
+    second = aggregate_prior_results(recs, max_records=2, cache=cache)
+    # Same cache entry reused (no second sort/filter pass), no new key added.
+    assert len(cache) == 1
+    # Cached (pre-trim) results are identical to the uncached computation.
+    assert first == aggregate_prior_results(recs, max_records=5)
+    assert second == aggregate_prior_results(recs, max_records=2)
+
+
 def test_format_prior_attribution_empty_sentinel() -> None:
     out = format_prior_attribution([])
     assert "Not enough" in out
