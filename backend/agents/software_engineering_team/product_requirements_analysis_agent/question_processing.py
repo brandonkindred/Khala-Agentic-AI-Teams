@@ -462,13 +462,17 @@ def consolidate_open_questions(
     )
     if consolidated is None:
         return list(open_questions)
-    result = []
-    for i, q_data in enumerate(consolidated):
-        try:
-            result.append(parse_open_question(q_data, i))
-        except Exception as e:
-            logger.warning("Failed to parse consolidated question %d: %s", i, e)
-    return result if result else list(open_questions)
+    try:
+        result = []
+        for i, q_data in enumerate(consolidated):
+            try:
+                result.append(parse_open_question(q_data, i))
+            except Exception as e:
+                logger.warning("Failed to parse consolidated question %d: %s", i, e)
+        return result if result else list(open_questions)
+    except Exception as e:
+        logger.warning("Question consolidation failed, using original list: %s", str(e))
+        return list(open_questions)
 
 
 def review_question_answer_alignment(
@@ -532,35 +536,42 @@ def review_question_answer_alignment(
     )
     if aligned is None:
         return list(open_questions)
-    result = []
-    seen_ids = set()
-    any_parsed = False
-    for i, q_data in enumerate(aligned):
-        try:
-            parsed = parse_open_question(q_data, i)
-            if parsed.id not in original_by_id:
-                raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
-            if parsed.id in seen_ids:
-                raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
-            result.append(parsed)
-            seen_ids.add(parsed.id)
-            any_parsed = True
-        except Exception as e:
-            logger.warning("Failed to parse aligned question %d: %s", i, e)
-            fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
-            original = original_by_id.get(fallback_id) if fallback_id else None
-            if original is not None and original.id not in seen_ids:
-                result.append(original)
-                seen_ids.add(original.id)
-    if not any_parsed:
-        # Nothing in the batch was genuinely realigned, so the LLM-provided
-        # order (which any fallbacks above were assembled in) carries no
-        # meaning — return the original list in its original order instead.
+    try:
+        result = []
+        seen_ids = set()
+        any_parsed = False
+        for i, q_data in enumerate(aligned):
+            try:
+                parsed = parse_open_question(q_data, i)
+                if parsed.id not in original_by_id:
+                    raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
+                if parsed.id in seen_ids:
+                    raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
+                result.append(parsed)
+                seen_ids.add(parsed.id)
+                any_parsed = True
+            except Exception as e:
+                logger.warning("Failed to parse aligned question %d: %s", i, e)
+                fallback_id = q_data.get("id") if isinstance(q_data, dict) else None
+                original = original_by_id.get(fallback_id) if isinstance(fallback_id, str) else None
+                if original is not None and original.id not in seen_ids:
+                    result.append(original)
+                    seen_ids.add(original.id)
+        if not any_parsed:
+            # Nothing in the batch was genuinely realigned, so the LLM-provided
+            # order (which any fallbacks above were assembled in) carries no
+            # meaning — return the original list in its original order instead.
+            return list(open_questions)
+        for q in open_questions:
+            if q.id not in seen_ids:
+                result.append(q)
+        return result
+    except Exception as e:
+        logger.warning(
+            "Question-answer alignment review failed, using original list: %s",
+            str(e),
+        )
         return list(open_questions)
-    for q in open_questions:
-        if q.id not in seen_ids:
-            result.append(q)
-    return result
 
 
 def add_recommendations(
@@ -600,13 +611,20 @@ def add_recommendations(
     recs = _fetch_llm_list(model, prompt, "recommendations", "Recommendation generation")
     if recs is None:
         return list(open_questions)
-    rec_by_id = {
-        r.get("id"): str(r.get("recommendation", "") or "")
-        for r in recs
-        if isinstance(r, dict) and "id" in r
-    }
-    result = []
-    for q in open_questions:
-        rec = rec_by_id.get(q.id, "")
-        result.append(q.model_copy(update={"recommendation": rec}))
-    return result
+    try:
+        rec_by_id = {
+            r.get("id"): str(r.get("recommendation", "") or "")
+            for r in recs
+            if isinstance(r, dict) and "id" in r and isinstance(r.get("id"), str)
+        }
+        result = []
+        for q in open_questions:
+            rec = rec_by_id.get(q.id, "")
+            result.append(q.model_copy(update={"recommendation": rec}))
+        return result
+    except Exception as e:
+        logger.warning(
+            "Recommendation generation failed, leaving recommendations empty: %s",
+            str(e),
+        )
+        return list(open_questions)
