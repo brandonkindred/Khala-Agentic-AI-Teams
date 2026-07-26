@@ -19,14 +19,8 @@ from __future__ import annotations
 import importlib
 import sys
 import unittest.mock as mock
-from pathlib import Path
 
 import pytest
-
-_agents_dir = Path(__file__).resolve().parent.parent.parent
-if str(_agents_dir) not in sys.path:
-    sys.path.insert(0, str(_agents_dir))
-
 
 _TEMPORAL_PREFIX = "planning_team.temporal"
 
