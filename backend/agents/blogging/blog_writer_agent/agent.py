@@ -1095,6 +1095,10 @@ class BlogWriterAgent(_BlogAgentBase):
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     return revised.strip()
+            # The underlying Strands Agent call can surface LLMJsonParseError; retry
+            # without the transient backoff sleep (covered by test_writer_interactive.py).
+            except LLMJsonParseError as e:
+                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
@@ -1237,6 +1241,10 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
+            # See _revise_one_item: LLMJsonParseError from the Strands Agent call
+            # retries without the transient backoff sleep.
+            except LLMJsonParseError as e:
+                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
@@ -1495,6 +1503,10 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
+            # See _revise_one_item: LLMJsonParseError from the Strands Agent call
+            # retries without the transient backoff sleep (test_revise_from_user_feedback_json_parse_error_skips_sleep).
+            except LLMJsonParseError as e:
+                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
