@@ -832,7 +832,8 @@ class BlogWriterAgent(_BlogAgentBase):
             for i, item in enumerate(
                 revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
             ):
-                loc = f" [{item.location}]" if item.location else ""
+                location = getattr(item, "location", None)
+                loc = f" [{location}]" if location else ""
                 prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
             prompt_parts.extend(
                 [
