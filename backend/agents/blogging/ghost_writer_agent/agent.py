@@ -314,7 +314,9 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
     Uses three specialised LLM roles:
       - Evaluator: assesses story sufficiency via ``call_json_with_retry``
       - Interviewer: generates conversational follow-up questions
-      - Narrator: compiles vivid first-person narratives
+      - Narrator: compiles vivid first-person narratives (``_compile_narrative``
+        retries via its own plain-text loop, not ``call_json_with_retry`` —
+        left unchanged when the evaluator was migrated)
 
     Preconditions:
         - llm_client is not None.
