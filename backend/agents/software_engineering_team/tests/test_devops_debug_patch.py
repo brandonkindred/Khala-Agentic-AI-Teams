@@ -182,6 +182,52 @@ def _failing_debug_patch_state() -> _DebugPatchState:
     )
 
 
+class TestDebugPatchStateMalformedResults:
+    """Coverage for defensive handling of malformed ``exec_results`` entries."""
+
+    def test_refresh_aggregates_skips_malformed_entries(self) -> None:
+        """Non-dict entries and non-dict/list ``checks``/``findings`` are skipped, not raised."""
+        state = _DebugPatchState(
+            exec_results=[
+                None,
+                "bad",
+                {"checks": "not-a-dict", "findings": "not-a-list"},
+                {"success": False, "checks": {"a": "fail"}, "findings": ["x"]},
+            ],
+        )
+        assert state.exec_gate_map == {"a": "fail"}
+        assert state.exec_findings == ["x"]
+        # Non-dict entries are excluded from exec_failures entirely (not
+        # merely tolerated), since the Phase 4.6 debug-patch loop calls
+        # `.get()` on each exec_failures entry without further checks.
+        assert state.exec_failures == [
+            {"success": False, "checks": {"a": "fail"}, "findings": ["x"]}
+        ]
+
+    def test_exec_failures_excludes_non_dict_entries(self) -> None:
+        """A non-dict entry (e.g. None) is logged and dropped, not surfaced as a failure."""
+        state = _DebugPatchState(exec_results=[None, "bad", {"success": True, "checks": {}}])
+        assert state.exec_failures == []
+
+    def test_exec_failures_normalizes_malformed_findings(self) -> None:
+        """A failing entry with non-list ``findings`` (e.g. ``None``) is normalized to ``[]``.
+
+        Guards against ``_debug_patch_once``'s unguarded
+        ``"\\n".join(ef.get("findings", []))``, whose default only applies
+        when the key is absent — not when it's present with the wrong type.
+        """
+        state = _DebugPatchState(
+            exec_results=[
+                {"success": False, "tool": "terraform", "findings": None},
+                {"success": False, "tool": "terraform", "findings": "not-a-list"},
+                {"success": False, "tool": "terraform", "findings": ["ok"]},
+            ],
+        )
+        assert [f["findings"] for f in state.exec_failures] == [[], [], ["ok"]]
+        for failure in state.exec_failures:
+            "\n".join(failure["findings"])  # must not raise
+
+
 # ---------------------------------------------------------------------------
 # Debug Agent tests
 # ---------------------------------------------------------------------------
