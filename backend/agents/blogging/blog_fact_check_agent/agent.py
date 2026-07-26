@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
+from agents.blogging.shared.artifacts import read_artifact, read_latest_draft, write_artifact
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
@@ -22,11 +23,6 @@ from llm_service import LLMRateLimitError, LLMTemporaryError
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
-
-try:
-    from agents.blogging.shared.artifacts import write_artifact
-except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared modules; not exercised because conftest guarantees the import path resolves.
-    write_artifact = None
 
 try:
     from agents.blogging.shared.errors import FactCheckError, LLMError
@@ -194,16 +190,7 @@ def run_fact_check_from_work_dir(
         ``FactCheckReport`` from ``BlogFactCheckAgent.run``. Disclaimer categories are
         currently hardcoded to medical / legal / financial.
     """
-    try:
-        from agents.blogging.shared.artifacts import read_artifact
-    except ImportError:  # pragma: no cover - defensive ImportError fallback; not exercised because conftest guarantees the import path resolves.
-        raise ImportError("shared.artifacts required")
-
-    draft = read_artifact(work_dir, draft_artifact, default="")
-    if not draft:
-        draft = read_artifact(work_dir, "draft_v2.md", default="") or read_artifact(
-            work_dir, "draft_v1.md", default=""
-        )
+    draft = read_latest_draft(work_dir, draft_artifact)
 
     allowed_claims = read_artifact(work_dir, "allowed_claims.json", default=None)
     if not isinstance(allowed_claims, dict):
