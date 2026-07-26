@@ -7,6 +7,8 @@ submit → poll → map flow, the unconfigured short-circuit, and the failure pa
 
 from __future__ import annotations
 
+from typing import Optional
+
 import httpx
 import pytest
 
@@ -29,10 +31,9 @@ class _FakeResp:
 
 
 class _FakeAsyncClient:
-    """Fake httpx.AsyncClient: one POST (submit) then queued GET (status) responses."""
+    """Fake httpx.AsyncClient: queued GET (status) responses for the poll loop."""
 
-    def __init__(self, submit: _FakeResp, statuses: list[_FakeResp]) -> None:
-        self._submit = submit
+    def __init__(self, statuses: list[_FakeResp]) -> None:
         self._statuses = list(statuses)
 
     async def __aenter__(self) -> "_FakeAsyncClient":
@@ -41,15 +42,19 @@ class _FakeAsyncClient:
     async def __aexit__(self, *_exc: object) -> bool:
         return False
 
-    async def post(self, url: str, **_kw: object) -> _FakeResp:
-        return self._submit
-
     async def get(self, url: str, **_kw: object) -> _FakeResp:
         return self._statuses.pop(0)
 
 
-def _patch_client(monkeypatch, submit: _FakeResp, statuses: list[_FakeResp]) -> None:
-    monkeypatch.setattr(mr.httpx, "AsyncClient", lambda: _FakeAsyncClient(submit, statuses))
+def _patch_poll(monkeypatch, statuses: list[_FakeResp]) -> None:
+    monkeypatch.setattr(mr.httpx, "AsyncClient", lambda: _FakeAsyncClient(statuses))
+
+
+def _patch_submit(monkeypatch, result: Optional[dict]) -> None:
+    async def _fake_async_post_json(*_a: object, **_kw: object) -> Optional[dict]:
+        return result
+
+    monkeypatch.setattr(mr, "async_post_json", _fake_async_post_json)
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +122,9 @@ def test_request_returns_none_when_unconfigured(monkeypatch) -> None:
 
 def test_request_success_returns_snapshot(monkeypatch) -> None:
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
-    _patch_client(
+    _patch_submit(monkeypatch, {"job_id": "j1"})
+    _patch_poll(
         monkeypatch,
-        submit=_FakeResp({"job_id": "j1"}),
         statuses=[_FakeResp({"status": "completed", "result": {"mission_summary": "done"}})],
     )
     snap = mr.request_market_research(
@@ -136,7 +141,7 @@ def test_request_success_returns_snapshot(monkeypatch) -> None:
 
 def test_request_raises_when_no_job_id(monkeypatch) -> None:
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
-    _patch_client(monkeypatch, submit=_FakeResp({}), statuses=[])
+    _patch_submit(monkeypatch, {})
     with pytest.raises(RuntimeError, match="no job_id"):
         mr.request_market_research(
             make_mission(
@@ -150,9 +155,9 @@ def test_request_raises_when_no_job_id(monkeypatch) -> None:
 
 def test_request_raises_on_terminal_failure(monkeypatch) -> None:
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
-    _patch_client(
+    _patch_submit(monkeypatch, {"job_id": "j2"})
+    _patch_poll(
         monkeypatch,
-        submit=_FakeResp({"job_id": "j2"}),
         statuses=[_FakeResp({"status": "failed", "error": "boom"})],
     )
     with pytest.raises(RuntimeError, match="ended with status failed"):
@@ -168,7 +173,7 @@ def test_request_raises_on_terminal_failure(monkeypatch) -> None:
 
 def test_request_wraps_transport_errors(monkeypatch) -> None:
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
-    _patch_client(monkeypatch, submit=_FakeResp({}, status_code=500), statuses=[])
+    _patch_submit(monkeypatch, None)
     with pytest.raises(RuntimeError, match="Market research request failed"):
         mr.request_market_research(
             make_mission(
@@ -186,9 +191,9 @@ def test_request_offloads_when_loop_running(monkeypatch) -> None:
     import asyncio
 
     monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
-    _patch_client(
+    _patch_submit(monkeypatch, {"job_id": "j3"})
+    _patch_poll(
         monkeypatch,
-        submit=_FakeResp({"job_id": "j3"}),
         statuses=[_FakeResp({"status": "completed", "result": {"mission_summary": "offloaded"}})],
     )
 
