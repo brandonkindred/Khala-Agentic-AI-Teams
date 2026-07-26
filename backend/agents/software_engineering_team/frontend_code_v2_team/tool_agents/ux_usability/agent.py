@@ -16,7 +16,6 @@ from ...models import ReviewIssue, ToolAgentPhaseInput, ToolAgentPhaseOutput
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
-MAX_UX_CODE_CHARS = 30_000
 MAX_RELEVANT_CODE_CHARS = 8_000
 
 UX_DESIGNER_PLAN_PROMPT = """You are an expert UX Designer Agent. Your job is to define user flows, information architecture, interaction design, microcopy, and edge cases BEFORE pixels get involved. You ensure the app makes sense from a user perspective.
@@ -125,7 +124,6 @@ class UxUsabilityToolAgent(BaseReviewToolAgent):
     problem_solve_sources = ("ux", "ux_usability", "tool_ux_usability")
     review_prompt = UX_ENGINEER_REVIEW_PROMPT
     problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-    max_code_chars = MAX_UX_CODE_CHARS
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "json"
     uses_json_model = True
