@@ -227,7 +227,10 @@ class _DebugPatchState:
     Invariants: ``exec_failures`` is derived from ``exec_results`` (entries where
     ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` always mirror
     ``exec_results`` — established in ``__post_init__`` and refreshed via
-    :meth:`refresh_aggregates` after each re-exec.
+    :meth:`refresh_aggregates` after each re-exec. Malformed entries (not a
+    dict, or with non-dict ``checks`` / non-list ``findings``) are skipped
+    rather than raising, since execution-tool output is untrusted external
+    input.
     """
 
     exec_results: List[Dict[str, Any]]
@@ -240,19 +243,31 @@ class _DebugPatchState:
     @property
     def exec_failures(self) -> List[Dict[str, Any]]:
         """Failing execution-tool results derived from ``exec_results``."""
-        return [er for er in self.exec_results if not er.get("success", True)]
+        return [
+            er for er in self.exec_results if not (isinstance(er, dict) and er.get("success", True))
+        ]
 
     def refresh_aggregates(self) -> None:
         """Rebuild ``exec_gate_map`` / ``exec_findings`` from ``exec_results``.
 
         Preconditions: ``exec_results`` is the latest execution-tool output list.
-        Postconditions: ``exec_gate_map`` and ``exec_findings`` mirror that list.
+        Postconditions: ``exec_gate_map`` and ``exec_findings`` mirror that list;
+          entries that aren't a dict, or whose ``checks``/``findings`` aren't
+          the expected dict/list shape, are skipped and logged rather than
+          raising.
         """
         self.exec_gate_map = {}
         self.exec_findings = []
         for er in self.exec_results:
-            self.exec_gate_map.update(er.get("checks", {}))
-            self.exec_findings.extend(er.get("findings", []))
+            if not isinstance(er, dict):
+                logger.warning("DevOps execution result is not a dict: %r", er)
+                continue
+            checks = er.get("checks")
+            if isinstance(checks, dict):
+                self.exec_gate_map.update(checks)
+            findings = er.get("findings")
+            if isinstance(findings, list):
+                self.exec_findings.extend(findings)
 
 
 class DevOpsTeamLeadAgent(TeamLeadSharedState):
@@ -799,6 +814,9 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             repo_str = str(repo_path)
             exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
             for er in exec_results:
+                if not isinstance(er, dict):
+                    logger.warning("DevOps execution result is not a dict: %r", er)
+                    continue
                 fc = er.get("failure_class", "")
                 if fc:
                     logger.info(

@@ -108,6 +108,26 @@ def _failing_debug_patch_state() -> _DebugPatchState:
     )
 
 
+class TestDebugPatchStateMalformedResults:
+    """Coverage for defensive handling of malformed ``exec_results`` entries."""
+
+    def test_refresh_aggregates_skips_malformed_entries(self) -> None:
+        """Non-dict entries and non-dict/list ``checks``/``findings`` are skipped, not raised."""
+        state = _DebugPatchState(
+            exec_results=[
+                None,
+                "bad",
+                {"checks": "not-a-dict", "findings": "not-a-list"},
+                {"success": False, "checks": {"a": "fail"}, "findings": ["x"]},
+            ],
+        )
+        assert state.exec_gate_map == {"a": "fail"}
+        assert state.exec_findings == ["x"]
+        # Malformed entries are treated as failing (safe default) rather than
+        # raising when accessed.
+        assert len(state.exec_failures) == 3
+
+
 # ---------------------------------------------------------------------------
 # Debug Agent tests
 # ---------------------------------------------------------------------------
