@@ -3775,6 +3775,7 @@ def _run_paper_trading_background(
             if raw is not None:
                 session = PaperTradingSession.parse_persisted(raw)
                 session.status = PaperTradingStatus.FAILED
+                session.error = f"Paper trading crashed: {exc}"
                 session.divergence_analysis = f"Paper trading crashed: {exc}"
                 session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                 _paper_trading_sessions[session_id] = session
