@@ -222,7 +222,12 @@ flowchart LR
 - **Actor:** Brand Strategist
 - **Trigger:** The agency needs to organize many clients, each with one
   or more brands.
-- **Preconditions:** None.
+- **Preconditions:** `POSTGRES_HOST` is configured and reachable, and the
+  branding schema is registered (`create_team_app`'s lifespan in
+  `shared/app/factory.py` calls `register_team_schemas` on the schema
+  `api/main.py` passes it) — `BrandingStore` calls
+  `shared.postgres.get_conn`, which raises `RuntimeError` when
+  `POSTGRES_HOST` is unset.
 - **Main flow:**
   1. Strategist creates clients via `POST /clients`
      (`api/main.py:445`) and lists / fetches them via
@@ -232,11 +237,13 @@ flowchart LR
      also creates or attaches a conversation for the brand.
   3. Per-client brand listing via
      `GET /clients/{client_id}/brands` (`api/main.py:472`).
-  4. `BrandingStore` keeps clients and brands in the SQLite `clients`
-     and `brands` tables indexed by `client_id`
-     (`store.py:30-41`, `store.py:156-183`).
+  4. `BrandingStore` keeps clients and brands in the Postgres
+     `branding_clients` and `branding_brands` tables indexed by
+     `client_id` (`postgres/__init__.py:13-71`, `store.py:147`,
+     `store.py:270`).
 - **Postconditions:** All client/brand data is persistent across
-  restarts (WAL-mode file-backed SQLite at `BRANDING_DB_PATH`).
+  restarts in the shared Khala Postgres instance
+  (`shared.postgres.get_conn`).
 - **Entry points:** `/clients`, `/clients/{id}`,
   `/clients/{id}/brands`, `/clients/{id}/brands/{brand_id}`
 
