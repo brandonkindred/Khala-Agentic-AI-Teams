@@ -335,14 +335,14 @@ export class StrategyLabComponent implements OnInit {
   }
 
   /**
-   * Wires `paperTradingService.errors$` into the `error` signal from the
-   * constructor (not `ngOnInit()`) so it's active the instant the component
-   * is constructed — `runPaperTrading()` can be called, and its guard/POST
-   * error surfaced, before `ngOnInit()` ever runs.
+   * Wires `paperTradingService.errors$` into the `error` signal. A field
+   * initializer (not wired inside `ngOnInit()`) so it's active the instant
+   * the component is constructed — `runPaperTrading()` can be called, and
+   * its guard/POST error surfaced, before `ngOnInit()` ever runs.
+   * `mirrorErrorsIntoBanner` returns `void`, so this field only exists to
+   * trigger that call at construction time — it holds no state of its own.
    */
-  constructor() {
-    this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
-  }
+  private readonly wirePaperTradingErrors = this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
 
   ngOnInit(): void {
     this.loadConfig();
@@ -893,10 +893,22 @@ export class StrategyLabComponent implements OnInit {
   // Paper Trading — delegates to paperTradingService.
   // ---------------------------------------------------------------------------
 
+  /**
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: delegates entirely to `paperTradingService.runPaperTrading`
+   *   (see its own contract) — this method has no logic of its own beyond
+   *   forwarding the call.
+   */
   runPaperTrading(record: StrategyLabRecord): void {
     this.paperTradingService.runPaperTrading(record);
   }
 
+  /**
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: returns `paperTradingService.getPaperSession(record)`
+   *   verbatim (see its own contract) — this method has no logic of its own
+   *   beyond forwarding the call.
+   */
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
     return this.paperTradingService.getPaperSession(record);
   }
