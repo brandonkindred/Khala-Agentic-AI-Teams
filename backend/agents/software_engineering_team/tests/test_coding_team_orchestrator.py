@@ -2407,6 +2407,59 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     assert task.status == TaskStatus.MERGED
 
 
+def test_fresh_run_preserves_falsy_task_id(tmp_path, monkeypatch):
+    """A task id that is falsy but not missing (0 or "") must be kept as-is, not treated as
+    absent and replaced by the task_{idx} fallback."""
+
+    class StubTL(_DefaultGroomTaskMixin):
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [
+                    {"id": 0, "title": "Zero id task"},
+                    {"id": "", "title": "Empty id task"},
+                ],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    captured: Dict[str, TaskGraphService] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            captured["graph"] = self.graph
+
+        def run(self, **kw):
+            self.graph.mark_branch_merged("0")
+            self.graph.mark_branch_merged("")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter, engine_provider, **kwargs: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    graph = captured["graph"]
+    assert graph.get_task("0").title == "Zero id task"
+    assert graph.get_task("").title == "Empty id task"
+    assert graph.get_task("task_1") is None
+    assert graph.get_task("task_2") is None
+
+
 # ----------------------------------------------------- task grooming (run_groom_task wiring)
 
 
