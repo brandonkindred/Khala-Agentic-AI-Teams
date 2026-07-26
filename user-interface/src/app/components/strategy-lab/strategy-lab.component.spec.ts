@@ -7,10 +7,14 @@ import { vi } from 'vitest';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { NotificationService } from '../../core/notification.service';
-import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
-import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
+import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import { createRunServiceStub, type RunServiceStub } from '../../testing/strategy-lab-run-service.stub';
+import {
+  createPaperTradingServiceStub,
+  type PaperTradingServiceStub,
+} from '../../testing/strategy-lab-paper-trading-service.stub';
+import { strategyLabProvidersOverride } from '../../testing/strategy-lab-component-providers';
 import type {
   PaperTradingSession,
   RunStrategyLabRequest,
@@ -83,9 +87,7 @@ describe('StrategyLabComponent — asset categories', () => {
       })
       // StrategyLabRunService is provided at the component level (see its
       // `providers` array); override that provider with the test double.
-      .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: runService }, StrategyLabActivityLogService] },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     fixture = TestBed.createComponent(StrategyLabComponent);
@@ -241,14 +243,12 @@ describe('StrategyLabComponent — asset categories', () => {
 
 });
 
-describe('StrategyLabComponent — publishability gating', () => {
+describe('StrategyLabComponent — paper trading delegation', () => {
   let component: StrategyLabComponent;
-  let apiSpy: { runPaperTrading: ReturnType<typeof vi.fn> };
+  let paperTradingService: PaperTradingServiceStub;
 
   beforeEach(async () => {
-    apiSpy = {
-      runPaperTrading: vi.fn().mockReturnValue(of({ session: { session_id: 'pt-1', status: 'running' } })),
-    };
+    paperTradingService = createPaperTradingServiceStub();
     await TestBed.configureTestingModule({
       imports: [StrategyLabComponent, NoopAnimationsModule],
       providers: [
@@ -266,7 +266,6 @@ describe('StrategyLabComponent — publishability gating', () => {
             ),
             getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
             getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
-            runPaperTrading: apiSpy.runPaperTrading,
           },
         },
         {
@@ -287,46 +286,39 @@ describe('StrategyLabComponent — publishability gating', () => {
       .overrideProvider(MatDialog, {
         useValue: { open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }) },
       })
-      .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: createRunServiceStub() }, StrategyLabActivityLogService] },
-      })
+      .overrideComponent(
+        StrategyLabComponent,
+        strategyLabProvidersOverride(createRunServiceStub(), [
+          { provide: StrategyLabPaperTradingService, useValue: paperTradingService },
+        ]),
+      )
       .compileComponents();
 
     component = TestBed.createComponent(StrategyLabComponent).componentInstance;
   });
 
-  it('publishabilitySkipLabel prefers publishability_skip_reason', () => {
-    expect(
-      component.publishabilitySkipLabel({
-        lab_record_id: 'lab-1',
-        is_winning: true,
-        is_publishable: false,
-        publishability_skip_reason: 'realism_failed',
-        paper_trading_skipped_reason: 'realism_failed,alignment_unresolved',
-        strategy_rationale: '',
-        analysis_narrative: '',
-        created_at: '',
-        strategy: {} as never,
-        backtest: {} as never,
-      }),
-    ).toBe('realism_failed');
+  it('runPaperTrading delegates to paperTradingService', () => {
+    const record = { lab_record_id: 'rec-1', is_publishable: true } as unknown as StrategyLabRecord;
+
+    component.runPaperTrading(record);
+
+    expect(paperTradingService.runPaperTrading).toHaveBeenCalledWith(record);
   });
 
-  it('runPaperTrading no-ops and sets error when not publishable', () => {
-    component.runPaperTrading({
-      lab_record_id: 'lab-legacy',
-      is_winning: true,
-      is_publishable: false,
-      publishability_skip_reason: 'realism_failed',
-      strategy_rationale: '',
-      analysis_narrative: '',
-      created_at: '',
-      strategy: {} as never,
-      backtest: {} as never,
-    });
-    expect(apiSpy.runPaperTrading).not.toHaveBeenCalled();
-    expect(component.error()).toContain('not publishable');
-    expect(component.error()).toContain('realism_failed');
+  it('getPaperSession delegates to paperTradingService', () => {
+    const record = { lab_record_id: 'rec-1', is_publishable: true } as unknown as StrategyLabRecord;
+
+    component.getPaperSession(record);
+
+    expect(paperTradingService.getPaperSession).toHaveBeenCalledWith(record);
+  });
+
+  it('mirrors paperTradingService.errors$ into the error signal', () => {
+    paperTradingService.errors$.next('not publishable (realism_failed)');
+    expect(component.error()).toBe('not publishable (realism_failed)');
+
+    paperTradingService.errors$.next(null);
+    expect(component.error()).toBeNull();
   });
 });
 
@@ -381,9 +373,7 @@ describe('StrategyLabComponent — destructive confirmations', () => {
       ],
     })
       .overrideProvider(MatDialog, { useValue: dialogSpy })
-      .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: runService }, StrategyLabActivityLogService] },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     // No detectChanges(): keeps ngOnInit's data loads out of these focused tests.
@@ -547,9 +537,7 @@ describe('StrategyLabComponent — rendered template under OnPush', () => {
         },
       ],
     })
-      .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: runService }, StrategyLabActivityLogService] },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     fixture = TestBed.createComponent(StrategyLabComponent);
@@ -684,9 +672,7 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
       .overrideProvider(MatDialog, {
         useValue: { open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }) },
       })
-      .overrideComponent(StrategyLabComponent, {
-        set: { providers: [{ provide: StrategyLabRunService, useValue: runService }, StrategyLabActivityLogService] },
-      })
+      .overrideComponent(StrategyLabComponent, strategyLabProvidersOverride(runService))
       .compileComponents();
 
     component = TestBed.createComponent(StrategyLabComponent).componentInstance;
@@ -794,17 +780,33 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
   // verdictLabel/verdictColor moved to strategy-card.component.spec.ts along
   // with the markup and methods that used them.
 
-  it('loadPaperTradingResults keeps the most recent session per lab record and resumes polling', () => {
-    const older = { lab_record_id: 'rec-1', session_id: 'pt-old', status: 'completed', started_at: '2026-01-01T00:00:00Z', completed_at: '2026-01-01T00:05:00Z' };
-    const newer = { lab_record_id: 'rec-1', session_id: 'pt-new', status: 'running', started_at: '2026-01-02T00:00:00Z', completed_at: '' };
-    apiSpy.getPaperTradingResults.mockReturnValue(of({ items: [older, newer] }));
+  // loadPaperTradingResults/runPaperTrading's own guard/dedupe/tracking logic
+  // moved to strategy-lab-paper-trading.service.spec.ts; delegation (does the
+  // component call the service?) is covered in the 'paper trading delegation'
+  // describe above using a stub. The three tests below are neither: this
+  // describe block provides the REAL StrategyLabPaperTradingService (not a
+  // stub), so they instead prove the live wiring between the real component
+  // and the real service — the component's early errors$-to-error() wiring
+  // actually reaches component.error() for both the guard and POST-failure
+  // paths, and a successful POST actually reaches
+  // runService.trackPaperTradingSession — which no other spec file checks
+  // end-to-end for this pair of classes.
 
-    component.loadPaperTradingResults();
+  it('runPaperTrading (real service, real component) sets error() via the field-initializer subscription when not publishable', () => {
+    const record = {
+      lab_record_id: 'rec-1',
+      is_publishable: false,
+      publishability_skip_reason: 'realism_failed',
+    } as unknown as StrategyLabRecord;
 
-    expect(runService.hydratePaperTradingSessions).toHaveBeenCalledWith({ 'rec-1': newer });
+    component.runPaperTrading(record);
+
+    expect(apiSpy.runPaperTrading).not.toHaveBeenCalled();
+    expect(component.error()).toContain('not publishable');
+    expect(component.error()).toContain('realism_failed');
   });
 
-  it('runPaperTrading tracks the session via runService on success', () => {
+  it('runPaperTrading (real service, real component) tracks the session via runService on success', () => {
     const record = { lab_record_id: 'rec-1', is_publishable: true } as unknown as StrategyLabRecord;
 
     component.runPaperTrading(record);
@@ -814,9 +816,10 @@ describe('StrategyLabComponent — pure helpers and remaining error paths', () =
       'rec-1',
       expect.objectContaining({ session_id: 'pt-1' }),
     );
+    expect(component.error()).toBeNull();
   });
 
-  it('runPaperTrading surfaces an error on failure', () => {
+  it('runPaperTrading (real service, real component) surfaces a POST failure via error()', () => {
     apiSpy.runPaperTrading.mockReturnValue(throwError(() => ({ error: { detail: 'worker unavailable' } })));
     const record = { lab_record_id: 'rec-1', is_publishable: true } as unknown as StrategyLabRecord;
 

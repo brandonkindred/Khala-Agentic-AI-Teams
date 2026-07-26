@@ -1,4 +1,4 @@
-import type { EntryRule, ExitRule, QualityGateResult, SizingRule, StrategyLabRecord } from '../../models';
+import type { EntryRule, ExitRule, QualityGateResult, SizingRule } from '../../models';
 import {
   ASSET_CLASS_ICONS,
   entryRuleRows,
@@ -8,7 +8,6 @@ import {
   gateSeverityClass,
   getAssetClassIcon,
   humanizeKey,
-  publishabilitySkipLabel,
   returnColor,
   returnColorLabel,
   sizingRows,
@@ -18,20 +17,6 @@ import {
 
 function makeGate(overrides: Partial<QualityGateResult> = {}): QualityGateResult {
   return { gate_name: 'g', passed: false, details: '', severity: 'warning', ...overrides };
-}
-
-function makeRecord(overrides: Partial<StrategyLabRecord> = {}): StrategyLabRecord {
-  return {
-    lab_record_id: 'lab-1',
-    is_winning: true,
-    is_publishable: false,
-    strategy_rationale: '',
-    analysis_narrative: '',
-    created_at: '',
-    strategy: {} as never,
-    backtest: {} as never,
-    ...overrides,
-  };
 }
 
 describe('returnColor', () => {
@@ -115,33 +100,9 @@ describe('gateIcon / gateSeverityClass', () => {
   });
 });
 
-describe('publishabilitySkipLabel', () => {
-  it('prefers publishability_skip_reason over paper_trading_skipped_reason', () => {
-    expect(
-      publishabilitySkipLabel(
-        makeRecord({
-          publishability_skip_reason: 'realism_failed',
-          paper_trading_skipped_reason: 'realism_failed,alignment_unresolved',
-        }),
-      ),
-    ).toBe('realism_failed');
-  });
-
-  it('falls back to paper_trading_skipped_reason when no publishability_skip_reason is set', () => {
-    expect(
-      publishabilitySkipLabel(makeRecord({ paper_trading_skipped_reason: 'alignment_unresolved' })),
-    ).toBe('alignment_unresolved');
-  });
-
-  it('treats the not_winning/disabled reasons as non-answers, returning null', () => {
-    expect(publishabilitySkipLabel(makeRecord({ paper_trading_skipped_reason: 'not_winning' }))).toBeNull();
-    expect(publishabilitySkipLabel(makeRecord({ paper_trading_skipped_reason: 'disabled' }))).toBeNull();
-  });
-
-  it('returns null when neither reason is present', () => {
-    expect(publishabilitySkipLabel(makeRecord())).toBeNull();
-  });
-});
+// publishabilitySkipLabel moved to shared/publishability.ts (services/ needed
+// it without reaching into components/); its tests moved to
+// shared/publishability.spec.ts alongside it.
 
 describe('humanizeKey', () => {
   it('title-cases a snake_case key', () => {
