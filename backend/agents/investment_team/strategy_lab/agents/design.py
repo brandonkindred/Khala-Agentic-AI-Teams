@@ -116,7 +116,8 @@ def _get_stop_order_semantics() -> str:
     global _STOP_ORDER_SEMANTICS
     if _STOP_ORDER_SEMANTICS is None:
         text = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
-        assert text, "_stop_order_semantics.md must be non-empty"
+        if not text:
+            raise ValueError("_stop_order_semantics.md must be non-empty")
         _STOP_ORDER_SEMANTICS = text
     return _STOP_ORDER_SEMANTICS
 
@@ -134,7 +135,8 @@ def _get_design_system_prompt() -> str:
     global _DESIGN_SYSTEM_PROMPT
     if _DESIGN_SYSTEM_PROMPT is None:
         body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
-        assert body, "design_system.md must be non-empty"
+        if not body:
+            raise ValueError("design_system.md must be non-empty")
         _DESIGN_SYSTEM_PROMPT = body + "\n\n" + _get_stop_order_semantics()
     return _DESIGN_SYSTEM_PROMPT
 
@@ -152,7 +154,8 @@ def _get_self_review_system_prompt() -> str:
     global _SELF_REVIEW_SYSTEM_PROMPT
     if _SELF_REVIEW_SYSTEM_PROMPT is None:
         body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
-        assert body, "design_self_review_system.md must be non-empty"
+        if not body:
+            raise ValueError("design_self_review_system.md must be non-empty")
         _SELF_REVIEW_SYSTEM_PROMPT = body + "\n\n" + _get_stop_order_semantics()
     return _SELF_REVIEW_SYSTEM_PROMPT
 

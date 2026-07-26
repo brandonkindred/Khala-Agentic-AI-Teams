@@ -48,16 +48,16 @@ beyond it. In particular: do not introduce findings it does not state, do not
 fill in file paths it does not name (leave "location" empty instead), and do
 not change its compliance verdict.
 """
-"""Formatting-pass (think=False) instructions: the JSON shape plus a
-transcribe-only guard.
-
-This pass receives ONLY the reasoning pass's prose — never the repository
-content — so it cannot audit anything. The investigative directives ("cite
-repo content", "report that as a finding", "do not invent file paths") live
-in :data:`_TSC_REASONING_INSTRUCTION`, which reaches the pass that actually
-sees the repo. Leaving them here invited a transcription-only call to invent
-a location or a spurious critical/high finding, which would flip
-``compliant``."""
+# Formatting-pass (think=False) instructions: the JSON shape plus a
+# transcribe-only guard.
+#
+# This pass receives ONLY the reasoning pass's prose — never the repository
+# content — so it cannot audit anything. The investigative directives ("cite
+# repo content", "report that as a finding", "do not invent file paths") live
+# in _TSC_REASONING_INSTRUCTION, which reaches the pass that actually sees
+# the repo. Leaving them here invited a transcription-only call to invent a
+# location or a spurious critical/high finding, which would flip
+# ``compliant``.
 
 _TSC_REASONING_INSTRUCTION = """
 Think through this carefully, then write your audit as structured prose (not JSON): a short
