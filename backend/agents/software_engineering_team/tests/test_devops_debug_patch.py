@@ -360,7 +360,8 @@ class TestDevOpsPipelineDebugPatchLoop:
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
                 {"files": {}, "summary": "doc ok"},
-            ]
+            ],
+            strict=True,
         )
 
         agent = DevOpsTeamLeadAgent(llm_client=client)
@@ -441,7 +442,8 @@ class TestDevOpsPipelineDebugPatchLoop:
                 {"approved": True, "summary": "ok"},
                 {"quality_gates": {}, "summary": "ok"},
                 {"files": {}, "summary": "doc ok"},
-            ]
+            ],
+            strict=True,
         )
 
         agent = DevOpsTeamLeadAgent(llm_client=client)
@@ -535,7 +537,8 @@ class TestDevOpsPipelineDebugPatchLoop:
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
                 {"files": {}, "summary": "doc ok"},
-            ]
+            ],
+            strict=True,
         )
 
         agent = DevOpsTeamLeadAgent(llm_client=client)
