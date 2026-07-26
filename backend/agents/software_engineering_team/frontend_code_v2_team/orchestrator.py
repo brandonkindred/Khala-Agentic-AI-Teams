@@ -19,7 +19,7 @@ from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.team_lead_base import BaseTeamLead
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, make_job_updater
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
 from . import models as _models
@@ -118,12 +118,13 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
     in the Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
-    ``_build_job_updater`` / ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
+    ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
     ``_run_execution_phase`` / ``_record_execution_bookkeeping`` /
     ``_run_documentation_phase`` / ``_run_deliver_and_finalize`` from
-    :class:`BaseV2DevelopmentAgent`; supplies the frontend tooling detection,
-    repo-briefing sets, and the integration-only ``run_workflow``, which now
-    delegates every phase to the base helpers.
+    :class:`BaseV2DevelopmentAgent` (the job-update closure itself comes from
+    the shared ``team_lead_base.make_job_updater``); supplies the frontend
+    tooling detection, repo-briefing sets, and the integration-only
+    ``run_workflow``, which now delegates every phase to the base helpers.
     """
 
     _TEAM_LABEL = "Frontend"
@@ -216,7 +217,7 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
         task_id = task.id
         start_time = time.monotonic()
         result = FrontendCodeV2WorkflowResult(task_id=task_id)
-        _update_job = self._build_job_updater(job_updater, task_id=task_id, logger=logger)
+        _update_job = make_job_updater(job_updater, task_id, logger)
 
         logger.info(
             "[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id

@@ -76,7 +76,15 @@ from .agents.analysis import AnalysisAgent, format_misalignment_prefix
 from .agents.code_synthesis import CodeSynthesisAgent, CodeSynthesisError
 from .agents.design import DesignAgent
 from .agents.design_review import DesignReviewAgent
-from .agents.refinement import RefinementAgent
+from .agents.refinement import (
+    _ALLOWED_OUTPUT_KEYS as _REFINEMENT_ALLOWED_KEYS,
+)
+from .agents.refinement import (
+    _PASSTHROUGH_FOR_ORCHESTRATOR as _REFINEMENT_PASSTHROUGH_KEYS,
+)
+from .agents.refinement import (
+    RefinementAgent,
+)
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
 from .exceptions import SpecImplementabilityError
@@ -117,13 +125,11 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 # logged + discarded by ``_apply_updates``; ``risk_limits`` is the lone
 # exception, handled with tighten-only semantics.
 #
-# NOTE: ``RefinementAgent`` enforces the same contract on its side via
+# ``RefinementAgent`` enforces the same contract on its side via
 # ``_ALLOWED_OUTPUT_KEYS`` / ``_PASSTHROUGH_FOR_ORCHESTRATOR`` in
-# ``agents/refinement.py``. The duplication is intentional — agent-side
-# narrowing is a first line of defense; orchestrator-side narrowing is
-# authoritative. Keep the two passthrough sets in sync.
-_REFINEMENT_ALLOWED_KEYS = frozenset({"changes_made"})
-_REFINEMENT_PASSTHROUGH_KEYS = frozenset({"risk_limits"})
+# ``agents/refinement.py``; agent-side narrowing is a first line of defense,
+# orchestrator-side narrowing (using these same aliases) is authoritative.
+# Imported rather than redefined so the two layers cannot drift apart.
 
 # Threshold (per ``failure_phase``) at which repeated spec-mutation attempts
 # from the refinement agent trip ``SpecImplementabilityError`` and route the
@@ -168,7 +174,7 @@ def _design_max_llm_calls() -> int:
     return env_int("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", 120, floor=1)
 
 
-MAX_CODE_REFINEMENT_ROUNDS = 50
+MAX_CODE_REFINEMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS", 50, floor=1)
 # ``WINNING_THRESHOLD`` (the S&P-500 amortized benchmark, 8.0%) is imported
 # from ``..models`` and is the single deterministic verdict floor: a valid run
 # is WINNING iff ``annualized_return_pct >= WINNING_THRESHOLD``, on every path.

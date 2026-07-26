@@ -4,9 +4,8 @@ Shared base for the code-v2 Development Agents (backend + frontend).
 ``BackendDevelopmentAgent`` and ``FrontendDevelopmentAgent`` share their
 constructor, their repo-briefing read (including the incremental
 :class:`~software_engineering_team.shared.repo_context_cache.RepoContextCache`
-fast path), their tool-runner construction, their job-update closure
-(``_build_job_updater``), their planning + feature-branch setup
-(``_run_planning_and_branch_setup``), their per-microtask-review-gated
+fast path), their tool-runner construction, their planning + feature-branch
+setup (``_run_planning_and_branch_setup``), their per-microtask-review-gated
 execution phase (``_run_execution_phase``), their post-execution bookkeeping
 (``_record_execution_bookkeeping``), their documentation phase
 (``_run_documentation_phase``), and their deliver + final status/logging
@@ -16,7 +15,9 @@ tooling detection, repo extension/exclude sets, and each team's own
 class differs per team) remain in ``run_workflow`` itself. This base holds
 the shared members; each team subclasses it and supplies the divergent parts
 via class attributes (``_TEAM_LABEL``, ``_DELIVER_IN_PROGRESS_STATUS``) and
-overrides.
+overrides. The job-update closure each ``run_workflow`` builds comes from the
+shared ``team_lead_base.make_job_updater`` rather than from this base, since
+``BaseTeamLead`` needs the identical closure for its own Setup phase.
 
 ``run_workflow`` itself deliberately stays per-team: it remains
 ``# pragma: no cover`` integration code that wires team-specific tool agents
@@ -57,37 +58,6 @@ class BaseV2DevelopmentAgent:
         # the whole repo. None (the direct-construction/test path) falls back to
         # the fresh-walk ``_read_repo_code``.
         self._repo_context_cache: Optional[RepoContextCache] = None
-
-    @staticmethod
-    def _build_job_updater(
-        job_updater: Optional[Callable[..., None]],
-        *,
-        task_id: str,
-        logger: logging.Logger,
-    ) -> Callable[..., None]:
-        """Build the ``run_workflow`` job-update closure that swallows updater failures.
-
-        Extracted from ``run_workflow`` so the "forward kwargs to job_updater,
-        log+swallow any exception at DEBUG" closure is defined once instead of
-        duplicated near-identically at the top of each team's ``run_workflow``.
-
-        Preconditions: none (``job_updater`` may be ``None``, matching the
-          keyword-argument default every ``run_workflow`` already uses).
-        Postconditions: returns a callable ``(**kwargs) -> None``. When
-          ``job_updater`` is ``None`` it is a no-op; otherwise it forwards
-          ``kwargs`` to ``job_updater`` and any exception ``job_updater``
-          raises is caught and logged at DEBUG via ``logger`` rather than
-          propagated. Never raises on its own.
-        """
-
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as exc:
-                    logger.debug("[%s] job_updater callback failed: %s", task_id, exc)
-
-        return _update_job
 
     def _build_tool_runners(self, tool_agents: Dict[Any, Any]) -> Dict[Any, Callable[..., Any]]:
         """Build run callables from tool agent instances (for the Execution phase)."""

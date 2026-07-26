@@ -55,6 +55,17 @@ from .phase2_graph import run_phase2_parallel
 # here (``str.format`` ignores the unreferenced ``scope`` kwarg).
 DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE = "feat(devops): {summary}"
 
+# Fallback runtime verification checklist used when the deployment-strategy
+# agent's output carries no health checks of its own; the required-approval
+# name for production deploys. Named so Phase 5's ReleaseReadiness assembly
+# has a single, reusable source for these defaults instead of inline literals.
+DEFAULT_RUNTIME_CHECKS = [
+    "deployment_rollout_status",
+    "service_health",
+    "alert_health",
+]
+PROD_APPROVAL = "manual_prod_approval"
+
 # Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
 # Keep list values read-only — do not mutate them in the adapter.
 _DEFAULT_LEGACY_CLOUD = "on-premises"
@@ -1017,14 +1028,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 or "rolling",
                 rollback_available=bool(deploy_result.rollback_plan),
                 alerting_configured=bool(deploy_result.alerting_configured),
-                required_approvals=["manual_prod_approval"]
+                required_approvals=[PROD_APPROVAL]
                 if "production" in task_spec.platform_scope.environments
                 else [],
-                runtime_verification_checklist=[
-                    "deployment_rollout_status",
-                    "service_health",
-                    "alert_health",
-                ],
+                runtime_verification_checklist=list(getattr(deploy_result, "health_checks", []))
+                or DEFAULT_RUNTIME_CHECKS,
             )
             # Deliver the artifacts for real via the shared inline-merge helper and
             # report the actual outcome (real branch, commit SHA, merge status) rather

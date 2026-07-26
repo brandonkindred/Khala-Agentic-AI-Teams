@@ -225,13 +225,15 @@ def get_build_status(job_id: str) -> AISystemStatusResponse:
     # completion — both the thread-mode orchestrator and the Temporal per-phase
     # activities maintain ``blueprint.completed_phases`` (checkpointed after each
     # phase), so read live progress straight from it.
-    stored_bp = data.get("blueprint")
+    stored_blueprint = data.get("blueprint")
 
     blueprint = None
-    if data.get("status") == JOB_STATUS_COMPLETED and stored_bp:
-        blueprint = AgentBlueprint(**stored_bp)
+    if data.get("status") == JOB_STATUS_COMPLETED and stored_blueprint:
+        blueprint = AgentBlueprint(**stored_blueprint)
 
-    completed_phases = stored_bp.get("completed_phases", []) if isinstance(stored_bp, dict) else []
+    completed_phases = (
+        stored_blueprint.get("completed_phases", []) if isinstance(stored_blueprint, dict) else []
+    )
 
     return AISystemStatusResponse(
         job_id=job_id,
@@ -341,10 +343,10 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
 
     # Reconstruct partial blueprint from stored data
     resume_bp = None
-    stored_bp = data.get("blueprint")
-    if stored_bp and isinstance(stored_bp, dict):
+    stored_blueprint = data.get("blueprint")
+    if stored_blueprint and isinstance(stored_blueprint, dict):
         try:
-            resume_bp = AgentBlueprint(**stored_bp)
+            resume_bp = AgentBlueprint(**stored_blueprint)
         except Exception:
             pass  # corrupt data — will re-run all phases
 

@@ -832,47 +832,6 @@ class _FakeExecutionOutput:
         self.summary = summary
 
 
-class TestBuildJobUpdater:
-    """Tests for the shared ``BaseV2DevelopmentAgent._build_job_updater`` helper."""
-
-    @staticmethod
-    def _logger():
-        import logging
-
-        return logging.getLogger("test_build_job_updater")
-
-    def test_none_job_updater_is_a_noop(self):
-        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
-
-        update_job = BaseV2DevelopmentAgent._build_job_updater(
-            None, task_id="t1", logger=self._logger()
-        )
-        update_job(progress=10, status_text="hi")  # must not raise
-
-    def test_forwards_kwargs_to_job_updater(self):
-        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
-
-        calls = []
-        update_job = BaseV2DevelopmentAgent._build_job_updater(
-            lambda **kw: calls.append(kw), task_id="t1", logger=self._logger()
-        )
-        update_job(progress=10, status_text="hi")
-        assert calls == [{"progress": 10, "status_text": "hi"}]
-
-    def test_job_updater_exception_is_swallowed_and_logged(self, caplog):
-        from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
-
-        def _boom(**kw):
-            raise RuntimeError("job update boom")
-
-        update_job = BaseV2DevelopmentAgent._build_job_updater(
-            _boom, task_id="t1", logger=self._logger()
-        )
-        with caplog.at_level("DEBUG", logger="test_build_job_updater"):
-            update_job(progress=10)  # must not raise
-        assert "job_updater callback failed: job update boom" in caplog.text
-
-
 class TestRunExecutionPhase:
     """Tests for the shared ``BaseV2DevelopmentAgent._run_execution_phase`` helper."""
 

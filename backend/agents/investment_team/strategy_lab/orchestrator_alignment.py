@@ -39,6 +39,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from shared.env_config import env_int
+
 from ..market_data_service import OHLCVBar
 from ..models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
 from ..trading_service.modes.sandbox_compat import StrategyRunResult
@@ -64,7 +66,7 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 # alignment agent to rewrite the Python code; the new code is sent back
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
-MAX_ALIGNMENT_ROUNDS = 10
+MAX_ALIGNMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS", 10, floor=1)
 
 
 class AlignmentMixin:
