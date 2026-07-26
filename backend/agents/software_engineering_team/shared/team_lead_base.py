@@ -66,6 +66,39 @@ _DEVELOPMENT_RESULT_FIELDS = (
 )
 
 
+def make_job_updater(
+    job_updater: Optional[Callable[..., None]],
+    task_id: str,
+    logger: logging.Logger,
+) -> Callable[..., None]:
+    """Build a ``**kwargs``-forwarding wrapper around an optional job-update callback.
+
+    The three code-v2 orchestrators (the shared base and the backend/frontend
+    development agents) each need to report progress through an
+    externally-supplied ``job_updater`` without letting a broken callback abort
+    the workflow. This factory is the single place that behavior lives, so the
+    three call sites cannot drift from each other the way they previously did.
+
+    Preconditions: ``task_id`` is a non-empty str; ``logger`` is a
+      ``logging.Logger``; ``job_updater``, if provided, accepts arbitrary
+      keyword arguments.
+    Postconditions: returns a callable ``_update_job(**kwargs)`` that, when
+      ``job_updater`` is falsy, is a no-op; otherwise invokes
+      ``job_updater(**kwargs)`` and, if that raises, swallows the exception and
+      logs it at DEBUG via ``logger`` rather than propagating it.
+    """
+    assert task_id, "task_id is required"
+
+    def _update_job(**kwargs: Any) -> None:
+        if job_updater:
+            try:
+                job_updater(**kwargs)
+            except Exception as exc:
+                logger.debug("[%s] job_updater failed: %s", task_id, exc)
+
+    return _update_job
+
+
 def copy_development_result_fields(dst: Any, src: Any) -> None:
     """Overlay the shared development-handoff fields from ``src`` onto ``dst``.
 
@@ -388,12 +421,7 @@ class BaseTeamLead(TeamLeadSharedState):
         task_id = task.id
         result = result_cls(task_id=task_id)
 
-        def _update_job(**kwargs: Any) -> None:
-            if job_updater:
-                try:
-                    job_updater(**kwargs)
-                except Exception as exc:
-                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
+        _update_job = make_job_updater(job_updater, task_id, logger)
 
         result.current_phase = Phase.SETUP
         _update_job(

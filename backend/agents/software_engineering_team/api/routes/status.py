@@ -102,4 +102,5 @@ def metrics_dora(window_days: float = 30.0) -> dict:
             "crash_resolved_count": 0,
             "total_cost_usd": 0.0,
             "cost_by_job": {},
+            "trace_ids_by_job": {},
         }

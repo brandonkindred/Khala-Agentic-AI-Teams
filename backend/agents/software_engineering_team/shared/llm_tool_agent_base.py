@@ -243,7 +243,8 @@ class LlmToolAgentBase:
             None.
 
         Postconditions:
-            Falsy ``model`` yields ``tier="no_model"`` with a copy of
+            Any falsy ``model`` (``None``, ``False``, ``0``, ``[]``, ``""``,
+            etc.) yields ``tier="no_model"`` with a copy of
             ``no_model_recommendations`` and ``no_model_summary``. Truthy
             ``model`` yields ``None``. Does not log.
         """

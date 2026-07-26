@@ -59,8 +59,14 @@ SCHEMA = TeamSchema(
             event_type TEXT NOT NULL,
             phase      TEXT NOT NULL DEFAULT '',
             gate       TEXT NOT NULL DEFAULT '',
-            detail     JSONB NOT NULL DEFAULT '{}'::jsonb
+            detail     JSONB NOT NULL DEFAULT '{}'::jsonb,
+            trace_id   TEXT NOT NULL DEFAULT ''
         )""",
+        # Idempotent migration for tables created before trace_id existed: the
+        # CREATE TABLE above is a no-op against an existing table, so without
+        # this, inserts/selects referencing trace_id would fail on deployments
+        # upgrading an existing database.
+        "ALTER TABLE se_events ADD COLUMN IF NOT EXISTS trace_id TEXT NOT NULL DEFAULT ''",
         "CREATE INDEX IF NOT EXISTS idx_se_events_type_ts ON se_events(event_type, ts)",
         "CREATE INDEX IF NOT EXISTS idx_se_events_job ON se_events(job_id)",
         """CREATE TABLE IF NOT EXISTS se_learnings (

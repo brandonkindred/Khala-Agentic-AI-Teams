@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import ClassVar, Iterator, Literal, Optional
+from typing import ClassVar, Iterator, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -102,3 +102,14 @@ class GateResultsMixin:
             details=details,
             rule_id=rule_id,
         )
+
+
+def join_gate_details(results: List[QualityGateResult]) -> str:
+    """Render a list of ``QualityGateResult`` objects as one ``"; "``-joined string.
+
+    Pre: ``results`` is a list of ``QualityGateResult`` (typically an
+    already-filtered critical/failing subset).
+    Post: returns ``"; ".join(r.details for r in results)`` — the empty
+    string when ``results`` is empty.
+    """
+    return "; ".join(r.details for r in results)

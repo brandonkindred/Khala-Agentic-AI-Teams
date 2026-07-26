@@ -12,7 +12,14 @@ from software_engineering_team.shared import se_events
 _BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _ev(event_type: str, *, offset_s: float = 0.0, job_id: str = "", task_id: str = "") -> dict:
+def _ev(
+    event_type: str,
+    *,
+    offset_s: float = 0.0,
+    job_id: str = "",
+    task_id: str = "",
+    trace_id: str = "",
+) -> dict:
     return {
         "ts": _BASE + timedelta(seconds=offset_s),
         "event_type": event_type,
@@ -21,6 +28,7 @@ def _ev(event_type: str, *, offset_s: float = 0.0, job_id: str = "", task_id: st
         "phase": "",
         "gate": "",
         "detail": {},
+        "trace_id": trace_id,
     }
 
 
@@ -246,6 +254,34 @@ def test_mttr_pairs_by_task_id_not_just_job() -> None:
     m = compute_from_events(events, 30.0)
     assert m.crash_resolved_count == 3
     assert m.mttr_seconds_median == pytest.approx(20.0)  # median(1, 20, 100)
+
+
+def test_trace_ids_by_job_populated_from_events() -> None:
+    """trace_ids_by_job maps each job with a trace-bearing event to that trace_id."""
+    events = [
+        _ev(se_events.TASK_CREATED, job_id="j1", task_id="t1", trace_id="trace-j1"),
+        _ev(se_events.TASK_MERGED, offset_s=10, job_id="j1", task_id="t1", trace_id="trace-j1"),
+        _ev(se_events.MERGE_TO_MAIN, job_id="j2", trace_id="trace-j2"),
+    ]
+    m = compute_from_events(events, 30.0)
+    assert m.trace_ids_by_job == {"j1": "trace-j1", "j2": "trace-j2"}
+
+
+def test_trace_ids_by_job_omits_jobs_without_a_trace_id() -> None:
+    """A job whose events carry no trace_id is omitted, not mapped to an empty string."""
+    events = [_ev(se_events.MERGE_TO_MAIN, job_id="j1", trace_id="")]
+    m = compute_from_events(events, 30.0)
+    assert m.trace_ids_by_job == {}
+
+
+def test_trace_ids_by_job_uses_latest_when_a_job_rebinds() -> None:
+    """A resumed job that rebinds a new trace_id reports the most recent one."""
+    events = [
+        _ev(se_events.TASK_CREATED, offset_s=0, job_id="j1", trace_id="trace-old"),
+        _ev(se_events.TASK_MERGED, offset_s=100, job_id="j1", trace_id="trace-new"),
+    ]
+    m = compute_from_events(events, 30.0)
+    assert m.trace_ids_by_job == {"j1": "trace-new"}
 
 
 def test_to_dict_round_trips_fields() -> None:

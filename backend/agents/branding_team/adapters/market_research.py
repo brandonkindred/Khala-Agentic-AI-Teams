@@ -12,6 +12,7 @@ import httpx
 from branding_team.models import BrandingMission, CompetitiveSnapshot
 from branding_team.shared.coro_runner import run_coroutine
 from shared.env_config import env_float
+from shared.http.job_polling import async_post_json
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
@@ -90,16 +91,20 @@ async def request_market_research_async(
     request_timeout = _request_timeout_s()
     total_timeout = _total_timeout_s()
     poll_interval = _poll_interval_s()
+    submitted = await async_post_json(
+        f"{root}/market-research/run",
+        payload,
+        timeout=request_timeout,
+        log_context="Market research submit",
+    )
+    if submitted is None:
+        raise RuntimeError("Market research request failed: submit request failed")
+    job_id = submitted.get("job_id")
+    if not job_id:
+        raise RuntimeError("Market research submit returned no job_id")
+
     try:
         async with httpx.AsyncClient() as client:
-            submit = await client.post(
-                f"{root}/market-research/run", json=payload, timeout=request_timeout
-            )
-            submit.raise_for_status()
-            job_id = submit.json().get("job_id")
-            if not job_id:
-                raise RuntimeError("Market research submit returned no job_id")
-
             deadline = time.monotonic() + total_timeout
             while True:
                 status = await client.get(

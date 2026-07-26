@@ -312,6 +312,52 @@ async def test_async_aclose_pool_under_running_loop_awaits_without_asyncio_run()
     assert client not in [e.client for e in shared.http._async_clients.values()]  # noqa: SLF001
 
 
+def test_async_aclose_pool_only_current_loop_spares_other_running_loops():
+    """only_current_loop=True must not touch a client owned by another live loop.
+
+    Guards against a concurrent-request regression: two unrelated coroutines
+    can each own a pooled client on their own loop at the same time (e.g. two
+    offloaded asyncio.run calls on separate worker threads sharing this
+    process-wide pool). Tearing down one must never sever the other's
+    in-flight client.
+    """
+    import threading
+
+    owner_loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _drive():
+        asyncio.set_event_loop(owner_loop)
+        owner_loop.call_soon(ready.set)
+        owner_loop.run_forever()
+
+    thread = threading.Thread(target=_drive, daemon=True)
+    thread.start()
+    try:
+        ready.wait(timeout=5.0)
+        other_client = asyncio.run_coroutine_threadsafe(_grab_async_client(15.0), owner_loop).result(timeout=5.0)
+
+        async def _body():
+            mine = get_pooled_async_client(15.0)
+            await aclose_async_pool(only_current_loop=True)
+            assert mine.is_closed
+            assert not other_client.is_closed
+
+        asyncio.run(_body())
+        assert any(
+            entry.client is other_client
+            for entry in shared.http._async_clients.values()  # noqa: SLF001
+        )
+        # Close the still-open client on its owning loop while that loop is
+        # still running, rather than leaving it open when the loop is closed.
+        asyncio.run_coroutine_threadsafe(aclose_async_pool(), owner_loop).result(timeout=5.0)
+        assert other_client.is_closed
+    finally:
+        owner_loop.call_soon_threadsafe(owner_loop.stop)
+        thread.join(timeout=5.0)
+        owner_loop.close()
+
+
 def test_async_close_pool_closes_even_when_caller_has_running_loop():
     """Sync close under a live owning loop schedules aclose (no foreign asyncio.run)."""
 
