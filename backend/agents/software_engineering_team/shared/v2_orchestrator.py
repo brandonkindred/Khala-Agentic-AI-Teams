@@ -5,19 +5,23 @@ Shared base for the code-v2 Development Agents (backend + frontend).
 constructor, their repo-briefing read (including the incremental
 :class:`~software_engineering_team.shared.repo_context_cache.RepoContextCache`
 fast path), their tool-runner construction, their planning + feature-branch
-setup (``_run_planning_and_branch_setup``), their post-execution
-bookkeeping (``_record_execution_bookkeeping``), their documentation phase
+setup (``_run_planning_and_branch_setup``), their per-microtask-review-gated
+execution phase (``_run_execution_phase``), their post-execution bookkeeping
+(``_record_execution_bookkeeping``), their documentation phase
 (``_run_documentation_phase``), and their deliver + final status/logging
 (``_run_deliver_and_finalize``) verbatim; only the per-team tool-agent roster,
-tooling detection, repo extension/exclude sets, and the remainder of the
-integration-only ``run_workflow`` (execution) differ. This base holds the
-shared members; each team subclasses it and supplies the divergent parts via
-class attributes (``_TEAM_LABEL``, ``_DELIVER_IN_PROGRESS_STATUS``) and overrides.
+tooling detection, repo extension/exclude sets, and each team's own
+``ReviewDependencies``/``MicrotaskReviewConfig`` construction (the config
+class differs per team) remain in ``run_workflow`` itself. This base holds
+the shared members; each team subclasses it and supplies the divergent parts
+via class attributes (``_TEAM_LABEL``, ``_DELIVER_IN_PROGRESS_STATUS``) and
+overrides. The job-update closure each ``run_workflow`` builds comes from the
+shared ``team_lead_base.make_job_updater`` rather than from this base, since
+``BaseTeamLead`` needs the identical closure for its own Setup phase.
 
-The still-divergent parts of ``run_workflow`` deliberately stay per-team: they
-are ``# pragma: no cover`` integration code carrying team-specific
-status/progress/result wiring, so converging them safely is a separate,
-test-guarded change rather than part of this base.
+``run_workflow`` itself deliberately stays per-team: it remains
+``# pragma: no cover`` integration code that wires team-specific tool agents
+and result types, but every phase of it now delegates to a base-class helper.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
-from software_engineering_team.shared.v2_models import Phase
+from software_engineering_team.shared.v2_models import MicrotaskReviewFailedError, Phase
 
 
 class BaseV2DevelopmentAgent:
@@ -307,6 +311,111 @@ class BaseV2DevelopmentAgent:
                 logger.warning("[%s] Git agent create_feature_branch raised: %s", task_id, exc)
 
         return planning_result, feature_branch_name, None
+
+    @staticmethod
+    def _run_execution_phase(
+        *,
+        task_id: str,
+        task: Any,
+        planning_result: Any,
+        repo_path: Path,
+        architecture: Any,
+        spec_content: str,
+        existing_code: str,
+        tool_runners: Dict[Any, Callable[..., Any]],
+        progress_callback: Callable[..., None],
+        review_deps: Any,
+        review_config: Any,
+        llm: LLMClient,
+        result: Any,
+        run_execution_with_review_gates: Callable[..., Any],
+        update_job: Callable[..., None],
+        logger: logging.Logger,
+        status_text: str,
+    ) -> Optional[Dict[str, str]]:
+        """Run the review-gated execution loop and return the produced files.
+
+        Extracted from ``run_workflow`` so the execution-phase status update +
+        review-gated execution invocation + exception handling + empty-files
+        check is defined once. ``run_execution_with_review_gates`` is injected
+        (the caller's own late-imported module-level name) so tests that
+        monkeypatch a team's orchestrator module (``orch.run_execution_with_review_gates``)
+        keep working unchanged, matching ``_run_deliver_and_finalize``'s pattern.
+        ``progress_callback`` is built by the caller via
+        ``self._build_progress_callback(update_job, review_label=...)`` before
+        this is called, since that factory is already its own extracted helper
+        and the one real per-team difference (``review_label``) is resolved
+        there rather than duplicated here. ``review_deps`` (a
+        ``ReviewDependencies``, itself defined once in ``shared.phases.execution``
+        and reused verbatim by both teams' ``phases/execution.py``) and
+        ``review_config`` (the team's already-resolved ``MicrotaskReviewConfig``,
+        i.e. ``review_config or MicrotaskReviewConfig()`` -- left to the caller
+        since that class differs per team) are passed in fully constructed.
+        ``MicrotaskReviewFailedError`` is imported directly from
+        ``shared.v2_models`` rather than injected: each team's ``models.py``
+        re-exports the identical class object, so catching the shared import
+        here still catches whatever ``run_execution_with_review_gates`` raises.
+        ``status_text`` is parameterized because backend and frontend differ
+        (``"Starting code implementation"`` vs. ``"Starting code
+        implementation..."``); the "Next step -> Starting Phase: Execution"
+        log line is unified across both teams (backend previously logged
+        "...Phase 2: Execution") since no test asserts on the exact log text.
+
+        Preconditions: ``result`` exposes writable ``current_phase``,
+          ``execution_result``, and ``failure_reason`` attributes.
+          ``run_execution_with_review_gates`` follows the team
+          ``run_execution_with_review_gates`` keyword signature.
+        Postconditions: ``result.current_phase`` is ``Phase.EXECUTION``. On
+          success, ``result.execution_result`` is set and this returns the
+          produced (non-empty) ``files`` dict. On a
+          ``MicrotaskReviewFailedError``, a generic exception, or an empty
+          ``files`` result, sets ``result.failure_reason`` (logged via
+          ``logger.error`` for the first two; the empty-files case matches
+          prior behavior and is not logged) and returns ``None``; the
+          caller's contract is to ``return result`` immediately in that case,
+          exactly as ``run_workflow`` does today. Never raises on its own.
+        """
+        logger.info("[%s] Next step -> Starting Phase: Execution", task_id)
+        result.current_phase = Phase.EXECUTION
+        update_job(
+            current_phase="execution",
+            current_microtask="",
+            progress=15,
+            status_text=status_text,
+        )
+
+        try:  # pragma: no cover  # integration-only: runs review-gated execution loop against live LLM + build/lint/test tooling
+            exec_result = run_execution_with_review_gates(
+                llm=llm,
+                task=task,
+                planning_result=planning_result,
+                repo_path=repo_path,
+                architecture=architecture,
+                spec_content=spec_content,
+                existing_code=existing_code,
+                tool_runners=tool_runners,
+                progress_callback=progress_callback,
+                review_config=review_config,
+                review_deps=review_deps,
+            )
+            result.execution_result = exec_result
+        except MicrotaskReviewFailedError as err:
+            result.failure_reason = (
+                f"Microtask {err.microtask.id} failed review: {err.review_result.summary}"
+            )
+            logger.error("[%s] %s", task_id, result.failure_reason)
+            return None
+        except Exception as exc:
+            result.failure_reason = f"Execution failed: {exc}"
+            logger.error("[%s] %s", task_id, result.failure_reason)
+            return None
+
+        current_files = exec_result.files
+        if not current_files:
+            result.failure_reason = "Execution produced no files."
+            return None
+
+        return current_files
 
     @staticmethod
     def _record_execution_bookkeeping(

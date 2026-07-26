@@ -26,7 +26,6 @@ from . import models as _models
 from .models import (
     FrontendCodeV2WorkflowResult,
     MicrotaskReviewConfig,
-    MicrotaskReviewFailedError,
     Phase,
     ToolAgentKind,
 )
@@ -120,12 +119,12 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
 
     Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
     ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
-    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
-    ``_run_deliver_and_finalize`` from :class:`BaseV2DevelopmentAgent`; supplies
-    the frontend tooling detection, repo-briefing sets, and the
-    integration-only ``run_workflow``, which calls the base helpers for
-    preflight, planning/branch setup, bookkeeping, documentation, and
-    deliver/finalize.
+    ``_run_execution_phase`` / ``_record_execution_bookkeeping`` /
+    ``_run_documentation_phase`` / ``_run_deliver_and_finalize`` from
+    :class:`BaseV2DevelopmentAgent` (the job-update closure itself comes from
+    the shared ``team_lead_base.make_job_updater``); supplies the frontend
+    tooling detection, repo-briefing sets, and the integration-only
+    ``run_workflow``, which now delegates every phase to the base helpers.
     """
 
     _TEAM_LABEL = "Frontend"
@@ -218,7 +217,6 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
         task_id = task.id
         start_time = time.monotonic()
         result = FrontendCodeV2WorkflowResult(task_id=task_id)
-
         _update_job = make_job_updater(job_updater, task_id, logger)
 
         logger.info(
@@ -270,15 +268,6 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
             return result
         result.planning_result = planning_result
 
-        logger.info("[%s] Next step -> Starting Phase: Execution", task_id)
-        result.current_phase = Phase.EXECUTION
-        _update_job(
-            current_phase="execution",
-            current_microtask="",
-            progress=15,
-            status_text="Starting code implementation...",
-        )
-
         progress_callback = self._build_progress_callback(_update_job, review_label="Reviewing")
 
         review_deps = ReviewDependencies(
@@ -292,36 +281,28 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
 
         config = review_config or MicrotaskReviewConfig()
 
-        try:  # pragma: no cover  # integration-only: runs review-gated execution loop against live LLM + npm/ng
-            exec_result = run_execution_with_review_gates(
-                llm=self.llm,
-                task=task,
-                planning_result=planning_result,
-                repo_path=repo_path,
-                architecture=architecture,
-                spec_content=spec_content,
-                existing_code=existing_code,
-                tool_runners=tool_runners,
-                progress_callback=progress_callback,
-                review_config=config,
-                review_deps=review_deps,
-            )
-            result.execution_result = exec_result
-        except MicrotaskReviewFailedError as err:
-            result.failure_reason = (
-                f"Microtask {err.microtask.id} failed review: {err.review_result.summary}"
-            )
-            logger.error("[%s] %s", task_id, result.failure_reason)
+        current_files = self._run_execution_phase(
+            task_id=task_id,
+            task=task,
+            planning_result=planning_result,
+            repo_path=repo_path,
+            architecture=architecture,
+            spec_content=spec_content,
+            existing_code=existing_code,
+            tool_runners=tool_runners,
+            progress_callback=progress_callback,
+            review_deps=review_deps,
+            review_config=config,
+            llm=self.llm,
+            result=result,
+            run_execution_with_review_gates=run_execution_with_review_gates,
+            update_job=_update_job,
+            logger=logger,
+            status_text="Starting code implementation...",
+        )
+        if current_files is None:
             return result
-        except Exception as exc:
-            result.failure_reason = f"Execution failed: {exc}"
-            logger.error("[%s] %s", task_id, result.failure_reason)
-            return result
-
-        current_files = exec_result.files
-        if not current_files:
-            result.failure_reason = "Execution produced no files."
-            return result
+        exec_result = result.execution_result
 
         completed_count, failed_count = self._record_execution_bookkeeping(
             task_id=task_id,
