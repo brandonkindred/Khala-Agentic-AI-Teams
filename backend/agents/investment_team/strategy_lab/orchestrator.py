@@ -7,6 +7,34 @@ Pipeline:
    runs cleanly and produces valid trade output
 3. Backtest evaluation: compute metrics and check for anomalies
 4. Strands Agent generates post-backtest narrative
+
+Module layout — ``StrategyLabOrchestrator`` used to be a single ~3500-line
+class; it is now composed from mixins, each a verbatim, behavior-preserving
+extraction of one cohesive pipeline cluster:
+
+- ``orchestrator_design.py`` (``DesignMixin``) — the design <-> review loop.
+- ``orchestrator_synthesis.py`` (``SynthesisMixin``) — the code-synthesis /
+  refinement loop and anomaly recovery.
+- ``orchestrator_alignment.py`` (``AlignmentMixin``) — the trade-alignment
+  audit/fix loop.
+- ``orchestrator_verification.py`` (``VerificationMixin``) — the
+  verification phase and publication-veto decisions.
+- ``orchestrator_record_assembly.py`` (``RecordAssemblyMixin``) — building
+  the final ``StrategyLabRecord`` (and its short-circuit variant).
+- ``_orchestrator_helpers.py`` — pure helpers and outcome dataclasses
+  shared by this file and all five mixins above; nothing in it depends on
+  ``StrategyLabOrchestrator`` or any mixin.
+
+This file keeps ``StrategyLabOrchestrator.__init__``, the cross-cluster glue
+methods that call into more than one mixin
+(``_orchestrate_refinement_and_alignment``,
+``_orchestrate_verification_and_analysis``,
+``_extract_findings_and_assemble_record``), and whatever else each mixin's
+own module docstring lists as staying on the base class. Every extracted
+module re-exports, in a labeled block near the end of this file, any
+module-level symbol external callers historically imported via
+``investment_team.strategy_lab.orchestrator`` — check those blocks (and the
+mixin's module docstring) before assuming a symbol lives here.
 """
 
 from __future__ import annotations
