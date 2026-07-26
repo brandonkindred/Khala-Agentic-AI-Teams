@@ -722,6 +722,10 @@ def test_create_brand_with_conversation_already_attached_returns_409() -> None:
     )
     assert second.status_code == 409
 
+    # The failed second brand must not be left behind as an orphan.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert [b["id"] for b in brands] == [first.json()["id"]]
+
 
 def test_create_brand_with_unknown_conversation_id_returns_404() -> None:
     """A conversation_id that doesn't exist yields 404, not a silent auto-create."""
@@ -738,6 +742,10 @@ def test_create_brand_with_unknown_conversation_id_returns_404() -> None:
         },
     )
     assert resp.status_code == 404
+
+    # The brand committed before the conversation check failed must not survive.
+    brands = client.get(f"/clients/{client_id}/brands").json()
+    assert brands == []
 
 
 def test_list_clients_pagination_query_params() -> None:

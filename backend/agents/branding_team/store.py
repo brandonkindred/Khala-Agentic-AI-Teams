@@ -28,7 +28,7 @@ from psycopg import Cursor
 from psycopg.types.json import Json
 
 from shared.postgres.metrics import timed_query
-from user_profile import ArtifactType, record_association_safe
+from user_profile import ArtifactType, record_association_safe, remove_association_safe
 
 from ._db import PostgresHelperMixin
 from .models import (
@@ -299,6 +299,25 @@ class BrandingStore(PostgresHelperMixin):
         # never raises, so a link failure can't break brand creation.
         record_association_safe(ArtifactType.BRAND, "branding", brand_id, label=brand.name)
         return brand
+
+    @timed_query(store=_STORE, op="delete_brand")
+    def delete_brand(self, client_id: str, brand_id: str) -> bool:
+        """Delete a brand row and its best-effort profile association.
+
+        Postconditions:
+            Returns True iff a brand row was deleted; False (not an error)
+            when no such row exists for this client — the expected outcome
+            when a concurrent request already deleted it. Callers use this to
+            roll back a brand ``create_brand`` committed moments earlier once
+            a subsequent conversation attach fails.
+        """
+        deleted = self._execute(
+            "DELETE FROM branding_brands WHERE id = %s AND client_id = %s",
+            (brand_id, client_id),
+        )
+        if deleted > 0:
+            remove_association_safe(ArtifactType.BRAND, brand_id)
+        return deleted > 0
 
     @timed_query(store=_STORE, op="update_brand")
     def update_brand(
