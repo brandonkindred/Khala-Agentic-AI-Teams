@@ -161,7 +161,6 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # --- Prompts / parsing ------------------------------------------------
     review_prompt: Optional[str] = None
     problem_solving_prompt: Optional[str] = None
-    max_code_chars: int = 12_000
     max_relevant_code_chars: int = DEFAULT_MAX_RELEVANT_CODE_CHARS
     review_parse_mode: str = "text"  # "text" | "json"
     uses_json_model: bool = False
@@ -219,9 +218,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         return self._invoke_llm(model, prompt)
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
-        return "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:20])[
-            : self.max_code_chars
-        ]
+        return "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_files.items())
 
     def _problem_solving_kwargs(self, inp) -> Dict[str, Any]:
         """Extra ``.format`` kwargs for the single-issue prompt.

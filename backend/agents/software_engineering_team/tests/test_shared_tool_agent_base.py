@@ -127,7 +127,6 @@ class _DemoAgent(BaseReviewToolAgent):
     problem_solve_sources = ("demo",)
     review_prompt = "task={task_description} code={code}"
     problem_solving_prompt = "src={source} sev={severity} desc={description} fp={file_path} rec={recommendation} code={current_code}"
-    max_code_chars = 1000
     review_parse_mode = "text"
     default_recommendation = "Fix demo."
     plan_recommendations = ["do a demo thing"]

@@ -294,7 +294,6 @@ class TestTestingQACollapse:
             "empty_label",
             "issue_source",
             "problem_solve_sources",
-            "max_code_chars",
             "max_relevant_code_chars",
             "review_parse_mode",
             "plan_summary",
