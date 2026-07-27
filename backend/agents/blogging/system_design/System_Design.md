@@ -261,18 +261,6 @@ classDiagram
         +Exception cause
     }
 
-    class LLMError {
-        +int status_code
-    }
-
-    class LLMRateLimitError
-    class LLMTemporaryError
-    class LLMUnreachableError
-
-    class LLMJsonParseError {
-        +str response_preview
-    }
-
     class ResearchError {
         +int sources_found
     }
@@ -304,7 +292,6 @@ classDiagram
 
     class PublicationError
 
-    BloggingError <|-- LLMError
     BloggingError <|-- ResearchError
     BloggingError <|-- PlanningError
     BloggingError <|-- DraftError
@@ -313,11 +300,9 @@ classDiagram
     BloggingError <|-- FactCheckError
     BloggingError <|-- ValidationError
     BloggingError <|-- PublicationError
-    LLMError <|-- LLMRateLimitError
-    LLMError <|-- LLMTemporaryError
-    LLMError <|-- LLMUnreachableError
-    LLMError <|-- LLMJsonParseError
 ```
+
+LLM-specific errors (`LLMError`, `LLMRateLimitError`, `LLMTemporaryError`, `LLMUnreachableAfterRetriesError`, `LLMJsonParseError`) are raised and caught via `llm_service.interface`, not this hierarchy.
 
 **Design decision**: Each error includes a `phase` field so the orchestrator can update the job store with `failed_phase` without parsing the exception type. `PlanningError` carries a `failure_reason` enum (`MAX_ITERATIONS_REACHED`, `INFEASIBLE_SCOPE`, `PARSE_FAILURE`, `MODEL_ABORT`) for API consumers.
 

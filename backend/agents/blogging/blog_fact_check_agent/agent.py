@@ -25,13 +25,10 @@ from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
 
 try:
-    from agents.blogging.shared.errors import FactCheckError, LLMError
+    from agents.blogging.shared.errors import FactCheckError
 except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared.errors; not exercised because conftest guarantees the import path resolves.
 
     class FactCheckError(Exception):
-        pass
-
-    class LLMError(Exception):
         pass
 
 

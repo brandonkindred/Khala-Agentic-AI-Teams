@@ -15,23 +15,35 @@ from agent_cognition.tools.binding import (
     bind_tools,
 )
 from agent_git_tools import GitToolContext
-from integrations.registry import IntegrationRegistry, ProviderConfig
 
 
 def _git_ctx(tmp_path) -> GitToolContext:
     return GitToolContext(repo_path=tmp_path)
 
 
-def _http_registry() -> IntegrationRegistry:
-    return IntegrationRegistry(
-        [
-            ProviderConfig(
-                name="http_api",
-                transport="api",
-                capabilities=["http"],
-                description="Generic HTTP API integration.",
-            )
-        ]
+class _FakeProvider:
+    """Minimal integration-provider stand-in: bind_tools only reads `.description`."""
+
+    def __init__(self, name: str, description: str = "") -> None:
+        self.name = name
+        self.description = description
+
+
+class _FakeIntegrationRegistry:
+    """Minimal IntegrationRegistry stand-in: bind_tools only calls `.get_provider(id)`."""
+
+    def __init__(self, providers: list[_FakeProvider]) -> None:
+        self._providers = {p.name: p for p in providers}
+
+    def get_provider(self, name: str) -> _FakeProvider:
+        if name not in self._providers:
+            raise LookupError(name)
+        return self._providers[name]
+
+
+def _http_registry() -> _FakeIntegrationRegistry:
+    return _FakeIntegrationRegistry(
+        [_FakeProvider("http_api", description="Generic HTTP API integration.")]
     )
 
 
@@ -126,11 +138,7 @@ def test_unknown_id_when_registries_raise_falls_through_to_error() -> None:
 
 def test_function_name_collision_errors(tmp_path) -> None:
     # Two integration providers that synthesize the same function name collide.
-    reg = IntegrationRegistry(
-        [
-            ProviderConfig(name="dup", transport="api", capabilities=[]),
-        ]
-    )
+    reg = _FakeIntegrationRegistry([_FakeProvider("dup")])
     with pytest.raises(ToolBindingError, match="collides"):
         # Declaring the same provider twice yields the same `dup__call` name.
         bind_tools(["dup", "dup"], integration_registry=reg)
