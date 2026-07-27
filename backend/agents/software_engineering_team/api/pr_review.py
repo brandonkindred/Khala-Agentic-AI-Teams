@@ -1131,7 +1131,10 @@ def _partition_review_issues(
           reviews, which never tag, are unaffected).
         - ``proposals`` is :func:`_detect_duplicate_proposals` applied to
           ``proposal_from_findings`` over each :func:`group_similar_findings`
-          group of ``preexisting_issues``.
+          group of ``preexisting_issues``, with any proposal matched to an
+          already-open GitHub issue (``matched_existing: True``) then dropped —
+          it is already tracked, so ``proposals`` only ever carries genuinely
+          new candidates for a human to consider.
         - When ``pr_issues`` is non-empty, it is first partitioned against
           :func:`_fetch_existing_comments` via
           :func:`partition_issues_by_existing_comments`, producing the
@@ -1176,6 +1179,8 @@ def _partition_review_issues(
     finding_groups = group_similar_findings(preexisting_issues)
     proposals = [proposal_from_findings(g, idx) for idx, g in enumerate(finding_groups)]
     proposals = _detect_duplicate_proposals(proposals, client, owner, repo, pr_number)
+    # Already tracked by an existing open GitHub issue -- nothing new to report.
+    proposals = [p for p in proposals if not p.get("matched_existing")]
 
     # Recognize findings that duplicate a comment already on the PR (from a
     # prior review run, or a human), so an evolving PR does not accumulate
@@ -1418,12 +1423,11 @@ def _finalize_review_outcome(
         "addressed_issues_dropped": len(partition.addressed_issues),
         # Pre-existing bugs the reviewer flagged in unchanged code, offered
         # to a human on the Code Review page as GitHub-issue candidates.
-        # Not posted on this PR. Each carries a stable ``id``. ``issue_url``/
-        # ``issue_number`` start unset, UNLESS annotate_duplicate_proposals
-        # already matched the finding to an existing open issue -- in which
-        # case they're pre-filled with that issue's identity and
-        # ``matched_existing`` is True, so the proposal is never offered as
-        # a fresh "create issue" candidate.
+        # Not posted on this PR. Each carries a stable ``id`` and unset
+        # ``issue_url``/``issue_number``. A finding annotate_duplicate_proposals
+        # matched to an existing open issue is already tracked, so
+        # _partition_review_issues drops it before it ever reaches here --
+        # every entry below is a genuinely new candidate.
         "pending_issue_proposals": partition.proposals,
     }
     if posting.comments_failed:
