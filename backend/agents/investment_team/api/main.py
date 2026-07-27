@@ -658,6 +658,15 @@ class PromotionDecisionResponse(BaseModel):
 
 
 class WorkflowStatusResponse(BaseModel):
+    """Trading-mode + audit/queue snapshot for the current workflow state.
+
+    Not a ``WorkflowStatus``-equivalent enum: investment_team has no
+    run-lifecycle status comparable to branding_team's or
+    market_research_team's ``WorkflowStatus``. See
+    ``backend/shared/hitl/README.md`` ("Non-shared: team WorkflowStatus")
+    for the full cross-team decision record.
+    """
+
     mode: str
     audit_log: List[str] = Field(default_factory=list)
     queue_counts: Dict[str, int] = Field(default_factory=dict)
