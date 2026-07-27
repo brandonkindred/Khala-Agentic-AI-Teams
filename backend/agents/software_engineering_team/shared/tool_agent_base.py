@@ -43,8 +43,13 @@ from software_engineering_team.shared.v2_models import (
     ToolAgentPhaseOutput,
 )
 
-# Default per-issue context budget (subclasses may override via class attr).
-DEFAULT_MAX_RELEVANT_CODE_CHARS = 8_000
+# Default per-issue context budget for the single-issue fix prompt (subclasses
+# may override via class attr). Deliberately generous (on the same scale as
+# CODE_REVIEW_ABS_CHUNK_CHARS in context_sizing.py): unlike the review phase's
+# read-only code context, this feeds a prompt the model edits, so truncating
+# it risks a broken fix — the cap exists only to bound a pathological single
+# file, not to restrict normal usage.
+DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
 
 
 def relevant_code_for_issue(
