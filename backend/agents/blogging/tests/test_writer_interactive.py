@@ -67,6 +67,32 @@ def test_identify_uncertainty_questions_no_array(monkeypatch) -> None:
     assert a.identify_uncertainty_questions("d", "p") == []
 
 
+def test_identify_uncertainty_questions_markdown_link_before_array(monkeypatch) -> None:
+    """A Markdown link before the questions array must not block extraction.
+
+    Regression test: naive first-``[``/last-``]`` slicing would grab the
+    Markdown link's brackets and fail to parse; the robust
+    ``_extract_json_array_from_text`` scan skips non-array ``[`` occurrences.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+    response = "See [docs](https://example.com/guide) for context.\n\n" + json.dumps(
+        [
+            {
+                "question_id": "q1",
+                "question": "What audience?",
+                "context": "ctx",
+                "section": "Intro",
+            }
+        ]
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": response)
+    out = a.identify_uncertainty_questions("draft", "plan")
+    assert len(out) == 1
+    assert out[0].question_id == "q1"
+
+
 def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> None:
     """Items missing `question` are skipped; missing `question_id` gets an auto id."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent

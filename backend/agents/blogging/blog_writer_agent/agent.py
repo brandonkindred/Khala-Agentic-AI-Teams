@@ -1402,17 +1402,14 @@ class BlogWriterAgent(_BlogAgentBase):
             # NOTE: use ``_call_text`` (not ``_call_agent_json``). The prompt asks
             # for a top-level JSON *array*, but JSON-mode adapters constrain
             # output to a single object, so a JSON-mode call can wrap or empty
-            # the array. The slicer below extracts ``[...]`` from prose.
+            # the array. ``_extract_json_array_from_text`` extracts ``[...]``
+            # from prose, skipping Markdown links and other non-array ``[``.
             raw = self._call_text(
                 prompt,
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
             )
             cleaned = raw.strip()
-            start = cleaned.find("[")
-            end = cleaned.rfind("]") + 1
-            if start == -1 or end <= start:
-                return []
-            items = json.loads(cleaned[start:end])
+            items = _extract_json_array_from_text(cleaned)
             if not items:
                 return []
             questions = []
