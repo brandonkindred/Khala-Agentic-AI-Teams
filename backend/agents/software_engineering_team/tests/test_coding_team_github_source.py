@@ -173,6 +173,15 @@ class TestClientSubIssues:
         subs = client.list_sub_issues("o", "r", 1)
         assert [s.number for s in subs] == [10, 11, 12]
 
+    def test_non_404_error_raises_even_with_not_found_ok(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, text="boom")
+
+        client = _client_with(handler)
+        with pytest.raises(GitHubAPIError) as exc_info:
+            client.list_sub_issues("o", "r", 7)
+        assert exc_info.value.status == 500
+
 
 class TestClientGetIssue:
     def test_rejects_pr(self) -> None:
@@ -429,6 +438,122 @@ class TestClientRetries:
         assert repo.default_branch == "main"
         assert len(slept) == 1
 
+    def test_rate_limit_not_retried_when_not_first_attempt(self) -> None:
+        # The rate-limit branch only fires when attempt == 0. Force a 502 retry
+        # first (bumping attempt to 1), then return a rate-limited 403: it must
+        # fall straight through to _check (which raises), not sleep again.
+        slept: list[float] = []
+        calls = {"n": 0}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(502, json={"message": "bad gateway"})
+            return httpx.Response(
+                403,
+                json={"message": "rate limited"},
+                headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "0"},
+            )
+
+        transport = httpx.MockTransport(handler)
+        client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
+        client._client.close()  # type: ignore[attr-defined]
+        client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
+
+        with pytest.raises(GitHubAPIError) as exc_info:
+            client.get_repo("o", "r")
+        assert exc_info.value.status == 403
+        # Only the one 502-retry sleep; the 403 on attempt 1 must not sleep again.
+        assert len(slept) == 1
+
+    def test_rate_limit_missing_reset_header_defaults_wait_to_one_second(self) -> None:
+        slept: list[float] = []
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            if not slept:
+                return httpx.Response(
+                    403,
+                    json={"message": "rate limited"},
+                    headers={"X-RateLimit-Remaining": "0"},
+                )
+            return httpx.Response(200, json={"default_branch": "main"})
+
+        transport = httpx.MockTransport(handler)
+        client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
+        client._client.close()  # type: ignore[attr-defined]
+        client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
+
+        repo = client.get_repo("o", "r")
+        assert repo.default_branch == "main"
+        assert slept == [1.0]
+
+    def test_rate_limit_non_numeric_reset_header_defaults_wait_to_one_second(self) -> None:
+        slept: list[float] = []
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            if not slept:
+                return httpx.Response(
+                    403,
+                    json={"message": "rate limited"},
+                    headers={
+                        "X-RateLimit-Remaining": "0",
+                        "X-RateLimit-Reset": "not-a-number",
+                    },
+                )
+            return httpx.Response(200, json={"default_branch": "main"})
+
+        transport = httpx.MockTransport(handler)
+        client = GitHubClient(token="t", sleep=lambda s: slept.append(s))
+        client._client.close()  # type: ignore[attr-defined]
+        client._client = httpx.Client(transport=transport, timeout=10)  # type: ignore[attr-defined]
+
+        repo = client.get_repo("o", "r")
+        assert repo.default_branch == "main"
+        assert slept == [1.0]
+
+    def test_403_without_rate_limit_headers_raises_immediately(self) -> None:
+        calls = {"n": 0}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(403, json={"message": "forbidden"})
+
+        client = _client_with(handler)
+        with pytest.raises(GitHubAPIError) as exc_info:
+            client.get_repo("o", "r")
+        assert exc_info.value.status == 403
+        assert calls["n"] == 1
+
+
+class TestGitHubHttpHeaders:
+    def test_headers_sent_on_request(self) -> None:
+        seen: dict[str, str] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen.update(req.headers)
+            return httpx.Response(200, json={"default_branch": "main"})
+
+        client = _client_with(handler)
+        client.get_repo("o", "r")
+        assert seen["authorization"] == "Bearer t"
+        assert seen["accept"] == "application/vnd.github+json"
+        assert seen["x-github-api-version"] == "2022-11-28"
+        assert seen["user-agent"] == "khala-coding-team"
+
+
+class TestAbsoluteUrl:
+    def test_passes_through_already_absolute(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(200, json={}))
+        assert client._absolute_url("https://example.com/x") == "https://example.com/x"  # type: ignore[attr-defined]
+
+    def test_prepends_base_when_leading_slash_present(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(200, json={}))
+        assert client._absolute_url("/repos/o/r") == f"{client._base_url}/repos/o/r"  # type: ignore[attr-defined]
+
+    def test_prepends_leading_slash_when_missing(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(200, json={}))
+        assert client._absolute_url("repos/o/r") == f"{client._base_url}/repos/o/r"  # type: ignore[attr-defined]
+
 
 class TestClientIssueCommentMarker:
     def test_add_issue_comment_appends_khala_marker(self) -> None:
@@ -639,6 +764,25 @@ class TestParseNextLink:
     def test_no_next(self) -> None:
         assert _parse_next_link(None) is None
         assert _parse_next_link('<x>; rel="last"') is None
+
+    def test_ignores_unrelated_rel_before_next(self) -> None:
+        header = (
+            '<https://x/a>; rel="prev", <https://x/b?page=3>; rel="next", <https://x/c>; rel="last"'
+        )
+        assert _parse_next_link(header) == "https://x/b?page=3"
+
+
+class TestGitHubAPIError:
+    def test_constructs_with_status_and_body(self) -> None:
+        err = GitHubAPIError(404, "not found")
+        assert err.status == 404
+        assert err.body == "not found"
+        assert str(err) == "GitHub API 404: not found"
+
+    def test_defaults_body_to_empty_string(self) -> None:
+        err = GitHubAPIError(500)
+        assert err.body == ""
+        assert str(err) == "GitHub API 500: "
 
 
 # ---------------------------------------------------------------------------

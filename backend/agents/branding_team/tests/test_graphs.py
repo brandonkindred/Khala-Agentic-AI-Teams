@@ -21,8 +21,10 @@ from branding_team.graphs.phase4_channel import build_phase4_graph
 from branding_team.graphs.phase5_governance import build_phase5_graph
 from branding_team.graphs.shared import (
     PHASE_ORDER,
+    PHASE_TITLES,
     build_agent,
     phase_index,
+    phase_order_text,
     serialize_mission,
     should_advance_past,
 )
@@ -107,6 +109,12 @@ def test_build_agent_rejects_bad_output_mode() -> None:
         build_agent(name="bad", system_prompt="x", output_mode="xml")  # type: ignore[arg-type]
 
 
+def test_build_agent_with_agent_key_override() -> None:
+    agent = build_agent(name="a4", system_prompt="do w", agent_key="branding_assistant")
+    assert isinstance(agent, Agent)
+    assert agent.name == "a4"
+
+
 # ---------------------------------------------------------------------------
 # phase-order utilities (graphs/shared)
 # ---------------------------------------------------------------------------
@@ -125,6 +133,33 @@ def test_should_advance_past() -> None:
     # Advance past phase 0 only if the target is beyond it.
     assert should_advance_past(0, BrandPhase.NARRATIVE_MESSAGING) is True
     assert should_advance_past(4, BrandPhase.STRATEGIC_CORE) is False
+
+
+def test_phase_order_text_matches_hand_written_description() -> None:
+    assert phase_order_text() == (
+        "Phase 1 — Strategic Core\n"
+        "Phase 2 — Narrative & Messaging\n"
+        "Phase 3 — Visual & Expressive Identity\n"
+        "Phase 4 — Experience & Channel Activation\n"
+        "Phase 5 — Governance & Evolution"
+    )
+
+
+def test_phase_order_text_covers_every_phase_order_entry() -> None:
+    assert set(PHASE_ORDER) <= set(PHASE_TITLES)
+
+
+def test_phase_order_text_driven_by_phase_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    import branding_team.graphs.shared as shared_mod
+
+    monkeypatch.setattr(
+        shared_mod,
+        "PHASE_ORDER",
+        [BrandPhase.GOVERNANCE, BrandPhase.STRATEGIC_CORE],
+    )
+    assert shared_mod.phase_order_text() == (
+        "Phase 1 — Governance & Evolution\nPhase 2 — Strategic Core"
+    )
 
 
 def test_serialize_mission_roundtrips_company_name() -> None:

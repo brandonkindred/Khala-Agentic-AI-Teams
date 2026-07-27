@@ -70,6 +70,22 @@ def test_fe_run_build_verification_raises():
     assert "build crash" in msg
 
 
+def test_fe_run_build_verification_uses_profile_label():
+    from software_engineering_team.frontend_code_v2_team.phases._profile import PROFILE
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        _run_build_verification,
+    )
+
+    seen = {}
+
+    def _verifier(repo_path, label, task_id):
+        seen["label"] = label
+        return True, ""
+
+    _run_build_verification(Path("/tmp"), _verifier, "t1")
+    assert seen["label"] == PROFILE.build_verify_label
+
+
 def test_fe_run_llm_review(monkeypatch):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review

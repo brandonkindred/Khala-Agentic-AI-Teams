@@ -43,11 +43,6 @@ from .errors import (
     CopyEditError,
     DraftError,
     FactCheckError,
-    LLMError,
-    LLMJsonParseError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    LLMUnreachableError,
     PlanningError,
     PublicationError,
     ValidationError,
@@ -71,6 +66,7 @@ from .models import (
     get_phase_progress,
 )
 from .style_loader import load_style_file
+from .word_count import count_words
 
 __all__ = [
     "_BlogAgentBase",
@@ -81,11 +77,6 @@ __all__ = [
     "CopyEditError",
     "DraftError",
     "FactCheckError",
-    "LLMError",
-    "LLMJsonParseError",
-    "LLMRateLimitError",
-    "LLMTemporaryError",
-    "LLMUnreachableError",
     "PublicationError",
     "PlanningError",
     "ValidationError",
@@ -126,4 +117,5 @@ __all__ = [
     "resolve_length_policy",
     "resolve_length_policy_from_request_dict",
     "series_context_block",
+    "count_words",
 ]

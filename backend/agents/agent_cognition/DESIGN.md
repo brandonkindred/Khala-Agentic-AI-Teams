@@ -124,7 +124,7 @@ flowchart LR
 
   subgraph Ext["Existing infra (reused)"]
     LLM[llm_service<br/>complete_validated / compaction / factory]
-    REG[agent_llm_tools_service<br/>IntegrationRegistry / agent_git_tools]
+    REG[agent_llm_tools_service<br/>caller-supplied integration registry / agent_git_tools]
     LOOP[tool_loop.complete_json_with_tool_loop]
   end
 
@@ -448,7 +448,7 @@ stateDiagram-v2
 ```yaml
 cognition:
   memory: { retention_days_events: 90 }
-  tools: [git, http_api]            # ids from agent_llm_tools_service / IntegrationRegistry
+  tools: [git, http_api]            # ids from agent_llm_tools_service / a caller-supplied integration registry
   rule_packs: [default_guardrails]  # seed packs installed on first provision
   requires_idempotency_key: false   # true ⇒ side-effecting; reject invokes without a caller key
 ```
@@ -588,7 +588,7 @@ flowchart TB
 | Context compaction / retry / model routing | `compact_text`, `call_llm_with_retries`, `get_client` | `llm_service/{compaction,util,factory}.py` |
 | Background periodic task | `run_pruner` + lifespan task | `agent_console/prune.py`, `unified_api/main.py` |
 | Tool defs / handlers / loop | `agent_git_tools`, `tool_loop` | `agent_git_tools/`, `llm_service/tool_loop.py` |
-| Tool/MCP registries | `LlmToolsService`, `IntegrationRegistry` | `agent_llm_tools_service/`, `integrations/registry.py` |
+| Tool/MCP registries | `LlmToolsService`; integration registry is caller-supplied (duck-typed `get_provider(tool_id)`, no concrete class in this repo) | `agent_llm_tools_service/` |
 | Author handle / query telemetry | `resolve_author`, `@timed_query` | `agent_console/author.py`, `shared/postgres/metrics.py` |
 
 **Net-new:** only the rules engine (store, reflection, predicate DSL + evaluator) and the

@@ -439,7 +439,8 @@ def run_coding_team_orchestrator(
                         extra={"trace_id": current_trace_id()},
                     )
                     continue
-                task_id = str(t.get("id") or f"task_{idx}")
+                raw_id = t.get("id")
+                task_id = str(raw_id) if raw_id is not None else f"task_{idx}"
                 normalized_tasks.append(
                     {
                         "id": task_id,

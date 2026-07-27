@@ -383,23 +383,26 @@ class BrandingAssistantAgent:
                 extraction_llm = llm
 
         if conversation_llm is None or extraction_llm is None:
-            from strands import Agent
-
-            from llm_service import get_strands_model
-
             if conversation_llm is None:
-                conversation_llm = Agent(
-                    # response_format="text": the conversation stage must
-                    # produce free-form prose. Without this opt-in the adapter
-                    # would force JSON output on the wire and the user-facing
-                    # reply would be empty or JSON-shaped.
-                    model=get_strands_model("branding_assistant", response_format="text"),
+                from branding_team.graphs.shared import build_agent
+
+                # output_mode="text": the conversation stage must produce
+                # free-form prose. Without this opt-in the adapter would
+                # force JSON output on the wire and the user-facing reply
+                # would be empty or JSON-shaped.
+                conversation_llm = build_agent(
+                    name="conversation",
+                    agent_key="branding_assistant",
+                    output_mode="text",
                     system_prompt=SYSTEM_PROMPT,
                 )
             if extraction_llm is None:
-                extraction_llm = Agent(
-                    # Extractor emits strict JSON — keep the default JSON mode.
-                    model=get_strands_model("branding_assistant"),
+                from branding_team.graphs.shared import build_agent
+
+                # output_mode="json" (default): the extractor emits strict JSON.
+                extraction_llm = build_agent(
+                    name="extraction",
+                    agent_key="branding_assistant",
                     system_prompt=EXTRACTION_SYSTEM_PROMPT,
                 )
 

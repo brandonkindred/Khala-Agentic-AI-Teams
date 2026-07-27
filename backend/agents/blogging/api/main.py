@@ -16,6 +16,12 @@ from agents.blogging.blog_medium_stats_agent.agent import (  # noqa: E402,F401
     BlogMediumStatsAgent,
 )
 from agents.blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA  # noqa: E402
+from agents.blogging.shared.artifacts import (  # noqa: E402,F401
+    ARTIFACT_NAMES,
+    ARTIFACT_PRODUCER,
+    read_artifact,
+    write_artifact,
+)
 from agents.blogging.shared.errors import BloggingError  # noqa: E402
 from agents.blogging.shared.medium_integration_access import (  # noqa: F401
     medium_stats_integration_eligible,  # noqa: E402
@@ -23,19 +29,6 @@ from agents.blogging.shared.medium_integration_access import (  # noqa: F401
 from pydantic import BaseModel  # noqa: E402
 
 from shared.app import create_team_app  # noqa: E402
-
-try:
-    from agents.blogging.shared.artifacts import (
-        ARTIFACT_NAMES,
-        ARTIFACT_PRODUCER,
-        read_artifact,
-        write_artifact,
-    )
-except ImportError:  # pragma: no cover - defensive ImportError fallback only triggered when blogging shared module is missing entirely; not exercised in tests because conftest guarantees the import path resolves.
-    ARTIFACT_NAMES = ()
-    ARTIFACT_PRODUCER = {}
-    read_artifact = None
-    write_artifact = None
 
 try:
     from agents.blogging.shared.blog_job_store import (

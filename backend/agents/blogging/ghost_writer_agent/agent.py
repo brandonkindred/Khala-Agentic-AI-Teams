@@ -314,7 +314,9 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
     Uses three specialised LLM roles:
       - Evaluator: assesses story sufficiency via ``call_json_with_retry``
       - Interviewer: generates conversational follow-up questions
-      - Narrator: compiles vivid first-person narratives
+      - Narrator: compiles vivid first-person narratives (``_compile_narrative``
+        retries via its own plain-text loop, not ``call_json_with_retry`` —
+        left unchanged when the evaluator was migrated)
 
     Preconditions:
         - llm_client is not None.
@@ -861,6 +863,16 @@ class GhostWriterElicitationAgent(_BlogAgentBase):
 
     @staticmethod
     def _plan_to_text(plan: ContentPlan) -> str:
+        """
+        Render a ContentPlan as a plain-text outline for LLM prompts.
+
+        Preconditions:
+            - ``plan`` is a populated ``ContentPlan``.
+        Postconditions:
+            - Returns a multi-line string with the overarching topic, the
+              narrative flow (if present), and each section's title and
+              coverage description (if present).
+        """
         lines = [f"Topic/thesis: {plan.overarching_topic}"]
         if plan.narrative_flow:
             lines.append(f"Narrative flow: {plan.narrative_flow}")

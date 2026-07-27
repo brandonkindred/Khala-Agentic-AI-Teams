@@ -8,7 +8,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.command_runner.runner import run_command
+from shared.command_runner.executor import run_command
 from shared.subprocess_timeouts import DEVOPS_HELM_EXECUTION_TIMEOUT_S
 
 logger = logging.getLogger(__name__)

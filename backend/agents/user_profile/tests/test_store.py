@@ -211,6 +211,42 @@ def test_remove_association(db):
     assert up_store.remove_association(a.id) is False
 
 
+def test_remove_association_safe_removes_by_artifact_triple(db):
+    up_store.record_association("brand", "branding", "brand_1")
+    up_store.remove_association_safe("brand", "brand_1")
+    assert up_store.list_associations() == []
+
+
+def test_remove_association_safe_missing_association_is_noop(db):
+    """No-op, not an error, when nothing matches the (user_id, type, id) triple."""
+    up_store.remove_association_safe("brand", "brand_does_not_exist")
+
+
+def test_remove_association_safe_skips_empty_inputs(monkeypatch, db):
+    called = False
+
+    def _spy(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(up_store, "get_conn", _spy)
+    up_store.remove_association_safe("", "brand_1")
+    up_store.remove_association_safe("brand", "")
+    up_store.remove_association_safe("brand", "brand_1", user_id="")
+    assert called is False
+
+
+def test_remove_association_safe_swallows_errors(monkeypatch):
+    """The best-effort wrapper never raises even when the store blows up."""
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("postgres down")
+
+    monkeypatch.setattr(up_store, "get_conn", _boom)
+    # Must not raise.
+    up_store.remove_association_safe("brand", "brand_1")
+
+
 def test_ts_helper_renders_values():
     from datetime import datetime, timezone
 

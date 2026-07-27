@@ -21,10 +21,10 @@ back into static ones — see the identical, pre-existing idiom in
 ``zero_trade_repair.py`` (its import of ``_maybe_attach_coverage_report``)
 for precedent.
 
-``SynthesisMixin`` is mixed into ``StrategyLabOrchestrator``
-(``class StrategyLabOrchestrator(DesignMixin, SynthesisMixin):``); its
-methods expect the attributes ``StrategyLabOrchestrator.__init__`` sets on
-``self`` (``self.strategy_validator``, ``self.code_safety_checker``,
+``SynthesisMixin`` is mixed into ``StrategyLabOrchestrator`` — see the class
+statement in ``orchestrator.py`` for the current base order (more mixins
+have since joined it); its methods expect the attributes
+``StrategyLabOrchestrator.__init__`` sets on ``self`` (``self.strategy_validator``, ``self.code_safety_checker``,
 ``self.code_conformance_gate``, ``self.predicate_conformance_gate``,
 ``self.spec_readiness_gate``, ``self.target_symbol_coverage_gate``,
 ``self.predicate_reachability_probe``, ``self.zero_trade_repairer``,

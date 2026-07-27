@@ -1,14 +1,20 @@
-"""Pure helpers + outcome dataclasses extracted from :mod:`orchestrator`.
+"""Pure helpers + outcome dataclasses shared by :mod:`orchestrator` and its
+extracted mixins.
 
 These types and functions all live "below" :class:`StrategyLabOrchestrator`
-in the dependency graph — they take primitive inputs (specs, bar lists,
-metrics) and return fresh values. Hosting them in a sibling module keeps
-``orchestrator.py`` focused on the coordinator's surface.
+and every mixin module in the dependency graph — ``orchestrator_design.py``,
+``orchestrator_synthesis.py``, ``orchestrator_alignment.py``,
+``orchestrator_verification.py``, ``orchestrator_record_assembly.py`` — they
+take primitive inputs (specs, bar lists, metrics) and return fresh values,
+and none of them import from ``orchestrator.py`` or any mixin. Hosting them
+in a sibling module keeps each of those files focused on its own cluster's
+surface instead of re-deriving these helpers.
 
 External callers (``zero_trade_repair.py``, the test suite,
 ``agents/refinement.py``'s docstring reference) historically imported
-these names via ``investment_team.strategy_lab.orchestrator``. The
-orchestrator re-exports them so existing import sites keep working.
+these names via ``investment_team.strategy_lab.orchestrator``.
+``orchestrator.py`` re-exports them (see the "Re-exports" block near the
+end of that file) so existing import sites keep working.
 """
 
 from __future__ import annotations

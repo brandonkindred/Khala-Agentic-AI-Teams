@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import List, Optional
 
 from pydantic import BaseModel
 
+from shared.http.base_url import resolve_base_url
 from shared.http.job_polling import get_json_with_status
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ _REQUIRED_PHASES = ["strategic_core", "narrative_messaging"]
 
 
 def _base_url() -> Optional[str]:
-    return os.environ.get("UNIFIED_API_BASE_URL") or os.environ.get("SOCIAL_MARKETING_BRANDING_URL")
+    return resolve_base_url("UNIFIED_API_BASE_URL", "SOCIAL_MARKETING_BRANDING_URL")
 
 
 def fetch_brand(client_id: str, brand_id: str) -> dict:

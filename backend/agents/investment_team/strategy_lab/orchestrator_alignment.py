@@ -15,11 +15,11 @@ that such a patch would never reach. Do not "clean up" this deferred import
 back into a static one — see the identical, pre-existing idiom in
 ``orchestrator_synthesis.py``'s ``_cached_run_strategy_code`` /
 ``_run_synthesis_loop`` / ``_evaluate_synthesis_round`` for precedent.
-``AlignmentMixin`` is mixed into
-``StrategyLabOrchestrator``
-(``class StrategyLabOrchestrator(DesignMixin, SynthesisMixin, AlignmentMixin):``);
-its methods expect the attributes ``StrategyLabOrchestrator.__init__`` sets on
-``self`` (``self.code_safety_checker``), plus the ``self.record_gates`` /
+``AlignmentMixin`` is mixed into ``StrategyLabOrchestrator`` — see the class
+statement in ``orchestrator.py`` for the current base order (more mixins
+have since joined it); its methods expect the attributes
+``StrategyLabOrchestrator.__init__`` sets on ``self``
+(``self.code_safety_checker``), plus the ``self.record_gates`` /
 ``self.build_orchestrator_gate`` / ``self._apply_updates`` /
 ``self._cached_run_strategy_code`` / ``self._check_anomalies_cached`` /
 ``self._run_alignment_audit`` / ``self._committed_code_conformance_verdict``
@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from shared.env_config import env_int
 
 from ..market_data_service import OHLCVBar
 from ..models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
@@ -64,7 +66,7 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 # alignment agent to rewrite the Python code; the new code is sent back
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
-MAX_ALIGNMENT_ROUNDS = 10
+MAX_ALIGNMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS", 10, floor=1)
 
 
 class AlignmentMixin:

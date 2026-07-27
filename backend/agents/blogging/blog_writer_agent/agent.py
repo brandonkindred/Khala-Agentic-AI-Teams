@@ -925,7 +925,8 @@ class BlogWriterAgent(_BlogAgentBase):
             for i, item in enumerate(
                 revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
             ):
-                loc = f" [{item.location}]" if item.location else ""
+                location = getattr(item, "location", None)
+                loc = f" [{location}]" if location else ""
                 prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
             prompt_parts.extend(
                 [
@@ -1065,13 +1066,18 @@ class BlogWriterAgent(_BlogAgentBase):
             data = self._call_agent_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             if not data or not isinstance(data, dict):
                 return RevisionPlan(summary="Planning produced no output.", changes=[], risks=[])
+            changes: list[RevisionPlanChange] = []
+            for c in data.get("changes") or []:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    changes.append(RevisionPlanChange(**c))
+                except (TypeError, ValueError) as change_exc:
+                    logger.debug("Skipping malformed revision plan change: %s", change_exc)
+                    continue
             return RevisionPlan(
                 summary=data.get("summary", ""),
-                changes=[
-                    RevisionPlanChange(**c)
-                    for c in (data.get("changes") or [])
-                    if isinstance(c, dict)
-                ],
+                changes=changes,
                 risks=data.get("risks") or [],
             )
         except Exception as e:
@@ -1201,6 +1207,8 @@ class BlogWriterAgent(_BlogAgentBase):
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     return revised.strip()
+            # The underlying Strands Agent call can surface LLMJsonParseError; retry
+            # without the transient backoff sleep (covered by test_writer_interactive.py).
             except LLMJsonParseError as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
                 if attempt == 0:
@@ -1348,6 +1356,8 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
+            # See _revise_one_item: LLMJsonParseError from the Strands Agent call
+            # retries without the transient backoff sleep.
             except LLMJsonParseError as e:
                 logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
             except Exception as e:
@@ -1614,6 +1624,8 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
+            # See _revise_one_item: LLMJsonParseError from the Strands Agent call
+            # retries without the transient backoff sleep (test_revise_from_user_feedback_json_parse_error_skips_sleep).
             except LLMJsonParseError as e:
                 logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
             except Exception as e:

@@ -861,6 +861,57 @@ def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
     assert "Planning produced no output" in out.summary
 
 
+def test_revise_generate_revision_plan_skips_malformed_change(monkeypatch) -> None:
+    """A malformed change dict is skipped without discarding the rest of the plan."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_agent_json",
+        lambda self, p, **kw: {
+            "summary": "Fix tone",
+            "changes": [
+                {
+                    "action": "rewrite",
+                    "section": "intro",
+                    "rationale": "Soften",
+                    "feedback_ids": [1],
+                },
+                {"section": "conclusion"},  # missing required action/rationale
+            ],
+            "risks": ["scope creep"],
+        },
+    )
+    out = a._generate_revision_plan(
+        draft="# x",
+        feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+        revise_input=ReviseWriterInput(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    # Structured plan is preserved (no fallback to unstructured planning) —
+    # only the malformed change is dropped.
+    assert out.summary == "Fix tone"
+    assert out.risks == ["scope creep"]
+    assert len(out.changes) == 1
+    assert out.changes[0].section == "intro"
+
+
 def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
     """When the structured plan fails, fall back to a plain text plan."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem

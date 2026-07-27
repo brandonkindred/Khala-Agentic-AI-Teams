@@ -147,8 +147,10 @@ class BrandingWorkflow:
         Postconditions:
             - Drives the per-phase activities to completion; the finalize activity
               owns the COMPLETED transition. A cancel short-circuits (leaving the
-              row cancelled, not failed). Any phase/finalize failure records a
-              FAILED row and re-raises so the workflow reflects the failure.
+              row cancelled, not failed). Any phase/finalize failure attempts to
+              record a FAILED row (best-effort — if that write itself fails, the
+              row is left as-is) and always re-raises the original pipeline error
+              so the workflow reflects the failure.
         """
         job_id = payload["job_id"]
         # target_phase="complete" (BrandPhase.COMPLETE) is a valid enum value the
