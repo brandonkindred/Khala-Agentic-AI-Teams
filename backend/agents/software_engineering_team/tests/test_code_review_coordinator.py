@@ -1583,6 +1583,7 @@ def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
     degrades to a not-reviewed outcome rather than raising."""
     from code_review_agent import mapping
 
+    monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
     reviewer = _ThinkAwareReviewer(
         LLMSemanticExhaustionError("still nothing"), recover_on_think_off=False
