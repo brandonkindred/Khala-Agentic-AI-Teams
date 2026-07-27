@@ -207,18 +207,23 @@ def _code_review_gate(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> GateOutcome:
-    """Run the frontend code-review gate (build + lint + code review agents only).
+    """Run the frontend code-review gate (build + lint + code review agents,
+    plus every wired tool agent).
 
     Preconditions: ``deps.build_verifier``/``deps.code_review_agent``/
-      ``deps.linting_tool_agent`` are set consistently with what the caller
-      wants exercised; ``files`` is the microtask's current
-      ``{path: content}`` output.
+      ``deps.linting_tool_agent``/``deps.tool_agents`` are set consistently
+      with what the caller wants exercised; ``files`` is the microtask's
+      current ``{path: content}`` output.
     Postconditions: never raises (shared containment in
       ``run_microtask_review``); calls it with ``qa_agent=None,
-      security_agent=None`` so only code-review-sourced issues can be
-      returned, then copies ``passed``/``issues``/``summary``/
-      ``raw_issue_count`` (defaulting to ``None``) from the result
-      unfiltered.
+      security_agent=None`` (disabling only those two LLM review steps) and
+      the full, unscoped ``deps.tool_agents`` mapping — unlike the QA/security
+      gates, this call does not narrow ``tool_agents`` to a single kind, so
+      the returned ``issues`` can include build/lint/code-review findings
+      *and* every wired tool agent's findings (e.g. accessibility,
+      ui_design), not only code-review-sourced ones. Copies
+      ``passed``/``issues``/``summary``/``raw_issue_count`` (defaulting to
+      ``None``) from the result unfiltered.
     """
     from .review import run_microtask_review
 
