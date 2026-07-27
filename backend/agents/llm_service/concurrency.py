@@ -48,6 +48,21 @@ def _resolve_limit() -> int:
         return _DEFAULT_MAX_CONCURRENCY
 
 
+def get_llm_max_concurrency() -> int:
+    """Return the currently configured ``LLM_MAX_CONCURRENCY`` limit.
+
+    Unlike ``get_llm_semaphore()``, this re-reads the environment on every
+    call rather than freezing at first use -- callers that need to size a
+    ceiling *relative to* the process-wide limit (e.g. the code review map
+    phase) can observe env changes without needing ``reset_llm_semaphore()``.
+
+    Postconditions:
+        - Same resolution rules as the semaphore's limit (see
+          ``_resolve_limit``): never raises, always >= 1.
+    """
+    return _resolve_limit()
+
+
 def get_llm_semaphore() -> threading.BoundedSemaphore:
     """Return the process-global LLM concurrency semaphore, creating it once.
 

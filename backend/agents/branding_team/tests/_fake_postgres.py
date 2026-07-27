@@ -314,7 +314,7 @@ def _dispatch() -> DispatchTable:
         return (
             "from branding_conversations c" in norm
             and "left join branding_conv_messages" in norm
-            and "where c.conversation_id" in norm
+            and "where c.conversation_id = %s" in norm
             and "order by m.id" in norm
         )
 
@@ -356,22 +356,24 @@ def _dispatch() -> DispatchTable:
         return (
             "from branding_conversations c" in norm
             and "left join branding_conv_messages" in norm
-            and "where c.brand_id" in norm
+            and "where c.conversation_id = (" in norm
+            and "where brand_id" in norm
             and "order by m.id" in norm
         )
 
     def handle_join_conv_by_brand(cur: FakeCursor, params: tuple) -> None:
-        """Emulate get_by_brand_id LEFT JOIN (conversation + messages by brand_id).
+        """Emulate get_by_brand_id LEFT JOIN (conversation + messages, pinned to
+        the brand's single most-recently-updated conversation).
 
         Params: ``(brand_id,)``.
         Returns dict rows with conversation_id/mission/output plus message fields
         (null-role placeholder when empty); empty list when no conversation matches.
+        Mirrors the real query's subquery: among all conversations attached to
+        ``brand_id``, only the one with the greatest ``updated_at`` is loaded.
         """
         (brand_id,) = params
-        conv = next(
-            (c for c in cur.db["conversations"].values() if c["brand_id"] == brand_id),
-            None,
-        )
+        candidates = [c for c in cur.db["conversations"].values() if c["brand_id"] == brand_id]
+        conv = max(candidates, key=lambda c: c["updated_at"], default=None)
         if conv is None:
             cur.set_all([])
             return
