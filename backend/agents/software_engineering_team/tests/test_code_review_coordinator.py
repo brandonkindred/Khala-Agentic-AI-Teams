@@ -2690,6 +2690,22 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
     assert captured["reader"] is reader
 
 
+def test_coordinator_runs_with_submission_cache_disabled(monkeypatch) -> None:
+    """``run_coordinator`` must not crash when the submission cache is disabled
+    (``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` resolves to 0). Guards the explicit
+    ``cached = None`` initialization: without it, any future refactor that reads
+    ``cached`` outside the cache-enabled branch would raise ``UnboundLocalError``
+    for this codepath."""
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.setattr(coord, "_submission_cache_size", lambda: 0)
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+    assert result.approved is True
+
+
 def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
     """The submission is parsed into a ``CodebaseIndex`` exactly once per
     ``run_coordinator`` call, and the same instance is forwarded to both the
