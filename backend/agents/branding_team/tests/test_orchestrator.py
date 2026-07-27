@@ -242,6 +242,7 @@ def test_full_run_approved() -> None:
 
     assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
     assert result.current_phase == BrandPhase.COMPLETE
+    assert result.degraded_phases == []
     assert result.strategic_core is not None
     assert result.strategic_core.positioning_statement
     assert result.strategic_core.core_values
@@ -277,6 +278,7 @@ def test_requires_human_approval() -> None:
 
     assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION
     assert result.human_feedback == "Need legal review."
+    assert result.degraded_phases == []
     assert result.strategic_core is not None
     assert result.narrative_messaging is not None
     assert result.visual_identity is not None
@@ -309,6 +311,7 @@ def test_brand_checks() -> None:
 
     assert len(result.brand_checks) == 2
     assert any(not item.is_on_brand for item in result.brand_checks)
+    assert result.degraded_phases == []
 
 
 def test_market_research_integration() -> None:
@@ -338,6 +341,7 @@ def test_market_research_integration() -> None:
         )
     assert result.competitive_snapshot is not None
     assert result.competitive_snapshot.summary == "Competitive summary"
+    assert result.degraded_phases == []
 
 
 def test_design_assets_integration() -> None:
@@ -354,6 +358,7 @@ def test_design_assets_integration() -> None:
     assert result.design_asset_result is not None
     assert result.design_asset_result.request_id.startswith("design_")
     assert result.design_asset_result.status == "pending"
+    assert result.degraded_phases == []
 
 
 def test_run_with_store_appends_version(fake_pg) -> None:
