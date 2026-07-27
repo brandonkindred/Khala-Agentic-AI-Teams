@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -338,6 +338,116 @@ class CodeReviewIssue(BaseModel):
         "pre-existing findings (the PR-review whole-file path); every other gate leaves it False. "
         "Pre-existing findings are never posted as PR review comments — they are collected and "
         "offered to a human as GitHub-issue proposals. Default False.",
+    )
+
+
+_ChunkReviewIssueSeverity = Literal["critical", "high", "medium", "low", "info"]
+_ChunkReviewIssueCategory = Literal[
+    "naming",
+    "structure",
+    "logic",
+    "spec-compliance",
+    "standards",
+    "integration",
+    "testing",
+    "architecture",
+    "refactor",
+    "maintainability",
+    "side-effects",
+    "documentation",
+    "general",
+]
+
+
+class ChunkReviewIssueLLM(BaseModel):
+    """Narrow LLM-authored shape for one issue in a chunk-review response.
+
+    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
+    ``generate_structured`` (see ``llm_service``'s README, "When to use which
+    entrypoint"). This is the raw per-issue shape the model is asked to
+    emit — distinct from the persisted :class:`CodeReviewIssue`, which
+    additionally range-validates ``line``/``start_line`` against the cited
+    file segment and resolves ``file_path`` against the chunk. That
+    normalization stays downstream, in ``chunking._issues_from_chunk_output``,
+    unaffected by this schema.
+
+    ``severity``/``category`` are typed as the exact enumerated sets the
+    review prompt asks for (mirrors ``chunking._VALID_SEVERITIES``/
+    ``_VALID_CATEGORIES``) instead of a free string with silent fallback
+    coercion: an out-of-set value now fails schema validation and drives
+    ``complete_validated``'s one correction retry, rather than being
+    silently rewritten to "high"/"general" as today's hand-rolled parsing
+    does in ``chunking._issues_from_chunk_output``.
+    """
+
+    severity: _ChunkReviewIssueSeverity = Field(
+        default="high",
+        description="Severity: critical, high, medium, low, or info",
+    )
+    category: _ChunkReviewIssueCategory = Field(
+        default="general",
+        description=(
+            "Category: naming, structure, logic, spec-compliance, standards, integration, "
+            "testing, architecture, refactor, maintainability, side-effects, documentation, or "
+            "general (no specific category)"
+        ),
+    )
+    file_path: str = Field(
+        default="",
+        description="File path where the issue was found. Blank when the chunk has a single "
+        "segment or the issue is not tied to one specific file.",
+    )
+    line: Optional[int] = Field(
+        default=None,
+        description="1-based line number in the NEW version of file_path where the issue occurs, "
+        "when the issue is tied to a specific line. None for file-wide/structural issues.",
+    )
+    start_line: Optional[int] = Field(
+        default=None,
+        description="Optional start line for a multi-line issue; `line` is then the end line.",
+    )
+    description: str = Field(
+        default="",
+        description="Clear description of the issue",
+    )
+    suggestion: str = Field(
+        default="",
+        description="Concrete suggestion for how to fix the issue",
+    )
+    pre_existing: bool = Field(
+        default=False,
+        description="True when this issue is a bug in code the change under review did NOT add or "
+        "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
+        "change introduced. Default False.",
+    )
+
+
+class ChunkReviewLLMResponse(BaseModel):
+    """Narrow LLM-authored shape for one chunk-review call's response.
+
+    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
+    ``generate_structured``. Today that function hand-parses this exact
+    shape out of a ``complete_json_with_continuation`` reply via bare
+    ``.get()``/``str()``/``bool()`` coercions (chunk_reviewer.py). This model
+    documents and validates that contract; wiring it into an actual
+    ``generate_structured`` call is a separate, follow-up change.
+    """
+
+    approved: bool = Field(
+        default=False,
+        description="True if chunk has no critical/high issues",
+    )
+    issues: List[ChunkReviewIssueLLM] = Field(
+        default_factory=list,
+        description="Issues found in this chunk",
+    )
+    summary: str = Field(
+        default="",
+        description="Review summary for this chunk",
+    )
+    spec_compliance_notes: str = Field(
+        default="",
+        description="Notes on how well the chunk meets the spec and acceptance criteria",
     )
 
 
