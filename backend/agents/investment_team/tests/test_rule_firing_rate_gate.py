@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from investment_team.models import StrategySpec, TradeRecord
+from investment_team.strategy_lab.alignment_findings import AlignmentFinding
 from investment_team.strategy_lab.quality_gates.realism.rule_firing import (
     GATE,
     RuleFiringRateGate,
@@ -80,7 +81,8 @@ def _warnings(results):
 # ---------------------------------------------------------------------------
 
 
-def test_skips_when_requires_custom_code():
+def test_skips_when_requires_custom_code_and_no_alignment_findings():
+    """No ``alignment_findings`` kwarg passed → legacy info self-skip."""
     gate = RuleFiringRateGate()
     spec = _spec(requires_custom_code=True)
     trades = [_trade(1, entry_reason="compiled_entry:entry[0]")]
@@ -305,4 +307,200 @@ def test_open_position_without_annotation_still_fires_critical():
         trades,
         open_position_entry_reasons=[""],
     )
+    assert _criticals(results) == []
+
+
+# ---------------------------------------------------------------------------
+# Custom-code path: alignment-findings-derived correlation signal
+# ---------------------------------------------------------------------------
+
+
+def _finding(
+    *,
+    trade_num: int = 1,
+    rule_id,
+    check_name: str,
+    passed: bool,
+) -> AlignmentFinding:
+    return AlignmentFinding(
+        trade_num=trade_num,
+        rule_id=rule_id,
+        check_name=check_name,
+        passed=passed,
+        severity="info" if passed else "critical",
+        details="test finding",
+    )
+
+
+def test_custom_code_critical_when_entry_rule_never_satisfied():
+    """requires_custom_code=True with alignment_findings supplied: an entry
+    rule with zero passed 'entry[N]' findings is dead code → critical."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [_finding(rule_id="entry[0]", check_name="entry_signal", passed=False)]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    criticals = _criticals(results)
+    assert len(criticals) == 1
+    assert "entry[0]" in criticals[0].details
+    assert criticals[0].rule_id == "entry[0]"
+
+
+def test_custom_code_passes_when_entry_rule_satisfied_at_least_once():
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [_finding(rule_id="entry[0]", check_name="entry_signal", passed=True)]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    assert _criticals(results) == []
+    assert all(r.passed for r in results)
+
+
+def test_custom_code_only_counts_passed_findings():
+    """A failed ('near-miss') entry_signal finding for a rule doesn't count
+    as a hit — the predicate must have actually been satisfied."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [
+        _finding(rule_id="entry[0]", check_name="entry_signal", passed=False),
+        _finding(rule_id="entry[0]", check_name="entry_signal", passed=False),
+    ]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    assert len(_criticals(results)) == 1
+
+
+def test_custom_code_ignores_non_rule_indexed_findings():
+    """Findings like 'entry:side_mismatch' / 'entry:bars_missing' (no [N]
+    suffix) never contribute to any rule's hit count."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [_finding(rule_id="entry:side_mismatch", check_name="entry_signal", passed=True)]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    assert len(_criticals(results)) == 1
+
+
+def test_custom_code_warning_for_unfired_signal_exit_rule():
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=0)),
+            StopLossRule(pct=0.05),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [
+        _finding(rule_id="entry[0]", check_name="entry_signal", passed=True),
+        _finding(rule_id="exit:signal_exit", check_name="signal_exit", passed=True),
+    ]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    warnings = _warnings(results)
+    assert len(warnings) == 1
+    assert "exit[0]" in warnings[0].details
+    assert warnings[0].rule_id == "exit[0]"
+    assert _criticals(results) == []
+
+
+def test_custom_code_signal_exit_passes_when_satisfied():
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [
+        _finding(rule_id="entry[0]", check_name="entry_signal", passed=True),
+        _finding(rule_id="exit:signal_exit[0]", check_name="signal_exit", passed=True),
+    ]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    assert _warnings(results) == []
+    assert _criticals(results) == []
+
+
+def test_custom_code_empty_alignment_findings_reports_all_dead():
+    """An empty (but non-None) findings list is a real answer: nothing ever
+    correlated → every rule reports as dead, same as zero-citation on the
+    compiled path."""
+    gate = RuleFiringRateGate()
+    spec = _spec(requires_custom_code=True)
+    trades = [_trade(1)]
+    results = gate.check(spec, trades, alignment_findings=[])
+    assert len(_criticals(results)) == 1
+
+
+def test_custom_code_open_position_entry_reason_prevents_false_critical():
+    """Regression: alignment findings only cover CLOSED trades, so an entry
+    rule whose only firing left a position open at end-of-stream would be
+    misreported as dead code unless open_position_entry_reasons is also
+    consulted on the custom-code path (mirrors the compiled path's own
+    open-position union)."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+            EntryRule(side="short", when=Predicate(lhs="bar.close", op="<", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(1)]
+    findings = [_finding(rule_id="entry[0]", check_name="entry_signal", passed=True)]
+    results = gate.check(
+        spec,
+        trades,
+        alignment_findings=findings,
+        open_position_entry_reasons=["compiled_entry:entry[1]"],
+    )
+    assert _criticals(results) == []
+    assert all(r.passed for r in results)
+
+
+def test_custom_code_engine_attributed_exit_prevents_false_warning():
+    """Regression: DeterministicAlignmentChecker emits only the UNINDEXED
+    'exit:signal_exit' skip marker (not the rule's index) for a close it
+    attributes to the engine's own structured-exit dispatcher, since the
+    engine manages exit_rules identically regardless of
+    requires_custom_code. Without also consulting trade.exit_reason
+    (_count_exit_hits) on the custom-code path, a SignalExitRule closed
+    entirely via engine attribution would be misreported as never fired."""
+    gate = RuleFiringRateGate()
+    spec = _spec(
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0)),
+        ],
+        exit_rules=[
+            SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=0)),
+        ],
+        requires_custom_code=True,
+    )
+    trades = [_trade(i + 1, exit_reason="engine_exit:signal_exit[0]") for i in range(5)]
+    findings = [_finding(rule_id="entry[0]", check_name="entry_signal", passed=True)]
+    results = gate.check(spec, trades, alignment_findings=findings)
+    assert _warnings(results) == []
     assert _criticals(results) == []

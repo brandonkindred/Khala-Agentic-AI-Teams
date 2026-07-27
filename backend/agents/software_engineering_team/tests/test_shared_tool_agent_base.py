@@ -25,12 +25,16 @@ from software_engineering_team.shared.v2_models import ReviewIssue
 
 
 def test_relevant_code_prefers_issue_file():
+    """When the issue names a file present in the file map, only that file's
+    content is returned, tagged with its path."""
     issue = ReviewIssue(file_path="a.ts")
     out = relevant_code_for_issue(issue, {"a.ts": "code", "b.ts": "other"})
     assert out == "--- a.ts ---\ncode"
 
 
 def test_relevant_code_bounds_large_issue_file():
+    """A single issue file larger than the max-chars budget is truncated and
+    marked with a "[truncated]" suffix."""
     issue = ReviewIssue(file_path="a.ts")
     big = "x" * (DEFAULT_MAX_RELEVANT_CODE_CHARS + 100)
     out = relevant_code_for_issue(issue, {"a.ts": big})
@@ -40,12 +44,16 @@ def test_relevant_code_bounds_large_issue_file():
 
 
 def test_relevant_code_falls_back_to_first_files():
+    """When the issue's file_path isn't in the file map, the function falls
+    back to including the first available files instead of returning nothing."""
     issue = ReviewIssue(file_path="missing.ts")
     out = relevant_code_for_issue(issue, {"a.ts": "A", "b.ts": "B"})
     assert "a.ts" in out and "b.ts" in out
 
 
 def test_relevant_code_multifile_honors_budget():
+    """With no issue file_path and multiple large files, the fallback path
+    also enforces the max_chars budget, truncating combined output."""
     issue = ReviewIssue(file_path="")
     files = {f"f{i}.ts": "y" * 3000 for i in range(10)}
     out = relevant_code_for_issue(issue, files, max_chars=5000)
@@ -56,6 +64,8 @@ def test_relevant_code_multifile_honors_budget():
 
 
 def test_relevant_code_empty_returns_placeholder():
+    """With no files at all, a "(no code)" placeholder is returned rather than
+    an empty string."""
     assert relevant_code_for_issue(ReviewIssue(), {}) == "(no code)"
 
 
@@ -65,6 +75,7 @@ def test_relevant_code_empty_returns_placeholder():
 
 
 def test_lenient_json_direct():
+    """A raw string that is already a valid JSON object parses straight through."""
     data = lenient_json_object(
         '{"a": 1}', logger=logging.getLogger("t"), context="ctx", on_fail_msg="x"
     )
@@ -72,6 +83,7 @@ def test_lenient_json_direct():
 
 
 def test_lenient_json_extracts_object_from_prose():
+    """A JSON object embedded in surrounding prose text is extracted and parsed."""
     data = lenient_json_object(
         'prefix {"a": 2} suffix', logger=logging.getLogger("t"), context="ctx", on_fail_msg="x"
     )
@@ -79,6 +91,8 @@ def test_lenient_json_extracts_object_from_prose():
 
 
 def test_lenient_json_no_object_returns_empty(caplog):
+    """Text containing no JSON object at all logs a warning naming the context
+    and returns an empty dict rather than raising."""
     with caplog.at_level(logging.WARNING):
         data = lenient_json_object(
             "no json here", logger=logging.getLogger("t"), context="Review", on_fail_msg="zero."
@@ -88,6 +102,8 @@ def test_lenient_json_no_object_returns_empty(caplog):
 
 
 def test_lenient_json_malformed_inner_returns_empty(caplog):
+    """A substring that looks like a JSON object but fails to parse (invalid
+    syntax) logs a distinct warning and still returns an empty dict."""
     with caplog.at_level(logging.WARNING):
         data = lenient_json_object(
             "junk {bad: } more",
@@ -131,7 +147,6 @@ class _DemoAgent(BaseReviewToolAgent):
     problem_solve_sources = ("demo",)
     review_prompt = "task={task_description} code={code}"
     problem_solving_prompt = "src={source} sev={severity} desc={description} fp={file_path} rec={recommendation} code={current_code}"
-    max_code_chars = 1000
     review_parse_mode = "text"
     default_recommendation = "Fix demo."
     plan_recommendations = ["do a demo thing"]
@@ -173,6 +188,8 @@ def _make(monkeypatch, response):
 
 
 def test_run_delegates_to_execute():
+    """The generic ``run`` entrypoint on the template base delegates to the
+    subclass's ``execute`` step and surfaces its summary."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = None
     agent.llm = None
@@ -181,6 +198,8 @@ def test_run_delegates_to_execute():
 
 
 def test_execute_logs_and_returns_stub(caplog):
+    """``execute`` on a demo agent with no model logs at INFO and returns the
+    fixed "no changes applied" stub summary."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = None
     agent.llm = None
@@ -190,6 +209,8 @@ def test_execute_logs_and_returns_stub(caplog):
 
 
 def test_plan_returns_static():
+    """``plan`` returns the subclass's static ``plan_recommendations`` and
+    ``plan_summary`` verbatim, independent of the input."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = None
     out = agent.plan(_Input())
@@ -198,23 +219,40 @@ def test_plan_returns_static():
 
 
 def test_deliver():
+    """``deliver`` returns the subclass's fixed deliver summary."""
     agent = _DemoAgent.__new__(_DemoAgent)
     assert agent.deliver(_Input()).summary == "Demo deliver."
 
 
 def test_review_no_model():
+    """With no LLM model configured, ``review`` short-circuits with a
+    "skipped (no LLM)" summary instead of attempting a call."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = None
     assert "skipped (no LLM)" in agent.review(_Input(current_files={"a": "b"})).summary
 
 
 def test_review_no_code():
+    """With a model configured but no current files to review, ``review``
+    reports "no code" rather than invoking the LLM."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = object()
     assert "no code" in agent.review(_Input(current_files={})).summary
 
 
+def test_review_no_prompt_raises():
+    class _NoPromptAgent(_DemoAgent):
+        review_prompt = None
+
+    agent = _NoPromptAgent.__new__(_NoPromptAgent)
+    agent._model = object()
+    with pytest.raises(ValueError, match="_NoPromptAgent.*review_prompt"):
+        agent.review(_Input(current_files={"a": "b"}))
+
+
 def test_review_finds_issues(monkeypatch):
+    """A successful LLM review call is parsed into a single ReviewIssue tagged
+    with the agent's source, and the summary reports the issue count."""
     agent = _make(monkeypatch, "raw-review")
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert len(out.issues) == 1
@@ -223,6 +261,9 @@ def test_review_finds_issues(monkeypatch):
 
 
 def test_review_llm_exception(monkeypatch):
+    """An exception raised by the underlying LLM agent during review is
+    caught and reported as a "failed (LLM error)" summary rather than
+    propagating."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = object()
     agent.llm = None
@@ -398,6 +439,9 @@ def test_problem_solve_no_model():
 
 
 def test_problem_solve_no_matching_issues():
+    """When the pending review issues don't match the agent's
+    ``problem_solve_sources``, no fix attempt is made and the summary reports
+    zero issues to fix."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = object()
     out = agent.problem_solve(_Input(review_issues=[ReviewIssue(source="other")]))
@@ -405,6 +449,8 @@ def test_problem_solve_no_matching_issues():
 
 
 def test_problem_solve_fixes(monkeypatch):
+    """A matching issue is fixed one-at-a-time via the LLM, and the summary
+    reports the fixed-vs-total count."""
     agent = _make(monkeypatch, "## FILE x.ts ##\nfixed")
     out = agent.problem_solve(
         _Input(
@@ -416,6 +462,9 @@ def test_problem_solve_fixes(monkeypatch):
 
 
 def test_problem_solve_llm_exception(monkeypatch):
+    """An exception raised by the underlying LLM agent while fixing an issue
+    is caught per-issue: the issue counts as unfixed ("fixed 0 of 1") rather
+    than aborting the whole problem_solve call."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = object()
     agent.llm = None
@@ -434,6 +483,8 @@ def test_problem_solve_llm_exception(monkeypatch):
 
 
 def test_constructor_resolves_text_model(monkeypatch):
+    """By default (``uses_json_model`` False), the constructor resolves only
+    a text-response-format strands model, not a JSON one."""
     seen = []
 
     def _record(llm, *, response_format="json"):
@@ -453,6 +504,8 @@ class _JsonDemoAgent(_DemoAgent):
 
 
 def test_constructor_resolves_json_model_when_enabled(monkeypatch):
+    """With ``uses_json_model`` set, the constructor resolves both a text
+    model and a separate JSON-response-format model."""
     seen = []
 
     def _record(llm, *, response_format="json"):
@@ -468,6 +521,9 @@ def test_constructor_resolves_json_model_when_enabled(monkeypatch):
 
 
 def test_review_json_mode(monkeypatch):
+    """When ``review_parse_mode`` is "json", the raw LLM response is parsed as
+    a JSON object (rather than via the subclass's text parser) into issues."""
+
     class _JsonReview(_DemoAgent):
         review_parse_mode = "json"
 
@@ -495,6 +551,9 @@ def test_review_tool_agent_is_llm_tool_agent_base_subclass():
 
 
 def test_review_tool_agent_selects_review_recipe_attrs():
+    """BaseReviewToolAgent's class-level recipe attributes match the specific
+    combination expected by the review use case (text response, lenient JSON
+    parsing, no dedicated JSON model)."""
     assert BaseReviewToolAgent.resolve_models is True
     assert BaseReviewToolAgent.response_format == "text"
     assert BaseReviewToolAgent.use_run_strands_agent is True

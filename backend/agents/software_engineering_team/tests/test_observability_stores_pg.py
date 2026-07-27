@@ -74,6 +74,34 @@ def test_events_roundtrip_and_dora(_schema) -> None:
     assert m.merged_count == 1
 
 
+def test_record_event_persists_bound_trace_id(_schema) -> None:
+    """An event recorded inside bind_trace_id persists that trace_id and surfaces it in DORA."""
+    from shared.observability import bind_trace_id
+    from software_engineering_team.metrics.dora import compute_dora
+    from software_engineering_team.shared import se_events
+
+    with bind_trace_id("abc123def456"):
+        assert se_events.record_event(se_events.MERGE_TO_MAIN, job_id="jT")
+
+    rows = se_events.fetch_events_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
+    assert rows[0]["trace_id"] == "abc123def456"
+
+    m = compute_dora(30.0)
+    assert m.trace_ids_by_job == {"jT": "abc123def456"}
+
+
+def test_record_event_explicit_trace_id_overrides_context(_schema) -> None:
+    """An explicit trace_id kwarg wins over any trace_id bound in the current context."""
+    from shared.observability import bind_trace_id
+    from software_engineering_team.shared import se_events
+
+    with bind_trace_id("context-trace"):
+        assert se_events.record_event(se_events.MERGE_TO_MAIN, job_id="jT", trace_id="explicit-trace")
+
+    rows = se_events.fetch_events_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
+    assert rows[0]["trace_id"] == "explicit-trace"
+
+
 def test_emit_coding_team_metrics_populates_dora(_schema, monkeypatch) -> None:
     """The live coding_team path's metrics helper turns a task graph into DORA events."""
     from datetime import datetime, timedelta, timezone

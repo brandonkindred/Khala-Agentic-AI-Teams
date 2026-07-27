@@ -15,6 +15,7 @@ chunk review and the verification call in an end-to-end run.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -771,6 +772,38 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
     inp = _input(files={"a.py": "x=1\n", "b.py": "y=2\n"})
     out = filter_false_positives(PerFileStub(), inp, [a, b])
     assert out == [b]
+
+
+def test_filter_timeout_keeps_group_findings_without_hanging(monkeypatch) -> None:
+    """A verification call that hangs past the per-group timeout is treated as a
+    failure for its group only (fail-safe: kept, not dropped) while other groups'
+    verdicts still apply — and the call returns promptly instead of blocking on
+    the hung call for its full duration."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "2")
+    monkeypatch.setenv("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", "1")
+
+    a = _issue(file_path="a.py", description="a-fp")
+    b = _issue(file_path="b.py", description="b-real")
+
+    class SlowStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            low = prompt.lower()
+            if "full content of `a.py`" in low:
+                time.sleep(3)  # exceeds the 1s timeout set above
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            if "full content of `b.py`" in low:
+                return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
+    inp = _input(files={"a.py": "x=1\n", "b.py": "y=2\n"})
+    start = time.monotonic()
+    out = filter_false_positives(SlowStub(), inp, [a, b])
+    elapsed = time.monotonic() - start
+
+    # a's group timed out and was kept (not dropped); b's real finding stays too.
+    assert out == [a, b]
+    # Returned close to the 1s timeout, not the 3s hang.
+    assert elapsed < 2.5
 
 
 def test_filter_empty_issue_list() -> None:

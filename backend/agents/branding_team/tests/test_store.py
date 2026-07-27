@@ -182,6 +182,54 @@ def test_create_brand_for_nonexistent_client_returns_none(fake_pg: dict) -> None
     assert brand is None
 
 
+def test_delete_brand_removes_brand_and_association(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import branding_team.store as store_mod
+    from user_profile import ArtifactType
+
+    calls: list = []
+    monkeypatch.setattr(store_mod, "remove_association_safe", lambda *a, **k: calls.append((a, k)))
+
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    mission = make_mission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(client.id, mission, name="Acme Brand")
+    assert brand is not None
+
+    assert store.delete_brand(client.id, brand.id) is True
+    assert store.get_brand(client.id, brand.id) is None
+    assert store.list_brands_for_client(client.id) == []
+    assert calls == [((ArtifactType.BRAND, brand.id), {})]
+
+
+def test_delete_brand_unknown_id_is_noop(fake_pg: dict) -> None:
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    assert store.delete_brand(client.id, "brand_does_not_exist") is False
+
+
+def test_delete_brand_wrong_client_is_noop(fake_pg: dict) -> None:
+    """delete_brand is scoped to client_id — another client can't delete it."""
+    store = BrandingStore()
+    owner = store.create_client("Owner")
+    other = store.create_client("Other")
+    mission = make_mission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(owner.id, mission)
+    assert brand is not None
+
+    assert store.delete_brand(other.id, brand.id) is False
+    assert store.get_brand(owner.id, brand.id) is not None
+
+
 def test_brand_exists(fake_pg: dict) -> None:
     """brand_exists is True for an existing brand and False for an unknown id."""
     store = BrandingStore()

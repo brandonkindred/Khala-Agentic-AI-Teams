@@ -55,6 +55,17 @@ from .phase2_graph import run_phase2_parallel
 # here (``str.format`` ignores the unreferenced ``scope`` kwarg).
 DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE = "feat(devops): {summary}"
 
+# Fallback runtime verification checklist used when the deployment-strategy
+# agent's output carries no health checks of its own; the required-approval
+# name for production deploys. Named so Phase 5's ReleaseReadiness assembly
+# has a single, reusable source for these defaults instead of inline literals.
+DEFAULT_RUNTIME_CHECKS = [
+    "deployment_rollout_status",
+    "service_health",
+    "alert_health",
+]
+PROD_APPROVAL = "manual_prod_approval"
+
 # Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
 # Keep list values read-only — do not mutate them in the adapter.
 _DEFAULT_LEGACY_CLOUD = "on-premises"
@@ -224,10 +235,15 @@ MAX_INFRA_FIX_ITERATIONS = 3
 class _DebugPatchState:
     """Mutable bag for one Phase 4.6 debug-patch retry session.
 
-    Invariants: ``exec_failures`` is derived from ``exec_results`` (entries where
-    ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` always mirror
-    ``exec_results`` — established in ``__post_init__`` and refreshed via
-    :meth:`refresh_aggregates` after each re-exec.
+    Invariants: ``exec_failures`` is derived from ``exec_results`` (dict entries
+    where ``success`` is falsy). ``exec_gate_map`` / ``exec_findings`` always
+    mirror ``exec_results`` — established in ``__post_init__`` and refreshed
+    via :meth:`refresh_aggregates` after each re-exec. Malformed entries (not a
+    dict, or with non-dict ``checks`` / non-list ``findings``) are skipped
+    rather than raising, since execution-tool output is untrusted external
+    input; consumers of ``exec_failures`` (e.g. the Phase 4.6 debug-patch loop)
+    call ``.get()`` on each entry without further isinstance checks, so
+    non-dict entries must never reach that list.
     """
 
     exec_results: List[Dict[str, Any]]
@@ -239,20 +255,54 @@ class _DebugPatchState:
 
     @property
     def exec_failures(self) -> List[Dict[str, Any]]:
-        """Failing execution-tool results derived from ``exec_results``."""
-        return [er for er in self.exec_results if not er.get("success", True)]
+        """Failing execution-tool results derived from ``exec_results``.
+
+        Postconditions: only dict entries are included — a non-dict entry is
+        logged and excluded rather than being surfaced as a "failure" that
+        downstream ``.get()`` calls (e.g. in ``_debug_patch_once``) cannot
+        safely handle. A non-list ``findings`` value is normalized to ``[]``
+        (on a shallow copy) so ``_debug_patch_once``'s unguarded
+        ``"\\n".join(ef.get("findings", []))`` — which only falls back to its
+        default when the key is *absent*, not when it's present but the wrong
+        type — never receives a non-iterable.
+        """
+        failures = []
+        for er in self.exec_results:
+            if not isinstance(er, dict):
+                logger.warning("DevOps execution result is not a dict: %r", er)
+                continue
+            if not er.get("success", True):
+                findings = er.get("findings")
+                if not isinstance(findings, list):
+                    if findings is not None:
+                        logger.warning(
+                            "DevOps execution result has non-list findings: %r", findings
+                        )
+                    er = {**er, "findings": []}
+                failures.append(er)
+        return failures
 
     def refresh_aggregates(self) -> None:
         """Rebuild ``exec_gate_map`` / ``exec_findings`` from ``exec_results``.
 
         Preconditions: ``exec_results`` is the latest execution-tool output list.
-        Postconditions: ``exec_gate_map`` and ``exec_findings`` mirror that list.
+        Postconditions: ``exec_gate_map`` and ``exec_findings`` mirror that list;
+          entries that aren't a dict, or whose ``checks``/``findings`` aren't
+          the expected dict/list shape, are skipped and logged rather than
+          raising.
         """
         self.exec_gate_map = {}
         self.exec_findings = []
         for er in self.exec_results:
-            self.exec_gate_map.update(er.get("checks", {}))
-            self.exec_findings.extend(er.get("findings", []))
+            if not isinstance(er, dict):
+                logger.warning("DevOps execution result is not a dict: %r", er)
+                continue
+            checks = er.get("checks")
+            if isinstance(checks, dict):
+                self.exec_gate_map.update(checks)
+            findings = er.get("findings")
+            if isinstance(findings, list):
+                self.exec_findings.extend(findings)
 
 
 class DevOpsTeamLeadAgent(TeamLeadSharedState):
@@ -280,8 +330,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
     # this class so ``self._run_gated_phases`` / ``self._run_bounded_retry_loop``
     # work without subclassing BaseTeamLead. The helpers only need ``self`` for
     # the Python method call signature — they do not read BaseTeamLead fields.
-    # ``_run_phase_gates`` (called via BaseTeamLead._run_phase_gates) delegates
-    # to ``self._run_gated_phases``, so that alias must exist on this class.
+    # Alias BaseTeamLead._run_gated_phases onto this class as
+    # self._run_gated_phases. This is required because BaseTeamLead._run_phase_gates
+    # (invoked unbound elsewhere in this file) internally calls
+    # self._run_gated_phases, and DevOpsTeamLead does not inherit from
+    # BaseTeamLead.
     _run_gated_phases = BaseTeamLead._run_gated_phases
     _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
     # Tool-dispatch logic lives in ``tool_dispatch.py``; aliased here so
@@ -653,6 +706,8 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
         quality_gates: Dict[str, str] = {}
         acceptance_trace: List[Dict[str, object]] = []
         completion: Any = None  # filled by Phase 5 on success
+        # Phase 4.6 debug-patch attempts consumed; 1 = no retry needed.
+        infra_fix_iterations = 1
 
         def _phase1_intake_clarify() -> Optional[DevOpsTeamResult]:
             """Phase 1: environment policy + task clarification gates.
@@ -775,11 +830,12 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
               may be empty).
             Postconditions: runs tool validation, execution verification, the
               debug-patch loop, and independent reviews; sets nonlocal
-              ``quality_gates``. Returns a failed ``DevOpsTeamResult`` on quality-
-              gate or build-verifier failure via ``_run_phase_gates``; otherwise
-              returns ``None`` so Phase 5 runs.
+              ``quality_gates`` and ``infra_fix_iterations`` (Phase 4.6 attempts
+              consumed; stays 1 when no retry was needed). Returns a failed
+              ``DevOpsTeamResult`` on quality-gate or build-verifier failure via
+              ``_run_phase_gates``; otherwise returns ``None`` so Phase 5 runs.
             """
-            nonlocal aggregated_artifacts, quality_gates, acceptance_trace
+            nonlocal aggregated_artifacts, quality_gates, acceptance_trace, infra_fix_iterations
 
             # Phase 4: tool validation + independent reviews
             self._report_status(
@@ -799,6 +855,9 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             repo_str = str(repo_path)
             exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
             for er in exec_results:
+                if not isinstance(er, dict):
+                    logger.warning("DevOps execution result is not a dict: %r", er)
+                    continue
                 fc = er.get("failure_class", "")
                 if fc:
                     logger.info(
@@ -818,9 +877,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             # preserved).
             state = _DebugPatchState(exec_results=exec_results)
             if state.exec_failures:
-                self._run_bounded_retry_loop(
-                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                    attempt=lambda i: self._debug_patch_once(
+
+                def _debug_patch_attempt(i: int) -> Optional[_DebugPatchState]:
+                    nonlocal infra_fix_iterations
+                    infra_fix_iterations = i + 1
+                    return self._debug_patch_once(
                         i,
                         state=state,
                         aggregated_artifacts=aggregated_artifacts,
@@ -829,7 +890,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         write_changes=write_changes,
                         subdir=subdir,
                         max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                    ),
+                    )
+
+                self._run_bounded_retry_loop(
+                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
+                    attempt=_debug_patch_attempt,
                     is_success=lambda s: not s.exec_failures,
                 )
 
@@ -899,7 +964,8 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 """Fail the phase when an injected build verifier rejects the repo.
 
                 Preconditions: quality gates already passed (prior gate returned
-                  ``None``); ``build_verifier`` may be ``None``.
+                  ``None``); ``build_verifier`` may be ``None``; ``repo_path`` and
+                  ``task_spec`` are set by Phase 4 setup above.
                 Postconditions: when ``build_verifier`` is set and returns a
                   failing result, returns ``DevOpsTeamResult(success=False, …)``
                   with the verifier error (or the default failure string);
@@ -962,14 +1028,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 or "rolling",
                 rollback_available=bool(deploy_result.rollback_plan),
                 alerting_configured=bool(deploy_result.alerting_configured),
-                required_approvals=["manual_prod_approval"]
+                required_approvals=[PROD_APPROVAL]
                 if "production" in task_spec.platform_scope.environments
                 else [],
-                runtime_verification_checklist=[
-                    "deployment_rollout_status",
-                    "service_health",
-                    "alert_health",
-                ],
+                runtime_verification_checklist=list(getattr(deploy_result, "health_checks", []))
+                or DEFAULT_RUNTIME_CHECKS,
             )
             # Deliver the artifacts for real via the shared inline-merge helper and
             # report the actual outcome (real branch, commit SHA, merge status) rather
@@ -1020,6 +1083,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                             notes=[deliver_result.summary],
                         ),
                     )
+                merge_status = "merged" if head_ok else "merged_sha_unknown"
+                if not head_ok:
+                    completion.notes.append(
+                        "Merge succeeded but HEAD SHA could not be read after merge; commit hash unknown."
+                    )
                 git_ops = GitOperationsMetadata(
                     branch_created=deliver_result.branch_name,
                     commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
@@ -1027,7 +1095,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         target_branch=DEVELOPMENT_BRANCH,
                         strategy="merge",
                         merge_commit_hash=sha,
-                        status="merged",
+                        status=merge_status,
                     ),
                 )
             completion.git_operations = git_ops
@@ -1055,4 +1123,6 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             return early_exit
 
         assert completion is not None  # phase 5 success path always assigns it
-        return DevOpsTeamResult(success=True, iterations=1, completion_package=completion)
+        return DevOpsTeamResult(
+            success=True, iterations=infra_fix_iterations, completion_package=completion
+        )

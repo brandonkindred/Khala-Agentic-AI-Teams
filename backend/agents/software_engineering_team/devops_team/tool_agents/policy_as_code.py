@@ -7,7 +7,8 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
-from shared.command_runner.runner import run_command
+from shared.command_runner.executor import run_command
+from shared.subprocess_timeouts import DEVOPS_POLICY_AS_CODE_TIMEOUT_S
 
 
 class PolicyAsCodeInput(BaseModel):
@@ -28,7 +29,7 @@ class PolicyAsCodeToolAgent:
         checks: Dict[str, str] = {}
         findings: List[str] = []
 
-        checkov = run_command(["checkov", "-d", str(path)], cwd=path, timeout=180)
+        checkov = run_command(["checkov", "-d", str(path)], cwd=path, timeout=DEVOPS_POLICY_AS_CODE_TIMEOUT_S)
         if checkov.exit_code in (127, -1) or "Command not found" in (checkov.stderr or ""):
             checks["policy_checks"] = "skipped"
         else:

@@ -24,29 +24,23 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import type { PageEvent } from '@angular/material/paginator';
-import { MatDialog } from '@angular/material/dialog';
 import { RouterLink } from '@angular/router';
-import { of } from 'rxjs';
-import { finalize, map } from 'rxjs/operators';
+import { Observable } from 'rxjs';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabRunService } from '../../services/strategy-lab-run.service';
 import { StrategyLabActivityLogService } from '../../services/strategy-lab-activity-log.service';
+import { StrategyLabPaperTradingService } from '../../services/strategy-lab-paper-trading.service';
+import { StrategyLabDestructiveActionsService } from '../../services/strategy-lab-destructive-actions.service';
 import { describeRunStatus } from '../../services/strategy-lab-log-message';
-import { NotificationService } from '../../core/notification.service';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { extractErrorDetail } from '../../shared/extract-error-detail';
-import {
-  ConfirmDialogComponent,
-  type ConfirmDialogData,
-} from '../../shared/confirm-dialog/confirm-dialog.component';
 import {
   ASSET_CLASS_ICONS,
   returnColor,
   returnColorLabel,
   getAssetClassIcon,
-  publishabilitySkipLabel,
 } from './strategy-lab.formatters';
 import { PhaseStepperComponent, phaseLabel } from './phase-stepper/phase-stepper.component';
 import { StrategyCardComponent } from './strategy-card/strategy-card.component';
@@ -102,7 +96,12 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
   selector: 'app-strategy-lab',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  providers: [StrategyLabRunService, StrategyLabActivityLogService],
+  providers: [
+    StrategyLabRunService,
+    StrategyLabActivityLogService,
+    StrategyLabPaperTradingService,
+    StrategyLabDestructiveActionsService,
+  ],
   imports: [
     CommonModule,
     DecimalPipe,
@@ -137,15 +136,14 @@ export class StrategyLabComponent implements OnInit {
   private readonly api = inject(InvestmentApiService);
   private readonly integrations = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
-  private readonly dialog = inject(MatDialog);
-  private readonly notify = inject(NotificationService);
   /** Owns SSE/polling/active-run tracking and per-record paper-trading polling. */
   readonly runService = inject(StrategyLabRunService);
   /** Owns activity-log bookkeeping and the completion/error/warning banners driven by runService.events$. */
   private readonly activityLogService = inject(StrategyLabActivityLogService);
-
-  /** True while a destructive confirm dialog is open — blocks re-entrant opens. */
-  private confirmingDestructive = false;
+  /** Owns paper-trading initiation: the publishability guard, the start POST, and the initial results fetch. */
+  private readonly paperTradingService = inject(StrategyLabPaperTradingService);
+  /** Owns per-record deletion and "clear all" strategy lab data, including the destructive-action confirm dialog. */
+  private readonly destructiveActionsService = inject(StrategyLabDestructiveActionsService);
 
   /**
    * TradingView data-source status, used to show/hide the "using free public
@@ -167,7 +165,8 @@ export class StrategyLabComponent implements OnInit {
   readonly running = computed(() => this.startingRun() || this.runService.running());
 
   readonly loading = signal(false);
-  readonly clearingAll = signal(false);
+  /** Owned by destructiveActionsService. */
+  readonly clearingAll = this.destructiveActionsService.clearingAll;
   readonly error = signal<string | null>(null);
   /**
    * Non-fatal notice banner (dismissible, non-error styling): shown when a run
@@ -176,8 +175,8 @@ export class StrategyLabComponent implements OnInit {
    * is a notice, not a red-banner error). Owned by `activityLogService`.
    */
   readonly completionWarning = this.activityLogService.completionWarning;
-  /** Lab record id currently being deleted (disables actions on that card). */
-  readonly deletingLabRecordId = signal<string | null>(null);
+  /** Lab record id currently being deleted (disables actions on that card). Owned by destructiveActionsService. */
+  readonly deletingLabRecordId = this.destructiveActionsService.deletingLabRecordId;
 
   // User-configurable batch settings (mirror backend Field bounds).
   // BATCH_COUNT_MAX is hydrated from GET /strategy-lab/config on init so the
@@ -242,13 +241,8 @@ export class StrategyLabComponent implements OnInit {
   // Per-card trade ledger state (pagination index only — rendering lives in StrategyCardComponent)
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
 
-  // Paper trading state
-  /** True while a "run paper trading" POST is in flight for this record, before runService takes over. */
-  private readonly startingPaperTrade = signal<string | null>(null);
-  /** Lab record id currently being paper traded — see `running`'s doc comment for why this merges two sources. */
-  readonly paperTradingLabRecordId = computed(
-    () => this.startingPaperTrade() ?? this.runService.paperTradingLabRecordId(),
-  );
+  // Paper trading state — owned by paperTradingService.
+  readonly paperTradingLabRecordId = this.paperTradingService.paperTradingLabRecordId;
 
   // Activity log — owned by activityLogService.
   readonly activityLog = this.activityLogService.activityLog;
@@ -322,25 +316,50 @@ export class StrategyLabComponent implements OnInit {
     this.wasRunning = isRunning;
   });
 
+  /**
+   * Subscribes `source$` to mirror each of its emissions onto the `error`
+   * signal for the component's lifetime. Shared by every "forward this
+   * service's error stream into the banner" wiring site (`activityLogService`,
+   * `runService`, `paperTradingService`) instead of each hand-rolling the same
+   * `pipe(takeUntilDestroyed) -> subscribe` boilerplate.
+   *
+   * Preconditions: none.
+   * Postconditions: every value `source$` emits — including `null`, which
+   *   clears the banner — is set on `error` until the component is destroyed.
+   */
+  private mirrorErrorsIntoBanner<T extends string | null>(source$: Observable<T>): void {
+    source$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((message) => this.error.set(message));
+  }
+
+  /**
+   * Wires `paperTradingService.errors$` into the `error` signal. A field
+   * initializer (not wired inside `ngOnInit()`) so it's active the instant
+   * the component is constructed — `runPaperTrading()` can be called, and
+   * its guard/POST error surfaced, before `ngOnInit()` ever runs.
+   * `mirrorErrorsIntoBanner` returns `void`, so this field only exists to
+   * trigger that call at construction time — it holds no state of its own.
+   */
+  private readonly wirePaperTradingErrors = this.mirrorErrorsIntoBanner(this.paperTradingService.errors$);
+
   ngOnInit(): void {
     this.loadConfig();
     this.loadResults();
-    this.loadPaperTradingResults();
+    this.paperTradingService.loadPaperTradingResults();
     this.runService.checkForActiveRun();
     this.loadTradingViewStatus();
 
     this.activityLogService.resultsRefreshRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.loadResults());
-    this.activityLogService.terminalError$
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((message) => this.error.set(message));
+    this.mirrorErrorsIntoBanner(this.activityLogService.terminalError$);
     this.activityLogService.scrollRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => this.logContainer?.nativeElement?.scrollTo({ top: 999999, behavior: 'smooth' }));
-    this.runService.errors$
+    this.mirrorErrorsIntoBanner(this.runService.errors$);
+    this.destructiveActionsService.resultsRefreshRequested$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((message) => this.error.set(message));
+      .subscribe(() => this.loadResults());
+    this.mirrorErrorsIntoBanner(this.destructiveActionsService.errors$);
   }
 
   /**
@@ -753,195 +772,45 @@ export class StrategyLabComponent implements OnInit {
   }
 
   /**
-   * Open the shared Material confirm dialog for a destructive action.
-   *
-   * Preconditions: `data.title` and `data.message` are non-empty; the caller
-   *   treats a `false` emission as "do not proceed".
-   * Postconditions: emits exactly once — `true` only when the user confirms,
-   *   `false` on cancel, backdrop/ESC dismissal, or when a confirmation is
-   *   already pending. The re-entrancy guard is released when the dialog closes.
-   *
-   * The native `confirm()` this replaced blocked synchronously; the async
-   * dialog does not, so a rapid double-activation (e.g. Enter pressed twice
-   * before the dialog traps focus) could otherwise stack dialogs and fire
-   * duplicate destructive requests. The guard collapses that window.
-   */
-  private confirmDestructive(data: ConfirmDialogData) {
-    if (this.confirmingDestructive) return of(false);
-    this.confirmingDestructive = true;
-    return this.dialog
-      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
-      .afterClosed()
-      .pipe(
-        map((result) => result === true),
-        finalize(() => {
-          this.confirmingDestructive = false;
-        }),
-      );
-  }
-
-  /**
-   * Deletes a strategy lab record after user confirmation.
-   *
-   * Opens a destructive-action confirmation dialog describing the record's
-   * hypothesis; if the user cancels or dismisses it, no request is sent and
-   * state is left untouched. On confirmation, calls the API to delete the
-   * record (and its backtest and paper-trading sessions), tracks the
-   * in-flight deletion via `deletingLabRecordId`, and on success clears the
-   * error state, refreshes the results list, and shows a success toast. On
-   * failure, clears the in-flight marker and surfaces the error via
-   * `error`.
-   *
-   * Preconditions:
-   *   `record` must be a valid `StrategyLabRecord` with a populated
-   *   `lab_record_id`. `strategy.hypothesis` may be missing on legacy
-   *   records; the confirmation message falls back to an empty string
-   *   in that case rather than throwing.
-   *
-   * Postconditions:
-   *   Either no observable change occurs (cancelled), or the record is
-   *   deleted server-side, `deletingLabRecordId` returns to `null`, and
-   *   either the results are refreshed with a success notification or
-   *   `error` reflects the failure.
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: delegates entirely to `destructiveActionsService.deleteRecord`
+   *   (see its own contract) — this method has no logic of its own beyond
+   *   forwarding the call.
    */
   deleteRecord(record: StrategyLabRecord): void {
-    const id = record.lab_record_id;
-    const hypothesis = record.strategy?.hypothesis ?? '';
-    const shortHyp = hypothesis.slice(0, 60) + (hypothesis.length > 60 ? '…' : '');
-    this.confirmDestructive({
-      title: 'Delete strategy lab run',
-      message: `Delete this strategy lab run?\n\n${shortHyp}\n\nThis removes the record, its backtest, and any paper-trading sessions for it. This cannot be undone.`,
-      confirmLabel: 'Delete',
-      variant: 'danger',
-    })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((confirmed) => {
-        if (!confirmed) return;
-        this.error.set(null);
-        this.deletingLabRecordId.set(id);
-        this.api
-          .deleteStrategyLabRecord(id)
-          .pipe(takeUntilDestroyed(this.destroyRef))
-          .subscribe({
-            next: () => {
-              this.deletingLabRecordId.set(null);
-              this.loadResults();
-              this.notify.saved('Strategy lab run deleted.');
-            },
-            error: (err) => {
-              this.deletingLabRecordId.set(null);
-              this.error.set(extractErrorDetail(err, 'Failed to delete strategy.'));
-            },
-          });
-      });
+    this.destructiveActionsService.deleteRecord(record);
   }
 
   /**
-   * Prompts the user to confirm before wiping all strategy lab data, then calls the API to
-   * delete every lab run, lab strategy/backtest, and paper-trading session and refreshes the view.
+   * Postconditions: delegates entirely to `destructiveActionsService.clearAllLabData`
+   *   (see its own contract) — this method has no logic of its own beyond
+   *   forwarding the call.
    */
   clearAllLabData(): void {
-    this.confirmDestructive({
-      title: 'Clear all strategy lab data',
-      message:
-        'Delete ALL strategy lab runs, lab strategies/backtests, and paper-trading sessions?\n\nThis cannot be undone.',
-      confirmLabel: 'Delete all',
-      variant: 'danger',
-    })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe((confirmed) => {
-        if (!confirmed) return;
-        this.error.set(null);
-        this.clearingAll.set(true);
-        this.api
-          .clearStrategyLabStorage()
-          .pipe(takeUntilDestroyed(this.destroyRef))
-          .subscribe({
-            next: () => {
-              this.clearingAll.set(false);
-              this.runService.clearPaperTradingSessions();
-              this.loadResults();
-              this.notify.saved('Strategy lab data cleared.');
-            },
-            error: (err) => {
-              this.clearingAll.set(false);
-              this.error.set(extractErrorDetail(err, 'Failed to clear strategy lab data.'));
-            },
-          });
-      });
+    this.destructiveActionsService.clearAllLabData();
   }
 
   // ---------------------------------------------------------------------------
-  // Paper Trading
+  // Paper Trading — delegates to paperTradingService.
   // ---------------------------------------------------------------------------
 
   /**
-   * Fetches paper trading sessions and hydrates run-service state from them.
-   *
-   * Preconditions: none.
-   * Postconditions: for each `lab_record_id`, only the most recent session
-   * (by `paperSessionRecencyKey`) is kept and handed to
-   * `runService.hydratePaperTradingSessions`, so any still-running sessions
-   * resume polling.
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: delegates entirely to `paperTradingService.runPaperTrading`
+   *   (see its own contract) — this method has no logic of its own beyond
+   *   forwarding the call.
    */
-  loadPaperTradingResults(): void {
-    this.api
-      .getPaperTradingResults()
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: (res) => {
-        const sessions: Record<string, PaperTradingSession> = {};
-        for (const s of res.items) {
-          // Keep the newest session per lab record, using started_at as the
-          // recency key (completed_at is empty for still-running sessions, so
-          // relying on it would systematically lose to older completed ones).
-          const existing = sessions[s.lab_record_id];
-          if (!existing || this.paperSessionRecencyKey(s) > this.paperSessionRecencyKey(existing)) {
-            sessions[s.lab_record_id] = s;
-          }
-        }
-        // Resumes polling for any sessions still running (e.g. after a page reload).
-        this.runService.hydratePaperTradingSessions(sessions);
-      },
-    });
-  }
-
-  /** Sortable recency key for a paper-trading session. */
-  private paperSessionRecencyKey(s: PaperTradingSession): string {
-    return s.started_at || s.completed_at || '';
-  }
-
   runPaperTrading(record: StrategyLabRecord): void {
-    if (!record.is_publishable) {
-      const reason = this.publishabilitySkipLabel(record);
-      this.error.set(
-        'This strategy is not publishable and cannot be paper traded' +
-        (reason ? ` (${reason})` : '.'),
-      );
-      return;
-    }
-    this.error.set(null);
-    this.startingPaperTrade.set(record.lab_record_id);
-    this.api
-      .runPaperTrading({ lab_record_id: record.lab_record_id })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-      next: (res) => {
-        // Backend returns a "running" session immediately; runService stores it
-        // so the UI shows in-progress state, then polls until the worker finishes.
-        this.runService.trackPaperTradingSession(record.lab_record_id, res.session);
-        this.startingPaperTrade.set(null);
-      },
-      error: (err) => {
-        this.startingPaperTrade.set(null);
-        this.error.set(extractErrorDetail(err, 'Paper trading failed.'));
-      },
-    });
+    this.paperTradingService.runPaperTrading(record);
   }
 
-  readonly publishabilitySkipLabel = publishabilitySkipLabel;
-
+  /**
+   * Preconditions: `record` is a loaded lab row.
+   * Postconditions: returns `paperTradingService.getPaperSession(record)`
+   *   verbatim (see its own contract) — this method has no logic of its own
+   *   beyond forwarding the call.
+   */
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
-    return this.runService.paperTradingSessions()[record.lab_record_id] ?? null;
+    return this.paperTradingService.getPaperSession(record);
   }
 }

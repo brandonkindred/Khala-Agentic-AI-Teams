@@ -69,6 +69,12 @@ export interface TeamProgressEntry {
   progress?: number;
   current_task_id?: string;
   current_microtask?: string;
+  /**
+   * One of MICROTASK_PHASES' ids, "completed", or "qa_security_testing" (not
+   * in MICROTASK_PHASES) -- the backend reports the latter while QA and
+   * Security run concurrently; neither has a confirmed outcome yet, so it
+   * must not be inferred as "qa_testing passed".
+   */
   current_microtask_phase?: string;
   phase_detail?: string;
   current_microtask_index?: number;

@@ -12,7 +12,7 @@ import orchestrator
 import pytest
 
 from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE, LLMRateLimitError
-from shared.command_runner.runner import CommandResult
+from shared.command_runner.executor import CommandResult
 from software_engineering_team.shared.models import (
     ProductRequirements,
     SystemArchitecture,
@@ -49,10 +49,10 @@ def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_err
     )
 
     with patch(
-        "shared.command_runner.runner.run_python_syntax_check",
+        "shared.command_runner.executor.run_python_syntax_check",
         return_value=CommandResult(True, 0, "", ""),
     ):
-        with patch("shared.command_runner.runner.run_pytest", return_value=mock_result):
+        with patch("shared.command_runner.executor.run_pytest", return_value=mock_result):
             from software_engineering_team import build_fix
 
             ok, error_output = build_fix._run_build_verification(tmp_path, "backend", "task-1")

@@ -197,6 +197,20 @@ The gate runs in the synthesis loop after `CodeConformanceGate`,
 only for `requires_custom_code=True` strategies. Each retry feeds the per-bar diff back through
 `_refine_or_exhaust`; after exhaustion the pipeline proceeds to backtest with the best-effort code.
 
+### STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS
+Cap on the code-refinement loop inside `_run_synthesis_loop` (default `50`, sub-1 values floored to
+`1`). Each round validates the spec/code, executes it in the sandbox, and asks `RefinementAgent` to fix
+the reported syntax/build/runtime failure; exhaustion sets `backtest_status="failed:
+max_refinement_rounds"`, distinct from the within-loop stall short-circuit governed by
+`STRATEGY_LAB_REFINEMENT_STALL_ROUNDS`.
+
+### STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS
+Cap on the trade-alignment audit/fix loop inside `_run_trade_alignment_loop` (default `10`, sub-1
+values floored to `1`). Each round audits the executed trades against the spec and, if misaligned,
+asks the alignment agent to rewrite the strategy code, which is then re-executed for a fresh backtest.
+Reaching the cap logs a warning and leaves the trades as last audited — it does not raise or otherwise
+short-circuit the cycle, it just stops attempting further fixes.
+
 ### STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE
 Relative tolerance for `SpecReadinessGate`'s position-sizing coherence rule (default `0.05` = 5%).
 Risk model: `sizing.fraction` / `max_position_pct`

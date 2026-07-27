@@ -90,6 +90,7 @@ const PHASE_DISPLAY: Record<string, string> = {
   'code_review': 'Code Review',
   'qa_testing': 'QA',
   'security_testing': 'Security',
+  'qa_security_testing': 'QA + Security',
   'problem_solving': 'Fixing',
 };
 
@@ -850,6 +851,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       case 'code_review':
       case 'qa_testing':
       case 'security_testing':
+      case 'qa_security_testing':
         return 'phase-review';
       case 'documentation':
         return 'phase-docs';

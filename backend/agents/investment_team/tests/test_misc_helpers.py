@@ -368,7 +368,122 @@ def test_format_prior_results_truncates_long_text() -> None:
     out = format_prior_results([rec])
     # Truncation markers ("...") were added when each field exceeded the cap.
     assert "..." in out
-    assert "[WINNING]" in out
+    # is_publishable defaults to False (legacy/ungated row) and no skip reason
+    # was set, so the label reflects "won but not confirmed publishable".
+    assert "[WINNING · NOT PUBLISHABLE]" in out
+
+
+def test_format_prior_results_labels_publishable_winner() -> None:
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    strat = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    res = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=10.0,
+        volatility_pct=10.0,
+        sharpe_ratio=0.1,
+        max_drawdown_pct=1.0,
+        win_rate_pct=50.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt",
+        strategy_id="s",
+        strategy=strat,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=res,
+        trades=[],
+    )
+    rec = StrategyLabRecord(
+        lab_record_id="l1",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        is_publishable=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    out = format_prior_results([rec])
+    assert "[WINNING · PUBLISHABLE]" in out
+
+
+def test_format_prior_results_labels_winning_with_skip_reason() -> None:
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    strat = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    res = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=10.0,
+        volatility_pct=10.0,
+        sharpe_ratio=0.1,
+        max_drawdown_pct=1.0,
+        win_rate_pct=50.0,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id="bt",
+        strategy_id="s",
+        strategy=strat,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=res,
+        trades=[],
+    )
+    rec = StrategyLabRecord(
+        lab_record_id="l1",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        is_publishable=False,
+        publishability_skip_reason="realism_failed",
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+    )
+    out = format_prior_results([rec])
+    assert "[WINNING · NOT PUBLISHABLE (realism_failed)]" in out
 
 
 def test_format_prior_results_truncates_to_tail() -> None:
@@ -432,6 +547,22 @@ def test_format_prior_results_truncates_to_tail() -> None:
     assert "h-0" not in out
 
 
+def test_format_prior_results_labels_mixed_states_in_single_call() -> None:
+    """A single render pass over losing / publishable-winning / non-publishable-
+    winning records must label each independently — the label attaches to the
+    record's own state, not to whichever record rendered first or the raw
+    return the records share."""
+    records = [
+        _attr_record(i=0, annual_return=2.0),  # losing
+        _attr_record(i=1, annual_return=10.0, is_publishable=True),  # winning, publishable
+        _attr_record(i=2, annual_return=10.0, is_publishable=False),  # winning, not publishable
+    ]
+    out = format_prior_results(records)
+    assert "[LOSING] stocks | h-0" in out, out
+    assert "[WINNING · PUBLISHABLE] stocks | h-1" in out, out
+    assert "[WINNING · NOT PUBLISHABLE] stocks | h-2" in out, out
+
+
 # ---------------------------------------------------------------------------
 # Prior-results performance attribution (aggregate_prior_results /
 # format_prior_attribution + the entry/exit classifiers).
@@ -450,6 +581,7 @@ def _attr_record(
     status: str = "completed",
     requires_redesign: bool = False,
     unparsed_rules=None,
+    is_publishable: bool = False,
 ):
     """Build a ``StrategyLabRecord`` with the DSL knobs the attribution buckets on.
 
@@ -515,6 +647,7 @@ def _attr_record(
         strategy=strat,
         backtest=bt,
         is_winning=annual_return >= 8.0,
+        is_publishable=is_publishable,
         strategy_rationale="r",
         analysis_narrative="n",
         created_at=f"2024-01-{i + 1:02d}T00:00:00Z",
@@ -724,11 +857,50 @@ def test_aggregate_prior_results_single_record_keys_and_means() -> None:
     )
     agg = aggregate_prior_results([rec])
 
-    assert agg[("asset_class", "crypto")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
-    assert agg[("entry", "rsi")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
-    assert agg[("exit", "trailing_stop")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
+    expected_stats = {
+        "win_rate": 60.0,
+        "annual_return": 12.0,
+        "n": 1,
+        "publishable_n": 0,
+        "publishable_win_rate": None,
+        "publishable_annual_return": None,
+    }
+    assert agg[("asset_class", "crypto")] == expected_stats
+    assert agg[("entry", "rsi")] == expected_stats
+    assert agg[("exit", "trailing_stop")] == expected_stats
     # Sizing defaults to fixed_fraction on StrategySpec.
     assert agg[("sizing", "fixed_fraction")]["n"] == 1
+
+
+def test_aggregate_prior_results_publishable_subset_means() -> None:
+    """``publishable_*`` fields track a mean over only the ``is_publishable``
+    subset of a bucket's contributing records, distinct from the raw mean over
+    all of them — so a bucket's apparent (possibly overfit) raw edge never
+    hides whether any of it is actually robust."""
+    recs = [
+        _attr_record(i=0, asset_class="crypto", win_rate=40.0, annual_return=4.0),
+        _attr_record(
+            i=1, asset_class="crypto", win_rate=80.0, annual_return=20.0, is_publishable=True
+        ),
+    ]
+    agg = aggregate_prior_results(recs)
+    bucket = agg[("asset_class", "crypto")]
+    assert bucket["n"] == 2
+    assert bucket["win_rate"] == pytest.approx(60.0)
+    assert bucket["annual_return"] == pytest.approx(12.0)
+    assert bucket["publishable_n"] == 1
+    assert bucket["publishable_win_rate"] == pytest.approx(80.0)
+    assert bucket["publishable_annual_return"] == pytest.approx(20.0)
+
+
+def test_aggregate_prior_results_publishable_fields_none_when_no_publishable_record() -> None:
+    """A bucket with zero publishable contributors reports ``None`` (not 0.0,
+    which would misleadingly read as a genuine zero-return robust result)."""
+    agg = aggregate_prior_results([_attr_record(i=0, asset_class="forex")])
+    bucket = agg[("asset_class", "forex")]
+    assert bucket["publishable_n"] == 0
+    assert bucket["publishable_win_rate"] is None
+    assert bucket["publishable_annual_return"] is None
 
 
 def test_aggregate_prior_results_averages_within_bucket() -> None:
@@ -838,6 +1010,22 @@ def test_aggregate_prior_results_max_records_zero_yields_empty() -> None:
     # whole list). Guards the contract that 0 → {}.
     recs = [_attr_record(i=i, entry_rules=[_rsi_entry()]) for i in range(3)]
     assert aggregate_prior_results(recs, max_records=0) == {}
+
+
+def test_aggregate_prior_results_cache_reused_across_calls_and_windows() -> None:
+    # A shared cache dict must let a second call against the same ``records``
+    # object reuse the sorted/filtered pass instead of recomputing it — even
+    # when the two calls use different ``max_records`` windows.
+    recs = [_attr_record(i=i, entry_rules=[_rsi_entry()], annual_return=float(i)) for i in range(5)]
+    cache: dict = {}
+    first = aggregate_prior_results(recs, max_records=5, cache=cache)
+    assert len(cache) == 1
+    second = aggregate_prior_results(recs, max_records=2, cache=cache)
+    # Same cache entry reused (no second sort/filter pass), no new key added.
+    assert len(cache) == 1
+    # Cached (pre-trim) results are identical to the uncached computation.
+    assert first == aggregate_prior_results(recs, max_records=5)
+    assert second == aggregate_prior_results(recs, max_records=2)
 
 
 def test_format_prior_attribution_empty_sentinel() -> None:

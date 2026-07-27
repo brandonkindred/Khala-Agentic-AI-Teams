@@ -49,6 +49,11 @@ class RunTeamWorkflow:
         resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
         planning_only: bool = False,
     ) -> None:
+        # Generated via workflow.uuid4() (Temporal's replay-safe UUID source), not
+        # shared.observability.new_trace_id()/uuid.uuid4() directly — workflow code
+        # must be deterministic across replays. ``.hex[:12]`` mirrors new_trace_id()'s
+        # documented shape, so both runtime modes emit the same id format.
+        trace_id = workflow.uuid4().hex[:12]
         await workflow.execute_activity(
             _activities.run_orchestrator_activity,
             args=[
@@ -57,6 +62,7 @@ class RunTeamWorkflow:
                 spec_content_override,
                 resolved_questions_override,
                 planning_only,
+                trace_id,
             ],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=RUN_ORCHESTRATOR_TIMEOUT,
@@ -70,9 +76,10 @@ class RetryFailedWorkflow:
 
     @workflow.run
     async def run(self, job_id: str) -> None:
+        trace_id = workflow.uuid4().hex[:12]
         await workflow.execute_activity(
             _activities.retry_failed_activity,
-            args=[job_id],
+            args=[job_id, trace_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=RETRY_FAILED_TIMEOUT,
             retry_policy=DEFAULT_RETRY_POLICY,
@@ -96,10 +103,20 @@ class RunTeamWorkflowV2:
         resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
         planning_only: bool = False,
     ) -> None:
+        # One trace id for every phase of this job — generated via workflow.uuid4()
+        # (Temporal's replay-safe UUID source) rather than
+        # shared.observability.new_trace_id()/uuid.uuid4() directly, since workflow
+        # code must be deterministic across replays. Each activity runs as its own
+        # process/thread invocation, so the id is passed explicitly and re-bound
+        # inside each activity rather than relying on contextvar inheritance.
+        # ``.hex[:12]`` mirrors new_trace_id()'s documented shape, so both runtime
+        # modes emit the same id format.
+        trace_id = workflow.uuid4().hex[:12]
+
         # Phase 1: Spec parsing + Product Requirements Analysis
         spec_result = await workflow.execute_activity(
             _activities.parse_spec_activity,
-            args=[job_id, repo_path, spec_content_override],
+            args=[job_id, repo_path, spec_content_override, trace_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=timedelta(hours=4),
             heartbeat_timeout=timedelta(minutes=5),
@@ -109,7 +126,7 @@ class RunTeamWorkflowV2:
         # Phase 2: Planning
         plan_result = await workflow.execute_activity(
             _activities.plan_project_activity,
-            args=[job_id, repo_path, spec_result],
+            args=[job_id, repo_path, spec_result, trace_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=timedelta(hours=4),
             heartbeat_timeout=timedelta(minutes=5),
@@ -122,7 +139,7 @@ class RunTeamWorkflowV2:
         # Phase 3: Coding Team execution
         await workflow.execute_activity(
             _activities.execute_coding_team_activity,
-            args=[job_id, repo_path, plan_result, resolved_questions_override],
+            args=[job_id, repo_path, plan_result, resolved_questions_override, trace_id],
             task_queue=TASK_QUEUE,
             schedule_to_close_timeout=timedelta(hours=36),
             heartbeat_timeout=timedelta(minutes=10),

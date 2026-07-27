@@ -180,6 +180,68 @@ def test_copy_development_result_fields_copies_all_shared_fields():
     assert dst.setup_result == "dst-setup"
 
 
+def _make_valid_pair():
+    src = SimpleNamespace(
+        success=True,
+        current_phase="deliver",
+        iterations_used=3,
+        planning_result="planning",
+        execution_result="execution",
+        review_result="review",
+        problem_solving_result="problem_solving",
+        documentation_result="documentation",
+        deliver_result="deliver",
+        final_files={"a.py": "x = 1"},
+        summary="done",
+        failure_reason="",
+        needs_followup=True,
+        setup_result="src-setup",
+    )
+    dst = SimpleNamespace(
+        success=False,
+        current_phase="setup",
+        iterations_used=0,
+        planning_result=None,
+        execution_result=None,
+        review_result=None,
+        problem_solving_result=None,
+        documentation_result=None,
+        deliver_result=None,
+        final_files={},
+        summary="",
+        failure_reason="",
+        needs_followup=False,
+        setup_result="dst-setup",
+    )
+    return dst, src
+
+
+def test_copy_development_result_fields_rejects_none_dst():
+    _, src = _make_valid_pair()
+    with pytest.raises(AssertionError):
+        copy_development_result_fields(None, src)
+
+
+def test_copy_development_result_fields_rejects_none_src():
+    dst, _ = _make_valid_pair()
+    with pytest.raises(AssertionError):
+        copy_development_result_fields(dst, None)
+
+
+def test_copy_development_result_fields_rejects_src_missing_field():
+    dst, src = _make_valid_pair()
+    del src.summary
+    with pytest.raises(AssertionError):
+        copy_development_result_fields(dst, src)
+
+
+def test_copy_development_result_fields_rejects_dst_missing_field():
+    dst, src = _make_valid_pair()
+    del dst.summary
+    with pytest.raises(AssertionError):
+        copy_development_result_fields(dst, src)
+
+
 class _FakeTeamResult:
     """Minimal constructor-shaped result for factory tests (devops-like)."""
 

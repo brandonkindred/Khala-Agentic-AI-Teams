@@ -39,6 +39,7 @@ import os
 import re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -47,7 +48,10 @@ from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+from software_engineering_team.shared.context_sizing import (
+    compute_code_review_map_chunk_chars,
+    parse_env_int,
+)
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .code_boundaries import node_end_line, node_start_line
@@ -90,6 +94,25 @@ _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 # pattern detects and strips those prefixes so the function-finder helpers
 # receive plain code and a physical (1-based) line index.
 _LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
+
+# Default per-group verification call timeout (seconds); see
+# ``_verify_timeout_seconds`` below.
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 60
+
+
+def _verify_timeout_seconds() -> int:
+    """Per-group verification call timeout (seconds).
+
+    Bounds how long a single ``_verify_one`` call (one LLM verification round
+    for one cited file's group of findings) may run before its group is
+    treated as a failure (fail-safe: keep its findings, log a warning). Env-
+    overridable via ``CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`` (see
+    docs/ENV_VARS.md).
+
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    return parse_env_int("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", DEFAULT_VERIFY_TIMEOUT_SECONDS, 1)
 
 
 def _verify_parallelism() -> int:
@@ -889,7 +912,10 @@ def _verify_group(
     Postconditions:
         - Returns ``{finding_index: _Verdict}`` for the findings the model gave
           a parseable, in-range verdict on; findings with no verdict are absent
-          (and therefore kept by the caller).
+          (and therefore kept by the caller). ``finding_index`` is the 0-based
+          position of the finding within ``issues`` (i.e. a valid index into
+          the ``issues``/``group`` list the caller passed in), so callers may
+          index back into their own list with it.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data, max_inline_chars)
     agent = Agent(
@@ -954,7 +980,7 @@ def filter_false_positives(
         return list(issues)
 
     try:
-        return _verify_and_filter(llm, input_data, issues, verifiable, repo_reader, index)
+        return _verify_and_filter(llm, input_data, issues, repo_reader, index)
     except Exception as exc:  # noqa: BLE001 - fail-safe: verification must never break the review
         logger.warning(
             "FalsePositiveFilter: verification failed during setup (%s: %s); keeping all findings",
@@ -968,7 +994,6 @@ def _verify_and_filter(
     llm: LLMClient,
     input_data: CodeReviewInput,
     issues: List[CodeReviewIssue],
-    verifiable: List[CodeReviewIssue],
     repo_reader: Optional[RepoReader] = None,
     index: Optional[CodebaseIndex] = None,
 ) -> List[CodeReviewIssue]:
@@ -979,8 +1004,8 @@ def _verify_and_filter(
     can raise, and the caller turns any such error into "keep all findings".
 
     Preconditions:
-        - ``verifiable`` is the subset of ``issues`` with a non-blank file path
-          (already computed by the caller).
+        - The caller has already confirmed at least one issue in ``issues`` has
+          a non-blank file path (otherwise this is a wasted call, not a bug).
         - ``index``, when given, was built from this same ``input_data``/
           ``repo_reader``.
 
@@ -1008,7 +1033,10 @@ def _verify_and_filter(
     # verifier would have no primary file to read, so the call would inline an
     # error string, waste an LLM round, and still keep the finding (fail-safe).
     groups: OrderedDict[str, List[CodeReviewIssue]] = OrderedDict()
-    for issue in verifiable:
+    group_orig_indices: Dict[str, List[int]] = {}
+    for orig_idx, issue in enumerate(issues):
+        if not (issue.file_path or "").strip():
+            continue
         resolved = index.resolve_path(issue.file_path)
         if resolved is None:
             logger.debug(
@@ -1017,6 +1045,7 @@ def _verify_and_filter(
             )
             continue
         groups.setdefault(resolved, []).append(issue)
+        group_orig_indices.setdefault(resolved, []).append(orig_idx)
 
     # Each group is an independent verification LLM call over the same read-only
     # index, so they fan out: with N cited files the wall-clock is the slowest
@@ -1042,15 +1071,40 @@ def _verify_and_filter(
     if workers <= 1:
         group_verdicts = [_verify_one(item) for item in group_items]
     else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            group_verdicts = list(executor.map(_verify_one, group_items))
+        # Per-future ``result(timeout=...)`` (rather than ``executor.map(...,
+        # timeout=...)``) so a single stuck verification call can never block
+        # the whole pass: a ``map`` timeout raises out of ``list(...)``
+        # instead of being caught per-group, and would abort the merge below
+        # for every group, not just the slow one.
+        timeout = _verify_timeout_seconds()
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = [executor.submit(_verify_one, item) for item in group_items]
+            group_verdicts = []
+            for (file_path, _group), future in zip(group_items, futures):
+                try:
+                    group_verdicts.append(future.result(timeout=timeout))
+                except FuturesTimeoutError:
+                    logger.warning(
+                        "FalsePositiveFilter: verification timed out after %ss for %s; keeping its findings",
+                        timeout,
+                        file_path,
+                    )
+                    group_verdicts.append({})
+        finally:
+            # ``wait=False``/``cancel_futures=True``: a future that already
+            # timed out above may still be running in its worker thread: a
+            # plain ``with ThreadPoolExecutor(...)`` would block on exit
+            # waiting for it, reintroducing the same hang this fix removes.
+            executor.shutdown(wait=False, cancel_futures=True)
 
-    removed: set[int] = set()
-    for (_file_path, group), verdicts in zip(group_items, group_verdicts):
+    removed_indices: set[int] = set()
+    for (file_path, group), verdicts in zip(group_items, group_verdicts):
+        orig_indices = group_orig_indices[file_path]
         for idx, verdict in verdicts.items():
             if verdict.is_false_positive:
                 issue = group[idx]
-                removed.add(id(issue))
+                removed_indices.add(orig_indices[idx])
                 logger.info(
                     "FalsePositiveFilter: dropping false positive [%s] %s:%s — %s (%s)",
                     issue.severity,
@@ -1060,9 +1114,9 @@ def _verify_and_filter(
                     verdict.reasoning or "no reasoning given",
                 )
 
-    if not removed:
+    if not removed_indices:
         return list(issues)
-    kept = [i for i in issues if id(i) not in removed]
+    kept = [i for orig_idx, i in enumerate(issues) if orig_idx not in removed_indices]
     logger.info(
         "FalsePositiveFilter: removed %s of %s findings as false positives",
         len(issues) - len(kept),

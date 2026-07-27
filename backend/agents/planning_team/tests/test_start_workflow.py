@@ -8,14 +8,7 @@ own client-ready wait / ``run_coroutine_threadsafe`` behavior is covered by
 ``shared.temporal``'s tests.
 """
 
-import sys
-from pathlib import Path
-
 import pytest
-
-_agents_dir = Path(__file__).resolve().parent.parent.parent
-if str(_agents_dir) not in sys.path:
-    sys.path.insert(0, str(_agents_dir))
 
 
 def test_start_planning_workflow_delegates_to_shared_bridge(monkeypatch):

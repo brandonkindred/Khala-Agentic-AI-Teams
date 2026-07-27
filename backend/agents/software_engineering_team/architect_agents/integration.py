@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from shared.subprocess_timeouts import DEVOPS_ARCHITECT_INTEGRATION_TIMEOUT_S
+
 
 def run_enterprise_architect(
     spec_content: str,
@@ -64,7 +66,7 @@ def run_enterprise_architect(
             text=True,
             cwd=str(root),
             env=env,
-            timeout=3600,  # 1 hour max
+            timeout=DEVOPS_ARCHITECT_INTEGRATION_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
         return {

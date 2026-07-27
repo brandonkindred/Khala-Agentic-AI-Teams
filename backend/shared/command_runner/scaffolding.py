@@ -20,17 +20,17 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-from shared.command_runner.nvm import (
-    _get_nvm_script_prefix,
-    ensure_nvm_installed,
-    run_command_with_nvm,
-)
-from shared.command_runner.runner import (
+from shared.command_runner.executor import (
     ANGULAR_VERSION,
     BUILD_TIMEOUT,
     FRONTEND_NODE_VERSION,
     CommandResult,
     run_command,
+)
+from shared.command_runner.nvm import (
+    _get_nvm_script_prefix,
+    ensure_nvm_installed,
+    run_command_with_nvm,
 )
 
 logger = logging.getLogger(__name__)
