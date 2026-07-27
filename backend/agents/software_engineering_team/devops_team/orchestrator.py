@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm_service import DummyLLMClient, LLMClient
+from llm_service import LLMClient
 from software_engineering_team.shared.branch_utils import make_branch_suffix
 from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
 from software_engineering_team.shared.git_utils import (
@@ -36,6 +36,7 @@ from .deployment_strategy_agent import DeploymentStrategyAgent
 from .devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
 from .doc_runbook_agent import DocumentationRunbookAgent, DocumentationRunbookInput
 from .iac_agent import InfrastructureAsCodeAgent
+from .intake_design import run_design_fan_out, run_intake_clarification
 from .models import (
     CriterionTrace,
     DevOpsCompletionPackage,
@@ -48,7 +49,6 @@ from .models import (
     ReleaseReadiness,
     SubtaskContract,
 )
-from .phase2_graph import run_phase2_parallel
 
 # Commit-message template for the shared deliver helper. ``deliver_inline_merge``
 # calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
@@ -207,7 +207,7 @@ ENV_POLICY = {
 from . import tool_dispatch  # noqa: E402
 from .infra_debug_agent import IaCDebugInput, InfraDebugAgent  # noqa: E402
 from .infra_patch_agent import IaCPatchInput, InfraPatchAgent  # noqa: E402
-from .task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput  # noqa: E402
+from .task_clarifier import DevOpsTaskClarifierAgent  # noqa: E402
 from .test_validation_agent import (  # noqa: E402
     DevOpsTestValidationAgent,
     DevOpsTestValidationInput,
@@ -220,7 +220,6 @@ from .tool_agents import (  # noqa: E402
     HelmExecutionToolAgent,
     IaCValidationToolAgent,
     PolicyAsCodeToolAgent,
-    RepoNavigatorInput,
     RepoNavigatorToolAgent,
     TerraformExecutionToolAgent,
 )
@@ -716,26 +715,11 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
               clarifier rejection; otherwise builds subtask contracts, logs their
               count, and returns ``None`` so later phases run.
+
+            Delegates to :func:`intake_design.run_intake_clarification`; see
+            that module for the extracted implementation.
             """
-            env_block = self._enforce_env_policy(task_spec)
-            if env_block:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=f"Environment policy violation: {env_block}"
-                )
-
-            clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
-            if not clarifier.approved_for_execution:
-                return DevOpsTeamResult(
-                    success=False,
-                    failure_reason="Clarification required: "
-                    + "; ".join(clarifier.clarification_requests[:3]),
-                )
-
-            subtask_contracts = self._build_subtask_contracts(task_spec)
-            logger.info(
-                "DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts)
-            )
-            return None
+            return run_intake_clarification(self, task_spec)
 
         def _phase2_parallel_design() -> Optional[DevOpsTeamResult]:
             """Phase 2: change design / implementation (3-way parallel fan-out).
@@ -744,31 +728,18 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             Postconditions: sets ``iac_result``, ``cicd_result``, ``deploy_result``,
               and ``aggregated_artifacts`` from the parallel fan-out; always returns
               ``None`` (this phase has no early-exit gate today).
+
+            Delegates to :func:`intake_design.run_design_fan_out`, which returns
+            an explicit ``DesignFanOutState`` rather than mutating nonlocals
+            itself; this wrapper copies that state onto the pipeline's nonlocal
+            variables so Phases 3-5 keep reading the same names.
             """
             nonlocal iac_result, cicd_result, deploy_result, aggregated_artifacts
-            self._report_status(
-                "phase2",
-                detail="DevOps team pipeline: phase 2 - change design (parallel)",
-            )
-            repo_summary = self.repo_navigator_tool.run(
-                RepoNavigatorInput(repo_path=str(repo_path))
-            ).summary
-            # Enable parallel execution unless the backing LLM client is a
-            # DummyLLMClient (or subclass) — scripted test clients use a shared
-            # sequential response list that breaks under concurrent access.
-            use_parallel = not isinstance(self.llm, DummyLLMClient)
-            phase2 = run_phase2_parallel(
-                self.iac_agent,
-                self.cicd_agent,
-                self.deployment_agent,
-                task_spec,
-                repo_summary=repo_summary,
-                parallel=use_parallel,
-            )
-            iac_result = phase2["iac_result"]
-            cicd_result = phase2["cicd_result"]
-            deploy_result = phase2["deploy_result"]
-            aggregated_artifacts = phase2["aggregated_artifacts"]
+            state = run_design_fan_out(self, task_spec, repo_path)
+            iac_result = state.iac_result
+            cicd_result = state.cicd_result
+            deploy_result = state.deploy_result
+            aggregated_artifacts = state.aggregated_artifacts
             return None
 
         def _phase3_branch_write() -> Optional[DevOpsTeamResult]:
