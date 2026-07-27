@@ -82,6 +82,10 @@ _BACKEND_PROFILE = StackProfile(
     has_language_conventions=True,
     build_verify_label="backend_code_v2",
     detect_language=lambda _p, _t: "python",
+    repo_extensions=frozenset({".py"}),
+    repo_exclude_dirs=frozenset({".git"}),
+    repo_max_chars=1000,
+    detect_tooling=lambda _p: (True, True),
 )
 
 _FRONTEND_PROFILE = StackProfile(
@@ -93,6 +97,10 @@ _FRONTEND_PROFILE = StackProfile(
     has_language_conventions=False,
     build_verify_label="frontend_code_v2",
     detect_language=lambda _p, _t: "typescript",
+    repo_extensions=frozenset({".ts"}),
+    repo_exclude_dirs=frozenset({".git"}),
+    repo_max_chars=1000,
+    detect_tooling=lambda _p: (True, True),
 )
 
 
