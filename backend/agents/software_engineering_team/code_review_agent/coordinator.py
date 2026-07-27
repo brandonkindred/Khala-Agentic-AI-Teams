@@ -735,6 +735,9 @@ def run_coordinator(
     )
     # Built once and shared with the architecture-consistency pass below: both read the
     # same submission/repo_reader, so a single index avoids parsing the submission twice.
+    # CodebaseIndex is read-only after construction (see its own docstring's Invariants),
+    # so this one instance is safe to hand to all three tail passes when they run
+    # concurrently in worker threads (see ``_run_tail_passes``).
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
     # False-positive verification (skipped when the calling gate opted out via
@@ -760,7 +763,7 @@ def run_coordinator(
         repo_reader=repo_reader,
         shared_index=shared_index,
     )
-    verified = tail_pass_result.issues
+    tail_pass_issues = tail_pass_result.issues
 
     notify_review_progress(
         progress_callback,
@@ -777,7 +780,7 @@ def run_coordinator(
     # restore the legacy fail-closed behavior where they block the merge.
     not_reviewed_ranges = [_not_reviewed_range_label(i) for i in outcome.not_reviewed_issues]
     if _block_on_unreviewed():
-        deduped = _dedupe_issues([*verified, *outcome.not_reviewed_issues, *skipped_issues])
+        deduped = _dedupe_issues([*tail_pass_issues, *outcome.not_reviewed_issues, *skipped_issues])
     else:
         if not_reviewed_ranges:
             logger.warning(
@@ -786,7 +789,7 @@ def run_coordinator(
                 len(not_reviewed_ranges),
                 not_reviewed_ranges,
             )
-        deduped = _dedupe_issues([*verified, *skipped_issues])
+        deduped = _dedupe_issues([*tail_pass_issues, *skipped_issues])
     assert outcome.approved_flags, "unreachable: guarded by the total-failure check above"
     all_llm_approved = all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
