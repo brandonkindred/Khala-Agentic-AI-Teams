@@ -1,10 +1,13 @@
-"""Markdown rendering for the ProspectDossier block embedded in the outreach prompt.
+"""Markdown and JSON rendering for the ProspectDossier block embedded in prompts.
 
 Lives in the prompts package because it shapes prompt-bound text — kept
 deterministic and side-effect-free so prompt diffs stay reviewable.
 """
 
 from __future__ import annotations
+
+import json
+from typing import Any
 
 from ..models import ProspectDossier
 
@@ -90,3 +93,47 @@ def render_dossier_for_prompt(dossier: ProspectDossier) -> str:
             lines.append(f"- {s}")
 
     return "\n".join(lines)
+
+
+_DOSSIER_JSON_CHAR_CAP = 12_000
+
+# (max_str_len, max_list_len) steps tried in order until the serialized
+# result fits under the char cap. Shrinks the dict *before* serializing so
+# every attempt round-trips through json.dumps as valid JSON — never a raw
+# slice of already-serialized text, which can cut a string/number/bracket
+# mid-token and leave malformed JSON in the prompt.
+_DOSSIER_JSON_SHRINK_STEPS = ((4000, 8), (2000, 5), (800, 5), (300, 3), (120, 2))
+
+
+def _shrink_for_json(value: Any, max_str_len: int, max_list_len: int) -> Any:
+    if isinstance(value, dict):
+        return {k: _shrink_for_json(v, max_str_len, max_list_len) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_shrink_for_json(v, max_str_len, max_list_len) for v in value[:max_list_len]]
+    if isinstance(value, str) and len(value) > max_str_len:
+        return value[:max_str_len] + "…"
+    return value
+
+
+def render_dossier_json_for_prompt(
+    dossier: ProspectDossier, char_cap: int = _DOSSIER_JSON_CHAR_CAP
+) -> str:
+    """Serialize a ``ProspectDossier`` to JSON, bounded to ``char_cap`` chars.
+
+    Unlike slicing an already-serialized JSON string at a fixed character
+    index (which can split a string, number, or bracket and leave malformed
+    JSON), this shrinks long strings and lists in the dumped dict *before*
+    serializing, so the JSON text up to any appended truncation marker is
+    always syntactically valid.
+    """
+    dump = dossier.model_dump(mode="json")
+    text = json.dumps(dump, indent=2)
+    if len(text) <= char_cap:
+        return text
+
+    for max_str_len, max_list_len in _DOSSIER_JSON_SHRINK_STEPS:
+        text = json.dumps(_shrink_for_json(dump, max_str_len, max_list_len), indent=2)
+        if len(text) <= char_cap:
+            break
+
+    return text + "\n…(dossier truncated)"

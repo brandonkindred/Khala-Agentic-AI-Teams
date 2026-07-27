@@ -25,6 +25,7 @@ from ..models import (
     QualificationScore,
     SalesProposal,
 )
+from ..prompts._dossier_render import render_dossier_json_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -140,9 +141,7 @@ class ProposalCriticAgent:
     ) -> str:
         proposal_json = json.dumps(proposal.model_dump(mode="json"), indent=2)
         if dossier is not None:
-            dossier_json = json.dumps(dossier.model_dump(mode="json"), indent=2)
-            if len(dossier_json) > _DOSSIER_CHAR_CAP:
-                dossier_json = dossier_json[:_DOSSIER_CHAR_CAP] + "\n…(dossier truncated)"
+            dossier_json = render_dossier_json_for_prompt(dossier, char_cap=_DOSSIER_CHAR_CAP)
         else:
             dossier_json = "(no dossier supplied)"
         if qualification is not None:

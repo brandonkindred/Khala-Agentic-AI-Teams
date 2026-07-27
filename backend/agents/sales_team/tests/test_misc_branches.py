@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from llm_service.interface import LLMClient
@@ -135,6 +136,9 @@ def _sequence(prospect: Prospect, dossier_id: str) -> OutreachSequence:
 def test_outreach_critic_truncates_oversize_dossier_in_prompt() -> None:
     prospect = Prospect(id="prs_x", company_name="Acme")
     dossier = _huge_dossier()
+    # Sanity: the dossier's raw JSON does exceed the cap, so the critic must
+    # actually truncate (not just pass it through untouched).
+    assert _DOSSIER_CHAR_CAP < len(json.dumps(dossier.model_dump(mode="json")))
     icp = IdealCustomerProfile(industry=["SaaS"])
     seq = _sequence(prospect, dossier.dossier_id or "d_x")
     llm = _CannedLLM(
@@ -142,11 +146,16 @@ def test_outreach_critic_truncates_oversize_dossier_in_prompt() -> None:
     )
     critic = OutreachCriticAgent(llm_client=llm)
     critic.review(seq, dossier, icp)
+    prompt = llm.calls[0]["prompt"] or ""
     # The critic's prompt should contain the truncation marker because the
     # dossier JSON exceeds the cap.
-    assert any("dossier truncated" in (c["prompt"] or "") for c in llm.calls)
-    # And the prompt should be capped near _DOSSIER_CHAR_CAP for the dossier slice.
-    assert _DOSSIER_CHAR_CAP < len(llm.calls[0]["prompt"])  # full prompt > cap, sanity
+    assert "dossier truncated" in prompt
+    # The truncated dossier block itself must still be valid JSON — truncation
+    # must land on a JSON boundary, not an arbitrary character index that can
+    # split a string/number/bracket.
+    dossier_block = prompt.split("--- DOSSIER ---\n", 1)[1].split("\n\n--- OUTREACH SEQUENCE", 1)[0]
+    json_part = dossier_block[: -len("\n…(dossier truncated)")]
+    json.loads(json_part)
 
 
 def test_outreach_critic_emits_no_dossier_marker_when_dossier_none() -> None:

@@ -11,11 +11,14 @@ outreach prompt embeds. It must be:
 
 from __future__ import annotations
 
+import json
+
 from sales_team.models import ProspectDossier, PublicWorkItem
 from sales_team.prompts._dossier_render import (
     _DOSSIER_LIST_TOP_K,
     _truncate,
     render_dossier_for_prompt,
+    render_dossier_json_for_prompt,
 )
 
 # ---------------------------------------------------------------------------
@@ -238,3 +241,69 @@ def test_render_is_deterministic_across_calls() -> None:
     a = render_dossier_for_prompt(dossier)
     b = render_dossier_for_prompt(dossier)
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# render_dossier_json_for_prompt
+# ---------------------------------------------------------------------------
+
+
+def test_json_render_returns_full_json_when_under_cap() -> None:
+    dossier = ProspectDossier(
+        prospect_id="prs_j",
+        full_name="Jane",
+        current_title="VP",
+        current_company="Acme",
+    )
+    out = render_dossier_json_for_prompt(dossier)
+    assert "dossier truncated" not in out
+    assert json.loads(out)["full_name"] == "Jane"
+
+
+def test_json_render_truncates_oversize_dossier_with_marker() -> None:
+    big_text = "lorem ipsum " * 2000  # ~24k chars, well over the default cap.
+    dossier = ProspectDossier(
+        prospect_id="prs_big",
+        full_name="Jane",
+        current_title="VP",
+        current_company="Acme",
+        executive_summary=big_text,
+    )
+    out = render_dossier_json_for_prompt(dossier, char_cap=12_000)
+    assert out.endswith("\n…(dossier truncated)")
+    assert len(out) <= 12_000 + len("\n…(dossier truncated)")
+
+
+def test_json_render_truncated_output_is_valid_json() -> None:
+    """Truncation must land on a valid JSON boundary, never mid-string/mid-token."""
+    big_text = "lorem ipsum " * 2000
+    dossier = ProspectDossier(
+        prospect_id="prs_big",
+        full_name="Jane",
+        current_title="VP",
+        current_company="Acme",
+        executive_summary=big_text,
+        trigger_events=[f"event {i}: {'x' * 500}" for i in range(30)],
+    )
+    out = render_dossier_json_for_prompt(dossier, char_cap=12_000)
+    assert out.endswith("\n…(dossier truncated)")
+    json_part = out[: -len("\n…(dossier truncated)")]
+    parsed = json.loads(json_part)  # raises if truncation broke JSON syntax
+    assert parsed["full_name"] == "Jane"
+
+
+def test_json_render_shrinks_far_below_cap_when_single_field_dominates() -> None:
+    """A single oversized string field (no big lists to trim) must still be
+    brought under the cap by shrinking the string itself."""
+    big_text = "lorem ipsum " * 5000  # ~60k chars
+    dossier = ProspectDossier(
+        prospect_id="prs_huge",
+        full_name="Jane",
+        current_title="VP",
+        current_company="Acme",
+        executive_summary=big_text,
+    )
+    out = render_dossier_json_for_prompt(dossier, char_cap=12_000)
+    assert len(out) <= 12_000 + len("\n…(dossier truncated)")
+    json_part = out[: -len("\n…(dossier truncated)")]
+    json.loads(json_part)
