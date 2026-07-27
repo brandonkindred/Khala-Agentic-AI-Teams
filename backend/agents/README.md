@@ -19,7 +19,6 @@ backend/agents/
 ├── continuation_logs/                 # Continuation log storage
 ├── deepthought/                       # Recursive self-organising agent
 ├── docker/                            # Agents-only Docker assets
-├── integrations/                      # Shared integrations layer used across teams
 ├── investment_team/
 ├── llm_service/                       # Centralized LLM client (Ollama, dummy)
 ├── market_research_team/
@@ -91,10 +90,6 @@ For team-specific setup and env vars, use each team's README.
 - `user_agent_founder/README.md`
 - `deepthought/README.md`
 - `llm_service/README.md`
-
-## Shared integrations
-
-`integrations/` provides provider-neutral integration contracts and routing that can be reused by any team.
 
 ## Platform shared packages
 
