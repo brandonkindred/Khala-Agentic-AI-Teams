@@ -276,7 +276,9 @@ def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
         draft_output_path=tmp_path / "out.md",
     )
     assert "Revised by user feedback" in out.draft
-    assert (tmp_path / "out.md").exists()
+    written = (tmp_path / "out.md").read_text()
+    assert "Revised by user feedback" in written
+    assert "Body." in written
 
 
 def test_revise_from_user_feedback_literal_braces_in_feedback(monkeypatch) -> None:
@@ -301,11 +303,20 @@ def test_revise_from_user_feedback_literal_braces_in_feedback(monkeypatch) -> No
     assert feedback in captured_prompts[0]
 
 
-def test_revise_from_user_feedback_empty_draft() -> None:
+def test_revise_from_user_feedback_empty_draft(monkeypatch) -> None:
     """Whitespace-only draft is returned unchanged (no LLM call)."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     a = _make_agent()
+    calls: list = []
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "should not be called",
+    )
     out = a.revise_from_user_feedback(draft="   ", user_feedback="x", content_plan_text="cp")
     assert out.draft == "   "
+    assert calls == []
 
 
 def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> None:
@@ -630,7 +641,7 @@ def test_revise_programming_error_propagates(monkeypatch) -> None:
         )
 
 
-def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
+def test_revise_falls_back_to_original_when_llm_fails(monkeypatch) -> None:
     """If text yields no draft and json fallback fails, return original draft."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
