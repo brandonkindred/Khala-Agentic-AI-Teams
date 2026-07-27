@@ -905,6 +905,19 @@ class TestReviewEndpoint:
             sum(job["review_summary"]["severity_counts"].values())
             == job["review_summary"]["total_issues"]
         )
+        # The pre-existing bug is excluded from the counts because it's routed to a
+        # proposal, not silently dropped: it must show up there and never as any kind
+        # of PR comment.
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["description"] == "pre-existing bug"
+        assert proposal["file_path"] == "unchanged.py"
+        gh = review_app["github"]["client"]
+        all_comment_bodies = (
+            [c["body"] for rev in gh.submitted_reviews for c in rev.get("comments", [])]
+            + [c.get("body", "") for c in gh.review_comments]
+            + [body for _n, body in gh.comments]
+        )
+        assert not any("pre-existing bug" in body for body in all_comment_bodies)
 
     def test_review_summary_excludes_unknown_and_blank_severities(self, review_app) -> None:
         # A finding whose severity is unrecognized ("bogus") or blank ("") is counted
@@ -945,6 +958,29 @@ class TestReviewEndpoint:
         assert "ghp_SECRETTOKEN" not in review["body"]
         assert "https://***@" in review["body"]
         assert "ghp_SECRETTOKEN" not in review["comments"][0]["body"]
+
+    def test_file_level_and_standalone_comments_are_token_scrubbed(self, review_app) -> None:
+        # The line-anchored/review-body path is covered above; this covers the
+        # other two comment paths this PR touches -- a file-level comment (an
+        # off-diff line on a changed file) and a standalone comment (a file
+        # absent from the diff entirely) -- so a leaked credential can't slip
+        # through either one unscrubbed.
+        secret_url = "https://x:ghp_SECRETTOKEN@github.com/o/r.git"
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("low", line=999, description=f"leak {secret_url} here"),
+                _FakeReviewIssue(
+                    "low", line=4, file_path="not_in_diff.py", description=f"leak {secret_url} too"
+                ),
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert "ghp_SECRETTOKEN" not in gh.review_comments[0]["body"]
+        assert "https://***@" in gh.review_comments[0]["body"]
+        assert "ghp_SECRETTOKEN" not in gh.comments[0][1]
+        assert "https://***@" in gh.comments[0][1]
 
     def test_multiple_off_diff_findings_each_get_own_file_comment(self, review_app) -> None:
         # The core contract: every finding produces its OWN comment and no comment
@@ -1571,9 +1607,11 @@ class TestReviewEndpoint:
         file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(line_comments) == 1  # the in-diff finding
         assert file_comments == []  # the out-of-diff finding is never file-anchored
-        # Instead it is posted as its own standalone conversation comment.
+        # Instead it is posted as its own standalone conversation comment,
+        # naming its own file rather than the unrelated in-diff file.
         assert len(gh.comments) == 1
         assert "leftover" in gh.comments[0][1]
+        assert "missing.py" in gh.comments[0][1]
         assert job["review_summary"]["comment_findings"] == 1
         assert job["review_summary"]["pending_issue_proposals"] == []
 

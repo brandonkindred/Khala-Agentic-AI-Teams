@@ -294,9 +294,8 @@ class TestHunkReviewFocusUnit:
         hunk_result = pr_review._hunk_review_focus("body")
         whole_result = pr_review._whole_file_focus("body")
         assert hunk_result != whole_result
+        assert "pre_existing" in hunk_result
         assert "hunk" in hunk_result.lower()
-        assert "diff hunks" in hunk_result
-        assert "complete files" in hunk_result
         assert "hunk" not in whole_result.lower()
 
 
