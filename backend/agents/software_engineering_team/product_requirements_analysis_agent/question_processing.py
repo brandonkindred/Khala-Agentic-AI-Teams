@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from difflib import SequenceMatcher
 from typing import Any, List
 
@@ -60,6 +61,10 @@ def filter_duplicate_questions(
     filtered = []
     duplicates = []
 
+    def _clean_token(w: str) -> str:
+        """Strip punctuation so tokens like 'store?' match their bare form."""
+        return re.sub(r"[^a-z0-9]", "", w.strip())
+
     def _stem(w: str) -> str:
         """Normalize word for matching (e.g. tokens->token, stored->store)."""
         w = w.strip()
@@ -74,8 +79,8 @@ def filter_duplicate_questions(
     for q in new_questions:
         q_text_lower = q.question_text.lower()
         # Key words: length > 3, normalized to stems for plural/tense
-        words = [w for w in q_text_lower.split() if len(w) > 3]
-        key_stems = set(_stem(w) for w in words)
+        words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
+        key_stems = set(_stem(_clean_token(w)) for w in words)
         if not key_stems:
             filtered.append(q)
             continue
@@ -549,7 +554,9 @@ def review_question_answer_alignment(
             try:
                 parsed = parse_open_question(q_data, i)
                 if parsed.id not in original_by_id:
-                    raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
+                    raise ValueError(
+                        f"aligned question id {parsed.id!r} does not match any original question"
+                    )
                 if parsed.id in seen_ids:
                     raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
                 result.append(parsed)
@@ -608,7 +615,7 @@ def add_recommendations(
         for q in open_questions
     ]
     questions_json = json.dumps(questions_payload, indent=2)
-    spec_excerpt = (spec_content or "")
+    spec_excerpt = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
         spec_excerpt=spec_excerpt,
         questions_json=questions_json,

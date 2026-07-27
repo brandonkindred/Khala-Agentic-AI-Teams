@@ -31,6 +31,9 @@ from product_requirements_analysis_agent.question_data import (
     _sop_phase1_fallback_questions,
 )
 from product_requirements_analysis_agent.question_processing import (
+    filter_duplicate_questions,
+)
+from product_requirements_analysis_agent.question_processing import (
     parse_open_question as _real_parse_open_question,
 )
 
@@ -1008,7 +1011,9 @@ def test_review_question_answer_alignment_restores_original_for_unmatched_malfor
     assert result_by_id["q2"].question_text == "Which platform?"
 
 
-def test_review_question_answer_alignment_restores_original_when_two_items_fail_one_unmatched() -> None:
+def test_review_question_answer_alignment_restores_original_when_two_items_fail_one_unmatched() -> (
+    None
+):
     """Regression for dropping an original question when one failed item matches by id and
     another failed item has an unrecognized id: both originals must survive, not just the
     id-matched fallback."""
@@ -1110,7 +1115,9 @@ def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> No
     assert result == [q1, q2]
 
 
-def test_review_question_answer_alignment_preserves_input_order_when_all_items_fail_but_ids_match() -> None:
+def test_review_question_answer_alignment_preserves_input_order_when_all_items_fail_but_ids_match() -> (
+    None
+):
     """If every item fails to parse but each still carries a recognizable original id, the
     id-matched fallbacks must not be returned in the LLM's (possibly reordered) order —
     since nothing was genuinely realigned, the original input order is preserved instead."""
@@ -2412,3 +2419,27 @@ def test_run_context_discovery_resume_falls_back_to_latest_updated_spec(tmp_path
     )
     assert ok is True
     assert spec == "# v11"  # version 11 sorts above version 3
+
+
+def test_filter_duplicate_questions_strips_punctuation_before_stemming() -> None:
+    """A question token with trailing punctuation (e.g. 'store?') should still match
+    the unpunctuated form of the same word in qa_history, so the question is filtered
+    as a duplicate instead of being re-asked."""
+    questions = [OpenQuestion(id="q1", question_text="Where do we store? the data")]
+    qa_history = "Q: Where should data be stored?\nA: We store data in Postgres."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_keeps_non_duplicate() -> None:
+    """A question with no overlapping stems in qa_history is not filtered out."""
+    questions = [OpenQuestion(id="q1", question_text="Which cloud provider should we use?")]
+    qa_history = "Q: What is the deployment target?\nA: On-premise servers."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
