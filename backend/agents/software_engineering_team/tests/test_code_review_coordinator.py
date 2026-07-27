@@ -2873,22 +2873,34 @@ class _NonDummyLLMClient(LLMClient, Model):
 
 def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None:
     """With a non-``DummyLLMClient`` ``llm``, the three tail passes run at once:
-    each stub blocks on a 3-party barrier, so the call only completes if all
-    three are in flight together -- a fallback to sequential execution would
-    deadlock the first stub and the test would fail on the barrier timeout."""
+    each stub records its arrival then blocks on a 3-party barrier, so the call
+    only completes if all three are in flight together -- a fallback to
+    sequential execution would deadlock the first stub and the test would fail
+    on the barrier timeout. The recorded arrivals additionally prove, without
+    relying on that implicit timeout/exception behavior, that all three stubs
+    actually ran."""
     import code_review_agent.coordinator as coord
 
+    arrivals: list[str] = []
+    lock = threading.Lock()
     barrier = threading.Barrier(3, timeout=5)
 
+    def _record(name: str) -> None:
+        with lock:
+            arrivals.append(name)
+
     def _filter(llm, input_data, issues, repo_reader=None, index=None):
+        _record("filter")
         barrier.wait()
         return list(issues)
 
     def _arch(llm, input_data, repo_reader=None, index=None):
+        _record("architecture")
         barrier.wait()
         return []
 
     def _side_effect(llm, input_data, repo_reader=None, index=None):
+        _record("side_effect")
         barrier.wait()
         return []
 
@@ -2897,12 +2909,19 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
     monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
 
     stand_in = _NonDummyLLMClient(DummyLLMClient())
-    result = run_coordinator(
-        stand_in,
-        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
-    )
+    try:
+        result = run_coordinator(
+            stand_in,
+            CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+        )
+    finally:
+        # Leaves no party waiting on the barrier even if run_coordinator raises
+        # before all three stubs reach it, so a failure here can't wedge a
+        # later test sharing the same worker process.
+        barrier.abort()
 
     assert isinstance(result, CodeReviewOutput)
+    assert sorted(arrivals) == ["architecture", "filter", "side_effect"]
 
 
 def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch) -> None:
