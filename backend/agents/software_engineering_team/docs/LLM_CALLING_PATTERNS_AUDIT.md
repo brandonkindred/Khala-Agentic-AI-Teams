@@ -48,13 +48,13 @@ steps** that subclasses mix and match: model resolution
 `_call_partial_tolerant`, `_fallback_empty_parse`) that are never
 auto-wired — a subclass must explicitly call them.
 
-Two concrete recipes ship on top of it:
+Three concrete recipes ship on top of it:
 
 - **`BaseReviewToolAgent` / `ReviewToolAgent`** (`shared/tool_agent_base.py`)
   — the "review + single-issue fix" shape used by the security, testing/QA,
   accessibility, performance, UX, and build-specialist tool agents in both
   `backend_code_v2_team` and `frontend_code_v2_team` (e.g.
-  `backend_code_v2_team/tool_agents/api_openapi/agent.py`,
+  `backend_code_v2_team/tool_agents/security/agent.py`,
   `frontend_code_v2_team/tool_agents/security/agent.py`).
 - **`JsonGeneratorToolAgent`** (`ai_agent_development_team/tool_agents/_base.py`)
   — the Plan/Json recipe (`response_format="json"`,
@@ -62,6 +62,15 @@ Two concrete recipes ship on top of it:
   `ai_agent_development_team` domain tool agents (`agent_runtime`,
   `safety_governance`, `evaluation_harness`, `memory_rag`,
   `prompt_engineering`, `mcp_server_connectivity`).
+- **`PlanGeneratorToolAgent`** (`frontend_code_v2_team/tool_agents/_plan_base.py`)
+  — a third, `frontend_code_v2_team`-only recipe (same Plan-recipe class attrs
+  as `JsonGeneratorToolAgent`: `response_format="json"`,
+  `json_parse_strategy="extract"`, inline invocation) used by the Branding/Theme,
+  UI Design, and Architecture tool agents. Its `plan()` runs the one-shot LLM
+  call through `_call_with_single_fallback` (no-model/call-error tiers) and
+  routes unparseable output through `_fallback_empty_parse` into configured
+  recommendations/summary — the same three-tier shape as the other two
+  recipes, just wired into `plan()` instead of `review()`/`run()`.
 
 **Failure handling.**
 
@@ -239,10 +248,17 @@ return static, config-driven advisory output (no LLM call in those phases
 at all):
 
 - **`FileGeneratorToolAgent`** — subclasses (auth, data-engineering,
-  API/OpenAPI generators in both `backend_code_v2_team/tool_agents/` and
-  `frontend_code_v2_team/tool_agents/`) run exactly **one** LLM prompt in
-  `execute` and parse `## FILE ## / ## SUMMARY ##` template output via a
-  team-specific `_parse_files_and_summary` hook.
+  API/OpenAPI generators) run exactly **one** LLM prompt in `execute` and
+  parse `## FILE ## / ## SUMMARY ##` template output via a team-specific
+  `_parse_files_and_summary` hook. **Backend-only**: all three concrete
+  generators live under `backend_code_v2_team/tool_agents/`
+  (`auth/agent.py`, `data_engineering/agent.py`, `api_openapi/agent.py`).
+  `frontend_code_v2_team` has no `FileGeneratorToolAgent` subclasses at
+  all — its API/OpenAPI and auth tool agents (`frontend_code_v2_team/
+  tool_agents/api_openapi/agent.py`, `.../auth/agent.py`) inherit
+  `StubToolAgent` instead, so the propagating Pattern 4 failure behavior
+  below applies only to the backend generators, not to any frontend
+  equivalent.
 - **`StubToolAgent`** — adapter stubs (e.g. CI/CD, containerization —
   `backend_code_v2_team/tool_agents/static_agents.py`) whose `execute` never
   calls an LLM at all; every phase returns a static "not yet implemented"
