@@ -266,8 +266,16 @@ def _qa_gate(
     detail_callback: Callable[[str], None],
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
-    """Run the frontend QA gate (QA agent + ``testing_qa`` tool agent only),
-    keeping only ``source == "qa"`` issues.
+    """Run the frontend QA gate, keeping only ``source == "qa"`` issues.
+
+    Disables the external ``security_agent``/``code_review_agent``/
+    ``linting_tool_agent`` and passes ``build_verifier=None`` — build and
+    lint are then genuinely skipped by ``run_microtask_review``.
+    ``code_review_agent=None`` does not skip code review, though: the shared
+    ``_code_review_step`` still runs its LLM-fallback reviewer whenever no
+    external agent is supplied, and the fan-out calls it unconditionally, so
+    a code-review LLM call happens on every invocation of this gate; its
+    issues are filtered out below, not never produced.
 
     Preconditions: ``deps.qa_agent``/``deps.tool_agents`` are set consistently
       with what the caller wants exercised; ``files`` is the microtask's
@@ -278,11 +286,14 @@ def _qa_gate(
       invoked outside that containment and, in the gated loop, forwards to
       the caller-supplied ``progress_callback`` — is not caught here and
       propagates uncaught. Calls ``run_microtask_review`` with only
-      ``qa_agent`` enabled and ``tool_agents`` scoped to
+      ``qa_agent`` enabled among the external review agents (build and lint
+      skipped; the LLM-fallback code-review step still runs and contributes
+      to ``r.issues``) and ``tool_agents`` scoped to
       ``ToolAgentKind.TESTING_QA`` via ``_scoped_tool_agents`` (``None`` when
       that kind isn't wired), then filters ``r.issues`` to ``source == "qa"``
-      before returning. ``passed`` is computed as ``not qa_issues`` (true iff
-      no QA-sourced issue survives filtering) rather than taken from
+      before returning, discarding the code-review issues and any other
+      non-QA-sourced ones. ``passed`` is computed as ``not qa_issues`` (true
+      iff no QA-sourced issue survives filtering) rather than taken from
       ``r.passed`` — a stray non-QA issue in ``r.issues`` cannot fail this
       gate.
     """
@@ -318,8 +329,16 @@ def _security_gate(
     detail_callback: Callable[[str], None],
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
-    """Run the frontend security gate (security agent + ``security`` tool agent only),
-    keeping only ``source == "security"`` issues.
+    """Run the frontend security gate, keeping only ``source == "security"`` issues.
+
+    Disables the external ``qa_agent``/``code_review_agent``/
+    ``linting_tool_agent`` and passes ``build_verifier=None`` — build and
+    lint are then genuinely skipped by ``run_microtask_review``.
+    ``code_review_agent=None`` does not skip code review, though: the shared
+    ``_code_review_step`` still runs its LLM-fallback reviewer whenever no
+    external agent is supplied, and the fan-out calls it unconditionally, so
+    a code-review LLM call happens on every invocation of this gate; its
+    issues are filtered out below, not never produced.
 
     Preconditions: ``deps.security_agent``/``deps.tool_agents`` are set
       consistently with what the caller wants exercised; ``files`` is the
@@ -330,11 +349,14 @@ def _security_gate(
       invoked outside that containment and, in the gated loop, forwards to
       the caller-supplied ``progress_callback`` — is not caught here and
       propagates uncaught. Calls ``run_microtask_review`` with only
-      ``security_agent`` enabled and ``tool_agents`` scoped to
+      ``security_agent`` enabled among the external review agents (build and
+      lint skipped; the LLM-fallback code-review step still runs and
+      contributes to ``r.issues``) and ``tool_agents`` scoped to
       ``ToolAgentKind.SECURITY`` via ``_scoped_tool_agents`` (``None`` when
       that kind isn't wired), then filters ``r.issues`` to
-      ``source == "security"`` before returning. ``passed`` is computed as
-      ``not sec_issues`` (true iff no security-sourced issue survives
+      ``source == "security"`` before returning, discarding the code-review
+      issues and any other non-security-sourced ones. ``passed`` is computed
+      as ``not sec_issues`` (true iff no security-sourced issue survives
       filtering) rather than taken from ``r.passed`` — a stray non-security
       issue in ``r.issues`` cannot fail this gate.
     """
