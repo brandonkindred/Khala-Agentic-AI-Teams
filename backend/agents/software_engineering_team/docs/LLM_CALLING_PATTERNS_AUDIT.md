@@ -99,8 +99,8 @@ Two concrete recipes ship on top of it:
 - **`_call_partial_tolerant` exists but is not actually used by
   `BaseReviewToolAgent.problem_solve`.** That method (which fixes issues one
   at a time) has its own hand-rolled per-item loop instead, and that loop's
-  `try`/`except Exception` covers **only** the `self._run_agent(...)` call —
-  `shared/tool_agent_base.py:426-437` — not the subsequent
+  `try`/`except Exception` covers **only** the `self._run_agent(...)` call
+  (see `BaseReviewToolAgent.problem_solve`) — not the subsequent
   `self._parse_single_issue(raw)` call or the `.get("files")` on its result.
   So the *LLM call* failing for one issue is correctly tolerated (logged,
   `continue`s to the next issue), but if the parser hook itself raises (bad
@@ -300,8 +300,8 @@ Representative call sites and their distinct behaviors:
   only holds for the initial, undecomposed call**, though: once
   decomposition has actually started, `_decompose_and_process` wraps each
   chunk's recursive `self.process(...)` call in its own `try/except
-  Exception` (`shared/decomposition.py:432-450`), logs a warning, and
-  *continues to the next chunk* — so a non-truncation/JSON-parse error from
+  Exception` (see `RecursiveProcessor._decompose_and_process`), logs a
+  warning, and *continues to the next chunk* — so a non-truncation/JSON-parse error from
   a decomposed child is swallowed, not re-raised, and the method ultimately
   returns a partial (or, if every chunk failed, empty) merge instead of
   propagating.
@@ -357,7 +357,7 @@ rather than its origin (`decomposition.py`'s truncation-only catch).
 |---|---|---|---|---|
 | 1. `LlmToolAgentBase` | Caught, returns tiered `FallbackPayload` / `success=False` | Distinct tier: `{}` (lenient) or `None` (extract); does *not* imply `success=False` in `JsonGeneratorToolAgent` | No (single attempt) | Generic, tier-labeled |
 | 2. `run_structured_persona` | Caught (broad `except Exception`), routed to `fallback_factory` | Folded into the same broad catch (Strands structured-output validation failure) | No | Type-specific, caller-authored, safe-by-default |
-| 3. `DevOpsSingleShotAgent` | **Propagates unchanged** | **Propagates unchanged** (`LLMJsonParseError` after one recovery-parse attempt — no actual continuation despite the helper's name) | **None** — single call, no retry | None — caller must handle |
+| 3. `DevOpsSingleShotAgent` | **Propagates unchanged** | **Propagates unchanged** (`LLMJsonParseError` after one recovery-parse attempt — no actual continuation despite the helper's name) | **No** — single call, no retry | None — caller must handle |
 | 4. `FileGeneratorToolAgent` | **Propagates unchanged** | **Propagates unchanged** | No | None — caller must handle |
 | 5. Hand-rolled | **Varies per call site** (raises / generic sentinel / domain-specific fail-closed value, depending on file) | **Varies per call site** | **Varies per call site** | **Varies per call site** |
 
