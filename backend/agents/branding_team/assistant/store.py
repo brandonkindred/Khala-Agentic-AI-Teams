@@ -163,7 +163,7 @@ class BrandingConversationStore(PostgresHelperMixin):
 
     def __init__(self) -> None:
         # Stateless; the connection pool lives inside shared.postgres.
-        pass
+        super().__init__()
 
     @timed_query(store=_STORE, op="create")
     def create(

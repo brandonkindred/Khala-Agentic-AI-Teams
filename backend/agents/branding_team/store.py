@@ -108,7 +108,7 @@ class BrandingStore(PostgresHelperMixin):
 
     def __init__(self) -> None:
         # Stateless; the connection pool lives inside shared.postgres.
-        pass
+        super().__init__()
 
     # ------------------------------------------------------------------
     # Clients
