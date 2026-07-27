@@ -151,7 +151,7 @@ class CognitionSpec(BaseModel):
     memory: CognitionMemorySpec = Field(default_factory=CognitionMemorySpec)
     tools: list[str] = Field(
         default_factory=list,
-        description="Tool ids resolved against LlmToolsService + IntegrationRegistry + agent_git_tools.",
+        description="Tool ids resolved against LlmToolsService + a caller-supplied integration registry + agent_git_tools.",
     )
     rule_packs: list[str] = Field(
         default_factory=list,
