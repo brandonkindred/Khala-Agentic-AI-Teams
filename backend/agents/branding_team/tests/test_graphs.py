@@ -107,6 +107,12 @@ def test_build_agent_rejects_bad_output_mode() -> None:
         build_agent(name="bad", system_prompt="x", output_mode="xml")  # type: ignore[arg-type]
 
 
+def test_build_agent_with_agent_key_override() -> None:
+    agent = build_agent(name="a4", system_prompt="do w", agent_key="branding_assistant")
+    assert isinstance(agent, Agent)
+    assert agent.name == "a4"
+
+
 # ---------------------------------------------------------------------------
 # phase-order utilities (graphs/shared)
 # ---------------------------------------------------------------------------
