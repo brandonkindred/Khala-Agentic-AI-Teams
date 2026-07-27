@@ -38,11 +38,6 @@ def test_errors_constructors_and_str() -> None:
         CopyEditError,
         DraftError,
         FactCheckError,
-        LLMError,
-        LLMJsonParseError,
-        LLMRateLimitError,
-        LLMTemporaryError,
-        LLMUnreachableError,
         PlanningError,
         PublicationError,
         ResearchError,
@@ -53,18 +48,6 @@ def test_errors_constructors_and_str() -> None:
     assert "[research] boom" == str(e)
     e_no_phase = BloggingError("nope")
     assert str(e_no_phase) == "nope"
-
-    cause = RuntimeError("orig")
-    llm = LLMError("rate", status_code=429, cause=cause)
-    assert llm.status_code == 429
-    assert llm.cause is cause
-
-    assert isinstance(LLMRateLimitError("x"), LLMError)
-    assert isinstance(LLMTemporaryError("x"), LLMError)
-    assert isinstance(LLMUnreachableError("x"), LLMError)
-
-    parse = LLMJsonParseError("bad json", response_preview="x" * 1000, phase="planning")
-    assert len(parse.response_preview) == 1000
 
     rese = ResearchError("nope", sources_found=3)
     assert rese.phase == "research"

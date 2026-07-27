@@ -42,10 +42,15 @@ value, and it crystallizes the "weekly operating system" thesis
 
 ### 2.2 What exists on the platform
 
-Per CLAUDE.md and the existing `backend/agents/integrations/`:
-- Shared Google browser login and session infrastructure.
-- The team already has the primitives for Google OAuth and
-  Playwright-based fallbacks.
+Per `backend/unified_api/`:
+- `google_browser_login_credentials.py` provides shared Google
+  browser-login and session infrastructure (Playwright-based),
+  currently consumed by the blogging team's Medium integration via
+  `blogging/shared/medium_integration_access.py`.
+- There is no standalone `agents/integrations` package on the
+  platform; the Google OAuth/browser-login primitives above live
+  directly in `unified_api/`, not behind a separate integrations
+  abstraction.
 
 This spec reuses that infrastructure; it does not build new OAuth.
 
