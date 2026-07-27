@@ -48,7 +48,7 @@ from .models import (
     ReleaseReadiness,
     SubtaskContract,
 )
-from .phase2_graph import run_phase2_parallel
+from .phases import run_phase1_intake_clarify, run_phase2_design_fanout
 
 # Commit-message template for the shared deliver helper. ``deliver_inline_merge``
 # calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
@@ -207,7 +207,7 @@ ENV_POLICY = {
 from . import tool_dispatch  # noqa: E402
 from .infra_debug_agent import IaCDebugInput, InfraDebugAgent  # noqa: E402
 from .infra_patch_agent import IaCPatchInput, InfraPatchAgent  # noqa: E402
-from .task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput  # noqa: E402
+from .task_clarifier import DevOpsTaskClarifierAgent  # noqa: E402
 from .test_validation_agent import (  # noqa: E402
     DevOpsTestValidationAgent,
     DevOpsTestValidationInput,
@@ -220,7 +220,6 @@ from .tool_agents import (  # noqa: E402
     HelmExecutionToolAgent,
     IaCValidationToolAgent,
     PolicyAsCodeToolAgent,
-    RepoNavigatorInput,
     RepoNavigatorToolAgent,
     TerraformExecutionToolAgent,
 )
@@ -305,38 +304,24 @@ class _DebugPatchState:
                 self.exec_findings.extend(findings)
 
 
-class DevOpsTeamLeadAgent(TeamLeadSharedState):
+class DevOpsTeamLeadAgent(BaseTeamLead):
     """Coordinates specialized DevOps agents with hard gates.
 
-    Inherits ``TeamLeadSharedState`` for the optional per-run status hook
-    (``_report_status`` / ``_status_callback``). Pipeline phase status always
-    emits INFO logs via :meth:`_log_pipeline_status`; the optional callback is
-    a separate forward channel and may be set/cleared per run without losing
-    historical log output.
-
-    This class intentionally does **not** subclass ``BaseTeamLead``: that type's
-    constructor and shared-state wiring differ from DevOps's
-    ``TeamLeadSharedState`` setup. Instead, pure phase/retry helpers are aliased
-    from ``BaseTeamLead`` as unbound methods on this class (see
-    ``_run_gated_phases`` / ``_run_bounded_retry_loop`` below) so call sites can
-    use ``self._run_*`` without inheriting ``BaseTeamLead`` instance state.
+    Inherits ``BaseTeamLead`` (and, transitively, ``TeamLeadSharedState``) for
+    LLM resolution and the optional per-run status hook (``_report_status`` /
+    ``_status_callback``). Pipeline phase status always emits INFO logs via
+    :meth:`_log_pipeline_status`; the optional callback is a separate forward
+    channel and may be set/cleared per run without losing historical log
+    output. DevOps does not use ``BaseTeamLead``'s per-repo briefing cache
+    (:meth:`BaseTeamLead._repo_context_cache_for`), so ``__init__`` passes
+    empty extension/exclude-dir sets and a zero char budget for that unused
+    feature.
 
     Invariants: ``self.llm`` is the client passed to ``__init__``; specialist
     agents and tools are constructed once; ``_status_callback`` defaults to
     None (mixin default) and is independent of fallback logging.
     """
 
-    # Unbound-method reuse (not inheritance): assign BaseTeamLead helpers onto
-    # this class so ``self._run_gated_phases`` / ``self._run_bounded_retry_loop``
-    # work without subclassing BaseTeamLead. The helpers only need ``self`` for
-    # the Python method call signature — they do not read BaseTeamLead fields.
-    # Alias BaseTeamLead._run_gated_phases onto this class as
-    # self._run_gated_phases. This is required because BaseTeamLead._run_phase_gates
-    # (invoked unbound elsewhere in this file) internally calls
-    # self._run_gated_phases, and DevOpsTeamLead does not inherit from
-    # BaseTeamLead.
-    _run_gated_phases = BaseTeamLead._run_gated_phases
-    _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
     # Tool-dispatch logic lives in ``tool_dispatch.py``; aliased here so
     # ``self._run_execution_tools(...)`` keeps its existing bound-method call
     # shape (see devops_team/tool_dispatch.py for the implementation).
@@ -344,12 +329,13 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
-        TeamLeadSharedState.__init__(
+        BaseTeamLead.__init__(
             self,
-            llm_getter=lambda _agent_id: llm_client,
-            shared_config={},
+            llm_client,
+            extensions=frozenset(),
+            exclude_dirs=frozenset(),
+            max_chars=0,
         )
-        self.llm = llm_client
         self.task_clarifier = DevOpsTaskClarifierAgent(llm_client)
         self.iac_agent = InfrastructureAsCodeAgent(llm_client)
         self.cicd_agent = CICDPipelineAgent(llm_client)
@@ -716,24 +702,22 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
               clarifier rejection; otherwise builds subtask contracts, logs their
               count, and returns ``None`` so later phases run.
+
+            Thin wrapper around the standalone ``run_phase1_intake_clarify``;
+            converts its typed result into this pipeline's gate contract.
             """
-            env_block = self._enforce_env_policy(task_spec)
-            if env_block:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=f"Environment policy violation: {env_block}"
-                )
+            result = run_phase1_intake_clarify(
+                task_spec=task_spec,
+                task_clarifier=self.task_clarifier,
+                enforce_env_policy=self._enforce_env_policy,
+                build_subtask_contracts=self._build_subtask_contracts,
+            )
+            if result.blocked_reason:
+                return DevOpsTeamResult(success=False, failure_reason=result.blocked_reason)
 
-            clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
-            if not clarifier.approved_for_execution:
-                return DevOpsTeamResult(
-                    success=False,
-                    failure_reason="Clarification required: "
-                    + "; ".join(clarifier.clarification_requests[:3]),
-                )
-
-            subtask_contracts = self._build_subtask_contracts(task_spec)
             logger.info(
-                "DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts)
+                "DevOps team pipeline: %d subtask contracts generated",
+                len(result.subtask_contracts),
             )
             return None
 
@@ -750,25 +734,23 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                 "phase2",
                 detail="DevOps team pipeline: phase 2 - change design (parallel)",
             )
-            repo_summary = self.repo_navigator_tool.run(
-                RepoNavigatorInput(repo_path=str(repo_path))
-            ).summary
             # Enable parallel execution unless the backing LLM client is a
             # DummyLLMClient (or subclass) — scripted test clients use a shared
             # sequential response list that breaks under concurrent access.
             use_parallel = not isinstance(self.llm, DummyLLMClient)
-            phase2 = run_phase2_parallel(
-                self.iac_agent,
-                self.cicd_agent,
-                self.deployment_agent,
-                task_spec,
-                repo_summary=repo_summary,
+            phase2 = run_phase2_design_fanout(
+                task_spec=task_spec,
+                repo_path=repo_path,
+                iac_agent=self.iac_agent,
+                cicd_agent=self.cicd_agent,
+                deployment_agent=self.deployment_agent,
+                repo_navigator_tool=self.repo_navigator_tool,
                 parallel=use_parallel,
             )
-            iac_result = phase2["iac_result"]
-            cicd_result = phase2["cicd_result"]
-            deploy_result = phase2["deploy_result"]
-            aggregated_artifacts = phase2["aggregated_artifacts"]
+            iac_result = phase2.iac_result
+            cicd_result = phase2.cicd_result
+            deploy_result = phase2.deploy_result
+            aggregated_artifacts = phase2.aggregated_artifacts
             return None
 
         def _phase3_branch_write() -> Optional[DevOpsTeamResult]:
@@ -980,12 +962,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         )
                 return None
 
-            # Consume BaseTeamLead's intra-phase multi-gate hook without inheriting
-            # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-            return BaseTeamLead._run_phase_gates(
-                self,
-                [_quality_gates_check, _build_verifier_check],
-            )
+            return self._run_phase_gates([_quality_gates_check, _build_verifier_check])
 
         def _phase5_completion_deliver() -> Optional[DevOpsTeamResult]:
             """Phase 5: completion package assembly + deliver/merge.
@@ -1107,17 +1084,14 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             completion.quality_gates = quality_gates
             return None
 
-        # Consume BaseTeamLead's gate-based phase sequencer without inheriting
-        # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-        early_exit = BaseTeamLead._run_gated_phases(
-            self,
+        early_exit = self._run_gated_phases(
             [
                 _phase1_intake_clarify,
                 _phase2_parallel_design,
                 _phase3_branch_write,
                 _phase4_validation_review,
                 _phase5_completion_deliver,
-            ],
+            ]
         )
         if early_exit is not None:
             return early_exit
