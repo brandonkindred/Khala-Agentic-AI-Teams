@@ -85,15 +85,26 @@ Two concrete recipes ship on top of it:
   exception sets `success=False`. This is an intentional split: "the model
   answered but didn't give me usable JSON" is not the same failure class as
   "I couldn't reach/run the model."
+- **Gap: valid-but-wrong-shaped JSON is not fully handled.**
+  `lenient_json_object` (`shared/tool_agent_base.py`) only special-cases
+  *parse* failure (`{}`); a syntactically valid but non-object payload — e.g.
+  the model returns a JSON array — is returned unchanged. In
+  `BaseReviewToolAgent.review`, `for item in (data or {}).get("issues") or
+  []` only guards the *falsy* case (`data` is `None`, `{}`, or an empty
+  list); a **non-empty** list is truthy, so `(data or {}).get(...)` calls
+  `.get` on a `list` and raises `AttributeError` straight out of `review()`
+  — uncaught by any of this pattern's fallback tiers. So this pattern's
+  "never lets a failure propagate" guarantee (below) does not cover every
+  model-output shape, only missing/empty/dict-shaped output.
 - **Partial-failure tolerance** — `_call_partial_tolerant` (used by
   `BaseReviewToolAgent.problem_solve`, which fixes issues one at a time) logs
   and skips any single item whose `fn(item)` raises, returning only the
   successes; one bad fix attempt does not abort the batch.
-- **Net effect:** this pattern never lets an LLM/parse failure propagate out
-  of `run`/`review`/`problem_solve`/`plan`/`deliver` — every failure mode
-  degrades to a `ToolAgentOutput`/`ToolAgentPhaseOutput` shape, with the
-  no-model/call-error/empty-parse "tiers" distinguishable in the returned
-  payload for callers that care.
+- **Net effect:** for the no-model, call-error, and parse-failure tiers this
+  pattern degrades to a `ToolAgentOutput`/`ToolAgentPhaseOutput` shape rather
+  than propagating, with the tiers distinguishable in the returned payload
+  for callers that care — but, per the gap above, that guarantee is not
+  exhaustive over every possible model-output shape.
 
 ---
 
@@ -117,10 +128,22 @@ scaffold, previously duplicated verbatim four times.
 
 **Failure handling.**
 
-- **Any failure** — building the agent, calling it, or the returned
-  `structured_output` not being an instance of `output_model` — is caught by
-  a single broad `except Exception` inside `run_structured_persona` and
-  routed to `fallback_factory(exc)`. **Never raises** to the caller.
+- **Agent construction is outside the try/except.** `run_structured_persona`
+  calls `agent = agent_factory(model=model, system_prompt=system_prompt)`
+  *before* entering the `try` block; only the subsequent call
+  (`agent(user_prompt, structured_output_model=output_model)`) and result
+  validation are covered. If `agent_factory` itself raises — e.g. model
+  resolution or `Agent.__init__` fails — that exception **propagates to the
+  caller unchanged**, bypassing `fallback_factory` entirely. This is
+  intentional per the function's precondition ("`agent_factory(...)` returns
+  a callable Strands `Agent`") and is exercised directly by
+  `tests/test_persona_agent_base.py` (a constructor failure is asserted to
+  propagate, not fall back).
+- **Calling the agent or an invalid `structured_output`** — the returned
+  `structured_output` not being an instance of `output_model` — *is* caught
+  by the single broad `except Exception` inside `run_structured_persona` and
+  routed to `fallback_factory(exc)`. **Never raises** for failures in this
+  narrower window.
 - The fallback is **type-specific and caller-authored**, not a generic empty
   shape: e.g. `security_agent`'s `_fallback` returns a
   `SecurityOutput(vulnerabilities=[], approved=False, summary=f"Security
@@ -166,11 +189,15 @@ single-shot JSON devops agents.
   owns its own patch/retry loop — see `orchestrator.py`'s Phase 4.6
   debug-patch loop, which does wrap its calls in `try`/`except Exception`).
   This pattern **does not** build a safe fallback output itself.
-- **Retry/continuation** happens one layer down, inside
-  `complete_json_with_continuation` and the underlying LLM client, not in
-  `DevOpsSingleShotAgent` itself — continuation-on-truncation is
-  transparent to this pattern, but a truncation that survives continuation
-  still raises.
+- **No continuation actually happens, despite the name.**
+  `complete_json_with_continuation` (`shared/llm.py`) makes exactly **one**
+  `agent(prompt, ...)` call; its own docstring says
+  `max_continuation_cycles` "is accepted for backward compatibility but
+  ignored." On a truncated or fenced/prose-wrapped response it falls back
+  to `extract_json_from_response` for recovery (one extra parse attempt, not
+  an extra LLM call); if that also fails, `LLMJsonParseError` is raised. So
+  this pattern has **no built-in retry or multi-call continuation at all**
+  — `DevOpsSingleShotAgent` makes a single LLM call per `run()`, full stop.
 - **`pre_call`** is the only built-in way to avoid calling the LLM at all;
   when it returns non-`None`, `run()` returns that value directly.
 - **Explicit standardization decision recorded in the module docstring:**
@@ -243,15 +270,22 @@ Representative call sites and their distinct behaviors:
   a **domain-specific fail-closed verdict** (`{"verdict": "fail", "reason":
   ...}`) rather than a generic empty dict — a stuck task that cannot even be
   adjudicated must terminate with a diagnostic, not re-enter the loop.
-- **`shared/decomposition.py`** (`DecompositionEngine.process`) — catches
-  specifically `LLMTruncatedError` (not `Exception`) and responds with
-  content decomposition + recursive retry on smaller chunks, up to
-  `max_depth`; if decomposition is exhausted while still truncated, it
-  writes a post-mortem artifact and **re-raises**. Any *other* exception
-  (a non-truncation LLM error, a JSON-parse failure via
-  `extract_json_from_response`) is **not caught at all** and propagates
-  immediately — this pattern treats truncation as the one specially-handled
-  failure mode and everything else as the caller's problem.
+- **`shared/decomposition.py`** (`RecursiveProcessor.process`) — at the
+  top-level (depth 0) call, catches specifically `LLMTruncatedError` (not
+  `Exception`) and responds with content decomposition + recursive retry on
+  smaller chunks, up to `max_depth`; if decomposition is exhausted while
+  still truncated, it writes a post-mortem artifact and **re-raises**. Any
+  *other* exception at that top level (a non-truncation LLM error, a
+  JSON-parse failure via `extract_json_from_response`) is **not caught at
+  all** and propagates immediately. **This "propagates immediately" policy
+  only holds for the initial, undecomposed call**, though: once
+  decomposition has actually started, `_decompose_and_process` wraps each
+  chunk's recursive `self.process(...)` call in its own `try/except
+  Exception` (`shared/decomposition.py:432-450`), logs a warning, and
+  *continues to the next chunk* — so a non-truncation/JSON-parse error from
+  a decomposed child is swallowed, not re-raised, and the method ultimately
+  returns a partial (or, if every chunk failed, empty) merge instead of
+  propagating.
 - **`code_review_agent/synthesis.py`** (`synthesize_review_findings`) —
   wraps the entire call (prompt build, agent call, JSON parse, key
   validation) in one broad `try/except Exception`, logs a warning per
@@ -273,11 +307,19 @@ Representative call sites and their distinct behaviors:
   sub-agent — propagates straight out of the `@tool` call and is handled (or
   not) by whatever Strands/orchestrator machinery invoked the tool. This is
   the most "raw" of the five patterns: zero local failure handling.
-- **`build_fix.py` / `build_fix_specialist/agent.py`** — build/patch-loop
-  helpers that wrap individual LLM calls in `try/except Exception`, log, and
-  return a `(False, summary)` failure tuple rather than raising — by
-  contract ("Neither function raises into the build gate") the build gate
-  itself never sees an exception, only a boolean outcome plus a message.
+- **`build_fix.py`** — build/patch-loop helper functions that wrap
+  individual LLM calls in `try/except Exception`, log, and return a
+  `(False, summary)` failure tuple rather than raising — by contract
+  ("Neither function raises into the build gate") the build gate itself
+  never sees an exception, only a boolean outcome plus a message. **Do not
+  conflate this with `build_fix_specialist/agent.py`** — a separate,
+  differently-behaved call site despite the similar name:
+  `BuildFixSpecialistAgent.run` calls `agent_call_json(self._agent, prompt,
+  ...)` with **no `try`/`except`** at all, so any LLM/parse exception
+  propagates straight out of `run()`, and its success path returns a
+  `BuildFixOutput` object, not a `(bool, str)` tuple. It belongs in the
+  "no local failure handling" bucket alongside `architect_agents`, not the
+  fail-safe-tuple bucket.
 
 **Failure handling, summarized:** unlike Patterns 1–4, there is no single
 answer for "does it raise or fall back, and to what" — it must be looked up
@@ -296,7 +338,7 @@ rather than its origin (`decomposition.py`'s truncation-only catch).
 |---|---|---|---|---|
 | 1. `LlmToolAgentBase` | Caught, returns tiered `FallbackPayload` / `success=False` | Distinct tier: `{}` (lenient) or `None` (extract); does *not* imply `success=False` in `JsonGeneratorToolAgent` | No (single attempt) | Generic, tier-labeled |
 | 2. `run_structured_persona` | Caught (broad `except Exception`), routed to `fallback_factory` | Folded into the same broad catch (Strands structured-output validation failure) | No | Type-specific, caller-authored, safe-by-default |
-| 3. `DevOpsSingleShotAgent` | **Propagates unchanged** | **Propagates unchanged** (`LLMJsonParseError` after recovery attempts) | Continuation only, inside `complete_json_with_continuation`; no top-level retry | None — caller must handle |
+| 3. `DevOpsSingleShotAgent` | **Propagates unchanged** | **Propagates unchanged** (`LLMJsonParseError` after one recovery-parse attempt — no actual continuation despite the helper's name) | **None** — single call, no retry | None — caller must handle |
 | 4. `FileGeneratorToolAgent` | **Propagates unchanged** | **Propagates unchanged** | No | None — caller must handle |
 | 5. Hand-rolled | **Varies per call site** (raises / generic sentinel / domain-specific fail-closed value, depending on file) | **Varies per call site** | **Varies per call site** | **Varies per call site** |
 
