@@ -169,6 +169,13 @@ def parallel_map(
           left behind by the fast-fail path. If a *different* item raises a
           genuine exception, the existing fast-fail policy still applies on
           top of any timeout bookkeeping already done.
+        - If enough items degrade that every worker slot is presumed
+          permanently occupied by an abandoned straggler (``workers`` such
+          degrades reached), a not-yet-started task can never be scheduled —
+          it too is degraded immediately (``on_timeout``/``None``) rather
+          than waiting forever for capacity that will never be observed as
+          freed. A task that has already started is unaffected: it keeps
+          being watched and resolves within its own deadline regardless.
         - With ``timeout=None`` (the default), behavior is identical to the
           version of this function without timeout support — the code path
           taken is the same, not merely equivalent.
@@ -198,7 +205,10 @@ def parallel_map(
     if timeout is not None:
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
             raise TypeError("timeout must be an int or float")
-        if timeout <= 0:
+        # ``not (timeout > 0)`` (rather than ``timeout <= 0``) also rejects NaN:
+        # every comparison with NaN is False, so ``NaN <= 0`` would silently pass
+        # while ``NaN > 0`` is False too, giving ``not False`` == True here.
+        if not (timeout > 0):
             raise ValueError("timeout must be > 0")
     if on_timeout is not None and not callable(on_timeout):
         raise TypeError("on_timeout must be callable")
@@ -236,7 +246,16 @@ def parallel_map(
 
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = [_submit(pool, i, item) for i, item in enumerate(items)]
+        # Captured positionally during the single pass over *items* so a
+        # timeout's ``on_timeout(item)`` call never re-indexes the original
+        # ``items`` — which only has to support ``__len__``/``__iter__`` per
+        # the precondition above, not ``__getitem__`` (e.g. a ``set`` is a
+        # valid sized iterable but isn't subscriptable).
+        submitted_items: list[T] = [None] * n  # type: ignore[list-item]
+        futures = []
+        for i, item in enumerate(items):
+            submitted_items[i] = item
+            futures.append(_submit(pool, i, item))
         index_of = {fut: i for i, fut in enumerate(futures)}
         ordered: list = [None] * n
         completion: list = []
@@ -255,6 +274,25 @@ def parallel_map(
             # poll bounds how late a timeout is noticed without busy-looping.
             pending = set(futures)
             poll_interval = min(timeout, 0.05)
+            # Count of items degraded-and-abandoned so far: once a straggler is
+            # discarded from ``pending`` its worker thread is never watched
+            # again, so if it never returns that thread is gone for good.
+            stragglers = 0
+
+            def _degrade(i: int) -> None:
+                nonlocal timed_out
+                timed_out = True
+                if on_timeout is not None:
+                    try:
+                        on_timeout(submitted_items[i])
+                    except Exception:
+                        logger.exception(
+                            "on_timeout hook raised for a degraded item; "
+                            "the item's result remains None"
+                        )
+                ordered[i] = None
+                completion.append(None)
+
             while pending:
                 done, pending = wait(pending, timeout=poll_interval, return_when=FIRST_COMPLETED)
                 for fut in done:
@@ -274,17 +312,21 @@ def parallel_map(
                         # rest of the batch is unaffected. This never touches
                         # ``abort`` — a timeout is not a worker exception.
                         pending.discard(fut)
-                        timed_out = True
-                        if on_timeout is not None:
-                            try:
-                                on_timeout(items[i])
-                            except Exception:
-                                logger.exception(
-                                    "on_timeout hook raised for a degraded item; "
-                                    "the item's result remains None"
-                                )
-                        ordered[i] = None
-                        completion.append(None)
+                        stragglers += 1
+                        _degrade(i)
+                if pending and stragglers >= workers:
+                    # Every worker slot is presumed permanently occupied by an
+                    # abandoned straggler we'll never observe finishing, so a
+                    # not-yet-started task behind it can never be scheduled —
+                    # waiting on it would spin forever. Degrade it too rather
+                    # than hang. (A task that already started is left alone:
+                    # it's still being watched and will resolve, one way or
+                    # another, within its own deadline above.)
+                    for fut in list(pending):
+                        i = index_of[fut]
+                        if start_times[i] is None:
+                            pending.discard(fut)
+                            _degrade(i)
     except BaseException as exc:
         # Set before anything else below (including the hook, which is
         # caller-supplied and may be slow) to give not-yet-started tasks the

@@ -414,6 +414,62 @@ def test_timeout_degrades_slow_item_success_items_unaffected() -> None:
     assert timed_out_items == [0]
 
 
+def test_timeout_degrades_queued_item_stuck_behind_a_hung_worker() -> None:
+    """With max_workers=1, a permanently hung first item must not starve a
+    queued second item forever: once the number of abandoned stragglers
+    reaches the worker count, a not-yet-started item is degraded too instead
+    of parallel_map hanging indefinitely."""
+    release = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release.wait(timeout=10)  # simulates a permanent hang
+            return x
+        return x * 10
+
+    try:
+        out = parallel_map([0, 1], fn, max_workers=1, skip_none=False, timeout=0.05)
+        # Item 1 never got a worker slot (item 0's hung thread never freed one
+        # up) so it degrades to None exactly like the timed-out item 0.
+        assert out == [None, None]
+    finally:
+        release.set()
+
+
+def test_timeout_uses_item_not_index_for_non_subscriptable_items() -> None:
+    """on_timeout receives the actual submitted item even when `items` is a
+    sized-but-not-subscriptable iterable (e.g. a set), rather than indexing
+    the original input with `items[i]`."""
+    timed_out_items: list[int] = []
+
+    def on_timeout(item: int) -> None:
+        timed_out_items.append(item)
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(1.0)
+        return x
+
+    out = parallel_map(
+        {0, 1},
+        fn,
+        max_workers=2,
+        skip_none=False,
+        timeout=0.1,
+        on_timeout=on_timeout,
+    )
+
+    assert None in out
+    assert timed_out_items == [0]
+
+
+def test_nan_timeout_rejected() -> None:
+    """A NaN timeout is rejected up front rather than silently disabling the
+    timeout check (NaN compares False against both <= 0 and > 0)."""
+    with pytest.raises(ValueError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, timeout=float("nan"))
+
+
 def test_timeout_none_default_is_unaffected() -> None:
     """timeout unset (default None) behaves exactly as before — no degrade
     logic engages even for a slow item."""
