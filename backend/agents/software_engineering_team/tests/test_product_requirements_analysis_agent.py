@@ -872,6 +872,29 @@ def test_add_recommendations_returns_unchanged_when_no_questions() -> None:
     assert result == []
 
 
+def test_add_recommendations_treats_null_recommendation_as_absent() -> None:
+    """A null ``recommendation`` from the LLM must leave the question's recommendation
+    empty, not the literal string "None" (str(None) coerced from an unconditional
+    str() call on the raw value)."""
+    llm = _StubClient(
+        {
+            "recommendations": [
+                {"id": "q1", "recommendation": None},
+                {"id": "q2", "recommendation": "Use OAuth for the MVP."},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Which auth?")
+    q2 = OpenQuestion(id="q2", question_text="Which storage?")
+
+    result = agent._add_recommendations([q1, q2], "# Spec content")
+
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"].recommendation == ""
+    assert result_by_id["q2"].recommendation == "Use OAuth for the MVP."
+
+
 def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents() -> None:
     """Specialist plan should include new UI/UX, architecture, and risk-focused agents when relevant."""
     llm = MagicMock()
