@@ -169,13 +169,19 @@ def parallel_map(
           left behind by the fast-fail path. If a *different* item raises a
           genuine exception, the existing fast-fail policy still applies on
           top of any timeout bookkeeping already done.
-        - If enough items degrade that every worker slot is presumed
-          permanently occupied by an abandoned straggler (``workers`` such
-          degrades reached), a not-yet-started task can never be scheduled —
-          it too is degraded immediately (``on_timeout``/``None``) rather
-          than waiting forever for capacity that will never be observed as
-          freed. A task that has already started is unaffected: it keeps
-          being watched and resolves within its own deadline regardless.
+        - If enough items degrade that every worker slot is presumed occupied
+          by an abandoned straggler (``workers`` such degrades reached), a
+          not-yet-started task behind them gets one further full ``timeout``
+          as a grace period — the same budget a running item gets — in case
+          a straggler was merely slow and about to free its worker. Only if
+          that saturation persists past the grace period is the queued task
+          finally degraded (``on_timeout``/``None``), and its future is
+          cancelled first so it can never start running unobserved in the
+          background after this call returns; if the cancel fails (a worker
+          freed up and started it after all), it's left alone and tracked
+          normally against its own deadline instead. A task that has already
+          started is never affected by this: it keeps being watched and
+          resolves within its own deadline regardless.
         - With ``timeout=None`` (the default), behavior is identical to the
           version of this function without timeout support — the code path
           taken is the same, not merely equivalent.
@@ -278,6 +284,15 @@ def parallel_map(
             # discarded from ``pending`` its worker thread is never watched
             # again, so if it never returns that thread is gone for good.
             stragglers = 0
+            # Set the first moment every worker slot is presumed occupied by
+            # an abandoned straggler. A single instant of saturation proves
+            # nothing on its own — the straggler may simply be a bit slow and
+            # about to return, freeing its worker for the next queued item —
+            # so a not-yet-started item only gets force-degraded once
+            # saturation has persisted for a further full ``timeout`` with no
+            # sign of it starting, giving it the same budget a normal item
+            # gets before it's called stuck.
+            saturation_since: Optional[float] = None
 
             def _degrade(i: int) -> None:
                 nonlocal timed_out
@@ -315,18 +330,24 @@ def parallel_map(
                         stragglers += 1
                         _degrade(i)
                 if pending and stragglers >= workers:
-                    # Every worker slot is presumed permanently occupied by an
-                    # abandoned straggler we'll never observe finishing, so a
-                    # not-yet-started task behind it can never be scheduled —
-                    # waiting on it would spin forever. Degrade it too rather
-                    # than hang. (A task that already started is left alone:
-                    # it's still being watched and will resolve, one way or
-                    # another, within its own deadline above.)
-                    for fut in list(pending):
-                        i = index_of[fut]
-                        if start_times[i] is None:
-                            pending.discard(fut)
-                            _degrade(i)
+                    if saturation_since is None:
+                        saturation_since = now
+                    elif now - saturation_since >= timeout:
+                        # Saturation has persisted for a full timeout with no
+                        # worker freeing up: every slot is genuinely stuck, so
+                        # a not-yet-started item behind it can never be
+                        # scheduled and would spin forever. Cancel it while
+                        # it's still queued — this both stops it from ever
+                        # running unobserved in the background after we
+                        # return, and doubles as the correctness check: if
+                        # cancel() fails, a worker freed up and started it
+                        # after all (race), so it's left in ``pending`` to be
+                        # tracked normally against its own start time instead.
+                        for fut in list(pending):
+                            i = index_of[fut]
+                            if start_times[i] is None and fut.cancel():
+                                pending.discard(fut)
+                                _degrade(i)
     except BaseException as exc:
         # Set before anything else below (including the hook, which is
         # caller-supplied and may be slow) to give not-yet-started tasks the

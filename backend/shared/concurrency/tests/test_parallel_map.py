@@ -436,6 +436,24 @@ def test_timeout_degrades_queued_item_stuck_behind_a_hung_worker() -> None:
         release.set()
 
 
+def test_timeout_queued_item_still_runs_behind_a_merely_slow_not_hung_worker() -> None:
+    """A queued item behind a slightly-over-budget (but not permanently hung)
+    worker must still get to run and receive its own full budget, rather than
+    being force-degraded the instant every worker looks saturated."""
+    release = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release.wait(timeout=2)  # a bit over the timeout, then returns
+            return x
+        return x * 10
+
+    threading.Timer(0.1, release.set).start()
+    out = parallel_map([0, 1], fn, max_workers=1, skip_none=False, timeout=0.05)
+
+    assert out == [None, 10]
+
+
 def test_timeout_uses_item_not_index_for_non_subscriptable_items() -> None:
     """on_timeout receives the actual submitted item even when `items` is a
     sized-but-not-subscriptable iterable (e.g. a set), rather than indexing
