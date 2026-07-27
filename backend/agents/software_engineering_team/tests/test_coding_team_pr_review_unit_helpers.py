@@ -352,6 +352,11 @@ class TestJoinNonblankUnit:
 
 
 class _FakeOutput:
+    """Minimal stand-in for a reviewer output object: `issues` is whatever list
+    the test wants merged/returned verbatim (not necessarily real issue objects),
+    `summary`/`spec_compliance_notes` are the free-text fields _MergedReviewerOutput
+    joins across attempts."""
+
     def __init__(self, issues, summary, spec_compliance_notes) -> None:
         self.issues = issues
         self.summary = summary
@@ -402,6 +407,8 @@ class _RecordingProvider:
 
 
 def _run_reviewer_kwargs(**overrides: Any) -> Dict[str, Any]:
+    """Base kwargs for calling `pr_review._run_reviewer`, with sensible defaults
+    for every parameter; pass any of them as a keyword to override."""
     base = dict(
         client=object(),
         owner="acme",
@@ -494,6 +501,15 @@ class TestRunReviewerUnit:
         # Whole-file attempt dispatched before the hunk attempt.
         assert provider.calls[0]["pre_numbered"] is False
         assert provider.calls[1]["pre_numbered"] is True
+        # Each attempt gets its own focus note and its own content, so a
+        # regression that swaps the whole-file/hunk wiring (or drops the
+        # hunk-mode pre_existing note) can't hide behind the flags above.
+        assert provider.calls[0]["task_requirements"] == pr_review._whole_file_focus("PR body")
+        assert provider.calls[0]["files"] == {"a.py": "content"}
+        assert provider.calls[1]["task_requirements"] == pr_review._hunk_review_focus("PR body")
+        assert "pre_existing" in provider.calls[1]["task_requirements"]
+        assert "diff hunks" in provider.calls[1]["task_requirements"]
+        assert provider.calls[1]["code"] == "### b.py ###\n1: y = 2"
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["whole-issue", "hunk-issue"]
 

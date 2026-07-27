@@ -1486,6 +1486,14 @@ class TestReviewEndpoint:
 
     def test_review_422_retries_then_succeeds(self, review_app) -> None:
         gh = review_app["github"]["client"]
+        # Explicit file_path so this stays an off-diff *line in a changed file*
+        # (-> file-level review comment) even if the fixture default ever changes.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=2, description="in-diff finding"),
+                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff line"),
+            ]
+        )
         gh.review_fail_times = 1  # first submit 422s, retry as COMMENT succeeds
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1508,6 +1516,14 @@ class TestReviewEndpoint:
         # re-submitted (here, via the bisection path) so they stay inline — no
         # standalone conversation comments.
         gh = review_app["github"]["client"]
+        # Explicit file_path so this stays an off-diff *line in a changed file*
+        # (-> file-level review comment) even if the fixture default ever changes.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=2, description="in-diff finding"),
+                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff line"),
+            ]
+        )
         gh.review_fail_times = 2  # both full-batch attempts 422; bisection then succeeds
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1650,6 +1666,7 @@ class TestReviewEndpoint:
         assert sum("leftover three" in b for b in bodies) == 1
         for b in bodies:
             assert b.count("leftover") == 1  # no comment carries more than one finding
+            assert "gone.py" in b  # each standalone comment still names its own file
         assert job["review_summary"]["comment_findings"] == 3
         assert job["review_summary"]["file_comments"] == 0
         assert job["review_summary"]["pending_issue_proposals"] == []
@@ -2521,6 +2538,21 @@ class TestPreservationProperties:
         assert description in file_level[0]["body"], (
             f"PRESERVATION BROKEN — comment body does not contain description. "
             f"body={file_level[0]['body']!r}, expected to contain {description!r}"
+        )
+        # The same finding must not ALSO show up as a line-anchored comment —
+        # file-level routing must be exclusive, not additive.
+        all_comments = []
+        for rev in gh.reviews:
+            all_comments.extend(rev.get("comments", []))
+        if line is None:
+            line_anchored = [c for c in all_comments if c.get("path") == "a.py" and "line" in c]
+        else:
+            line_anchored = [
+                c for c in all_comments if c.get("path") == "a.py" and c.get("line") == line
+            ]
+        assert len(line_anchored) == 0, (
+            f"PRESERVATION BROKEN — off-diff finding should not also produce a "
+            f"line-anchored comment, but found {line_anchored}."
         )
 
     # ------------------------------------------------------------------
