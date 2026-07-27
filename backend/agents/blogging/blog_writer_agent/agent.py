@@ -429,7 +429,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 if (
                     re.search(r"\[CLAIM:", after)
                     or re.search(r"https?://", after)
-                    or re.search(r"\]\(http", after)
+                    or re.search(r"\]\(https?://", after)
                 ):
                     continue
                 violations.append(
