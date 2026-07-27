@@ -3812,10 +3812,10 @@ class TestPreExistingFindings:
 
 
 class TestDuplicateProposalDetection:
-    """A pre-existing finding matched to an already-open GitHub issue is offered
-    pre-linked to that issue, not as a fresh "create issue" candidate."""
+    """A pre-existing finding matched to an already-open GitHub issue is already
+    tracked, so it is dropped entirely rather than offered to the user."""
 
-    def test_matching_open_issue_marks_proposal_matched_and_prelinked(self, review_app) -> None:
+    def test_matching_open_issue_is_dropped_from_proposals(self, review_app) -> None:
         gh = review_app["github"]["client"]
         gh.open_issues = [
             Issue(
@@ -3839,11 +3839,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
-        proposals = job["review_summary"]["pending_issue_proposals"]
-        assert len(proposals) == 1
-        assert proposals[0]["matched_existing"] is True
-        assert proposals[0]["issue_number"] == 42
-        assert proposals[0]["issue_url"] == "https://example/issues/42"
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_unrelated_open_issue_does_not_mark_proposal_matched(self, review_app) -> None:
         gh = review_app["github"]["client"]
@@ -3944,8 +3940,9 @@ class TestDuplicateProposalDetection:
         assert proposal["issue_url"] is None
 
     def test_create_review_issues_never_refiles_a_matched_proposal(self, review_app) -> None:
-        """A proposal pre-linked to an existing issue can never be filed as a new,
-        duplicate GitHub issue via the create-issues endpoint."""
+        """A matched finding is dropped before it ever becomes a filable candidate,
+        so requesting its (nonexistent) proposal id via the create-issues endpoint
+        is a no-op rather than filing a new, duplicate GitHub issue."""
         gh = review_app["github"]["client"]
         gh.open_issues = [
             Issue(
@@ -3969,6 +3966,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
+        assert job["review_summary"]["pending_issue_proposals"] == []
         resp = review_app["client"].post(
             f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
         )
@@ -3976,7 +3974,7 @@ class TestDuplicateProposalDetection:
         data = resp.json()
         assert data["created"] == []
         assert gh.created_issues == []
-        assert data["proposals"][0]["issue_url"] == "https://example/issues/42"
+        assert data["proposals"] == []
 
     def test_duplicate_check_only_considers_open_issues_up_to_the_cap(
         self, review_app, monkeypatch: pytest.MonkeyPatch
@@ -4025,7 +4023,8 @@ class TestDuplicateProposalDetection:
     def test_duplicate_check_env_override_widens_the_cap(
         self, review_app, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Raising the cap via env var lets a later-listed matching issue be found."""
+        """Raising the cap via env var lets a later-listed matching issue be found,
+        so the finding is dropped as already-tracked instead of offered."""
         monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "3")
         gh = review_app["github"]["client"]
         gh.open_issues = [
@@ -4060,9 +4059,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
-        proposal = job["review_summary"]["pending_issue_proposals"][0]
-        assert proposal["matched_existing"] is True
-        assert proposal["issue_url"] == "https://example/issues/99"
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
 
 class TestDetectDuplicateProposalsUnit:
