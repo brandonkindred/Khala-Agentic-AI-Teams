@@ -4,25 +4,27 @@ Shared base for the code-v2 Development Agents (backend + frontend).
 ``BackendDevelopmentAgent`` and ``FrontendDevelopmentAgent`` share their
 constructor, their repo-briefing read (including the incremental
 :class:`~software_engineering_team.shared.repo_context_cache.RepoContextCache`
-fast path), their tool-runner construction, their planning + feature-branch
-setup (``_run_planning_and_branch_setup``), their per-microtask-review-gated
-execution phase (``_run_execution_phase``), their post-execution bookkeeping
-(``_record_execution_bookkeeping``), their documentation phase
-(``_run_documentation_phase``), their deliver + final status/logging
-(``_run_deliver_and_finalize``), and the full ``run_workflow`` sequencing that
-calls all of the above in order (``_run_development_workflow``) verbatim; only
-the per-team tool-agent roster, tooling detection, repo extension/exclude
-sets, and a handful of team-specific classes/callables/strings differ. This
-base holds the shared members; each team subclasses it, supplies the
-divergent parts via class attributes (``_TEAM_LABEL``,
-``_DELIVER_IN_PROGRESS_STATUS``) and overrides (``_read_repo_code``,
-``_detect_tooling``), and exposes a thin ``run_workflow`` that forwards its
-own module-level names into ``_run_development_workflow`` — mirroring how
-``BaseTeamLead._run_setup_and_delegate`` already does this one level up for
-the team-lead classes. The job-update closure each ``run_workflow`` uses
-comes from the shared ``team_lead_base.make_job_updater`` rather than from
-this base, since ``BaseTeamLead`` needs the identical closure for its own
-Setup phase.
+fast path), their tooling detection, their tool-runner construction, their
+planning + feature-branch setup (``_run_planning_and_branch_setup``), their
+per-microtask-review-gated execution phase (``_run_execution_phase``), their
+post-execution bookkeeping (``_record_execution_bookkeeping``), their
+documentation phase (``_run_documentation_phase``), their deliver + final
+status/logging (``_run_deliver_and_finalize``), and the full ``run_workflow``
+sequencing that calls all of the above in order
+(``_run_development_workflow``) verbatim; only the per-team ``PROFILE``
+(repo extension/exclude sets, briefing budget, and tooling-detection
+callable — see
+:class:`~software_engineering_team.shared.stack_profile.StackProfile`),
+tool-agent roster, and a handful of team-specific classes/callables/strings
+differ. This base holds the shared members; each team subclasses it, supplies
+the divergent parts via class attributes (``PROFILE``, ``_TEAM_LABEL``,
+``_DELIVER_IN_PROGRESS_STATUS``), and exposes a thin ``run_workflow`` that
+forwards its own module-level names into ``_run_development_workflow`` —
+mirroring how ``BaseTeamLead._run_setup_and_delegate`` already does this one
+level up for the team-lead classes. The job-update closure each
+``run_workflow`` uses comes from the shared ``team_lead_base.make_job_updater``
+rather than from this base, since ``BaseTeamLead`` needs the identical closure
+for its own Setup phase.
 """
 
 from __future__ import annotations
@@ -33,7 +35,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
+from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
+from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.team_lead_base import make_job_updater
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 from software_engineering_team.shared.v2_models import MicrotaskReviewFailedError, Phase
@@ -42,17 +46,23 @@ from software_engineering_team.shared.v2_models import MicrotaskReviewFailedErro
 class BaseV2DevelopmentAgent:
     """Shared base for the code-v2 Development Agents.
 
-    Subclasses provide the per-team ``_read_repo_code`` (extension/exclude sets +
-    briefing budget), ``_detect_tooling``, tool-agent roster, and class attributes
-    ``_TEAM_LABEL`` / ``_DELIVER_IN_PROGRESS_STATUS``; their public ``run_workflow``
-    is a thin wrapper that forwards its own module-level names (tool-agent
-    builder, planning/execution/deliver functions, review classes, git-branch
-    tool-agent kind) into ``_run_development_workflow``.
+    Subclasses set the class-level ``PROFILE`` (a
+    :class:`~software_engineering_team.shared.stack_profile.StackProfile`
+    instance carrying the repo extension/exclude sets, briefing budget, and
+    tooling-detection callable that drive this base's shared
+    ``_read_repo_code``/``_detect_tooling``) plus their tool-agent roster and
+    class attributes ``_TEAM_LABEL`` / ``_DELIVER_IN_PROGRESS_STATUS``; their
+    public ``run_workflow`` is a thin wrapper that forwards its own
+    module-level names (tool-agent builder, planning/execution/deliver
+    functions, review classes, git-branch tool-agent kind) into
+    ``_run_development_workflow``.
 
     Invariants: instance state is limited to ``llm`` and ``_repo_context_cache``,
     so a subclass built via ``__new__`` and given those two attributes behaves
     identically to a constructed one.
     """
+
+    PROFILE: StackProfile
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
@@ -883,14 +893,35 @@ class BaseV2DevelopmentAgent:
         )
         return result
 
-    def _read_repo_code(self, repo_path: Path, max_chars: Optional[int] = None) -> str:
-        """Per-team repo briefing reader.
+    @classmethod
+    def _read_repo_code(cls, repo_path: Path, max_chars: Optional[int] = None) -> str:
+        """Read the repo briefing using this stack's ``PROFILE``.
 
-        Subclasses override this (as a ``@staticmethod``) with their own extension
-        / exclude sets and default briefing budget; the base only declares the
-        contract that :meth:`_read_existing_code` depends on.
+        Delegates to the shared budgeted scanner so every per-domain reader shares
+        one implementation; ``PROFILE.repo_extensions``/``repo_exclude_dirs`` are
+        the contract, and ``PROFILE.repo_max_chars`` is the default budget when
+        ``max_chars`` is not supplied.
+
+        A ``classmethod`` (not instance method) so it stays callable unbound —
+        ``BackendDevelopmentAgent._read_repo_code(repo_path)`` — exactly as
+        subclasses and tests have always called it, while still resolving the
+        calling subclass's ``PROFILE``.
         """
-        raise NotImplementedError  # pragma: no cover - always overridden
+        return read_repo_code_budgeted(
+            repo_path,
+            extensions=cls.PROFILE.repo_extensions,
+            exclude_dirs=cls.PROFILE.repo_exclude_dirs,
+            max_chars=max_chars if max_chars is not None else cls.PROFILE.repo_max_chars,
+        )
+
+    @classmethod
+    def _detect_tooling(cls, repo_path: Path) -> Tuple[bool, bool]:
+        """Return ``(has_lint, has_test)`` via this stack's ``PROFILE.detect_tooling``.
+
+        A ``classmethod`` so ``FrontendDevelopmentAgent._detect_tooling(repo_path)``
+        keeps working unbound, resolving the calling subclass's ``PROFILE``.
+        """
+        return cls.PROFILE.detect_tooling(repo_path)
 
     def _read_existing_code(self, repo_path: Path) -> str:
         """Return the repo briefing, consulting the incremental cache when one is threaded in.

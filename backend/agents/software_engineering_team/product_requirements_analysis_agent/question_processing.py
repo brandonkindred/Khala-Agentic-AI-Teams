@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from difflib import SequenceMatcher
 from typing import Any, List
 
@@ -40,9 +41,11 @@ def filter_duplicate_questions(
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Uses normalized word stems (e.g. token/tokens, store/stored). Only filters as
-    duplicate when match to qa_history is >= 90%; 50–90% similar questions are kept
-    and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
+    Filters out questions whose keyword stems (plus simple plural/past-tense
+    variants) appear verbatim in the Q&A history. A question is considered a
+    duplicate when at least 90% of its keyword stems are found in the history.
+    50-90% coverage is kept for possible consolidation elsewhere. This is
+    keyword coverage, not a similarity ratio between the question and history.
 
     Returns:
         Tuple of (filtered_questions, duplicate_questions).
@@ -54,9 +57,13 @@ def filter_duplicate_questions(
     Postconditions: the two returned lists partition ``new_questions`` (order
         preserved within each); never raises.
     """
-    qa_history_lower = qa_history.lower()
+    qa_history_lower = (qa_history or "").lower()
     filtered = []
     duplicates = []
+
+    def _clean_token(w: str) -> str:
+        """Strip punctuation so tokens like 'store?' match their bare form."""
+        return re.sub(r"[^a-z0-9]", "", w.strip())
 
     def _stem(w: str) -> str:
         """Normalize word for matching (e.g. tokens->token, stored->store)."""
@@ -70,10 +77,10 @@ def filter_duplicate_questions(
         return w
 
     for q in new_questions:
-        q_text_lower = q.question_text.lower()
+        q_text_lower = (q.question_text or "").lower()
         # Key words: length > 3, normalized to stems for plural/tense
-        words = [w for w in q_text_lower.split() if len(w) > 3]
-        key_stems = set(_stem(w) for w in words)
+        words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
+        key_stems = set(_stem(_clean_token(w)) for w in words)
         if not key_stems:
             filtered.append(q)
             continue
@@ -201,6 +208,15 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     )
 
 
+def _str_or_default(value: Any, default: str = "") -> str:
+    """Coerce an LLM-provided field to str, treating an explicit ``None`` as missing.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns ``default`` when ``value`` is ``None``, else ``str(value)``.
+    """
+    return default if value is None else str(value)
+
+
 def _safe_constraint_layer(value: Any) -> int:
     """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
 
@@ -228,15 +244,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             options.append(parse_question_option(opt, i))
 
         if options and not any(opt.is_default for opt in options):
-            sorted_opts = sorted(options, key=lambda o: o.confidence, reverse=True)
-            sorted_opts[0] = QuestionOption(
-                id=sorted_opts[0].id,
-                label=sorted_opts[0].label,
+            default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
+            options[default_idx] = QuestionOption(
+                id=options[default_idx].id,
+                label=options[default_idx].label,
                 is_default=True,
-                rationale=sorted_opts[0].rationale,
-                confidence=sorted_opts[0].confidence,
+                rationale=options[default_idx].rationale,
+                confidence=options[default_idx].confidence,
             )
-            options = sorted_opts
 
         raw_depends = q_data.get("depends_on")
         if isinstance(raw_depends, (list, tuple)):
@@ -247,23 +262,23 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             depends_on = None
 
         return OpenQuestion(
-            id=str(q_data.get("id", f"q{index}")),
-            question_text=str(q_data.get("question_text", "")),
-            context=str(q_data.get("context", "")),
-            recommendation=str(q_data.get("recommendation", "")),
+            id=_str_or_default(q_data.get("id"), f"q{index}"),
+            question_text=_str_or_default(q_data.get("question_text")),
+            context=_str_or_default(q_data.get("context")),
+            recommendation=_str_or_default(q_data.get("recommendation")),
             options=options,
             allow_multiple=bool(q_data.get("allow_multiple", False)),
-            source=str(q_data.get("source", "spec_review")),
-            category=str(q_data.get("category", "general")),
-            priority=str(q_data.get("priority", "medium")),
-            constraint_domain=str(q_data.get("constraint_domain", "")),
+            source=_str_or_default(q_data.get("source"), "spec_review"),
+            category=_str_or_default(q_data.get("category"), "general"),
+            priority=_str_or_default(q_data.get("priority"), "medium"),
+            constraint_domain=_str_or_default(q_data.get("constraint_domain")),
             constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
             blocking=bool(q_data.get("blocking", True)),
-            owner=str(q_data.get("owner", "user")),
+            owner=_str_or_default(q_data.get("owner"), "user"),
             section_impact=list(q_data.get("section_impact", [])),
-            due_date=str(q_data.get("due_date", "")),
-            status=str(q_data.get("status", "open")),
+            due_date=_str_or_default(q_data.get("due_date")),
+            status=_str_or_default(q_data.get("status"), "open"),
             asked_via=list(q_data.get("asked_via", [])),
         )
 
@@ -296,10 +311,10 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
     """
     if isinstance(opt_data, dict):
         return QuestionOption(
-            id=str(opt_data.get("id", f"opt{index}")),
-            label=str(opt_data.get("label", "")),
+            id=_str_or_default(opt_data.get("id"), f"opt{index}"),
+            label=_str_or_default(opt_data.get("label")),
             is_default=bool(opt_data.get("is_default", False)),
-            rationale=str(opt_data.get("rationale", "")),
+            rationale=_str_or_default(opt_data.get("rationale")),
             confidence=float(opt_data.get("confidence", 0.5)),
         )
     return QuestionOption(
@@ -548,7 +563,9 @@ def review_question_answer_alignment(
             try:
                 parsed = parse_open_question(q_data, i)
                 if parsed.id not in original_by_id:
-                    raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
+                    raise ValueError(
+                        f"aligned question id {parsed.id!r} does not match any original question"
+                    )
                 if parsed.id in seen_ids:
                     raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
                 result.append(parsed)
@@ -607,7 +624,7 @@ def add_recommendations(
         for q in open_questions
     ]
     questions_json = json.dumps(questions_payload, indent=2)
-    spec_excerpt = (spec_content or "")
+    spec_excerpt = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
         spec_excerpt=spec_excerpt,
         questions_json=questions_json,

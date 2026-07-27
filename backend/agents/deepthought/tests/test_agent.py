@@ -335,7 +335,6 @@ def test_events_emitted(root_spec, mock_llm):
     agent.execute(max_depth=10)
 
     event_types = [e.event_type for e in events]
-    assert AgentEvent.model_fields  # sanity check
     assert len(events) >= 2
     # Should have at least ANALYSING and COMPLETE
     from deepthought.models import AgentEventType
