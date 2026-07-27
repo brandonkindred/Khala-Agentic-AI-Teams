@@ -185,6 +185,31 @@ def test_approved_false_requires_a_populated_critical_or_high_issue() -> None:
         )
 
 
+def test_approved_false_with_only_a_no_op_suggestion_issue_is_rejected() -> None:
+    """A fourth way a rejection can fail to be "populated": the only
+    critical/high issue's suggestion is, in its entirety, a no-op admission
+    (``is_no_op_suggestion``, e.g. "No changes needed."). Downstream,
+    ``chunking._issues_from_chunk_output`` drops exactly this issue
+    (chunking.py:531-533) before ``_reconcile_approval`` ever sees it, so
+    without this check the schema would accept a rejection that normalization
+    silently turns into an approval anyway -- defeating the validator's whole
+    purpose."""
+    payload = {
+        "approved": False,
+        "issues": [
+            {
+                "severity": "critical",
+                "description": "SQL injection risk",
+                "suggestion": "No changes needed.",
+            }
+        ],
+        "summary": "Rejected.",
+        "spec_compliance_notes": "",
+    }
+    with pytest.raises(ValidationError):
+        ChunkReviewLLMResponse.model_validate(payload)
+
+
 def test_approved_false_with_a_populated_high_issue_is_accepted() -> None:
     """The mirror-image positive case: a rejection with a real critical/high,
     non-blank-description issue validates cleanly."""

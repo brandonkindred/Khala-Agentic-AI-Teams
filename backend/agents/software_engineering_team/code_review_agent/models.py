@@ -470,21 +470,26 @@ class ChunkReviewLLMResponse(BaseModel):
         """Reject a rejection that carries no actionable feedback.
 
         Mirrors ``coordinator._reconcile_approval``'s own criteria (severity
-        in critical/high) plus a non-blank description, since
-        ``chunking._issues_from_chunk_output`` drops blank-description issues
-        before they ever reach that gate — an issue with a blank description
-        is not "populated" no matter its severity.
+        in critical/high) plus the two conditions
+        ``chunking._issues_from_chunk_output`` uses to drop an issue before it
+        ever reaches that gate: a blank description, or a suggestion that is,
+        in its entirety, a no-op admission (``is_no_op_suggestion``, e.g. "No
+        changes needed."). An issue matching either is not "populated" no
+        matter its severity — counting it here would let a rejection through
+        that downstream normalization silently turns into an approval anyway.
         """
         if self.approved:
             return self
         has_actionable_issue = any(
-            issue.severity in ("critical", "high") and issue.description.strip()
+            issue.severity in ("critical", "high")
+            and issue.description.strip()
+            and not is_no_op_suggestion(issue.suggestion)
             for issue in self.issues
         )
         if not has_actionable_issue:
             raise ValueError(
                 "approved=False requires at least one issue with severity 'critical' or "
-                "'high' and a non-blank description"
+                "'high', a non-blank description, and a non-no-op suggestion"
             )
         return self
 
