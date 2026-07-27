@@ -242,11 +242,18 @@ def test_system_prompt_omits_dependency_and_gate_clauses_at_boundaries(
         assert "next phase in this flow" not in reordered
 
         header1 = prompts_mod._phase_header(BrandPhase.NARRATIVE_MESSAGING, 1)
+        header2 = prompts_mod._phase_header(BrandPhase.VISUAL_IDENTITY, 2)
         header5 = prompts_mod._phase_header(BrandPhase.STRATEGIC_CORE, 5)
-        idx1, idx5 = reordered.index(header1), reordered.index(header5)
-        # Narrative Messaging leads: no fabricated "Depends on ..." lead-in, straight to its items.
-        assert "Depends" not in reordered[idx1 : idx1 + len(header1) + 5]
-        assert "6. **Brand personality**" in reordered[idx1:idx5]
+        idx1, idx2, idx5 = (
+            reordered.index(header1),
+            reordered.index(header2),
+            reordered.index(header5),
+        )
+        # Narrative Messaging leads: no fabricated "Depends on ..." lead-in anywhere in its
+        # section, straight to its items. Bounded by the *next* header, not a fixed-width
+        # slice, so a dependency clause appearing later in the section is still caught.
+        assert "Depends" not in reordered[idx1:idx2]
+        assert "6. **Brand personality**" in reordered[idx1:idx2]
         # Strategic Core trails: no fabricated gate condition sending it "before" a nonexistent phase.
         assert "Gate condition" not in reordered[idx5:]
     finally:
