@@ -191,3 +191,74 @@ def resolve_execution_timeout_s(execute_timeout_s: float) -> float:
         - Never raises.
     """
     return max(_MIN_EXECUTION_TIMEOUT_S, execute_timeout_s - EXECUTION_TIMEOUT_MARGIN_S)
+
+
+# --- Worker activity-slot capacity + per-review adaptive fan-out width -------
+# Default concurrent-activity ceiling for the code review worker. The shared
+# framework default (``start_team_worker``'s own default, 4) is sized for
+# teams with narrow, fixed-width activity fan-out; code review's map phase
+# instead fans out one activity per review chunk (``temporal/workflows.py``'s
+# fan-out over ``review_chunk_activity``), and a large PR can produce dozens
+# of chunks (``chunking.build_review_chunks`` has no upper bound on chunk
+# count) — at 4 concurrent slots that is many sequential rounds, each
+# potentially bounded only by a single chunk's multi-hour worst-case retry
+# budget (``temporal/workflows.py``'s ``_LLM_RETRY``: 3 attempts x up to 1h
+# ``start_to_close_timeout`` + backoff). This was the root cause of a review
+# timing out its whole-review client wait even though it was still executing
+# durably; ``8`` mirrors ``sales_team``'s
+# ``SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`` and ``investment_team``'s
+# ``INVESTMENT_MAX_CONCURRENT_ACTIVITIES`` defaults, both raised from the same
+# 4-slot shared default for the identical "narrow default starves a wide
+# fan-out" reason. This is independent of ``CODE_REVIEW_MAP_PARALLELISM``
+# (also defaulting to 4) — that knob governs only the in-process thread-mode
+# fallback (see its entry in docs/ENV_VARS.md).
+#
+# This is the single source of truth for the worker's concurrency ceiling:
+# ``worker.py`` reads it to size the worker's activity-slot pool at boot, and
+# ``resolve_temporal_fanout_width`` below reads it to cap one review's own
+# fan-out request so it can never exceed that validated worker capacity.
+DEFAULT_MAX_CONCURRENT_ACTIVITIES = 8
+
+
+def resolve_max_concurrent_activities() -> int:
+    """Resolve the code review worker's concurrent-activity ceiling.
+
+    Preconditions:
+        - none (environment may be unset or garbage).
+    Postconditions:
+        - Returns ``CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`` when it parses to
+          a positive int, else :data:`DEFAULT_MAX_CONCURRENT_ACTIVITIES`
+          (unset, garbage, or <= 0 all fall back to the default), via the
+          shared ``env_int`` parser (which warns on a set-but-unparseable
+          value). Never raises.
+    """
+    return env_int(
+        "CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES",
+        DEFAULT_MAX_CONCURRENT_ACTIVITIES,
+        floor=1,
+    )
+
+
+def resolve_temporal_fanout_width(chunk_count: int) -> int:
+    """Resolve one review's own map-phase fan-out width (Temporal mode).
+
+    The in-process path's ``chunking._map_parallelism`` narrows a configurable
+    ceiling by both the process-wide ``LLM_MAX_CONCURRENCY`` gate and the
+    review's own chunk count. Temporal has no per-review analogue of
+    ``LLM_MAX_CONCURRENCY`` — the worker's ``max_concurrent_activities`` slot
+    pool (:func:`resolve_max_concurrent_activities`) already *is* the
+    validated capacity gate, fixed once at worker boot and shared across every
+    concurrently-executing workflow — so this collapses the in-process
+    three-term formula to two: the ceiling and the gate are the same knob.
+
+    Preconditions:
+        - none (``chunk_count`` may be zero or negative; defensively floored).
+    Postconditions:
+        - Returns ``max(1, min(resolve_max_concurrent_activities(),
+          chunk_count))``: a review with fewer chunks than the worker's
+          capacity never requests more slots than it has chunks, and a review
+          with more chunks than the worker's capacity never requests more than
+          that validated capacity — the 4->8 timeout incident (a single review
+          overwhelming the worker) cannot recur by construction. Never raises.
+    """
+    return max(1, min(resolve_max_concurrent_activities(), chunk_count))

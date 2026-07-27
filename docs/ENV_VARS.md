@@ -618,8 +618,9 @@ has **no effect** on the default Temporal-dispatch *map phase* (code review
 runs Temporal by default; see `TEMPORAL_ADDRESS (code review agent default)`
 above): there, each chunk is reviewed by its own durable `review_chunk_activity`,
 and fan-out concurrency is governed instead by the Temporal worker's own
-activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES` (below) —
-raising `CODE_REVIEW_MAP_PARALLELISM` does nothing to speed up a large PR
+activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES` (below), which
+has its own adaptive-width behavior mirroring this one — raising
+`CODE_REVIEW_MAP_PARALLELISM` itself still does nothing to speed up a large PR
 review's map phase running in the (default) Temporal mode. The
 false-positive verification phase, however, always runs its per-file calls
 via an in-process `ThreadPoolExecutor` (even under Temporal, inside the
@@ -640,19 +641,43 @@ default Temporal dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
-Int (default `8`, floor `1`). Ceiling on how many `code_review-queue` activities
-the code review Temporal worker runs at once — this is what actually bounds
-map-phase fan-out concurrency in the default Temporal dispatch mode (see
-`CODE_REVIEW_MAP_PARALLELISM` above, which does **not** apply here). The shared
-framework default (`4`) is sized for narrow, fixed-width fan-out; code review
-fans out one `review_chunk_activity` per review chunk, and a large PR can
-produce dozens of chunks, so a low ceiling turns a large review into many
-sequential rounds — this was the root cause of a review timing out its
-whole-review client wait (`CODE_REVIEW_EXECUTE_TIMEOUT_S` below) even though it
-was still executing durably. `8` mirrors `SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`
-and `INVESTMENT_MAX_CONCURRENT_ACTIVITIES`. Parsed via the shared `env_int`
-(unset/garbage/`<=0` → default, with a warning on a set-but-unparseable value).
-Only read by the code review worker (`code_review_agent/temporal/worker.py`).
+Int (default `8`, floor `1`). Two things, both governed by this one knob (see
+`code_review_agent/temporal/config.py::resolve_max_concurrent_activities`, the
+shared resolver both read from):
+
+1. Ceiling on how many `code_review-queue` activities the code review Temporal
+   worker runs at once, across every concurrently-executing workflow on that
+   worker. The shared framework default (`4`) is sized for narrow, fixed-width
+   fan-out; code review fans out one `review_chunk_activity` per review chunk,
+   and a large PR can produce dozens of chunks, so a low ceiling turns a large
+   review into many sequential rounds — this was the root cause of a review
+   timing out its whole-review client wait (`CODE_REVIEW_EXECUTE_TIMEOUT_S`
+   below) even though it was still executing durably. `8` mirrors
+   `SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES` and
+   `INVESTMENT_MAX_CONCURRENT_ACTIVITIES`. Only read at worker boot
+   (`code_review_agent/temporal/worker.py`).
+2. The validated-capacity ceiling for each individual review's own **adaptive**
+   map-phase fan-out width (`config.resolve_temporal_fanout_width`, computed
+   once per review inside `code_review_prepare` and applied in
+   `CodeReviewWorkflow.run` via an `asyncio.Semaphore` bounding how many of
+   that review's own `review_chunk_activity` calls are in flight at once): the
+   value actually used per review is `min(CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES,
+   chunk_count)`, mirroring `CODE_REVIEW_MAP_PARALLELISM`'s in-process
+   `min(ceiling, LLM_MAX_CONCURRENCY, chunk_count)` formula (collapsed to two
+   terms here because, for Temporal, the ceiling and the validated-capacity
+   gate are the same knob) — a small review (few chunks) never requests more
+   activity slots than it has chunks, and a large review can never request
+   more than the worker's own provisioned capacity, so this cannot reintroduce
+   the 4→8 timeout incident: raising this var still raises worker capacity as
+   before, and no single review can now request more of that capacity than was
+   actually validated. With the default (`8`), a large PR (dozens of chunks,
+   per `code_review_agent/docs/CODE_REVIEW_CHUNK_COUNT_TELEMETRY.md`'s
+   ~20-50-chunk "large PR" band) requests exactly `8` concurrent slots rather
+   than scheduling every chunk unconditionally, leaving the remaining worker
+   capacity available to other concurrently-running reviews.
+
+Parsed via the shared `env_int` (unset/garbage/`<=0` → default, with a warning
+on a set-but-unparseable value).
 
 ### CODE_REVIEW_EXECUTE_TIMEOUT_S
 Int seconds (default `21600` = 6h, floor `60`). Ceiling on how long
