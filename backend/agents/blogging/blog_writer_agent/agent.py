@@ -1451,7 +1451,7 @@ class BlogWriterAgent(_BlogAgentBase):
         )
 
         prompt_parts = [
-            USER_FEEDBACK_REVISION_INSTRUCTIONS.format(user_feedback=user_feedback),
+            USER_FEEDBACK_REVISION_INSTRUCTIONS.replace("{user_feedback}", user_feedback),
             "",
             "---",
             "BRAND AND STYLE (mandatory for every sentence):",
@@ -1525,7 +1525,7 @@ class BlogWriterAgent(_BlogAgentBase):
 
         current_draft = draft
         primary_succeeded = False
-        for attempt in range(3):
+        for attempt in range(BATCH_EXECUTE_MAX_RETRIES):
             try:
                 raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
@@ -1536,15 +1536,21 @@ class BlogWriterAgent(_BlogAgentBase):
             # See _revise_one_item: LLMJsonParseError from the Strands Agent call
             # retries without the transient backoff sleep (test_revise_from_user_feedback_json_parse_error_skips_sleep).
             except LLMJsonParseError as e:
-                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
+                logger.warning(
+                    "User-feedback revision failed (attempt %s/%s): %s",
+                    attempt + 1,
+                    BATCH_EXECUTE_MAX_RETRIES,
+                    e,
+                )
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
-                        "User-feedback revision transient error (attempt %s/3); retrying.",
+                        "User-feedback revision transient error (attempt %s/%s); retrying.",
                         attempt + 1,
+                        BATCH_EXECUTE_MAX_RETRIES,
                     )
-                    time.sleep(2.0 * (2**attempt))
+                    time.sleep(BATCH_EXECUTE_BACKOFF_BASE_SECONDS * (2**attempt))
                     continue
                 raise
 
