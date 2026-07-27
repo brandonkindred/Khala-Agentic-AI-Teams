@@ -7,7 +7,8 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
-from shared.command_runner.runner import run_command
+from shared.command_runner.executor import run_command
+from shared.subprocess_timeouts import DEVOPS_IAC_VALIDATION_TIMEOUT_S
 
 
 class IaCValidationInput(BaseModel):
@@ -30,11 +31,11 @@ class IaCValidationToolAgent:
 
         has_tf = any(path.rglob("*.tf"))
         if has_tf:
-            fmt = run_command(["terraform", "fmt", "-check"], cwd=path, timeout=120)
+            fmt = run_command(["terraform", "fmt", "-check"], cwd=path, timeout=DEVOPS_IAC_VALIDATION_TIMEOUT_S)
             checks["iac_validate_fmt"] = "pass" if fmt.success else "fail"
             if not fmt.success:
                 findings.append(fmt.error_summary or fmt.stderr)
-            validate = run_command(["terraform", "validate"], cwd=path, timeout=120)
+            validate = run_command(["terraform", "validate"], cwd=path, timeout=DEVOPS_IAC_VALIDATION_TIMEOUT_S)
             checks["iac_validate"] = "pass" if validate.success else "fail"
             if not validate.success:
                 findings.append(validate.error_summary or validate.stderr)

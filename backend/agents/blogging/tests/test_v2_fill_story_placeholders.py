@@ -261,6 +261,39 @@ def test_fill_story_placeholders_story_bank_save_cancellation_propagates(
         )
 
 
+def test_fill_story_placeholders_redraft_cancellation_propagates(monkeypatch, tmp_path) -> None:
+    """A Temporal cancellation raised from the post-story re-draft call must
+    propagate, not be swallowed into the "keep original draft" fallback."""
+    import agents.blogging.agent_implementations.blog_writing_process_v2 as v2
+    from agents.blogging.shared import blog_job_store as bjs
+    from temporalio.exceptions import CancelledError
+
+    job_id = str(uuid.uuid4())[:8]
+    bjs.create_blog_job(job_id, "brief")
+
+    import agents.blogging.ghost_writer_agent as gw
+
+    monkeypatch.setattr(gw, "GhostWriterElicitationAgent", _make_stub_ghost(narrative="A story."))
+
+    class _CancellingAgent:
+        def run(self, *a, **kw):
+            raise CancelledError("cancelled")
+
+    with pytest.raises(CancelledError):
+        v2._fill_story_placeholders(
+            draft_text="# Draft\n[Author: a story]\nBody.",
+            plan=_plan(),
+            llm_client=object(),
+            job_id=job_id,
+            job_updater=lambda **kw: None,
+            elicited_stories_text=None,
+            draft_agent=_CancellingAgent(),
+            draft_input_kwargs={"content_plan": _plan()},
+            work_dir=tmp_path,
+            iteration=1,
+        )
+
+
 def test_fill_story_placeholders_cancelled_break(monkeypatch, tmp_path) -> None:
     """If job goes to cancelled mid-loop, break out."""
     import agents.blogging.agent_implementations.blog_writing_process_v2 as v2

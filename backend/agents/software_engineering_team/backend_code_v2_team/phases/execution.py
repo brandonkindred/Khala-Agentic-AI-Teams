@@ -258,6 +258,7 @@ GATE_CONFIG = GatedExecutionConfig(
     status_code_review=MicrotaskStatus.IN_CODE_REVIEW,
     status_qa=MicrotaskStatus.IN_QA_TESTING,
     status_security=MicrotaskStatus.IN_SECURITY_TESTING,
+    status_qa_security=MicrotaskStatus.IN_QA_SECURITY_TESTING,
     max_total_cycles=lambda config: (
         config.code_review_max_retries + config.qa_max_retries + config.security_max_retries
     ),
@@ -268,6 +269,12 @@ GATE_CONFIG = GatedExecutionConfig(
         f"{total} microtasks, on_failure={config.on_failure}"
     ),
     gate_issue_log_verb="failed with",
+    # QA and Security are independent analysis calls over the same
+    # post-Code-Review snapshot on the backend (each scopes its tool-agent call
+    # to its own spec.tool_kind) -- see docs/GATE_DEPENDENCY_GRAPH.md. The
+    # frontend keeps the default False until its tool-agent fan-out is scoped
+    # per gate the same way.
+    parallelize_qa_security=True,
 )
 
 
@@ -302,7 +309,10 @@ def run_execution_with_review_gates(
 
     ``progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)`` is called during execution.
     ``current_index`` is the 1-based index of the currently executing microtask.
-    ``microtask_phase`` is one of: "coding", "code_review", "qa_testing", "security_testing", "documentation", "completed".
+    ``microtask_phase`` is one of: "coding", "code_review", "qa_testing", "security_testing",
+    "qa_security_testing", "documentation", "completed". "qa_security_testing" is reported
+    while QA and Security run concurrently (see ``GATE_CONFIG.parallelize_qa_security``);
+    it must not be read as "qa_testing has passed".
     ``phase_detail`` provides human-readable detail about the current action.
 
     Thin wrapper: the loop lives in the shared ``run_gated_execution_impl``,

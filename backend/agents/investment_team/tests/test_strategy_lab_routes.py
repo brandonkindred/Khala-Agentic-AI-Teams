@@ -390,6 +390,30 @@ def test_list_strategy_lab_runs_merges_persisted_only_runs(
     assert any(r["run_id"] == "run-x" for r in body["runs"])
 
 
+def test_list_strategy_lab_runs_merged_entry_missing_keys_does_not_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted job whose data lacks ``started_at``/``total_cycles`` must not 500."""
+    from investment_team.api import main as api_main
+
+    api_main._active_runs.clear()
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-sparse",
+                "status": "running",
+                "data": {},
+            }
+        ]
+    )
+    monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
+    resp = api_client.get("/strategy-lab/runs")
+    assert resp.status_code == 200
+    run = next(r for r in resp.json()["runs"] if r["run_id"] == "run-sparse")
+    assert run["started_at"] == ""
+    assert run["total_cycles"] == 0
+
+
 def test_list_strategy_lab_runs_falls_back_when_job_service_broken(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:

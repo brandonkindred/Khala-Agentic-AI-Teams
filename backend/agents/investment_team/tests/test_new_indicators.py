@@ -34,9 +34,7 @@ from investment_team.strategy_lab.executor import strategy_indicators as si
 from investment_team.strategy_lab.executor.predicate_evaluator import compute_indicator_series
 from investment_team.strategy_lab.executor.strategy_indicators import indicator_value
 from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
-from investment_team.strategy_lab.quality_gates.code_conformance import (
-    CodeConformanceGate,
-)
+from investment_team.strategy_lab.quality_gates.code_conformance.gate import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     PredicateConformanceGate,
 )
@@ -1995,7 +1993,7 @@ def test_source_aware_names_derived_from_allow_source() -> None:
 def test_bollinger_derived_bands_derived_from_dsl() -> None:
     # The gate's derived-band set is the DSL's bollinger band options minus the
     # base bands, so a future derived band added to spec_dsl is picked up.
-    from investment_team.strategy_lab.quality_gates.code_conformance import (
+    from investment_team.strategy_lab.quality_gates.code_conformance.ast_helpers import (
         _BOLLINGER_BASE_BANDS,
         _BOLLINGER_DERIVED_BANDS,
     )

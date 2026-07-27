@@ -537,6 +537,15 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
     if (!currentPhase) return false;
     if (rawPhase === 'completed') return true;
     const phaseOrder = MICROTASK_PHASES.map(p => p.id);
+    if (currentPhase === 'qa_security_testing') {
+      // QA and Security are running concurrently and neither has a confirmed
+      // outcome yet -- unlike the rest of MICROTASK_PHASES, observing this
+      // phase must not be read as "qa_testing passed". Only phases strictly
+      // before QA testing count as completed.
+      const qaIdx = phaseOrder.indexOf('qa_testing');
+      const targetIdx = phaseOrder.indexOf(phaseId);
+      return targetIdx >= 0 && targetIdx < qaIdx;
+    }
     const currentIdx = phaseOrder.indexOf(currentPhase);
     const targetIdx = phaseOrder.indexOf(phaseId);
     return currentIdx > targetIdx && targetIdx >= 0;
@@ -546,6 +555,9 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   isMicrotaskPhaseCurrent(teamId: string, phaseId: string): boolean {
     const rawPhase = this.status?.team_progress?.[teamId]?.current_microtask_phase;
     const currentPhase = this.normalizeMicrotaskPhase(rawPhase);
+    if (currentPhase === 'qa_security_testing') {
+      return phaseId === 'qa_testing' || phaseId === 'security_testing';
+    }
     return currentPhase === phaseId;
   }
 

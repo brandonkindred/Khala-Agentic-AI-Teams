@@ -224,6 +224,21 @@ def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
 
 
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
+    """Render prior lab strategies as the "Prior Strategy Results" block for the design prompt.
+
+    Each record is labeled LOSING / WINNING · PUBLISHABLE / WINNING · NOT PUBLISHABLE
+    (with the joined gate codes when available) from ``is_winning`` / ``is_publishable`` /
+    ``publishability_skip_reason``, followed by its asset class, hypothesis, backtest
+    metrics, ideation rationale, and post-backtest analysis — each field truncated to
+    keep the entry prompt-sized.
+
+    Preconditions:
+      - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 0``.
+    Postconditions:
+      - Returns a non-empty string. Empty ``records`` → a "first strategy" sentinel.
+      - When ``len(records) > max_records``, only the ``max_records`` most recently
+        created records (by ``created_at``) are rendered, oldest first.
+    """
     if not records:
         return "None yet — this is the first strategy."
     ordered = sorted(records, key=lambda x: x.created_at)
@@ -231,7 +246,14 @@ def format_prior_results(records: List[StrategyLabRecord], *, max_records: int =
         ordered = ordered[-max_records:]
     lines = []
     for i, r in enumerate(ordered, start=1):
-        label = "WINNING" if r.is_winning else "LOSING"
+        if not r.is_winning:
+            label = "LOSING"
+        elif r.is_publishable:
+            label = "WINNING · PUBLISHABLE"
+        elif r.publishability_skip_reason:
+            label = f"WINNING · NOT PUBLISHABLE ({r.publishability_skip_reason})"
+        else:
+            label = "WINNING · NOT PUBLISHABLE"
         hyp = r.strategy.hypothesis.replace("\n", " ").strip()
         if len(hyp) > 160:
             hyp = hyp[:157] + "..."
@@ -379,7 +401,7 @@ def _exit_archetypes(strategy: object) -> List[str]:
 
 
 def _executed_records(
-    records: List[StrategyLabRecord], *, max_records: int
+    records: List[StrategyLabRecord], *, max_records: int, cache: Optional[dict] = None
 ) -> List[StrategyLabRecord]:
     """The last ``max_records`` executed records, in chronological order.
 
@@ -389,13 +411,31 @@ def _executed_records(
     backtests. (Trimming first, then filtering, would let 50 recent
     short-circuits hide every executed run behind them.)
 
-    Preconditions: ``max_records >= 0``.
+    ``cache`` (optional) is a caller-owned dict that memoizes the sorted +
+    filtered (pre-trim) executed-records list per ``id(records)``, so several
+    calls against the *same* ``records`` object — with the same or a
+    different ``max_records`` window — within one caller-defined scope (e.g.
+    a single ``DesignAgent.run()`` invocation) share one O(N log N) sort +
+    O(N) filter pass instead of repeating it. ``None`` (default) disables
+    memoization and preserves the historical always-recompute behavior.
+
+    Preconditions: ``max_records >= 0``. When ``cache`` is provided, callers
+    must not mutate ``records`` while the cache is in scope.
     Postconditions: returns the last ``max_records`` records satisfying
     :func:`_is_executed_record`, in ``created_at`` order
-    (``max_records == 0`` → empty list).
+    (``max_records == 0`` → empty list). Identical result whether or not
+    ``cache`` is supplied.
     """
-    ordered = sorted(records, key=lambda x: x.created_at)
-    executed = [r for r in ordered if _is_executed_record(r)]
+    if cache is None:
+        ordered = sorted(records, key=lambda x: x.created_at)
+        executed = [r for r in ordered if _is_executed_record(r)]
+    else:
+        key = id(records)
+        executed = cache.get(key)
+        if executed is None:
+            ordered = sorted(records, key=lambda x: x.created_at)
+            executed = [r for r in ordered if _is_executed_record(r)]
+            cache[key] = executed
     # ``executed[-0:]`` is ``executed[0:]`` (the whole list), so the zero case
     # must be handled explicitly rather than via the slice.
     return executed[-max_records:] if max_records else []
@@ -424,7 +464,7 @@ def _has_parseable_design(strategy: object) -> bool:
 
 
 def aggregate_prior_results(
-    records: List[StrategyLabRecord], *, max_records: int = 50
+    records: List[StrategyLabRecord], *, max_records: int = 50, cache: Optional[dict] = None
 ) -> dict[tuple[str, str], dict]:
     """Aggregate prior lab records into per-dimension performance attribution.
 
@@ -434,50 +474,79 @@ def aggregate_prior_results(
     bucket value. Marginal (rather than composite 4-tuple) bucketing keeps the
     samples large enough to be informative on a diverse history.
 
+    ``cache`` (optional) is forwarded to :func:`_executed_records` to memoize
+    the sort/filter pass across calls sharing the same ``records`` object; see
+    its docstring for scoping details.
+
     Preconditions:
       - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 0``.
     Postconditions:
-      - Returns ``{(dimension, value): {"win_rate", "annual_return", "n"}}``.
+      - Returns ``{(dimension, value): {"win_rate", "annual_return", "n",
+        "publishable_n", "publishable_win_rate", "publishable_annual_return"}}``.
       - Empty / all-non-executed / ``max_records == 0`` input → ``{}``.
       - Every value dict has ``n >= 1`` and means equal to the arithmetic mean of
         the contributing records' ``win_rate_pct`` / ``annualized_return_pct``.
+      - ``publishable_n`` counts the contributing records that are
+        ``is_publishable``; ``publishable_win_rate``/``publishable_annual_return``
+        are the same means restricted to that subset, or ``None`` when
+        ``publishable_n == 0`` (never a misleading 0.0).
       - A record with a parseable design contributes to exactly one
         ``asset_class``/``entry``/``sizing`` bucket and to one ``exit`` bucket
         per distinct exit type it uses. A redesign-pending / unparsed-rules
         record contributes to its ``asset_class`` bucket only (see
         :func:`_has_parseable_design`).
     """
-    executed = _executed_records(records, max_records=max_records)
+    executed = _executed_records(records, max_records=max_records, cache=cache)
     if not executed:
         return {}
 
-    # bucket_key -> [sum_win_rate, sum_annual_return, count]
+    # bucket_key -> [sum_win_rate, sum_annual_return, n, pub_sum_win_rate, pub_sum_annual_return, pub_n]
     acc: dict[tuple[str, str], list[float]] = {}
 
-    def _add(dimension: str, value: str, win_rate: float, annual_return: float) -> None:
-        slot = acc.setdefault((dimension, value), [0.0, 0.0, 0.0])
+    def _add(
+        dimension: str, value: str, win_rate: float, annual_return: float, is_publishable: bool
+    ) -> None:
+        slot = acc.setdefault((dimension, value), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         slot[0] += win_rate
         slot[1] += annual_return
         slot[2] += 1.0
+        if is_publishable:
+            slot[3] += win_rate
+            slot[4] += annual_return
+            slot[5] += 1.0
 
     for r in executed:
         res = r.backtest.result
         win = float(res.win_rate_pct)
         ann = float(res.annualized_return_pct)
         strat = r.strategy
+        publishable = bool(r.is_publishable)
         # asset_class is genuine even for legacy redesign-pending rows, so it
         # always counts; the structured design dimensions only count when the
         # spec actually carries parseable rules (see _has_parseable_design).
-        _add("asset_class", normalize_asset_class(strat.asset_class), win, ann)
+        _add("asset_class", normalize_asset_class(strat.asset_class), win, ann, publishable)
         if _has_parseable_design(strat):
-            _add("entry", _entry_archetype(strat), win, ann)
-            _add("sizing", str(getattr(strat.sizing, "kind", "") or "unknown"), win, ann)
+            _add("entry", _entry_archetype(strat), win, ann, publishable)
+            _add(
+                "sizing",
+                str(getattr(strat.sizing, "kind", "") or "unknown"),
+                win,
+                ann,
+                publishable,
+            )
             for exit_label in _exit_archetypes(strat):
-                _add("exit", exit_label, win, ann)
+                _add("exit", exit_label, win, ann, publishable)
 
     return {
-        key: {"win_rate": sw / n, "annual_return": sa / n, "n": int(n)}
-        for key, (sw, sa, n) in acc.items()
+        key: {
+            "win_rate": sw / n,
+            "annual_return": sa / n,
+            "n": int(n),
+            "publishable_n": int(pn),
+            "publishable_win_rate": (pw / pn) if pn else None,
+            "publishable_annual_return": (pa / pn) if pn else None,
+        }
+        for key, (sw, sa, n, pw, pa, pn) in acc.items()
     }
 
 
@@ -490,7 +559,11 @@ _ATTRIBUTION_DIMENSIONS: tuple[tuple[str, str], ...] = (
 
 
 def format_prior_attribution(
-    records: List[StrategyLabRecord], *, max_records: int = 50, thin_n: int = 3
+    records: List[StrategyLabRecord],
+    *,
+    max_records: int = 50,
+    thin_n: int = 3,
+    cache: Optional[dict] = None,
 ) -> str:
     """Render per-dimension attribution as a compact "what has worked" digest.
 
@@ -500,6 +573,10 @@ def format_prior_attribution(
     size ``n`` — and a ``(thin sample)`` flag below ``thin_n`` — so the designer
     can exploit strong buckets without over-fitting to a single record.
 
+    ``cache`` (optional) is forwarded to :func:`aggregate_prior_results` to
+    memoize the underlying sort/filter pass across calls sharing the same
+    ``records`` object.
+
     Preconditions: ``records`` is a list of ``StrategyLabRecord``; ``thin_n >= 1``.
     Postconditions:
       - Returns a non-empty string. Empty / all-non-executed input → a short
@@ -507,7 +584,7 @@ def format_prior_attribution(
       - Every rendered bucket line contains its ``n=`` sample size.
     """
     assert thin_n >= 1, f"thin_n must be >= 1, got {thin_n}"
-    agg = aggregate_prior_results(records, max_records=max_records)
+    agg = aggregate_prior_results(records, max_records=max_records, cache=cache)
     if not agg:
         return "Not enough executed history yet to attribute performance."
 
@@ -544,45 +621,75 @@ def _or_join(items: List[str]) -> str:
 
 
 def _edge_exploitation_steer(
-    records: List[StrategyLabRecord], allowed: List[str], menu: str, *, tail: int
+    records: List[StrategyLabRecord],
+    allowed: List[str],
+    menu: str,
+    *,
+    tail: int,
+    cache: Optional[dict] = None,
 ) -> str:
-    """Steer toward the allowed asset class with the best demonstrated edge.
+    """Steer toward the allowed asset class with the best demonstrated *robust* edge.
 
     The objective-aware counterpart to the diversity nudge. Ranks the marginal
     ``asset_class`` attribution buckets from :func:`aggregate_prior_results`
-    (restricted to ``allowed``) by mean annualized return, then mean win rate as
-    the dual-objective tie-break, and names the leader so the designer leans into
-    its edge rather than rotating away from it.
+    (restricted to ``allowed``) in two tiers: any bucket with at least one
+    ``is_publishable`` record outranks every bucket with none, so a class whose
+    apparent edge is only backed by overfit or unrealistic "wins" never beats a
+    class with genuine robust evidence — regardless of raw return. Within each
+    tier, buckets are ranked by mean annualized return (publishable-only mean
+    for the first tier, raw mean for the second), then mean win rate as the
+    dual-objective tie-break, and the leader is named so the designer leans
+    into its edge rather than rotating away from it.
 
     The edge map is bounded to the same ``tail`` window of executed records that
     the caller's recent-counts line uses, so the steering can never name a class
     that has dropped out of the recent window the counts report.
 
+    ``cache`` (optional) is forwarded to :func:`aggregate_prior_results` to
+    memoize the underlying sort/filter pass across calls sharing the same
+    ``records`` object.
+
     Preconditions: ``allowed`` is non-empty; ``menu`` is its rendered list;
     ``tail >= 1``.
     Postconditions: returns a non-empty string. When no per-class edge is
     attributable yet (legacy / unparsed history), returns neutral menu text
-    rather than fabricating a preference.
+    rather than fabricating a preference. When no in-bounds bucket has any
+    publishable evidence, the message text is identical to the raw-stats-only
+    behavior (no publishable-evidence framing is fabricated).
     """
     assert allowed, "allowed must be non-empty"
     assert menu, "menu must be provided"
     assert tail >= 1, f"tail must be >= 1, got {tail}"
-    agg = aggregate_prior_results(records, max_records=tail)
-    buckets = sorted(
-        (
-            (value, stats)
-            for (dim, value), stats in agg.items()
-            if dim == "asset_class" and value in allowed
-        ),
-        key=lambda kv: (kv[1]["annual_return"], kv[1]["win_rate"]),
-        reverse=True,
-    )
+    agg = aggregate_prior_results(records, max_records=tail, cache=cache)
+    buckets = [
+        (value, stats)
+        for (dim, value), stats in agg.items()
+        if dim == "asset_class" and value in allowed
+    ]
     if not buckets:
         return (
             f"No per-class edge attributable yet — choose **asset_class** from {menu}: "
             "pick the class that best fits your strongest multi-signal edge."
         )
+
+    def _rank_key(item: tuple[str, dict]) -> tuple:
+        _, stats = item
+        if stats["publishable_n"]:
+            return (1, stats["publishable_annual_return"], stats["publishable_win_rate"])
+        return (0, stats["annual_return"], stats["win_rate"])
+
+    buckets.sort(key=_rank_key, reverse=True)
     top_value, top_stats = buckets[0]
+    if top_stats["publishable_n"]:
+        return (
+            "Objective is return/win-rate — **lean into your demonstrated robust edge**: "
+            f"{top_value} scores best among publishable wins (annual "
+            f"{top_stats['publishable_annual_return']:.1f}%, win "
+            f"{top_stats['publishable_win_rate']:.1f}%, n={top_stats['publishable_n']} "
+            f"publishable of {top_stats['n']} total). Prefer the highest-scoring "
+            "publishable-backed class when a coherent thesis fits rather than rotating "
+            "away from it; pick another class only when its robust edge is clearly stronger."
+        )
     return (
         "Objective is return/win-rate — **lean into your demonstrated edge**: "
         f"{top_value} scores best so far (annual {top_stats['annual_return']:.1f}%, "
@@ -598,6 +705,7 @@ def asset_class_mix_hint(
     tail: int = 24,
     exclude: Optional[List[str]] = None,
     mode: str = "explore",
+    cache: Optional[dict] = None,
 ) -> str:
     """Steer the LLM's asset-class choice, objective-aware.
 
@@ -624,6 +732,10 @@ def asset_class_mix_hint(
     classes so the hint never nudges the model toward a class the run is not
     permitted to use. When ``exclude`` is ``None`` / empty the output spans the
     full ideation-valid set.
+
+    ``cache`` (optional) is forwarded to :func:`_executed_records` and
+    :func:`_edge_exploitation_steer` to memoize the underlying sort/filter
+    pass across calls sharing the same ``records`` object.
 
     Preconditions:
       - ``mode in {"exploit", "explore"}`` (callers resolve unknown values to a
@@ -665,7 +777,7 @@ def asset_class_mix_hint(
     # ``failed: max_refinement_rounds``) DID run a real backtest with a genuine
     # canonical class and keep counting; legacy rows without a status default to
     # ``"completed"`` and are unaffected.
-    sample = _executed_records(records, max_records=tail)
+    sample = _executed_records(records, max_records=tail, cache=cache)
     if not sample:
         return (
             "No executed lab backtests yet. Choose **asset_class** from "
@@ -720,5 +832,5 @@ def asset_class_mix_hint(
     # class with the best demonstrated edge instead of forcing rotation. Bound
     # the edge map to the same ``tail`` window as the recent-counts line above
     # so the steering can never name a class that has dropped out of it.
-    parts.append(_edge_exploitation_steer(records, allowed, menu, tail=tail))
+    parts.append(_edge_exploitation_steer(records, allowed, menu, tail=tail, cache=cache))
     return " ".join(parts)

@@ -313,15 +313,22 @@ class DesignAgent:
             if prior_records
             else "No prior strategies tested yet."
         )
+        # Both calls below independently window/aggregate the same
+        # ``prior_records`` list; sharing one cache dict across them lets
+        # ``_executed_records`` memoize its sort/filter pass instead of
+        # repeating it per call (see strategy_lab_context._executed_records).
+        prior_results_cache: Dict[int, Any] = {}
         # ``format_prior_attribution`` returns its own "not enough history"
         # sentinel for an empty / all-non-executed list, so no guard is needed.
-        prior_attribution = format_prior_attribution(prior_records)
+        prior_attribution = format_prior_attribution(prior_records, cache=prior_results_cache)
         mode = _resolve_diversity_mode()
         # ``asset_class_mix_hint`` handles the empty-records case itself (a
         # neutral menu), so a single call covers both the with- and no-priors
         # paths. When a category restriction is active it already supplies the
         # positive allowed-class menu; only the hard negative rule is appended.
-        mix_hint = asset_class_mix_hint(prior_records, exclude=exclude_asset_classes, mode=mode)
+        mix_hint = asset_class_mix_hint(
+            prior_records, exclude=exclude_asset_classes, mode=mode, cache=prior_results_cache
+        )
         if exclude_asset_classes:
             mix_hint += (
                 "\nMANDATORY EXCLUSION: Do NOT use these asset classes: "

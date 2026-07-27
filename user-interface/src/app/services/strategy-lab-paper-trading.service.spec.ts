@@ -1,0 +1,178 @@
+import { TestBed } from '@angular/core/testing';
+import { Subject, of, throwError } from 'rxjs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { StrategyLabPaperTradingService } from './strategy-lab-paper-trading.service';
+import { StrategyLabRunService } from './strategy-lab-run.service';
+import { InvestmentApiService } from './investment-api.service';
+import { createRunServiceStub, type RunServiceStub } from '../testing/strategy-lab-run-service.stub';
+import type { PaperTradingSession, StrategyLabRecord } from '../models';
+
+describe('StrategyLabPaperTradingService', () => {
+  let service: StrategyLabPaperTradingService;
+  let runService: RunServiceStub;
+  let apiSpy: {
+    getPaperTradingResults: ReturnType<typeof vi.fn>;
+    runPaperTrading: ReturnType<typeof vi.fn>;
+  };
+
+  const publishableRecord: StrategyLabRecord = {
+    lab_record_id: 'rec-1',
+    is_winning: true,
+    is_publishable: true,
+    strategy_rationale: '',
+    analysis_narrative: '',
+    created_at: '',
+    strategy: {} as never,
+    backtest: {} as never,
+  };
+
+  const unpublishableRecord: StrategyLabRecord = {
+    ...publishableRecord,
+    lab_record_id: 'rec-legacy',
+    is_publishable: false,
+    publishability_skip_reason: 'realism_failed',
+  };
+
+  beforeEach(() => {
+    runService = createRunServiceStub();
+    apiSpy = {
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      runPaperTrading: vi.fn().mockReturnValue(of({ session: { session_id: 'pt-1', status: 'running' } })),
+    };
+    TestBed.configureTestingModule({
+      providers: [
+        StrategyLabPaperTradingService,
+        { provide: StrategyLabRunService, useValue: runService },
+        { provide: InvestmentApiService, useValue: apiSpy },
+      ],
+    });
+    service = TestBed.inject(StrategyLabPaperTradingService);
+  });
+
+  afterEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  it('starts with no in-flight paper trade', () => {
+    expect(service.paperTradingLabRecordId()).toBeNull();
+  });
+
+  it('falls back to runService.paperTradingLabRecordId() when no local call is in flight', () => {
+    runService.paperTradingLabRecordId.set('rec-9');
+    expect(service.paperTradingLabRecordId()).toBe('rec-9');
+  });
+
+  it('lets two overlapping runPaperTrading calls cross-talk through the shared in-flight flag', () => {
+    // Documents the pre-existing limitation called out in the service's doc
+    // comment: startingPaperTrade is a single signal shared across records, so
+    // whichever call settles first clears it for both.
+    const recordB: StrategyLabRecord = { ...publishableRecord, lab_record_id: 'rec-2' };
+    const responseA$ = new Subject<{ session: PaperTradingSession }>();
+    const responseB$ = new Subject<{ session: PaperTradingSession }>();
+    apiSpy.runPaperTrading.mockReturnValueOnce(responseA$).mockReturnValueOnce(responseB$);
+
+    service.runPaperTrading(publishableRecord);
+    expect(service.paperTradingLabRecordId()).toBe('rec-1');
+
+    service.runPaperTrading(recordB);
+    // The second call's optimistic flag clobbers the first's in the shared signal.
+    expect(service.paperTradingLabRecordId()).toBe('rec-2');
+
+    // Settling A (not B, which is still pending) clears the *shared* flag.
+    responseA$.next({ session: { session_id: 'pt-a', status: 'running' } as never });
+    responseA$.complete();
+
+    expect(runService.trackPaperTradingSession).toHaveBeenCalledWith('rec-1', {
+      session_id: 'pt-a',
+      status: 'running',
+    });
+    // With the local flag cleared, the merged signal falls back to runService's
+    // last known value — rec-1 (from A's trackPaperTradingSession above) — even
+    // though B's POST is still outstanding. This is the documented cross-talk.
+    expect(service.paperTradingLabRecordId()).toBe('rec-1');
+
+    responseB$.next({ session: { session_id: 'pt-b', status: 'running' } as never });
+    responseB$.complete();
+
+    expect(runService.trackPaperTradingSession).toHaveBeenCalledWith('rec-2', {
+      session_id: 'pt-b',
+      status: 'running',
+    });
+    expect(service.paperTradingLabRecordId()).toBe('rec-2');
+  });
+
+  describe('runPaperTrading', () => {
+    it('no-ops and emits an error on errors$ when the record is not publishable', () => {
+      const messages: (string | null)[] = [];
+      service.errors$.subscribe((m) => messages.push(m));
+
+      service.runPaperTrading(unpublishableRecord);
+
+      expect(apiSpy.runPaperTrading).not.toHaveBeenCalled();
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain('not publishable');
+      expect(messages[0]).toContain('realism_failed');
+      expect(service.paperTradingLabRecordId()).toBeNull();
+    });
+
+    it('emits null on errors$ (clearing any stale error) the instant the publishability guard passes', () => {
+      const messages: (string | null)[] = [];
+      service.errors$.subscribe((m) => messages.push(m));
+
+      service.runPaperTrading(publishableRecord);
+
+      expect(messages[0]).toBeNull();
+    });
+
+    it('tracks the session via runService on success and clears its own in-flight state', () => {
+      service.runPaperTrading(publishableRecord);
+
+      expect(apiSpy.runPaperTrading).toHaveBeenCalledWith({ lab_record_id: 'rec-1' });
+      expect(runService.trackPaperTradingSession).toHaveBeenCalledWith('rec-1', { session_id: 'pt-1', status: 'running' });
+      // The stub's trackPaperTradingSession sets runService's own paperTradingLabRecordId
+      // (matching the real service), so the merged signal still reflects 'rec-1' — it's
+      // this service's *local* optimistic flag that clears on success.
+      expect(service.paperTradingLabRecordId()).toBe('rec-1');
+    });
+
+    it('surfaces an error on errors$ and clears the in-flight id on failure', () => {
+      apiSpy.runPaperTrading.mockReturnValue(throwError(() => ({ error: { detail: 'worker unavailable' } })));
+      const messages: (string | null)[] = [];
+      service.errors$.subscribe((m) => messages.push(m));
+
+      service.runPaperTrading(publishableRecord);
+
+      expect(messages).toContain('worker unavailable');
+      expect(service.paperTradingLabRecordId()).toBeNull();
+    });
+  });
+
+  describe('loadPaperTradingResults', () => {
+    it('keeps the most recent session per lab record and hydrates runService', () => {
+      apiSpy.getPaperTradingResults.mockReturnValue(
+        of({
+          items: [
+            { lab_record_id: 'rec-1', session_id: 'old', status: 'completed', started_at: '2026-01-01T00:00:00Z' },
+            { lab_record_id: 'rec-1', session_id: 'new', status: 'running', started_at: '2026-01-02T00:00:00Z' },
+            { lab_record_id: 'rec-2', session_id: 'other', status: 'completed', started_at: '2026-01-01T00:00:00Z' },
+          ],
+        }),
+      );
+
+      service.loadPaperTradingResults();
+
+      expect(runService.hydratePaperTradingSessions).toHaveBeenCalledWith({
+        'rec-1': { lab_record_id: 'rec-1', session_id: 'new', status: 'running', started_at: '2026-01-02T00:00:00Z' },
+        'rec-2': { lab_record_id: 'rec-2', session_id: 'other', status: 'completed', started_at: '2026-01-01T00:00:00Z' },
+      });
+    });
+  });
+
+  describe('getPaperSession', () => {
+    it('reads the session from runService', () => {
+      runService.paperTradingSessions.set({ 'rec-1': { session_id: 'pt-1', status: 'running' } as never });
+      expect(service.getPaperSession(publishableRecord)).toEqual({ session_id: 'pt-1', status: 'running' });
+      expect(service.getPaperSession(unpublishableRecord)).toBeNull();
+    });
+  });
+});

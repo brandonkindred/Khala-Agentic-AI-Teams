@@ -169,7 +169,7 @@ def _dispatch() -> DispatchTable:
         cur.set_all(rows)
 
     def match_delete_association(norm: str) -> bool:
-        return norm.startswith("delete from user_profile_associations")
+        return norm.startswith("delete from user_profile_associations where id")
 
     def handle_delete_association(cur: FakeCursor, params: tuple) -> None:
         assoc_id, user_id = params
@@ -187,6 +187,18 @@ def _dispatch() -> DispatchTable:
         else:
             cur.rowcount = 0
 
+    def match_delete_association_by_artifact(norm: str) -> bool:
+        return norm.startswith("delete from user_profile_associations where user_id")
+
+    def handle_delete_association_by_artifact(cur: FakeCursor, params: tuple) -> None:
+        user_id, artifact_type, artifact_id = params
+        key = (user_id, artifact_type, artifact_id)
+        if key in cur.db["associations"]:
+            del cur.db["associations"][key]
+            cur.rowcount = 1
+        else:
+            cur.rowcount = 0
+
     return [
         (match_select_profile, handle_select_profile),
         (match_upsert_profile, handle_upsert_profile),
@@ -194,6 +206,7 @@ def _dispatch() -> DispatchTable:
         (match_insert_association, handle_insert_association),
         (match_select_associations, handle_select_associations),
         (match_delete_association, handle_delete_association),
+        (match_delete_association_by_artifact, handle_delete_association_by_artifact),
     ]
 
 

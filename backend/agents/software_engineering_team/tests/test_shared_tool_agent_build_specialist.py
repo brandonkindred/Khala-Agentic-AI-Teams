@@ -12,8 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from shared.command_runner import runner as cr
-from shared.command_runner.runner import CommandResult
+from shared.command_runner import executor as cr
+from shared.command_runner.executor import CommandResult
 from software_engineering_team.shared.tool_agent_build_specialist import (
     BuildSpecialistToolAgentBase,
     run_backend_build_and_parse,

@@ -8,7 +8,8 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.command_runner.runner import run_command
+from shared.command_runner.executor import run_command
+from shared.subprocess_timeouts import DEVOPS_CDK_EXECUTION_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class CDKExecutionToolAgent:
         if input_data.stack_name:
             cmd.append(input_data.stack_name)
 
-        result = run_command(cmd, cwd=path, timeout=180)
+        result = run_command(cmd, cwd=path, timeout=DEVOPS_CDK_EXECUTION_TIMEOUT_S)
 
         findings: List[str] = []
         if not result.success:

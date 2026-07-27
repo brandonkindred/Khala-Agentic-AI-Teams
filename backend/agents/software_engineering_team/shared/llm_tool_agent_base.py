@@ -7,7 +7,7 @@ step (lenient vs extract), and an opt-in fallback-handling step (no-model /
 call-error / empty-parse, plus partial-failure-tolerant calls). Deliberately
 imports nothing from ``code_review_agent`` so it can be depended on from any
 team without pulling in the code-review engine. Fallback helpers are available
-capability and are not auto-wired into subclasses.
+as capabilities but are not auto-wired into subclasses.
 
 Preconditions:
     None beyond standard Python import semantics.
@@ -69,9 +69,10 @@ class LlmToolAgentBase:
     ``__init__`` enables them automatically.
 
     Recipes:
-        Review-like — ``resolve_models = True`` (defaults give text mode; set
-        ``uses_json_model = True`` for a second JSON-mode model);
-        ``use_run_strands_agent = True``.
+        Review-like — ``resolve_models = True`` (defaults:
+        ``response_format="text"``, ``uses_json_model=False``,
+        ``use_run_strands_agent=False``; set ``uses_json_model = True`` for a
+        second JSON-mode model); ``use_run_strands_agent = True``.
         Plan/Json-like — ``resolve_models = True``, ``response_format = "json"``,
         ``get_strands_model_fn = <callable>``; leave
         ``use_run_strands_agent`` false for the inline path.
@@ -142,8 +143,10 @@ class LlmToolAgentBase:
     def _agent_factory(self):
         """Resolve ``Agent`` from the concrete subclass's defining module.
 
-        This is what lets ``monkeypatch.setattr(<agent_module>, "Agent", ...)``
-        intercept LLM calls made from this shared base.
+        Tests must ``monkeypatch.setattr(<subclass_module>, "Agent", ...)`` on
+        the *subclass's* module to intercept LLM calls — patching ``Agent`` on
+        this base class's module (``llm_tool_agent_base``) has no effect,
+        since resolution always uses ``type(self).__module__``.
 
         Preconditions:
             ``type(self).__module__`` names a module that defines an ``Agent``
@@ -171,7 +174,11 @@ class LlmToolAgentBase:
 
         Postconditions:
             Returns the stripped string result. Exceptions from building or
-            running the agent propagate unchanged.
+            running the agent propagate unchanged on both paths:
+            ``run_strands_agent`` (used when ``use_run_strands_agent`` is
+            true) is a thin passthrough with no internal retry or exception
+            handling, so it behaves identically to the inline call for
+            propagation purposes.
         """
         if self.use_run_strands_agent:
             from llm_service.strands_model import run_strands_agent
@@ -197,8 +204,9 @@ class LlmToolAgentBase:
         Postconditions:
             Returns a ``dict`` for lenient/text paths (``{}`` on lenient JSON
             failure). Returns ``dict | None`` for extract (``None`` on failure).
-            Does not import ``tool_agent_base`` or ``shared.llm_recovery`` until
-            the corresponding branch runs.
+            Does not import ``shared.llm_recovery`` or
+            ``tool_agent_base.lenient_json_object`` until the corresponding
+            branch runs.
         """
         strategy = type(self).json_parse_strategy
         assert strategy in ("lenient", "extract"), strategy
@@ -235,7 +243,8 @@ class LlmToolAgentBase:
             None.
 
         Postconditions:
-            Falsy ``model`` yields ``tier="no_model"`` with a copy of
+            Any falsy ``model`` (``None``, ``False``, ``0``, ``[]``, ``""``,
+            etc.) yields ``tier="no_model"`` with a copy of
             ``no_model_recommendations`` and ``no_model_summary``. Truthy
             ``model`` yields ``None``. Does not log.
         """
@@ -259,8 +268,8 @@ class LlmToolAgentBase:
             ``fn`` is a zero-argument callable.
 
         Postconditions:
-            Success → ``("ok", fn())``. Any ``Exception`` → warning log on the
-            subclass module logger, then ``("error", FallbackPayload)`` with
+            Success → ``("ok", fn())``. Any ``Exception`` (not ``BaseException``) →
+            warning log on the subclass module logger, then ``("error", FallbackPayload)`` with
             ``tier="call_error"`` and the ``llm_error_*`` class attrs (lists
             copied).
         """
@@ -292,7 +301,8 @@ class LlmToolAgentBase:
 
         Postconditions:
             Returns a list of successful ``fn(item)`` results in encounter order.
-            Failures are logged at warning and omitted. Does not build a
+            Any ``Exception`` raised by ``fn`` is treated as a failure: it is
+            logged at warning and the item is omitted. Does not build a
             ``FallbackPayload``.
         """
         label = log_label or type(self).__name__
@@ -322,9 +332,10 @@ class LlmToolAgentBase:
         Postconditions:
             Returns ``tier="empty_parse"``. Empty or ``None`` recommendations
             become a copy of ``empty_recommendations``. Summary starts as
-            ``summary`` when not ``None``, else ``default_summary``; if that
-            value is falsy and ``empty_summary_override`` is not ``None``, the
-            override is used. Does not log.
+            ``summary`` when not ``None`` (even if an empty string), else
+            ``default_summary``; if that value is falsy and
+            ``empty_summary_override`` is not ``None``, the override is used.
+            Does not log.
         """
         cls = type(self)
         if recommendations:

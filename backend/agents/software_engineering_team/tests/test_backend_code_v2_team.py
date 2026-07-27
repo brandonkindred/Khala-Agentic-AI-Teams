@@ -1028,6 +1028,94 @@ class TestBackendDevelopmentAgentBranchReuse:
         assert events.index("checkout") < events.index("read_repo") < events.index("planning")
         assert captured["deliver_branch"] == "feature/review-api"
 
+    def test_job_updater_failure_is_debug_logged_not_raised(self, tmp_path, monkeypatch):
+        """A broken job_updater callback must not crash the workflow, and is logged at DEBUG."""
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.models import (
+            DeliverResult,
+            DocumentationPhaseResult,
+            ExecutionResult,
+            PlanningResult,
+        )
+
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+
+        (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
+        (tmp_path / "tests").mkdir()
+
+        class _GitAgent:
+            def create_feature_branch(self, *_args, **_kwargs):
+                return True, "feature/api"
+
+            def commit_current_changes(self, *_args, **_kwargs):
+                return True, "committed"
+
+        monkeypatch.setattr(orch, "checkout_branch", lambda *_a, **_kw: (True, "checked out"))
+        monkeypatch.setattr(
+            orch,
+            "_build_tool_agents",
+            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: _GitAgent()},
+        )
+        monkeypatch.setattr(
+            orch.BackendDevelopmentAgent, "_read_repo_code", lambda _self, _repo_path: ""
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_planning",
+            lambda **_kwargs: PlanningResult(microtasks=[Microtask(id="mt-1")], summary="planned"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_execution_with_review_gates",
+            lambda **_kwargs: ExecutionResult(
+                files={"app.py": "print('ok')\n"},
+                microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
+                summary="implemented",
+            ),
+        )
+
+        from backend_code_v2_team.phases import documentation as doc_phase
+
+        monkeypatch.setattr(
+            doc_phase,
+            "run_documentation_phase",
+            lambda **_kwargs: DocumentationPhaseResult(summary="docs"),
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_deliver",
+            lambda **kwargs: DeliverResult(
+                branch_name=kwargs["feature_branch_name"], branch_ready=True, summary="ready"
+            ),
+        )
+
+        mock_debug = MagicMock()
+        monkeypatch.setattr(orch.logger, "debug", mock_debug)
+
+        def bad_updater(**_kwargs):
+            raise RuntimeError("job service down")
+
+        task = Task(
+            id="api",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            title="API",
+            description="Build API",
+        )
+
+        result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=task,
+            merge_to_development=False,
+            job_updater=bad_updater,
+        )
+
+        assert result.success is True
+        assert mock_debug.called
+        logged = " ".join(str(arg) for call in mock_debug.call_args_list for arg in call[0])
+        assert "job_updater failed" in logged
+
 
 # ---------------------------------------------------------------------------
 # Documentation self-review: team wiring around the shared helper

@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional, Union
 from agents.blogging.shared.agent_base import _BlogAgentBase
 from agents.blogging.shared.content_plan import PlanningInput, PlanningPhaseResult
 from agents.blogging.shared.content_planning_loop import (
+    PlanningError,  # noqa: F401 (re-exported: documented in run()'s docstring as a raised exception)
     complete_plan_json,
     run_content_planning_loop,
 )

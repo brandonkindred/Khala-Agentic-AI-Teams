@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE, LLMRateLimitError, get_client
+from shared.observability import current_trace_id
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PAUSED_LLM_LIMIT,
@@ -91,13 +92,15 @@ def resolve_spec_source(
                 "run_orchestrator received both sprint_id and spec_content_override; "
                 "they are mutually exclusive."
             )
-            logger.error(err)
+            logger.error(err, extra={"trace_id": current_trace_id()})
             update_job_fn(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return None
         try:
             requirements, spec_content = _load_requirements_from_sprint(sprint_id)
         except UnknownProductDeliveryEntity as e:
-            logger.error("Sprint %s not found: %s", sprint_id, e)
+            logger.error(
+                "Sprint %s not found: %s", sprint_id, e, extra={"trace_id": current_trace_id()}
+            )
             update_job_fn(
                 job_id,
                 status=JOB_STATUS_FAILED,
@@ -106,7 +109,9 @@ def resolve_spec_source(
             )
             return None
         except ValueError as e:
-            logger.error("Sprint %s scope is empty: %s", sprint_id, e)
+            logger.error(
+                "Sprint %s scope is empty: %s", sprint_id, e, extra={"trace_id": current_trace_id()}
+            )
             update_job_fn(
                 job_id,
                 status=JOB_STATUS_FAILED,
@@ -123,19 +128,31 @@ def resolve_spec_source(
     # Gather all context files from the repo for PRA agent
     context_files = gather_context_files(path)
     if context_files:
-        logger.info("Gathered %d context files for PRA agent", len(context_files))
+        logger.info(
+            "Gathered %d context files for PRA agent",
+            len(context_files),
+            extra={"trace_id": current_trace_id()},
+        )
 
     if sprint_id is None:
         try:
             requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
         except LLMRateLimitError:
-            logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
+            logger.warning(
+                "Ollama LLM usage limit exceeded for week. Job %s paused.",
+                job_id,
+                extra={"trace_id": current_trace_id()},
+            )
             update_job_fn(
                 job_id, status=JOB_STATUS_PAUSED_LLM_LIMIT, error=OLLAMA_WEEKLY_LIMIT_MESSAGE
             )
             return None
         except Exception as e:
-            logger.error("Spec parsing failed (LLM unavailable or returned invalid output): %s", e)
+            logger.error(
+                "Spec parsing failed (LLM unavailable or returned invalid output): %s",
+                e,
+                extra={"trace_id": current_trace_id()},
+            )
             update_job_fn(
                 job_id,
                 status=JOB_STATUS_FAILED,
@@ -178,6 +195,7 @@ def run_product_requirements_analysis(
         logger.info(
             "Sprint %s: skipped Product Requirements Analysis; using synthesized spec",
             sprint_id,
+            extra={"trace_id": current_trace_id()},
         )
         return source.spec_content
 
@@ -195,7 +213,8 @@ def run_product_requirements_analysis(
     )
     logger.info(
         "Next step -> Running Product Requirements Analysis agent to validate spec and "
-        "gather clarifications"
+        "gather clarifications",
+        extra={"trace_id": current_trace_id()},
     )
     pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
     pra_result = pra_agent.run_workflow(
@@ -211,13 +230,16 @@ def run_product_requirements_analysis(
             pra_result.failure_reason
             or "Product Requirements Analysis did not complete successfully."
         )
-        logger.error("Product Requirements Analysis failed: %s", err)
+        logger.error(
+            "Product Requirements Analysis failed: %s", err, extra={"trace_id": current_trace_id()}
+        )
         update_job_fn(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
         return None
 
     logger.info(
         "Product Requirements Analysis complete: %d iterations, validated spec ready",
         pra_result.iterations,
+        extra={"trace_id": current_trace_id()},
     )
     return pra_result.final_spec_content or source.spec_content
 
