@@ -1,12 +1,9 @@
 """
 Review phase: code review, build verification, lint, QA, security.
 
-Exposes ``run_review``, ``run_microtask_review``, and the per-phase gates
-``run_code_review_phase``, ``run_qa_testing_phase``, and
-``run_security_testing_phase``.
-
-Uses passed-in quality agents when available; LLM-based review otherwise.
-No code from the legacy ``frontend_team`` agent is used.
+Invokes passed-in quality agents when available; otherwise uses the team's
+own LLM-based review. No code from the legacy ``frontend_team`` agent is used.
+Uses template-based output (not JSON) so parsing works across model providers.
 """
 
 from __future__ import annotations
@@ -63,7 +60,7 @@ from ..models import (
 )
 from ..output_templates import parse_documentation_self_review_template, parse_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
-from ._profile import REVIEW_CONFIG
+from ._profile import PROFILE, REVIEW_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -185,18 +182,11 @@ def _run_build_verification(
     build_verifier: Optional[Callable[..., Tuple[bool, str]]],
     task_id: str,
 ) -> Tuple[bool, str]:
-    """Run the build verifier if provided, else assume success.
-
-    Postconditions:
-        - Returns ``(True, "No build verifier provided; skipping.")`` when
-          ``build_verifier`` is ``None``. Otherwise returns the verifier's own
-          ``(passed, message)``, or ``(False, str(exc))`` if it raises — never
-          propagates a verifier failure.
-    """
+    """Run the build verifier if provided, else assume success."""
     if build_verifier is None:
         return True, "No build verifier provided; skipping."
     try:
-        return build_verifier(repo_path, "frontend_code_v2", task_id)
+        return build_verifier(repo_path, PROFILE.build_verify_label, task_id)
     except Exception as exc:
         logger.warning("[%s] Build verifier raised: %s", task_id, exc)
         return False, str(exc)
@@ -214,7 +204,7 @@ def run_review(
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
-    language: str = "typescript",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> ReviewResult:
@@ -266,7 +256,7 @@ def run_microtask_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "typescript",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     cache: Optional[AgentReviewCache] = None,
@@ -324,7 +314,7 @@ def run_code_review_phase(
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "typescript",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> PhaseReviewResult:
@@ -372,7 +362,7 @@ def run_qa_testing_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "typescript",
+    language: str = PROFILE.default_language,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
@@ -414,7 +404,7 @@ def run_security_testing_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "typescript",
+    language: str = PROFILE.default_language,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
@@ -445,6 +435,11 @@ def run_security_testing_phase(
         tool_phase_input_factory=REVIEW_CONFIG.tool_phase_input_factory,
         tool_phase_includes_context=REVIEW_CONFIG.tool_phase_includes_context,
     )
+
+
+# ---------------------------------------------------------------------------
+# Documentation self-review
+# ---------------------------------------------------------------------------
 
 
 def run_documentation_self_review(

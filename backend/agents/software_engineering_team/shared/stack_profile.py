@@ -94,6 +94,12 @@ class StackProfile:
     not. Keeping one field means the profile cannot disagree with itself about
     whether the ``{language_conventions}`` slot is present."""
 
+    build_verify_label: str
+    """Label passed to ``build_verifier(repo_path, label, task_id)`` in the
+    review phase's build-verification step (e.g. ``"backend_code_v2"`` /
+    ``"frontend_code_v2"``). The single source of truth for this label —
+    each team's ``_run_build_verification`` reads it off ``PROFILE``."""
+
     detect_language: Callable[[Path, Task], str]
     """Infer the project's language/stack from the repo and task."""
 
