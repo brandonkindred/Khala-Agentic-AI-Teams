@@ -27,10 +27,10 @@ from uuid import uuid4
 from psycopg import Cursor
 from psycopg.types.json import Json
 
+from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 from user_profile import ArtifactType, record_association_safe, remove_association_safe
 
-from ._db import PostgresHelperMixin
 from .models import (
     Brand,
     BrandingMission,

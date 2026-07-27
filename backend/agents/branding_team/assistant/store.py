@@ -18,9 +18,9 @@ from uuid import uuid4
 
 from psycopg.types.json import Json
 
+from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 
-from .._db import PostgresHelperMixin
 from ..models import (
     MISSION_PLACEHOLDER_TBD,
     MISSION_PLACEHOLDER_TO_BE_DISCUSSED,

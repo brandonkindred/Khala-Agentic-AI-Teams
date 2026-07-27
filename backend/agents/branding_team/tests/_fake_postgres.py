@@ -20,7 +20,6 @@ dispatch table and the module list passed to ``install_fake_postgres``.
 
 from __future__ import annotations
 
-import sys
 from collections import Counter
 from typing import Any
 
@@ -675,26 +674,26 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
 
     Preconditions:
         ``monkeypatch`` is a pytest ``MonkeyPatch`` (or compatible).
-        All store classes reach Postgres only through ``PostgresHelperMixin``
-        in ``branding_team._db`` (their modules are not patched here).
+        All store classes reach Postgres only through
+        ``shared.postgres.PostgresHelperMixin``, which calls ``pg_cursor()``
+        in ``shared.postgres.client`` (their own modules are not patched here).
     Postconditions:
-        ``branding_team._db.get_conn`` is patched to yield a shared ``FakeConn``
-        backed by the returned default db and branding's SQL dispatch table.
-        ``api.state`` is patched only if it still exposes ``get_conn``.
+        ``POSTGRES_HOST`` is set so ``pg_cursor``'s ``is_postgres_enabled()``
+        guard falls through instead of yielding ``None``.
+        ``shared.postgres.client.get_conn`` is patched to yield a shared
+        ``FakeConn`` backed by the returned default db and branding's SQL
+        dispatch table.
     """
-    import branding_team._db as db_mod
+    import shared.postgres.client as client_mod
+
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
 
     # BrandingStore, BrandingConversationStore, and BrandingSessionStore all use
-    # PostgresHelperMixin from branding_team._db, so patching _db.get_conn covers them.
-    modules: list[Any] = [db_mod]
-
-    api_state = sys.modules.get("branding_team.api.state")
-    if api_state is not None and hasattr(api_state, "get_conn"):
-        modules.append(api_state)
-
+    # shared.postgres.PostgresHelperMixin, which resolves get_conn via
+    # shared.postgres.client at call time, so patching client_mod.get_conn covers them.
     return _install_fake_postgres(
         monkeypatch,
-        modules=modules,
+        modules=[client_mod],
         dispatch=_dispatch(),
         db=_default_db(),
     )

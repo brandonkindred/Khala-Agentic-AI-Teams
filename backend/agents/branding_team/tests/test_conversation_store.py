@@ -230,7 +230,7 @@ def test_list_conversations_with_and_without_brand_filter(fake_pg: dict) -> None
 
 def test_list_conversations_matcher_rejects_loose_fragments(fake_pg: dict) -> None:
     """Loose FROM/ORDER fragments alone must not dispatch as list_conversations."""
-    from branding_team._db import get_conn
+    from shared.postgres.client import get_conn
 
     decoy = """
         SELECT c.conversation_id

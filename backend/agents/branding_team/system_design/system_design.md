@@ -15,7 +15,6 @@ backend/agents/branding_team/
 ├── orchestrator.py          # BrandingTeamOrchestrator (run / run_phase / brand book builder)
 ├── models.py                # All Pydantic models (mission, phase outputs, TeamOutput, Client, Brand)
 ├── store.py                 # BrandingStore — Postgres-backed client/brand CRUD with version history
-├── _db.py                   # PostgresHelperMixin — shared fetch/execute helpers over shared.postgres.get_conn
 ├── api/
 │   └── main.py              # FastAPI app, request models, session store, route handlers
 ├── assistant/
@@ -252,8 +251,8 @@ the unified API. Three sets of endpoints coexist:
 ### Why three stores
 
 The team has three distinct persistence concerns and each has its own
-Postgres-backed store, all built on `PostgresHelperMixin` (`_db.py`), which
-wraps `shared.postgres.get_conn` with `_fetch_one`/`_fetch_all`/`_execute`/
+Postgres-backed store, all built on `shared.postgres.PostgresHelperMixin`,
+which wraps `shared.postgres.get_conn` with `_fetch_one`/`_fetch_all`/`_execute`/
 `_transaction` helpers:
 
 1. **Clients + brands + versioned history** — `BrandingStore`

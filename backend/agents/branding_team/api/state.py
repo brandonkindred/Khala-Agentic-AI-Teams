@@ -16,7 +16,6 @@ from uuid import uuid4
 from fastapi import HTTPException
 from psycopg.types.json import Json
 
-from branding_team._db import PostgresHelperMixin
 from branding_team.api.models import (
     BrandingQuestion,
     BrandingSession,
@@ -29,6 +28,7 @@ from branding_team.models import (
     BrandPhase,
     TeamOutput,
 )
+from shared.postgres import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 
 # ---------------------------------------------------------------------------
