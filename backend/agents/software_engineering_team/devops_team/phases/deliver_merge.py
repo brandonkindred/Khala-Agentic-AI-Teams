@@ -40,15 +40,15 @@ DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE = "feat(devops): {summary}"
 # agent's output carries no health checks of its own; the required-approval
 # name for production deploys. Named so Phase 5's ReleaseReadiness assembly
 # has a single, reusable source for these defaults instead of inline literals.
-DEFAULT_RUNTIME_CHECKS = [
+DEFAULT_RUNTIME_CHECKS = (
     "deployment_rollout_status",
     "service_health",
     "alert_health",
-]
+)
 PROD_APPROVAL = "manual_prod_approval"
 
 
-def _criterion_traces_from_phase4(
+def criterion_traces_from_phase4(
     criteria: List[str],
     acceptance_trace: List[Dict[str, object]],
     artifact_keys: List[str],
@@ -138,8 +138,10 @@ def run_phase5_deliver_merge(
     """Phase 5: completion package assembly + deliver/merge.
 
     Preconditions: Phases 1-4 returned ``None``; ``quality_gates``,
-      ``acceptance_trace``, ``aggregated_artifacts``, and Phase 2 results are
-      set (artifacts / trace may be empty).
+      ``acceptance_trace``, ``aggregated_artifacts``, and ``iac_result``/
+      ``cicd_result``/``deploy_result`` from Phases 1-3 are set (their
+      ``summary`` attributes are used for runbook notes; artifacts/trace may
+      be empty).
     Postconditions: on merge failure returns ``blocked_result`` set to a
       failed ``DevOpsTeamResult`` via ``build_team_failure_result`` with the
       blocked completion package; otherwise returns ``completion``
@@ -157,7 +159,7 @@ def run_phase5_deliver_merge(
     )
 
     completion = doc.completion_package
-    completion.acceptance_criteria_trace = _criterion_traces_from_phase4(
+    completion.acceptance_criteria_trace = criterion_traces_from_phase4(
         list(task_spec.acceptance_criteria),
         acceptance_trace,
         list(aggregated_artifacts.keys()),
@@ -172,7 +174,7 @@ def run_phase5_deliver_merge(
         if "production" in task_spec.platform_scope.environments
         else [],
         runtime_verification_checklist=list(getattr(deploy_result, "health_checks", []))
-        or DEFAULT_RUNTIME_CHECKS,
+        or list(DEFAULT_RUNTIME_CHECKS),
     )
     # Deliver the artifacts for real via the shared inline-merge helper and
     # report the actual outcome (real branch, commit SHA, merge status) rather

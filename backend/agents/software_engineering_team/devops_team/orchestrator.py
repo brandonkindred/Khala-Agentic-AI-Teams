@@ -30,7 +30,7 @@ from .doc_runbook_agent import DocumentationRunbookAgent
 from .iac_agent import InfrastructureAsCodeAgent
 from .models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult, SubtaskContract
 from .phases import (
-    _criterion_traces_from_phase4,  # noqa: F401 (re-exported for test_devops_team.py)
+    criterion_traces_from_phase4,  # noqa: F401 (public re-export; test_devops_team.py imports it here)
     run_phase1_intake_clarify,
     run_phase2_design_fanout,
     run_phase4_quality_gate,
@@ -62,12 +62,18 @@ _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
 
 
 def _git_ops() -> DeliverGitOps:
-    """Bundle this module's git callables for the shared deliver helper.
+    """Bundle this module's git/write callables for the shared deliver helper.
 
     Postconditions:
-        - Returns a ``DeliverGitOps`` whose callables are the names bound in this
-          module, so tests can monkeypatch the ``devops_team.orchestrator``
-          boundary (e.g. ``merge_branch``) exactly as the v2 teams do.
+        - Returns a ``DeliverGitOps`` containing only the git/write callables
+          required by ``deliver_inline_merge`` (``abort_merge``,
+          ``checkout_branch``, ``commit_working_tree``, ``create_feature_branch``,
+          ``delete_branch``, ``merge_branch``, ``write_agent_output``); each is
+          the name bound in this module, so tests can monkeypatch the
+          ``devops_team.orchestrator`` boundary (e.g. ``merge_branch``) exactly
+          as the v2 teams do. ``ensure_development_branch`` and ``get_head_sha``
+          are intentionally excluded — they're used directly elsewhere in the
+          pipeline, not by the deliver helper.
     """
     return DeliverGitOps(
         abort_merge=abort_merge,
@@ -505,10 +511,11 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
               may be empty).
             Postconditions: runs tool validation, execution verification, the
               debug-patch loop, and independent reviews; sets nonlocal
-              ``quality_gates`` and ``infra_fix_iterations`` (Phase 4.6 attempts
-              consumed; stays 1 when no retry was needed). Returns a failed
-              ``DevOpsTeamResult`` on quality-gate or build-verifier failure;
-              otherwise returns ``None`` so Phase 5 runs.
+              ``quality_gates``, ``acceptance_trace``, and
+              ``infra_fix_iterations`` (Phase 4.6 attempts consumed; stays 1
+              when no retry was needed). Returns a failed ``DevOpsTeamResult``
+              on quality-gate or build-verifier failure; otherwise returns
+              ``None`` so Phase 5 runs.
 
             Thin wrapper around the standalone ``run_phase4_quality_gate``;
             converts its typed result into this pipeline's gate contract.

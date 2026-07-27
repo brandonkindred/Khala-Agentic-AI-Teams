@@ -52,10 +52,10 @@ def run_phase4_quality_gate(
     """Phase 4: tool validation, execution verification, reviews, and gates.
 
     Preconditions: Phases 1-3 returned ``None`` (``aggregated_artifacts`` may
-      be empty); ``agent`` provides ``_run_execution_tools``,
-      ``_debug_patch_once``, ``_run_bounded_retry_loop``,
-      ``devsecops_review_agent``, ``change_review_agent``, and
-      ``test_validation_agent``.
+      be empty); ``agent`` provides ``_report_status``,
+      ``_run_execution_tools``, ``_debug_patch_once``,
+      ``_run_bounded_retry_loop``, ``devsecops_review_agent``,
+      ``change_review_agent``, and ``test_validation_agent``.
     Postconditions: runs tool validation, execution verification, the
       debug-patch loop, and independent reviews, returning the assembled
       ``quality_gates``, ``acceptance_trace``, ``tool_gate_map``, and
@@ -120,7 +120,7 @@ def run_phase4_quality_gate(
         agent._run_bounded_retry_loop(
             max_iterations=MAX_INFRA_FIX_ITERATIONS,
             attempt=_debug_patch_attempt,
-            is_success=lambda s: not s.exec_failures,
+            is_success=lambda s: s is not None and not s.exec_failures,
         )
 
     tool_gate_map.update(state.exec_gate_map)
