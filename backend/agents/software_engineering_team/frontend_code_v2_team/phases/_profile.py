@@ -134,7 +134,6 @@ def _frontend_microtask_intro(microtask_id: str, n_files: int) -> str:
 
 REVIEW_CONFIG = ReviewConfig(
     lint_agent_type="frontend",
-    build_verify_label="frontend_code_v2",
     build_fail_recommendation_review="Fix build errors; consider triggering Build Specialist.",
     # Frontend keeps the raw linter severity (no remap).
     lint_severity_remap=None,

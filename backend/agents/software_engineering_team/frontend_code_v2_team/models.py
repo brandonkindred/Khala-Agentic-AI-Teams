@@ -69,6 +69,7 @@ class MicrotaskStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     IN_REVIEW = "in_review"
+    IN_QA_SECURITY_TESTING = "in_qa_security_testing"
     IN_DOCUMENTATION = "in_documentation"
     COMPLETED = "completed"
     FAILED = "failed"

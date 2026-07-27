@@ -117,7 +117,6 @@ def _backend_microtask_intro(microtask_id: str, n_files: int) -> str:
 
 REVIEW_CONFIG = ReviewConfig(
     lint_agent_type="backend",
-    build_verify_label="backend_code_v2",
     build_fail_recommendation_review="Fix compilation/test errors before proceeding.",
     lint_severity_remap=_BACKEND_LINT_SEVERITY_MAP,
     tool_rec_source_prefix="tool_",
