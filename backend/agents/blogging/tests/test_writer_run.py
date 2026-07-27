@@ -472,6 +472,60 @@ def test_writer_revise_single_item_transient_retries_then_fallback(monkeypatch) 
     assert "Recovered transient" in out
 
 
+def test_writer_revise_single_item_wrapped_json_parse_error_retries_then_fallback(
+    monkeypatch,
+) -> None:
+    """EventLoopException-wrapped LLMJsonParseError must retry (not re-raise), then fall back.
+
+    Regression test: the ``except Exception`` branch used to unwrap the cause
+    only to check for LLMRateLimitError/LLMTemporaryError, re-raising a wrapped
+    LLMJsonParseError instead of retrying it the same way as an unwrapped one.
+    """
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMJsonParseError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise EventLoopException(LLMJsonParseError("bad json", response_preview="x"))
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p, system_prompt="": "# Recovered from wrapped parse error",
+    )
+    item = FeedbackItem(category="x", severity="minor", issue="i")
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    ri = ReviseWriterInput(
+        draft="# Orig", feedback_items=[item], feedback_summary="s", content_plan=plan
+    )
+    out = a._revise_single_item(
+        draft="# Orig",
+        item=item,
+        item_index=1,
+        total_items=1,
+        style_guide_text="style",
+        revise_input=ri,
+    )
+    assert "Recovered from wrapped parse error" in out
+
+
 def test_writer_revise_single_item_total_failure_returns_original(monkeypatch) -> None:
     """Empty text responses + failed fallback → original draft returned."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem

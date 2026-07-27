@@ -215,6 +215,34 @@ def test_writer_llm_self_review_unrelated_dict_array_before_issues_applies_fixes
     assert state["i"] == 2
 
 
+def test_writer_llm_self_review_mixed_array_keeps_valid_dict_issue(monkeypatch) -> None:
+    """A non-dict element alongside a valid issue dict must not drop the real issue.
+
+    Regression test: ``_extract_json_array_from_text`` used to reject the whole
+    array unless every element was a dict, discarding a valid issue whenever
+    the model's array also contained a stray non-dict entry.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "Here are the issues: "
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}, "malformed"]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
 def test_writer_llm_self_review_non_list_json_returns_draft(monkeypatch) -> None:
     """A JSON object (not an array) is treated as no issues."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent

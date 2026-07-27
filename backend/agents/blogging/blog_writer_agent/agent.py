@@ -173,9 +173,12 @@ def _extract_json_array_from_text(
           tolerating a real payload where some items are individually malformed
           (the caller's own per-item validation skips those).
     Postconditions:
-        - Returns the first decoded JSON array whose elements are all dicts and
-          at least one of which contains every key in ``required_keys``, found
-          by scanning for ``[`` and using ``json.JSONDecoder.raw_decode``.
+        - Returns the dict elements of the first decoded JSON array containing at
+          least one dict with every key in ``required_keys``, found by scanning
+          for ``[`` and using ``json.JSONDecoder.raw_decode``. Non-dict elements
+          in that array (e.g. a stray string) are dropped rather than rejecting
+          the whole array — callers already tolerate individually malformed dict
+          items via their own per-item validation.
         - A syntactically valid but schema-mismatched non-empty array (e.g. a
           numeric citation like ``[1]``, or a dict array none of whose elements
           have ``required_keys``) does not short-circuit the scan; scanning
@@ -199,12 +202,9 @@ def _extract_json_array_from_text(
             search_from = i + 1
             continue
         if isinstance(value, list):
-            if (
-                value
-                and all(isinstance(el, dict) for el in value)
-                and any(all(k in el for k in required_keys) for el in value)
-            ):
-                return value
+            dict_elements = [el for el in value if isinstance(el, dict)]
+            if dict_elements and any(all(k in el for k in required_keys) for el in dict_elements):
+                return dict_elements
             if not value and empty_fallback is None:
                 empty_fallback = value
         search_from = i + 1
@@ -1265,6 +1265,13 @@ class BlogWriterAgent(_BlogAgentBase):
                     time.sleep(0.5)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
+                if isinstance(cause, LLMJsonParseError):
+                    logger.warning(
+                        "Revise item %s/%s: %s; retrying.", item_index, total_items, cause
+                    )
+                    if attempt == 0:
+                        time.sleep(0.5)
+                    continue
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
                         "Revise item %s/%s: transient error (attempt %s/2); retrying.",
@@ -1329,9 +1336,11 @@ class BlogWriterAgent(_BlogAgentBase):
             - Otherwise returns a ``WriterOutput`` whose draft is the revised text,
               the stripped draft when feedback is empty, or the stripped draft when
               the text path and JSON fallback both fail to produce a usable draft.
-            - During batch execute retries, only unwrapped ``LLMRateLimitError`` /
-              ``LLMTemporaryError`` (including ``EventLoopException`` wrappers) are
-              retried with backoff; unexpected exceptions propagate immediately.
+            - During batch execute retries, unwrapped ``LLMJsonParseError``
+              (including ``EventLoopException`` wrappers) retries without a
+              backoff sleep, and unwrapped ``LLMRateLimitError`` /
+              ``LLMTemporaryError`` (including wrappers) retry with backoff;
+              unexpected exceptions propagate immediately.
         """
         self._assert_guidelines_present()
         original_draft = revise_input.draft or ""
@@ -1417,6 +1426,14 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
+                if isinstance(cause, LLMJsonParseError):
+                    logger.warning(
+                        "Batch revise failed (attempt %s/%s): %s",
+                        attempt + 1,
+                        BATCH_EXECUTE_MAX_RETRIES,
+                        cause,
+                    )
+                    continue
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
                         "Batch revise transient error (attempt %s/%s); retrying.",
@@ -1582,9 +1599,11 @@ class BlogWriterAgent(_BlogAgentBase):
 
         Postconditions:
             - Returns ``draft`` unchanged when it is blank.
-            - Otherwise retries the text-completion path up to 3 times on
-              transient ``LLMRateLimitError`` / ``LLMTemporaryError`` (including
-              ``EventLoopException`` wrappers), then falls back to
+            - Otherwise retries the text-completion path up to 3 times: an
+              unwrapped ``LLMJsonParseError`` (including ``EventLoopException``
+              wrappers) retries without a backoff sleep, and an unwrapped
+              ``LLMRateLimitError`` / ``LLMTemporaryError`` (including wrappers)
+              retries with backoff. If all attempts fail, falls back to
               ``_fallback_draft_via_json``; if both paths fail to produce a
               usable draft, returns the original ``draft`` unchanged.
         """
@@ -1693,6 +1712,14 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
+                if isinstance(cause, LLMJsonParseError):
+                    logger.warning(
+                        "User-feedback revision failed (attempt %s/%s): %s",
+                        attempt + 1,
+                        BATCH_EXECUTE_MAX_RETRIES,
+                        cause,
+                    )
+                    continue
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
                         "User-feedback revision transient error (attempt %s/%s); retrying.",

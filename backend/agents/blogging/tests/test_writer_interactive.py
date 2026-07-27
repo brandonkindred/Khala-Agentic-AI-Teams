@@ -525,6 +525,41 @@ def test_revise_from_user_feedback_json_parse_error_skips_sleep(monkeypatch) -> 
     assert sleep_calls == []
 
 
+def test_revise_from_user_feedback_wrapped_json_parse_error_skips_sleep(monkeypatch) -> None:
+    """EventLoopException-wrapped LLMJsonParseError must also use the no-sleep handler.
+
+    Regression test: the ``except Exception`` branch used to unwrap the cause
+    only to check for LLMRateLimitError/LLMTemporaryError, re-raising a wrapped
+    LLMJsonParseError instead of retrying it without backoff like an unwrapped one.
+    """
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMJsonParseError
+
+    a = _make_agent()
+    sleep_calls: list[float] = []
+
+    def boom(self, prompt, system_prompt=""):
+        raise EventLoopException(LLMJsonParseError("bad json", response_preview="x"))
+
+    def fail_json(self, p, **kw):
+        raise LLMJsonParseError("bad json", response_preview="x")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", fail_json)
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda secs: sleep_calls.append(secs))
+
+    out = a.revise_from_user_feedback(
+        draft="# Original",
+        user_feedback="tighten the intro",
+        content_plan_text="cp",
+    )
+    assert out.draft == "# Original"
+    assert sleep_calls == []
+
+
 # ---------------------------------------------------------------------------
 # generate_escalation_summary
 # ---------------------------------------------------------------------------
@@ -884,6 +919,62 @@ def test_revise_wrapped_temporary_retries_then_fallback(monkeypatch) -> None:
         ),
     )
     assert "Batch Recovered Wrapped" in out.draft
+
+
+def test_revise_wrapped_json_parse_error_retries_then_fallback(monkeypatch) -> None:
+    """EventLoopException-wrapped LLMJsonParseError must retry (not re-raise), then fall back.
+
+    Regression test: the batch-execute ``except Exception`` branch used to
+    unwrap the cause only to check for LLMRateLimitError/LLMTemporaryError,
+    re-raising a wrapped LLMJsonParseError instead of retrying it the same way
+    as an unwrapped one.
+    """
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput, RevisionPlan
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMJsonParseError
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda secs: sleep_calls.append(secs))
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_generate_revision_plan",
+        lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
+    )
+
+    def boom(self, *a, **kw):
+        raise EventLoopException(LLMJsonParseError("bad json", response_preview="x"))
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_fallback_draft_via_json",
+        lambda self, p, system_prompt="": "# Batch Recovered From Parse Error",
+    )
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    out = a.revise(
+        ReviseWriterInput(
+            draft="# Original\nBody",
+            feedback_items=[FeedbackItem(category="x", severity="minor", issue="y")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert "Batch Recovered From Parse Error" in out.draft
+    assert sleep_calls == []
 
 
 def test_revise_generate_revision_plan_happy(monkeypatch) -> None:
