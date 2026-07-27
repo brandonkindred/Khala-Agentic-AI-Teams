@@ -225,8 +225,8 @@ class BaseReviewToolAgent(LlmToolAgentBase):
 
         Driven by :attr:`conventions_by_language`: when it is non-empty, inject
         ``language_conventions`` selected by ``inp.language`` (falling back to the
-        ``"_default"`` entry); when empty, inject nothing — preserving frontend
-        agents whose single-issue prompt has no ``{language_conventions}`` slot.
+        ``"_default"`` entry); when empty, inject nothing — this agent's
+        single-issue prompt has no ``{language_conventions}`` slot to fill.
 
         Preconditions: when set, ``conventions_by_language`` maps lowercased
         language names (plus optional ``"_default"``) to convention strings.
