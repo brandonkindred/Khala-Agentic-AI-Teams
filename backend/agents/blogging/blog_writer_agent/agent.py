@@ -488,6 +488,20 @@ class BlogWriterAgent(_BlogAgentBase):
         terminates only when the planner's self-eval is done AND the critic
         approves. Refine feedback comes from the critic's structured violations
         instead of a generic string. When absent, legacy planner-self-eval only.
+
+        Args:
+            planning_input: Brief/context the planner drafts and refines against.
+            length_policy: Target-length policy passed through to the loop.
+            on_llm_request: Optional progress callback invoked before each LLM call.
+            max_iterations: Cap on generate/refine loop iterations before giving up.
+            max_parse_retries: Cap on JSON-parse retries per LLM call within the loop.
+            plan_critic: Optional critic agent whose approval is required for the
+                loop to terminate; omit for legacy planner-self-eval-only behavior.
+            work_dir: Optional directory to persist intermediate plan artifacts to.
+
+        Returns:
+            The final ``PlanningPhaseResult`` (content plan plus loop metadata),
+            per ``run_content_planning_loop``'s contract.
         """
         return run_content_planning_loop(
             planning_input,
@@ -727,7 +741,10 @@ class BlogWriterAgent(_BlogAgentBase):
             - Expected LLM parse failures (``LLMJsonParseError``, including when
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
-            - Unexpected programming errors from the LLM call path propagate.
+            - Any other exception from the LLM call path propagates unchanged —
+              this includes non-transient LLM errors such as
+              ``LLMPermanentError``/``LLMRateLimitError``/``LLMTemporaryError``,
+              not only unexpected programming errors.
         Invariants:
             - The agent's configuration, style guide, and brand spec are not mutated.
         """
