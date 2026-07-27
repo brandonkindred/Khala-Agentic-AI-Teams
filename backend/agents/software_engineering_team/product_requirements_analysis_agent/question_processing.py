@@ -261,6 +261,13 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
         else:
             depends_on = None
 
+        raw_section_impact = q_data.get("section_impact", [])
+        section_impact = (
+            list(raw_section_impact) if isinstance(raw_section_impact, (list, tuple)) else []
+        )
+        raw_asked_via = q_data.get("asked_via", [])
+        asked_via = list(raw_asked_via) if isinstance(raw_asked_via, (list, tuple)) else []
+
         return OpenQuestion(
             id=_str_or_default(q_data.get("id"), f"q{index}"),
             question_text=_str_or_default(q_data.get("question_text")),
@@ -276,10 +283,10 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             depends_on=depends_on,
             blocking=bool(q_data.get("blocking", True)),
             owner=_str_or_default(q_data.get("owner"), "user"),
-            section_impact=list(q_data.get("section_impact", [])),
+            section_impact=section_impact,
             due_date=_str_or_default(q_data.get("due_date")),
             status=_str_or_default(q_data.get("status"), "open"),
-            asked_via=list(q_data.get("asked_via", [])),
+            asked_via=asked_via,
         )
 
     return OpenQuestion(

@@ -634,6 +634,25 @@ def test_parse_open_question_preserves_extended_metadata() -> None:
     assert parsed.asked_via == ["slack", "web_ui"]
 
 
+def test_parse_open_question_defaults_non_sequence_section_impact_and_asked_via() -> None:
+    """_parse_open_question should ignore string values instead of exploding them into characters."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-004",
+            "question_text": "Which SLO tier should we target?",
+            "section_impact": "Requirements",
+            "asked_via": "slack",
+        },
+        index=0,
+    )
+
+    assert parsed.section_impact == []
+    assert parsed.asked_via == []
+
+
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
     llm = MagicMock()
