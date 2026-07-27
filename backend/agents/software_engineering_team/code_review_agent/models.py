@@ -453,14 +453,20 @@ class ChunkReviewLLMResponse(BaseModel):
     must fail validation and drive ``complete_validated``'s corrective
     retry, not silently look like a clean, empty-issue approval.
 
-    A rejection (``approved=False``) must carry at least one populated
-    critical/high issue: today, ``coordinator._reconcile_approval`` silently
-    flips such a rejection to an approval downstream ("nothing to give the
-    coding agent"), a deterministic safety net for a malformed LLM reply.
-    Enforcing the same rule here means that malformed reply instead fails
-    schema validation and drives ``complete_validated``'s corrective retry —
-    giving the model a chance to supply real feedback — rather than always
-    being silently absorbed by the coordinator's safety net.
+    ``approved`` must agree with whether the issues list carries an
+    actionable critical/high finding, in both directions -- exactly the
+    consistency check ``coordinator._reconcile_approval`` applies downstream
+    (its own ``critical_or_high`` computation): a rejection with no such
+    issue and an approval that carries one are both malformed per the
+    review prompt's contract (``profiles.py``: "APPROVE... No critical or
+    high issues... REJECT... Any critical or high issue present"). Today
+    the coordinator's gate silently repairs either case (flipping a
+    baseless rejection to an approval, or a contradictory approval to a
+    rejection) rather than letting a malformed LLM reply be a schema
+    failure. Enforcing the same rule here means that reply instead fails
+    validation and drives ``complete_validated``'s corrective retry — giving
+    the model a chance to correct itself — rather than always being
+    silently absorbed by the coordinator's safety net.
     """
 
     approved: bool = Field(
@@ -477,27 +483,35 @@ class ChunkReviewLLMResponse(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _require_actionable_issue_when_rejected(self) -> "ChunkReviewLLMResponse":
-        """Reject a rejection that carries no actionable feedback.
+    def _require_approval_consistent_with_issues(self) -> "ChunkReviewLLMResponse":
+        """Reject a verdict that contradicts its own issues list.
 
-        Mirrors ``coordinator._reconcile_approval``'s own criteria (severity
-        in critical/high) plus the two conditions
-        ``chunking._issues_from_chunk_output`` uses to drop an issue before it
-        ever reaches that gate: a blank description, or a suggestion that is,
-        in its entirety, a no-op admission (``is_no_op_suggestion``, e.g. "No
-        changes needed."). An issue matching either is not "populated" no
-        matter its severity — counting it here would let a rejection through
-        that downstream normalization silently turns into an approval anyway.
+        Computes the same "actionable critical/high issue" predicate
+        ``coordinator._reconcile_approval`` derives from its ``issues``
+        parameter (severity in critical/high), narrowed by the two
+        conditions ``chunking._issues_from_chunk_output`` uses to drop an
+        issue before it ever reaches that gate: a blank description, or a
+        suggestion that is, in its entirety, a no-op admission
+        (``is_no_op_suggestion``, e.g. "No changes needed."). An issue
+        matching either is not "populated" no matter its severity, so it
+        never counts on either side of this check -- matching what
+        ``_reconcile_approval`` actually sees once that filtering has run.
+
+        ``approved`` must then agree: ``True`` requires no actionable
+        critical/high issue, ``False`` requires at least one.
         """
-        if self.approved:
-            return self
-        has_actionable_issue = any(
+        has_actionable_critical_or_high = any(
             issue.severity in ("critical", "high")
             and issue.description.strip()
             and not is_no_op_suggestion(issue.suggestion)
             for issue in self.issues
         )
-        if not has_actionable_issue:
+        if self.approved and has_actionable_critical_or_high:
+            raise ValueError(
+                "approved=True is invalid when the issues list contains an actionable "
+                "critical/high issue (non-blank description, non-no-op suggestion)"
+            )
+        if not self.approved and not has_actionable_critical_or_high:
             raise ValueError(
                 "approved=False requires at least one issue with severity 'critical' or "
                 "'high', a non-blank description, and a non-no-op suggestion"

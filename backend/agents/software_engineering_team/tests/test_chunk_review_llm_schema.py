@@ -236,8 +236,7 @@ def test_approved_false_with_a_populated_high_issue_is_accepted() -> None:
 
 
 def test_approved_true_with_no_issues_is_unaffected() -> None:
-    """The new rejection invariant only applies when ``approved`` is False --
-    a clean approval with no issues at all is still perfectly valid."""
+    """A clean approval with no issues at all is still perfectly valid."""
     payload = {
         "approved": True,
         "issues": [],
@@ -246,7 +245,61 @@ def test_approved_true_with_no_issues_is_unaffected() -> None:
     }
     parsed = ChunkReviewLLMResponse.model_validate(payload)
     assert parsed.approved is True
-    assert parsed.issues == []
+
+
+def test_approved_true_with_an_actionable_critical_issue_is_rejected() -> None:
+    """The consistency check runs both directions: the review prompt
+    (``profiles.py``) is just as explicit that APPROVE requires no
+    critical/high issues as it is that REJECT requires one. Today
+    ``coordinator._reconcile_approval`` silently flips this exact
+    contradiction to a rejection downstream (its own
+    ``approved = llm_approved and not critical_or_high``); the schema now
+    catches it at the validation boundary instead."""
+    payload = {
+        "approved": True,
+        "issues": [{"severity": "high", "description": "Missing auth check"}],
+        "summary": "Looks good.",
+        "spec_compliance_notes": "",
+    }
+    with pytest.raises(ValidationError):
+        ChunkReviewLLMResponse.model_validate(payload)
+
+
+def test_approved_true_with_only_a_non_actionable_critical_issue_is_accepted() -> None:
+    """The approval-side check only fires for an *actionable* critical/high
+    issue -- one that would survive ``chunking._issues_from_chunk_output``'s
+    own filtering. An issue with a no-op suggestion never reaches
+    ``_reconcile_approval``'s ``critical_or_high`` computation downstream, so
+    it must not block an approval here either."""
+    payload = {
+        "approved": True,
+        "issues": [
+            {
+                "severity": "critical",
+                "description": "Looked fine on closer read",
+                "suggestion": "No changes needed.",
+            }
+        ],
+        "summary": "Looks good.",
+        "spec_compliance_notes": "",
+    }
+    parsed = ChunkReviewLLMResponse.model_validate(payload)
+    assert parsed.approved is True
+
+
+def test_approved_true_with_only_medium_severity_issues_is_accepted() -> None:
+    """Medium/low/info issues are explicitly acceptable alongside an
+    approval per the review prompt ("Medium/low/info issues are
+    acceptable"); only critical/high blocks an approval."""
+    payload = {
+        "approved": True,
+        "issues": [{"severity": "medium", "description": "Minor style nit"}],
+        "summary": "Looks good overall.",
+        "spec_compliance_notes": "",
+    }
+    parsed = ChunkReviewLLMResponse.model_validate(payload)
+    assert parsed.approved is True
+    assert len(parsed.issues) == 1
 
 
 def test_issue_defaults_match_current_hand_rolled_fallbacks() -> None:
