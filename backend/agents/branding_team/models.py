@@ -341,7 +341,7 @@ class NarrativeMessagingOutput(BaseModel):
     elevator_pitches: List[ElevatorPitch] = Field(default_factory=list)
     boilerplate_variants: List[str] = Field(default_factory=list)
     persona_profiles: List[PersonaProfile] = Field(default_factory=list)
-    # Voice and writing guidelines (from BrandGuidelinesAgent)
+    # Voice and writing guidelines (from VoicePrinciplesDrafter)
     writing_guidelines: "WritingGuidelines" = Field(default_factory=lambda: WritingGuidelines())
 
 
@@ -401,13 +401,13 @@ class VisualIdentityOutput(BaseModel):
     voice_tone_spectrum: List[VoiceToneEntry] = Field(default_factory=list)
     language_dos: List[str] = Field(default_factory=list)
     language_donts: List[str] = Field(default_factory=list)
-    # Mood board candidates (from MoodBoardIdeationAgent)
+    # Mood board candidates (from the MoodBoardConceptualist swarm, dispatched by CreativeDirector)
     mood_board_candidates: List["MoodBoardConcept"] = Field(default_factory=list)
-    # Creative refinement decision (from CreativeRefinementAgent)
+    # Creative refinement decision (from converge_decider)
     creative_refinement: "CreativeRefinementDecision" = Field(
         default_factory=lambda: CreativeRefinementDecision()
     )
-    # Design system definition (from BrandGuidelinesAgent)
+    # Design system definition (from design_system_codifier)
     design_system: "DesignSystemDefinition" = Field(
         default_factory=lambda: DesignSystemDefinition()
     )
@@ -497,9 +497,9 @@ class GovernanceOutput(BaseModel):
     review_trigger_points: List[str] = Field(default_factory=list)
     evolution_framework: str = ""
     version_control_cadence: str = ""
-    # Brand governance rules (from BrandGuidelinesAgent)
+    # Brand governance rules (from brand_rules_codifier)
     brand_guidelines: List[str] = Field(default_factory=list)
-    # Knowledge-base backlog (from BrandWikiAgent)
+    # Knowledge-base backlog (from asset_wiki_planner)
     wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
 
 
