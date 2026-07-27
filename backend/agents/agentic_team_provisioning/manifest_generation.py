@@ -177,13 +177,13 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     resolvable by the Agent Console catalog and the ``/api/agents/{id}/invoke``
     route (cognition injection + seed-pack install then happen on first invoke).
 
-    Scope: this is the registry of *this process*. It makes generated agents
-    resolvable to consumers that share this process. Other processes load their
-    own registries from disk and won't see these entries — the Agent Console /
-    invoke route when the team runs behind ``AGENTIC_TEAM_PROVISIONING_SERVICE_URL``,
-    and every per-invoke sandbox (its shim re-resolves the manifest from its own
-    in-container disk registry). Cross-process visibility (shared persistence /
-    sync) is a tracked follow-up beyond this generator-wiring change.
+    Scope: registration always updates *this process's* in-memory registry
+    immediately. When a Postgres-backed dynamic store is active (see
+    ``AgentRegistry.register``), each manifest is also write-through persisted
+    there, so other workers and per-invoke sandboxes that share that store
+    resolve the same entries — not just this process. When no dynamic store
+    is active (Postgres off / sandboxed), registration is local-only and other
+    processes won't see these entries until they generate their own.
 
     Preconditions:
         * ``team_id`` is non-empty.
@@ -194,8 +194,10 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
           replace for the
           team: previously-registered generated manifests for ``team_id`` that are
           absent from this roster are unregistered, so removed/renamed agents stop
-          appearing in the catalog. In-memory and idempotent. Best-effort — a
-          registry failure is logged, never raised, so generation still succeeds.
+          appearing in the catalog. Idempotent; persisted to the dynamic store
+          when one is active, in-memory-only otherwise (see Scope above).
+          Best-effort — a registry failure is logged, never raised, so
+          generation still succeeds.
     """
     # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
     # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here

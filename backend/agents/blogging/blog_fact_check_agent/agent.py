@@ -66,7 +66,7 @@ class BlogFactCheckAgent(_BlogAgentBase):
             draft: The draft text.
             allowed_claims: allowed_claims.json content.
             require_disclaimer_for: Categories requiring disclaimers (from brand_spec).
-            work_dir: If provided, write fact_check_report.json (or merge into compliance_report).
+            work_dir: If provided, write fact_check_report.json.
             on_llm_request: Optional callback invoked before the LLM call with a status message.
 
         Returns:
