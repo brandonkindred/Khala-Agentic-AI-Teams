@@ -117,7 +117,8 @@ _SHARED_OUTPUT_SECTION = (
     "unrelated bug you notice in surrounding, unchanged code you were shown for context). false "
     "when the defect is in code this change itself added or modified. Default false: when you "
     "cannot tell whether the code predates this change, treat it as part of the change rather than "
-    "guessing pre-existing.\n"
+    "guessing pre-existing. This does NOT apply to findings that the change should have added or "
+    "modified a file but did not -- those are in-scope defects and must use pre_existing: false.\n"
     '- "summary": string. A brief, high-level overview for the developer. Do NOT restate what the '
     "PR does or is meant to accomplish. When any issue was found, do NOT praise the implementation "
     "(do not call it sound, well-structured, or well-implemented) and do NOT claim it aligns with "
@@ -157,7 +158,8 @@ _SHARED_OUTPUT_SECTION = (
     'events to update these values."\n'
     '  - "pre_existing": boolean. true when the defect is in unchanged, pre-existing code outside '
     "this change; false when the defect is in code this change added or modified. Default false "
-    "when uncertain.\n"
+    "when uncertain. This does NOT apply to findings that the change should have added or modified "
+    "a file but did not -- those are in-scope defects and must use pre_existing: false.\n"
     "- The coding agent that receives these issues will use them as instructions, so each issue "
     "must be detailed enough to be acted upon WITHOUT additional context.\n\n"
     "**THOROUGHNESS REQUIREMENTS:**\n"

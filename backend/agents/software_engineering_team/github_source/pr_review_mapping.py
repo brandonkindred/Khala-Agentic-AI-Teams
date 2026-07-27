@@ -263,7 +263,13 @@ def is_within_diff(finding: Any, valid_by_path: dict[str, set[int]]) -> bool:
     if path is None:
         return False
     line = getattr(finding, "line", None)
-    return line is not None and int(line) in valid_by_path[path]
+    if line is None:
+        return False
+    try:
+        line_num = int(line)
+    except (TypeError, ValueError):
+        return False
+    return line_num in valid_by_path[path]
 
 
 def split_review_comments(

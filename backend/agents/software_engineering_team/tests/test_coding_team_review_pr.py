@@ -2498,6 +2498,16 @@ class TestPreservationProperties:
             f"PRESERVATION BROKEN — comment body does not contain description. "
             f"body={line_anchored[0]['body']!r}, expected to contain {description!r}"
         )
+        # In-diff line-anchored findings must NOT also be posted as file-level comments.
+        duplicate_file_level = [
+            c
+            for c in gh.review_comments
+            if c.get("subject_type") == "file" and c.get("path") == "a.py"
+        ]
+        assert len(duplicate_file_level) == 0, (
+            f"PRESERVATION BROKEN — in-diff line-anchored finding also produced a "
+            f"file-level comment: {duplicate_file_level}"
+        )
 
     # ------------------------------------------------------------------
     # PBT B — File-level routing preserved (Req 3.2)
@@ -3186,6 +3196,11 @@ class TestWholeFileReview:
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
         assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
+        # Whole-file-specific wording, and NOT the hunk-mode wording -- so a
+        # regression collapsing _whole_file_focus into _hunk_review_focus (or
+        # vice versa) can't hide behind the shared prefix check above.
+        assert "complete file contents" in captured["task_requirements"]
+        assert "diff hunks" not in captured["task_requirements"]
 
     def test_partial_head_fetch_reviews_fetched_subset_whole_and_missing_subset_via_hunks(
         self, review_app, monkeypatch
