@@ -192,6 +192,39 @@ class BrandDiscoveryAudit(BaseModel):
     stakeholder_insights: List[str] = Field(default_factory=list)
 
 
+class PurposeVisionOutput(BaseModel):
+    """Brand purpose, mission, and vision statements."""
+
+    brand_purpose: str = ""
+    mission_statement: str = ""
+    vision_statement: str = ""
+
+
+class CoreValuesOutput(BaseModel):
+    """A set of brand core values."""
+
+    core_values: List[CoreValue] = Field(default_factory=list)
+
+
+class AudienceSegmentsOutput(BaseModel):
+    """A set of target audience segments."""
+
+    target_audience_segments: List[AudienceSegment] = Field(default_factory=list)
+
+
+class DifferentiationPillarsOutput(BaseModel):
+    """A set of competitive differentiation pillars."""
+
+    differentiation_pillars: List[DifferentiationPillar] = Field(default_factory=list)
+
+
+class PositioningOutput(BaseModel):
+    """Synthesised positioning statement and brand promise."""
+
+    positioning_statement: str = ""
+    brand_promise: str = ""
+
+
 class StrategicCoreOutput(BaseModel):
     """Phase 1 output: the strategic foundation everything else derives from."""
 

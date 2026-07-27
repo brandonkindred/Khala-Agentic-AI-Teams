@@ -17,9 +17,15 @@ from strands import Agent
 
 from .graphs.shared import build_agent
 from .models import (
+    AudienceSegmentsOutput,
     BrandCheckRequest,
     BrandCheckResult,
+    BrandDiscoveryAudit,
     BrandingMission,
+    CoreValuesOutput,
+    DifferentiationPillarsOutput,
+    PositioningOutput,
+    PurposeVisionOutput,
 )
 
 # ===================================================================
@@ -35,9 +41,9 @@ def make_discovery_auditor() -> Agent:
             "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
             "brand discovery audit. Include: current_brand_perception, market_position, strengths, "
             "weaknesses, opportunities, threats, and stakeholder_insights. Be specific and grounded "
-            "in the company description and target audience provided. Output valid JSON matching the "
-            "BrandDiscoveryAudit schema."
+            "in the company description and target audience provided."
         ),
+        structured_output=BrandDiscoveryAudit,
     )
 
 
@@ -50,8 +56,9 @@ def make_purpose_vision_writer() -> Agent:
             "1. brand_purpose — why the company exists (one sentence)\n"
             "2. mission_statement — what the company does for its audience (one sentence)\n"
             "3. vision_statement — the aspirational future state (one sentence)\n"
-            "Be concise, inspiring, and specific to the company. Output valid JSON with these three keys."
+            "Be concise, inspiring, and specific to the company."
         ),
+        structured_output=PurposeVisionOutput,
     )
 
 
@@ -64,9 +71,9 @@ def make_values_articulator() -> Agent:
             "produce a list of 3-5 core values. For each value provide:\n"
             "- value: the value name\n"
             "- behavioral_definition: what this value means in practice\n"
-            "- observable_behaviors: 2-3 concrete behaviors that demonstrate this value\n"
-            "Output valid JSON as a list of CoreValue objects."
+            "- observable_behaviors: 2-3 concrete behaviors that demonstrate this value"
         ),
+        structured_output=CoreValuesOutput,
     )
 
 
@@ -78,8 +85,9 @@ def make_audience_segmenter() -> Agent:
             "You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience "
             "segments. For each segment provide: name, description, pain_points (2-3), goals (2-3), "
             "and decision_drivers (2-3). Ground your analysis in the company description and stated "
-            "target audience. Output valid JSON as a list of AudienceSegment objects."
+            "target audience."
         ),
+        structured_output=AudienceSegmentsOutput,
     )
 
 
@@ -92,9 +100,9 @@ def make_differentiation_mapper() -> Agent:
             "produce 2-4 differentiation pillars. For each pillar provide:\n"
             "- pillar: the differentiator name\n"
             "- proof_points: 2-3 evidence items\n"
-            "- competitive_context: how competitors fall short here\n"
-            "Output valid JSON as a list of DifferentiationPillar objects."
+            "- competitive_context: how competitors fall short here"
         ),
+        structured_output=DifferentiationPillarsOutput,
     )
 
 
@@ -109,9 +117,9 @@ def make_positioning_synthesizer() -> Agent:
             "1. positioning_statement — a single sentence following the format: "
             "'For [audience] who need [need], [company] is the [differentiator] that delivers "
             "[value] because [proof].'\n"
-            "2. brand_promise — a one-sentence commitment to the customer\n"
-            "Output valid JSON with these two keys."
+            "2. brand_promise — a one-sentence commitment to the customer"
         ),
+        structured_output=PositioningOutput,
     )
 
 
