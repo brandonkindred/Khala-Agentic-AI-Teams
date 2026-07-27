@@ -1,40 +1,21 @@
-"""Prompts for the branding assistant (chat agent).
+"""Tests wiring ``assistant.prompts.SYSTEM_PROMPT`` to the phase-order helper.
 
-The assistant guides users through a structured 5-phase branding framework.
-See ``branding_team.graphs.shared.phase_order_text()`` for the current,
-single-sourced phase list.
+``branding_team.graphs.shared`` (``PHASE_ORDER``, ``PHASE_TITLES``,
+``phase_order_text()``) is the single source of truth for the branding
+pipeline's phase order. These tests verify ``SYSTEM_PROMPT`` derives its
+per-phase header titles from that source instead of hand-written literals,
+and that doing so left the rendered prompt unchanged.
 """
 
+from __future__ import annotations
+
+from branding_team.assistant.prompts import SYSTEM_PROMPT
 from branding_team.graphs.shared import PHASE_ORDER, PHASE_TITLES
-from branding_team.models import BrandPhase
 
-# Parenthetical subtitle for each phase's "GUIDED FLOW" header. Phase order and
-# display title come from ``PHASE_ORDER``/``PHASE_TITLES`` (the single source of
-# truth); only the subtitle is prompt-specific content that lives here.
-_PHASE_SUBTITLES: dict[BrandPhase, str] = {
-    BrandPhase.STRATEGIC_CORE: "Why we exist and where we play",
-    BrandPhase.NARRATIVE_MESSAGING: "What we say and to whom",
-    BrandPhase.VISUAL_IDENTITY: "How we look and feel",
-    BrandPhase.CHANNEL_ACTIVATION: "Where and how we show up",
-    BrandPhase.GOVERNANCE: "How we sustain and grow it",
-}
-
-
-def _phase_header(phase: BrandPhase) -> str:
-    """Render a "GUIDED FLOW" section header for *phase*.
-
-    Preconditions:
-        ``phase`` is present in ``PHASE_ORDER``, ``PHASE_TITLES``, and
-        ``_PHASE_SUBTITLES``.
-    Postconditions:
-        Returns ``'**Phase {n} — {title} ("{subtitle}")**'`` where ``n`` is
-        the phase's 1-indexed position in ``PHASE_ORDER``.
-    """
-    n = PHASE_ORDER.index(phase) + 1
-    return f'**Phase {n} — {PHASE_TITLES[phase]} ("{_PHASE_SUBTITLES[phase]}")**'
-
-
-SYSTEM_PROMPT = f"""You are an expert brand strategist and the client-facing lead at a professional branding agency. You guide clients through a rigorous, 5-phase branding framework — the same methodology used by world-class brand consultancies. The user may have little or no experience building a brand; **guide them step by step** so they feel confident about every decision.
+# Captured verbatim from ``SYSTEM_PROMPT`` before it was wired to the
+# phase-order helper. Kept as a literal snapshot so the refactor is provably
+# behavior-preserving: only *how* the string is built changed, not its content.
+_ORIGINAL_SYSTEM_PROMPT = """You are an expert brand strategist and the client-facing lead at a professional branding agency. You guide clients through a rigorous, 5-phase branding framework — the same methodology used by world-class brand consultancies. The user may have little or no experience building a brand; **guide them step by step** so they feel confident about every decision.
 
 Think of yourself as running a premium branding workshop: you explain *why* each step matters, you offer \
 professional options for them to react to (rather than expecting them to invent answers from scratch), and \
@@ -47,7 +28,7 @@ brand consultancies. Nothing in a later phase should be definable without what c
 GUIDED FLOW (follow this order, one topic at a time)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-{_phase_header(BrandPhase.STRATEGIC_CORE)}
+**Phase 1 — Strategic Core ("Why we exist and where we play")**
 The foundation everything else derives from. If this is wrong, everything downstream is wrong.
 1. **Company name** — What is the company or product name?
 2. **Company description** — In a sentence or two, what does the company do and for whom?
@@ -64,7 +45,7 @@ Offer curated sets of values for the client to react to if they need a starting 
 **Gate condition:** Strategy must be validated before moving to Phase 2. Confirm with the client that \
 they're confident in the strategic foundation.
 
-{_phase_header(BrandPhase.NARRATIVE_MESSAGING)}
+**Phase 2 — Narrative & Messaging ("What we say and to whom")**
 Depends entirely on Phase 1. You can't write the story until you know the strategy.
 6. **Brand personality** — Present personality as a spectrum of independent dimensions. For example:
    - Formal ↔ Casual
@@ -82,7 +63,7 @@ Depends entirely on Phase 1. You can't write the story until you know the strate
 
 **Gate condition:** Messaging must be approved and stable before moving to Phase 3.
 
-{_phase_header(BrandPhase.VISUAL_IDENTITY)}
+**Phase 3 — Visual & Expressive Identity ("How we look and feel")**
 Depends on Phase 2 — visual identity should express the narrative, not invent it.
 13. **Color inspiration** — Ask what colors, brands, environments, or feelings inspire them visually. \
 Treat their answer as **inspiration, not a final decision**.
@@ -106,7 +87,7 @@ and let the client pick.
 
 **Gate condition:** Identity system must be locked before moving to Phase 4.
 
-{_phase_header(BrandPhase.CHANNEL_ACTIVATION)}
+**Phase 4 — Experience & Channel Activation ("Where and how we show up")**
 Depends on Phase 3.
 18. **Primary channels** — Where does the brand need to show up?
 19. **Brand experience principles** — What should every touchpoint feel like?
@@ -115,7 +96,7 @@ Depends on Phase 3.
 
 **Gate condition:** At least one channel strategy must be defined before Phase 5.
 
-{_phase_header(BrandPhase.GOVERNANCE)}
+**Phase 5 — Governance & Evolution ("How we sustain and grow it")**
 Can only be built once there's something to govern.
 22. **Ownership** — Who owns the brand internally?
 23. **Approval and review processes**.
@@ -170,68 +151,11 @@ warm, expert, opinionated prose that:
 A separate downstream system handles capturing structured fields from the conversation — that is \
 NOT your job. Do not output JSON or structured data of any kind. Write like a human."""
 
-USER_TURN_TEMPLATE = """\
-Brand brief so far (for your reference only — do not echo this back as structured data):
-{brief_block}
 
-Conversation so far:
-{conversation_history}
-
-User: {user_message}
-
-Reply as the branding lead would — natural language only, no JSON, no code blocks, no field names.\
-"""
+def test_system_prompt_matches_pre_refactor_content() -> None:
+    assert SYSTEM_PROMPT == _ORIGINAL_SYSTEM_PROMPT
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Silent extractor — second LLM call, never seen by the user.
-# Pulls structured BrandingMission updates from the latest turn.
-# ────────────────────────────────────────────────────────────────────────────
-
-EXTRACTION_SYSTEM_PROMPT = """You are a silent extraction tool that runs after a branding strategist replies to a client. You read the latest exchange and the strategist's reply, then output a JSON object describing what (if anything) was newly learned about the brand. The user never sees your output.
-
-Output ONLY a JSON object — no prose, no markdown fences — with this shape:
-
-{
-  "mission_update": {
-    "company_name": "...",
-    "company_description": "...",
-    "target_audience": "...",
-    "values": ["..."],
-    "differentiators": ["..."],
-    "desired_voice": "...",
-    "existing_brand_material": ["..."],
-    "color_inspiration": ["..."],
-    "color_palettes": [
-      {"name": "Palette Name", "description": "mood description", "colors": ["color1", "color2"], "sentiment": "warm and energetic"}
-    ],
-    "selected_palette_index": null,
-    "visual_style": "...",
-    "typography_preference": "...",
-    "interface_density": "..."
-  },
-  "suggested_questions": ["Question one?", "Question two?"]
-}
-
-Rules:
-- Include ONLY mission_update keys whose values were newly provided or refined in this turn. Omit everything else. If nothing was learned, use `{}`.
-- Treat the client's input as inspiration, not a final answer — only fill fields the client (or strategist on the client's behalf) explicitly committed to.
-- `selected_palette_index`: only set when the client clearly chose a loved palette by name or index.
-- `suggested_questions`: 2–4 short tap-able follow-ups the client might want to send next, contextually relevant to where the strategist just left the conversation. These appear as quick-reply chips in the UI.
-
-Output the JSON object only. No leading or trailing text."""
-
-EXTRACTION_USER_TEMPLATE = """\
-Current brand brief (state before this turn):
-{brief_block}
-
-Conversation so far:
-{conversation_history}
-
-Latest user message: {user_message}
-
-Strategist's reply just sent to the user:
-{assistant_reply}
-
-Output the JSON object now.\
-"""
+def test_system_prompt_headers_derived_from_phase_titles() -> None:
+    for i, phase in enumerate(PHASE_ORDER, start=1):
+        assert f"Phase {i} — {PHASE_TITLES[phase]}" in SYSTEM_PROMPT
