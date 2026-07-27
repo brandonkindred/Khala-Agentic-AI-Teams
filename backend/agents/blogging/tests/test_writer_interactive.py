@@ -279,11 +279,20 @@ def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
     assert (tmp_path / "out.md").exists()
 
 
-def test_revise_from_user_feedback_empty_draft() -> None:
+def test_revise_from_user_feedback_empty_draft(monkeypatch) -> None:
     """Whitespace-only draft is returned unchanged (no LLM call)."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     a = _make_agent()
+    calls: list = []
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "should not be called",
+    )
     out = a.revise_from_user_feedback(draft="   ", user_feedback="x", content_plan_text="cp")
     assert out.draft == "   "
+    assert calls == []
 
 
 def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> None:
