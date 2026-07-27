@@ -4,13 +4,10 @@ Pure, side-effect-free helpers used by the ``/review-pr`` flow:
 
 - ``parse_valid_lines`` — turn one file's unified diff into the set of new-file
   line numbers that can carry an inline comment on ``side="RIGHT"``.
-- ``file_in_diff`` — true when a finding's file resolves to a path in the PR's
-  diff, independent of its line (the deterministic scope gate a caller applies
-  BEFORE routing a finding here at all — see the module-level note below).
-- ``map_issues_to_comments`` — route each review finding (whose file is
-  already known to be in the diff) to a line-anchored inline comment (its line
-  is in the diff) or a file-level review comment (its cited line is not in the
-  diff).
+- ``map_issues_to_comments`` — route each review finding to a line-anchored
+  inline comment (its line is in the diff), a file-level review comment (its file
+  changed but the cited line is not in the diff), or a standalone leftover (its
+  file is not in the diff at all).
 - ``split_review_comments`` — partition mapped comments into the line-anchored
   group (rides the single review) and the file-level group (posted individually
   on the dedicated review-comments endpoint, the only one that takes
@@ -21,15 +18,14 @@ Pure, side-effect-free helpers used by the ``/review-pr`` flow:
 - ``build_review_body`` — render the summary-only review body.
 - ``choose_event`` — pick the GitHub review event from issue severity.
 
-Every finding gets exactly one comment, all attached to the single review: a
-finding on a changed line becomes a line-anchored inline comment, and one whose
-file changed but whose cited line is off-diff becomes a file-level review
-comment. A finding naming a file absent from the diff at all is out of this
-PR's scope by definition — the caller (``_partition_review_issues`` in
-``api/pr_review.py``) filters those out via ``file_in_diff`` before a finding
-ever reaches ``map_issues_to_comments``, so they are never posted as PR
-comments at all (they route to GitHub-issue proposals instead). The review
-body never lists findings.
+Every finding gets exactly one comment: a finding on a changed line becomes a
+line-anchored inline comment (rides the single review), a finding whose file
+changed but whose cited line is off-diff becomes a file-level review comment,
+and a finding naming a file absent from the diff at all is left as a leftover
+for the caller (``_partition_review_issues`` in ``api/pr_review.py``) to
+render via ``format_issue_comment`` and post as its own standalone
+conversation comment — never silently dropped, and never misattributed to an
+unrelated changed file. The review body itself never lists findings.
 
 Kept free of any GitHub-client or LLM dependency so it is cheap to unit-test and
 reusable. Findings are duck-typed: any object exposing ``severity``, ``category``,
@@ -181,39 +177,21 @@ def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optio
     return None
 
 
-def file_in_diff(file_path: str, valid_by_path: dict[str, set[int]]) -> bool:
-    """True when ``file_path`` resolves to a path in this PR's diff, independent of line.
-
-    This is the deterministic scope gate: a finding naming a file the PR never
-    touched cannot legitimately be about this PR's change, regardless of what
-    the reviewer's ``pre_existing`` self-report says. Callers apply this BEFORE
-    a finding is allowed anywhere near ``pr_issues``/``map_issues_to_comments``
-    — a finding that fails this check must never be posted as a PR comment.
-
-    Postconditions:
-        - Returns ``_normalize_path(file_path, valid_by_path) is not None``.
-    """
-    return _normalize_path(file_path, valid_by_path) is not None
-
-
 def map_issues_to_comments(
     issues: Iterable[Any],
     valid_by_path: dict[str, set[int]],
     existing_by_issue: Optional[dict[int, ExistingCommentRef]] = None,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
-    """Split findings into line-anchored and file-level review comments.
+    """Split findings into review comments and standalone leftovers.
 
     A finding is routed to the single PR review wherever it can be: anchored to a
     changed line when the cited line is in the diff, otherwise attached to the
-    file as a whole (a fabricated line would be misleading and GitHub would 422
-    it).
+    file as a whole when the file changed (a fabricated line would be misleading
+    and GitHub would 422 it). Only a finding whose file is not in the diff at all
+    can't be a review comment, so it is left for the caller to post as a
+    standalone conversation comment.
 
     Preconditions:
-        - Every ``issue.file_path`` already resolves to a path in
-          ``valid_by_path`` (per :func:`file_in_diff`) — the caller is
-          responsible for filtering out findings whose file is not in the diff
-          at all BEFORE calling this function; they are never in scope for a PR
-          comment and must not reach here.
         - ``existing_by_issue``, when given, maps ``id(issue)`` (Python object
           identity, valid only among the ``issues`` passed in this same call)
           to the existing PR comment that finding duplicates but which is not
@@ -221,14 +199,14 @@ def map_issues_to_comments(
           Absent or ``None`` behaves exactly as before this parameter existed.
     Postconditions:
         - Returns ``(review_comments, leftover_issues)``. ``review_comments``
-          contains one entry per finding: a line-anchored ``{"path", "line",
-          "side": "RIGHT", "body"}`` when ``line`` falls on a commentable line,
-          otherwise a file-level ``{"path", "subject_type": "file", "body"}``.
-          ``leftover_issues`` holds any finding whose file could not be
-          resolved despite the precondition (defensive only — every current
-          caller upholds it, so this is expected to always be empty). Nothing
-          is dropped, and no comment carries more than one finding. A finding
-          with an entry in ``existing_by_issue`` has its body annotated with a
+          contains one entry per finding whose file resolves to a path in
+          ``valid_by_path``: a line-anchored ``{"path", "line", "side": "RIGHT",
+          "body"}`` when ``line`` falls on a commentable line, otherwise a
+          file-level ``{"path", "subject_type": "file", "body"}``. Every other
+          finding (no resolvable file) is returned as a leftover so the caller
+          can post it as its own standalone conversation comment. Nothing is
+          dropped, and no comment carries more than one finding. A finding with
+          an entry in ``existing_by_issue`` has its body annotated with a
           reference to that existing comment (see ``format_comment_body``).
     """
     review_comments: list[dict[str, Any]] = []

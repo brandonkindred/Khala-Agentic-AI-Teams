@@ -42,7 +42,6 @@ from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
     build_review_body,
     choose_event,
-    file_in_diff,
     format_comment_body,
     format_issue_comment,
     inline_comment_to_timeline_body,
@@ -78,7 +77,6 @@ __all__ = [
     "build_review_body",
     "choose_event",
     "duplicate_check_max_open_issues",
-    "file_in_diff",
     "find_matching_open_issue",
     "format_comment_body",
     "format_issue_comment",
