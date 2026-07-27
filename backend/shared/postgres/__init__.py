@@ -40,6 +40,7 @@ from shared.postgres.client import (
     resolve_storage_status,
     statement_timeout_ms,
 )
+from shared.postgres.helpers import PostgresHelperMixin
 from shared.postgres.metrics import timed_query
 from shared.postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
 from shared.postgres.runner import ensure_team_schema, register_team_schemas
@@ -108,6 +109,7 @@ __all__ = [
     "merge_jsonb_via_cursor",
     "pg_cursor",
     "probe_cursor",
+    "PostgresHelperMixin",
     "register_all_team_schemas",
     "register_team_schemas",
     "resolve_storage_status",

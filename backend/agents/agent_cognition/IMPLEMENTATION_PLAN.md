@@ -160,7 +160,7 @@ flowchart TB
 ### Step 7 — Tools layer
 - **Goal:** Per-agent toolset, executed and logged to memory.
 - **Files:** `tools/binding.py` (resolve manifest `cognition.tools` ids against
-  `LlmToolsService` + `IntegrationRegistry` + `agent_git_tools` → `(definitions, handlers)`,
+  `LlmToolsService` + a caller-supplied integration registry + `agent_git_tools` → `(definitions, handlers)`,
   tagging each tool's **execution site**: `in_process`, `sandbox_local`, or `platform_bound`);
   `tools/runner.py` (wrap `complete_json_with_tool_loop`; emit `tool_call`/`outcome` events).
   The **shim broker wraps every declared handler** (both `platform_bound` and `sandbox_local`)
