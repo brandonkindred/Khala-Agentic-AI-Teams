@@ -141,3 +141,40 @@ def read_artifact(
     if parse_json:
         return json.loads(raw)
     return raw
+
+
+def read_latest_draft(
+    work_dir: Union[str, Path],
+    preferred: str = "final.md",
+    *,
+    fallback_names: tuple = ("draft_v2.md", "draft_v1.md"),
+) -> str:
+    """
+    Read the latest available draft, falling back through preferred -> fallback_names in order.
+
+    Args:
+        work_dir: Directory containing run artifacts.
+        preferred: Preferred draft filename to try first (default "final.md").
+        fallback_names: Filenames to try in order if preferred is missing/empty
+            (default ("draft_v2.md", "draft_v1.md")).
+
+    Returns:
+        The content of the first existing, non-empty artifact among
+        [preferred, *fallback_names], or "" if none are present.
+
+    Preconditions:
+        - ``work_dir`` is a directory path (existing or not); ``preferred`` and each
+          entry in ``fallback_names`` are artifact filenames as accepted by ``read_artifact``.
+    Postconditions:
+        - Always returns a ``str`` (never ``None``); never raises for a missing file.
+        - Tries ``preferred`` first, then each of ``fallback_names`` in order, returning
+          the first non-empty result; returns ``""`` if all are missing or empty.
+    """
+    draft = read_artifact(work_dir, preferred, default="")
+    if draft:
+        return draft
+    for name in fallback_names:
+        draft = read_artifact(work_dir, name, default="")
+        if draft:
+            return draft
+    return ""

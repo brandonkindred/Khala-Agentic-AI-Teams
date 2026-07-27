@@ -319,11 +319,6 @@ class GatedExecutionConfig:
     run_documentation_self_review: Callable[..., Any]
     # ``mt.status`` set at each gate's entry (backend: distinct per phase;
     # frontend: ``IN_REVIEW`` for all three — a no-op re-assign after code review).
-    # When ``parallelize_qa_security`` is in effect, QA and Security run at once,
-    # so there is no per-gate entry point for Security to set ``status_security``
-    # at — ``mt.status`` is set to ``status_qa`` once for the whole combined
-    # phase and intentionally never reaches ``status_security`` (see
-    # ``_run_review_cycles``'s concurrent branch).
     status_code_review: Any
     status_qa: Any
     status_security: Any
@@ -344,6 +339,13 @@ class GatedExecutionConfig:
     # QA -> Security behavior), so the frontend config is unaffected until its
     # tool-agent fan-out is scoped per gate the way the backend's already is.
     parallelize_qa_security: bool = False
+    # ``mt.status`` set instead of ``status_qa``/``status_security`` when
+    # ``parallelize_qa_security`` is in effect: QA and Security run at once, so
+    # there is no per-gate entry point for either to claim its own status at —
+    # this single combined status covers the whole concurrent window (see
+    # ``_run_review_cycles``'s concurrent branch). Defaults to ``None``, in
+    # which case the concurrent branch falls back to ``status_qa``.
+    status_qa_security: Any = None
 
 
 def _execute_coding_phase(
@@ -477,7 +479,10 @@ def run_gated_execution_impl(
     ``progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)``
     is called during execution; ``current_index`` is 1-based and ``microtask_phase``
     is one of "coding", "code_review", "qa_testing", "security_testing",
-    "documentation", "completed".
+    "qa_security_testing", "documentation", "completed". "qa_security_testing"
+    is reported only while ``parallelize_qa_security`` is in effect and QA and
+    Security are both in flight concurrently -- neither has a confirmed outcome
+    yet, so it must not be read as "qa_testing has passed".
 
     Preconditions:
         ``gate_config.models`` exposes ``MicrotaskStatus``, ``ExecutionResult``,

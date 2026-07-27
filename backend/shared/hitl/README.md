@@ -45,10 +45,88 @@ changes three previously-observable SE behaviors (each covered by a regression t
 
 ## Non-shared: team WorkflowStatus
 
-Branding (`READY_FOR_ROLLOUT`) and market research (`DRAFT` / `READY_FOR_EXECUTION`)
-keep local `WorkflowStatus` enums because terminal semantics differ per team.
-Investment's `WorkflowStatusResponse` is an unrelated API DTO and is not part of
-this package.
+`branding_team` and `market_research_team` each define their own run-lifecycle
+`WorkflowStatus(str, Enum)`. Both were evaluated for consolidation into this
+package alongside `HumanReview` and deliberately kept team-local — recorded here
+as the decision, with the evidence behind it, rather than re-litigated per team.
+
+**branding_team.WorkflowStatus** (`branding_team/models.py:43-52`): `NEEDS_HUMAN_DECISION`,
+`READY_FOR_ROLLOUT`. Produced by the single pure function
+`BrandingTeamOrchestrator._build_status_summary` (`orchestrator.py:443-475`), shared by
+both the thread-mode run path and the Temporal `finalize_branding_activity` via
+`_assemble_team_output`. Recomputed fresh into a new `TeamOutput` on every run — never
+mutated in place.
+
+| `human_review.approved` | `current_phase` | Result |
+|---|---|---|
+| `False` | any | `NEEDS_HUMAN_DECISION` |
+| `True` | `< COMPLETE` | `NEEDS_HUMAN_DECISION` |
+| `True` | `== COMPLETE` | `READY_FOR_ROLLOUT` (terminal) |
+
+(`branding_team` also has three unrelated status vocabularies in the same package —
+`BrandStatus` for the brand entity, job-store `JOB_STATUS_*` for background jobs, and ad
+hoc session/question strings — none of which are part of this comparison.)
+
+**market_research_team.WorkflowStatus** (`market_research_team/models.py:20-30`):
+`DRAFT`, `NEEDS_HUMAN_DECISION`, `READY_FOR_EXECUTION`. Produced by the single pure
+function `MarketResearchOrchestrator.assemble` (`orchestrator.py:231-291`), branching
+only on `human_review.approved` (`True` → `READY_FOR_EXECUTION`, `False` →
+`NEEDS_HUMAN_DECISION`). `DRAFT` is defined but currently dead — no code path produces it.
+
+**investment_team**: no `WorkflowStatus` enum exists. `api/main.py`'s
+`WorkflowStatusResponse` (`mode`, `audit_log`, `queue_counts`) is an unrelated API DTO
+backed by `WorkflowMode` (`models.py:116-120`: `ADVISORY`/`PAPER`/`LIVE`/`MONITOR_ONLY`) —
+a trading-mode setting, not a run-lifecycle status. Its other status vocabularies
+(`AdvisorSessionStatus`, `PaperTradingStatus`, `ValidationStatus`, `JOB_STATUS_*`,
+`STRATEGY_LAB_TERMINAL_STATUSES`) serve job/backtest/paper-trading lifecycles unrelated
+to human approval.
+
+The one investment_team enum that *is* approval-derived, and so was explicitly evaluated
+against `WorkflowStatus`, is **`PromotionStage`** (`models.py:103-107`: `REJECT` /
+`REVISE` / `PAPER` / `LIVE`), returned by `PromotionGateAgent.decide`
+(`agents.py:136-300`). Unlike `WorkflowStatus`, its outcome isn't a single
+`human_review.approved` branch — `decide` walks five independent, ordered gates
+(separation-of-duties, risk veto, validation checklist, IPS live-trading permission,
+then `ips.human_approval_required_for_live and not human_live_approval`), any of which
+can short-circuit to `REJECT`/`REVISE`/`PAPER` before human approval is even checked. The
+last gate only *blocks* `LIVE` on missing approval when the IPS requires it
+(`ips.human_approval_required_for_live`); when that setting is `False`, `decide` reaches
+`LIVE` regardless of `human_live_approval` — reaching `LIVE` is conditionally, not
+unconditionally, approval-dependent. Each decision also carries a
+`gate_results: List[GateCheckResult]` trace and an `AuditContext` (`models.py:1124-1138`)
+that `WorkflowStatus` has no equivalent of. Given the different shape (five-gate
+checklist producing an audited decision, vs. a single boolean gate producing a display
+tag) and the complete non-overlap in member names, `PromotionStage` was evaluated and
+kept out of this comparison rather than silently omitted.
+
+`investment_team/spec_models.py:33-48` also defines a deprecated V1 mirror —
+`PromotionStageV1` (`DESIGN`/`BACKTEST`/`WALK_FORWARD`/`PAPER`/`LIVE_CANDIDATE`/`LIVE`)
+and `PromotionDecisionType` (…`APPROVE_LIVE`…), carried by `PromotionDecisionV1`
+(`spec_models.py:410-422`, `human_approval_required: bool = True`). The module docstring
+marks it "retained for backward compatibility only; new features should not add V1
+mirrors here," and it isn't wired into `PromotionGateAgent.decide` or any other runtime
+gate logic — it's re-exported (`__init__.py`) and documented as an agent's I/O contract
+in `agent_catalog.py`, and constructed directly in one test, but nothing in
+`investment_team` computes a `PromotionDecisionV1` from a live approval check the way
+`PromotionStage` or `WorkflowStatus` are computed. It's excluded from this comparison for
+the same reason it's excluded from new runtime work generally: it's a frozen legacy
+contract, not an active status representation.
+
+**Decision: keep independent (no shared enum).** Only the string `"needs_human_decision"`
+is genuinely common between branding and market research; each team's terminal state
+names a different domain outcome (`ready_for_rollout` vs. `ready_for_execution`), and
+market research carries an extra, currently-unused `DRAFT`. A shared enum would need
+either an awkward union of all per-team terminal values (defeating the point of an enum
+as a closed set) or a lossy shared subset still requiring a per-team extension — more
+complexity than the current two ~10-line enums. `investment_team`'s approval-adjacent
+enums — runtime `PromotionStage` and the deprecated V1 `PromotionStageV1`/
+`PromotionDecisionType` — were evaluated above and excluded on shape (multi-gate
+audited checklists, not a boolean-derived tag), conditional rather than unconditional
+approval dependence, and (for the V1 pair) frozen legacy status, not overlooked.
+The one piece that *was* genuinely duplicated across teams — the
+`HumanReview` approve/reject gate — is already shared here; each team derives its own
+`WorkflowStatus` from `human_review.approved` at the orchestrator boundary, which is
+exactly why `WorkflowStatus` itself was not folded into this package.
 
 ## Layout & conventions
 

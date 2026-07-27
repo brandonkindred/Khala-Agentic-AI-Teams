@@ -526,6 +526,21 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
     expect(component.isMicrotaskPhasePending('backend', 'documentation')).toBe(true);
   });
 
+  it('isMicrotaskPhaseCompleted does not show QA as passed while QA+Security run concurrently', () => {
+    component.status = buildStatus({
+      team_progress: {
+        backend: { current_microtask_phase: 'qa_security_testing' } as never,
+      },
+    });
+    expect(component.isMicrotaskPhaseCompleted('backend', 'coding')).toBe(true);
+    expect(component.isMicrotaskPhaseCompleted('backend', 'code_review')).toBe(true);
+    expect(component.isMicrotaskPhaseCompleted('backend', 'qa_testing')).toBe(false);
+    expect(component.isMicrotaskPhaseCompleted('backend', 'security_testing')).toBe(false);
+    expect(component.isMicrotaskPhaseCurrent('backend', 'qa_testing')).toBe(true);
+    expect(component.isMicrotaskPhaseCurrent('backend', 'security_testing')).toBe(true);
+    expect(component.isMicrotaskPhasePending('backend', 'documentation')).toBe(true);
+  });
+
   it('isMicrotaskPhaseCompleted maps review/problem_solving to code_review', () => {
     component.status = buildStatus({
       team_progress: { backend: { current_microtask_phase: 'review' } as never },
