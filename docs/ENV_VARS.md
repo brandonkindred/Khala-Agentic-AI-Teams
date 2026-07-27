@@ -594,11 +594,22 @@ sliced in the prompt, so the reservation, the cache key, and the prompt can neve
 diverge.
 
 ### CODE_REVIEW_MAP_PARALLELISM
-Max concurrent review LLM calls per review run, shared by both phases: the map
-phase (chunk reviews) and the later false-positive verification phase (one call
-per cited file). The two phases run sequentially, so this is a single budget,
-not two. Default `4`, floor `1` (`1` runs both phases' calls sequentially).
-Results merge in deterministic order regardless of completion order.
+Ceiling on concurrent review LLM calls per review run, shared by both phases:
+the map phase (chunk reviews) and the later false-positive verification phase
+(one call per cited file). The two phases run sequentially, so this is a
+single budget, not two. Default `16`, floor `1` (`1` runs both phases' calls
+sequentially). Results merge in deterministic order regardless of completion
+order.
+
+The value actually used is `min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY,
+chunk_count)` (see `LLM_MAX_CONCURRENCY` above) -- an adaptive fan-out width
+rather than a flat one: small reviews (few chunks) never request more workers
+than they have chunks, and raising this ceiling for large reviews can never
+push the map phase past the process-wide `LLM_MAX_CONCURRENCY` gate, no matter
+what else is concurrently in flight. With both vars at their defaults (`16`
+and `4`), the effective width is unchanged from the previous fixed-`4`
+behavior; raise `LLM_MAX_CONCURRENCY` (and this var, if a higher value is
+desired) together to let large-PR reviews fan out wider.
 
 **Applies only to the in-process thread-mode fallback** (`coordinator.run_coordinator`,
 via `mapping.py`'s parallel-map helper) — used only when Temporal is disabled or

@@ -46,7 +46,9 @@ _LINES_SUFFIX_RE = re.compile(r"\s*\(lines \d+-\d+ of \d+\)\s*$")
 # Both knobs are env-overridable (see docs/ENV_VARS.md).
 MIN_SPLIT_SEGMENT_CHARS = 8_000  # CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS, floor 1_000
 MAX_CHUNK_BISECT_DEPTH = 3  # CODE_REVIEW_MAX_BISECT_DEPTH, floor 0
-DEFAULT_MAP_PARALLELISM = 4  # CODE_REVIEW_MAP_PARALLELISM, floor 1
+DEFAULT_MAP_PARALLELISM = (
+    16  # CODE_REVIEW_MAP_PARALLELISM ceiling, floor 1; clamped by LLM_MAX_CONCURRENCY
+)
 
 _BLOCK_JOINER_CHARS = 2  # "\n\n" between rendered blocks in a chunk
 
@@ -82,7 +84,18 @@ def _max_bisect_depth() -> int:
 
 
 def _map_parallelism() -> int:
-    return parse_env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
+    """Configured map-phase fan-out ceiling, clamped by the process-global LLM gate.
+
+    Postconditions:
+        - Returns ``min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY)``, floored
+          at 1, so raising this ceiling for a large review can never request more
+          concurrent LLM calls than the process-wide semaphore allows regardless of
+          what else is in flight.
+    """
+    from llm_service.concurrency import get_llm_max_concurrency
+
+    ceiling = parse_env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
+    return max(1, min(ceiling, get_llm_max_concurrency()))
 
 
 def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:

@@ -20,6 +20,7 @@ from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
 from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
     _issues_from_chunk_output,
+    _map_parallelism,
     _render_architecture_context,
     _segment_range_label,
     _tail_passes_run_sequentially,
@@ -1894,6 +1895,92 @@ def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
             CodeReviewInput(files=files, task_description="t", language="python"),
         )
     assert client.saw_second is False, "later chunk must not be reviewed after fail-fast"
+
+
+def test_map_parallelism_clamped_by_llm_max_concurrency(monkeypatch) -> None:
+    """The configured CODE_REVIEW_MAP_PARALLELISM ceiling is clamped by
+    LLM_MAX_CONCURRENCY, so a wide ceiling never yields a width above the
+    process-global gate."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "20")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "2")
+    assert _map_parallelism() == 2
+
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "3")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "10")
+    assert _map_parallelism() == 3
+
+    monkeypatch.delenv("CODE_REVIEW_MAP_PARALLELISM", raising=False)
+    monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)
+    assert (
+        _map_parallelism() == 4
+    )  # default ceiling (16) clamped by default LLM_MAX_CONCURRENCY (4)
+
+
+def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) -> None:
+    """End-to-end: with a high CODE_REVIEW_MAP_PARALLELISM ceiling but a low
+    LLM_MAX_CONCURRENCY, the map phase never runs more concurrent chunk
+    reviews than the global gate allows, even with more chunks available
+    than that gate."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "20")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "2")
+
+    lock = threading.Lock()
+    state = {"current": 0, "peak": 0}
+    release = threading.Event()
+
+    class _ConcurrencyProbe(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            with lock:
+                state["current"] += 1
+                state["peak"] = max(state["peak"], state["current"])
+            release.wait(timeout=5)
+            with lock:
+                state["current"] -= 1
+            return super().complete_json(prompt, **kwargs)
+
+    def _release_soon() -> None:
+        time.sleep(0.2)
+        release.set()
+
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(5)}
+    client = _ConcurrencyProbe()
+    threading.Thread(target=_release_soon, daemon=True).start()
+    try:
+        run_coordinator(
+            client, CodeReviewInput(files=files, task_description="t", language="python")
+        )
+    finally:
+        release.set()
+    assert state["peak"] <= 2
+
+
+def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
+    """With a high ceiling and high LLM_MAX_CONCURRENCY, a diff with fewer
+    chunks than either limit still uses no more workers than it has chunks."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "16")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "16")
+
+    lock = threading.Lock()
+    state = {"current": 0, "peak": 0}
+
+    class _ConcurrencyProbe(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            with lock:
+                state["current"] += 1
+                state["peak"] = max(state["peak"], state["current"])
+            time.sleep(0.05)
+            with lock:
+                state["current"] -= 1
+            return super().complete_json(prompt, **kwargs)
+
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(3)}
+    client = _ConcurrencyProbe()
+    run_coordinator(client, CodeReviewInput(files=files, task_description="t", language="python"))
+    assert 2 <= state["peak"] <= 3
 
 
 def test_headerless_code_reviews_as_single_unnamed_block() -> None:
