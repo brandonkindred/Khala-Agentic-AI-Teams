@@ -647,6 +647,28 @@ def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     assert parsed.constraint_layer == 0
 
 
+def test_parse_open_question_preserves_option_order_when_marking_default() -> None:
+    """_parse_open_question should keep the original option order, not sort by confidence."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-004",
+            "question_text": "Which option should be default?",
+            "options": [
+                {"id": "opt_a", "label": "A", "is_default": False, "confidence": 0.3},
+                {"id": "opt_b", "label": "B", "is_default": False, "confidence": 0.9},
+                {"id": "opt_c", "label": "C", "is_default": False, "confidence": 0.5},
+            ],
+        },
+        index=0,
+    )
+
+    assert [opt.id for opt in parsed.options] == ["opt_a", "opt_b", "opt_c"]
+    assert [opt.is_default for opt in parsed.options] == [False, True, False]
+
+
 def test_convert_to_pending_questions_includes_extended_metadata() -> None:
     """Pending question payload should include gate-aware metadata for UI and orchestration."""
     llm = MagicMock()
