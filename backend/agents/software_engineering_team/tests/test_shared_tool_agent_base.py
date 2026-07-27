@@ -461,6 +461,21 @@ def test_problem_solve_fixes(monkeypatch):
     assert "fixed 1 of 1 issue(s) (one at a time)." in out.summary
 
 
+def test_problem_solve_escapes_braces_in_code(monkeypatch):
+    """Relevant code containing literal ``{``/``}`` (dict literals, f-strings,
+    etc.) must not be interpreted as ``str.format`` placeholders — the fix
+    proceeds normally instead of raising KeyError/IndexError or being skipped."""
+    agent = _make(monkeypatch, "## FILE x.ts ##\nfixed")
+    code_with_braces = 'config = {"a": 1}\nname = f"{value}"'
+    out = agent.problem_solve(
+        _Input(
+            current_files={"x.ts": code_with_braces},
+            review_issues=[ReviewIssue(source="demo", file_path="x.ts")],
+        )
+    )
+    assert "fixed 1 of 1 issue(s) (one at a time)." in out.summary
+
+
 def test_problem_solve_llm_exception(monkeypatch):
     """An exception raised by the underlying LLM agent while fixing an issue
     is caught per-issue: the issue counts as unfixed ("fixed 0 of 1") rather

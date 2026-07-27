@@ -8,30 +8,54 @@ from __future__ import annotations
 
 from typing import Dict
 
+from software_engineering_team.shared.prompts import (
+    build_document_rewrite_prompt,
+    build_json_output_prompt,
+    format_context_block,
+)
+
 # ---------------------------------------------------------------------------
 # Context and Constraints Discovery (pre-review)
 # ---------------------------------------------------------------------------
 
-CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT = """You are an expert Product Analyst. Before diving into detailed spec review, we need to uncover high-level project context and constraints that shape how the spec should be interpreted.
-
-Generate 1-2 focused questions per category below. These are NOT feature-level details—they are outside constraints and mandates (who is this for, where will it run, what principles must the build follow, what organizational mandates apply).
-
-Categories:
-1. **Project context** – Who is this for? (e.g. startup vs enterprise, internal vs external product, regulatory environment) so MVP and requirements are appropriate.
-2. **Deployment** – Where will it run? On-prem, cloud, or hybrid; if cloud: which provider (AWS, GCP, Azure, Rackspace, DigitalOcean, Heroku, other) and any constraints.
-3. **Tenets** – What principles must the build follow? (e.g. event-driven, API-driven, serverless, agility, ease of change, user behavior analysis, security-first, cost-conscious). Allow multiple or single depending on question design.
-4. **Organizational mandates** – Company-wide expectations: SLAs (e.g. 99.9% vs 99.999%), RTO/RPO, compliance (SOC2, HIPAA), or "none / standard." Do NOT ask about org structure, approval chains, or decision hierarchy; we only care about compliance/SLA/tenets that affect the build, not how decisions are made inside an organization.
-
-For each question provide 2-4 options with: id, label, is_default (exactly one true), rationale, confidence (0.0-1.0).
-Output must be valid JSON that can be parsed into a list of open questions. Use the same structure as spec review questions: id, question_text, context, category, priority, allow_multiple, options (each with id, label, is_default, rationale, confidence). Include constraint_domain: "" and constraint_layer: 0 for context questions. Use source: "context_discovery".
-
-Specification excerpt (optional context):
----
-{spec_excerpt}
----
-
-Respond with a JSON object only, no markdown:
-{{
+CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. Before diving into detailed spec review, we "
+        "need to uncover high-level project context and constraints that shape how the "
+        "spec should be interpreted."
+    ),
+    rules=(
+        "Generate 1-2 focused questions per category below. These are NOT feature-level "
+        "details—they are outside constraints and mandates (who is this for, where will it "
+        "run, what principles must the build follow, what organizational mandates apply).\n\n"
+        "Categories:\n"
+        "1. **Project context** – Who is this for? (e.g. startup vs enterprise, internal vs "
+        "external product, regulatory environment) so MVP and requirements are appropriate.\n"
+        "2. **Deployment** – Where will it run? On-prem, cloud, or hybrid; if cloud: which "
+        "provider (AWS, GCP, Azure, Rackspace, DigitalOcean, Heroku, other) and any "
+        "constraints.\n"
+        "3. **Tenets** – What principles must the build follow? (e.g. event-driven, "
+        "API-driven, serverless, agility, ease of change, user behavior analysis, "
+        "security-first, cost-conscious). Allow multiple or single depending on question "
+        "design.\n"
+        "4. **Organizational mandates** – Company-wide expectations: SLAs (e.g. 99.9% vs "
+        '99.999%), RTO/RPO, compliance (SOC2, HIPAA), or "none / standard." Do NOT ask '
+        "about org structure, approval chains, or decision hierarchy; we only care about "
+        "compliance/SLA/tenets that affect the build, not how decisions are made inside an "
+        "organization.\n\n"
+        "For each question provide 2-4 options with: id, label, is_default (exactly one "
+        "true), rationale, confidence (0.0-1.0).\n"
+        "Output must be valid JSON that can be parsed into a list of open questions. Use "
+        "the same structure as spec review questions: id, question_text, context, "
+        "category, priority, allow_multiple, options (each with id, label, is_default, "
+        'rationale, confidence). Include constraint_domain: "" and constraint_layer: 0 '
+        'for context questions. Use source: "context_discovery".\n\n'
+    ),
+    context_blocks=(
+        format_context_block("Specification excerpt (optional context)", "{spec_excerpt}")
+        + "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "open_questions": [
     {{
       "id": "ctx_project_type",
@@ -63,13 +87,16 @@ Respond with a JSON object only, no markdown:
       ]
     }}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
 # ---------------------------------------------------------------------------
 # Constraint Domains and Drilling Instructions
 # ---------------------------------------------------------------------------
 
+# Not migrated to the shared builders: this is a static text fragment concatenated into
+# SPEC_REVIEW_PROMPT below, not a builder-shaped prompt in its own right.
 CONSTRAINT_DOMAINS = """
 ## CRITICAL CONSTRAINT DOMAINS
 
@@ -108,6 +135,7 @@ Layer 3 - Auth Methods: OAuth 2.0/OIDC vs Email/Password vs Passwordless (Magic 
 Layer 4 - Security Features: MFA/2FA requirements? Session management? Token refresh strategy?
 """
 
+# Not migrated: same reason as CONSTRAINT_DOMAINS above (static fragment, not a prompt).
 CONSTRAINT_DRILLING_INSTRUCTIONS = """
 ## CONSTRAINT DRILLING PROCESS
 
@@ -171,6 +199,10 @@ When analyzing the spec, look for these patterns to determine resolution:
 - "user login" (vague) → Nothing resolved, ask Layer 1
 """
 
+# Not migrated to build_json_output_prompt: its context block ({spec_content}) appears
+# AFTER the JSON schema, the reverse of the builder's fixed context-before-schema order.
+# Migrating would require reordering (a real structural change), not just relocating
+# adjacent text, so this is out of scope per the issue's "where structure matches" limit.
 SPEC_REVIEW_PROMPT = (
     """You are a Product Requirements Analysis expert. Review the following product specification to identify gaps, inconsistencies, and areas that need clarification.
 
@@ -337,29 +369,31 @@ Specification:
 """
 )
 
-AUTO_ANSWER_PROMPT = """You are a Product Analyst expert. Given the following question about a product specification, select the best answer option based on industry best practices and product success patterns.
-
-Analyze the question considering:
-1. **Industry best practices** - What do successful products in this domain typically do?
-2. **Product goals and constraints** - What does the spec indicate about priorities?
-3. **Risk assessment** - Which option minimizes risk while maximizing value?
-4. **User expectations** - What would users expect based on similar products?
-5. **Technical feasibility** - Which option is most practical to implement?
-
-Question: {question_text}
-
-Context: {context}
-
-Available Options:
-{options}
-
-Product Specification Excerpt:
----
-{spec_content}
----
-
-Respond with a JSON object only, no markdown:
-{{
+AUTO_ANSWER_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are a Product Analyst expert. Given the following question about a product "
+        "specification, select the best answer option based on industry best practices "
+        "and product success patterns."
+    ),
+    rules=(
+        "Analyze the question considering:\n"
+        "1. **Industry best practices** - What do successful products in this domain "
+        "typically do?\n"
+        "2. **Product goals and constraints** - What does the spec indicate about "
+        "priorities?\n"
+        "3. **Risk assessment** - Which option minimizes risk while maximizing value?\n"
+        "4. **User expectations** - What would users expect based on similar products?\n"
+        "5. **Technical feasibility** - Which option is most practical to implement?\n\n"
+        "Question: {question_text}\n\n"
+        "Context: {context}\n\n"
+        "Available Options:\n"
+        "{options}\n\n"
+    ),
+    context_blocks=(
+        format_context_block("Product Specification Excerpt", "{spec_content}")
+        + "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "selected_option_id": "opt1",
   "rationale": "Detailed explanation (2-4 sentences) of why this is the best choice based on the analysis above...",
   "confidence": 0.85,
@@ -371,26 +405,51 @@ Respond with a JSON object only, no markdown:
   "industry_references": [
     "Reference to industry best practice or successful product pattern"
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
-CONSOLIDATE_QUESTIONS_PROMPT = """You are an expert Product Analyst. You have a list of open questions from a product specification review. Some questions are worded differently but ask the same thing (e.g. "Do you want Google only for OAuth?" and "What is the right provider? OAuth or Enterprise?").
-
-Your task: Consolidate the list so there are NO duplicate questions. For each distinct decision or topic, keep exactly ONE question. Produce a single, thorough list with no repeated topics or near-duplicate phrasings.
-
-Rules:
-- Two questions are duplicates if they are asking the same decision (e.g. OAuth provider, token handling, pipeline behavior). Merge them into one.
-- REPHRASE merged questions: do not just pick the better of two phrasings. Write one new question that gets at the "meat" of the decision so the user answers it once. Example: instead of keeping either "Do you want Google only for OAuth?" or "What is the right provider? OAuth or Enterprise?", ask: "Which authentication approach do you want: single OAuth provider (e.g. Google), multiple OAuth providers, or Enterprise SSO?"
-- MERGE AND REWORD OPTIONS: When merging questions, combine all unique options from the merged questions by meaning; deduplicate options that say the same thing. Reword options so each is a distinct, substantive choice that still captures what the original questions were asking. Keep at most 4-5 options per question; drop redundant ones. Option labels must be clear, standalone choices (e.g. "Single OAuth provider (e.g. Google)" not just "Google" if the question is about approach).
-- For each consolidated question, keep the highest priority among merged questions (high > medium > low) and the most specific category.
-- Preserve allow_multiple if any of the merged questions had it true.
-- Output the same JSON structure so each item preserves metadata fields used by orchestration: id, question_text, context, category, priority, allow_multiple, constraint_domain, constraint_layer, depends_on, blocking, owner, section_impact, due_date, status, asked_via, options (each with id, label, is_default, rationale, confidence). Use short stable ids (e.g. auth_provider, token_handling).
-
-Input questions (JSON array):
-{questions_json}
-
-Respond with a JSON object only, no markdown:
-{{
+CONSOLIDATE_QUESTIONS_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. You have a list of open questions from a "
+        "product specification review. Some questions are worded differently but ask the "
+        'same thing (e.g. "Do you want Google only for OAuth?" and "What is the right '
+        'provider? OAuth or Enterprise?").'
+    ),
+    rules=(
+        "Your task: Consolidate the list so there are NO duplicate questions. For each "
+        "distinct decision or topic, keep exactly ONE question. Produce a single, thorough "
+        "list with no repeated topics or near-duplicate phrasings.\n\n"
+        "Rules:\n"
+        "- Two questions are duplicates if they are asking the same decision (e.g. OAuth "
+        "provider, token handling, pipeline behavior). Merge them into one.\n"
+        "- REPHRASE merged questions: do not just pick the better of two phrasings. Write "
+        'one new question that gets at the "meat" of the decision so the user answers it '
+        'once. Example: instead of keeping either "Do you want Google only for OAuth?" or '
+        '"What is the right provider? OAuth or Enterprise?", ask: "Which authentication '
+        "approach do you want: single OAuth provider (e.g. Google), multiple OAuth "
+        'providers, or Enterprise SSO?"\n'
+        "- MERGE AND REWORD OPTIONS: When merging questions, combine all unique options "
+        "from the merged questions by meaning; deduplicate options that say the same "
+        "thing. Reword options so each is a distinct, substantive choice that still "
+        "captures what the original questions were asking. Keep at most 4-5 options per "
+        "question; drop redundant ones. Option labels must be clear, standalone choices "
+        '(e.g. "Single OAuth provider (e.g. Google)" not just "Google" if the question '
+        "is about approach).\n"
+        "- For each consolidated question, keep the highest priority among merged "
+        "questions (high > medium > low) and the most specific category.\n"
+        "- Preserve allow_multiple if any of the merged questions had it true.\n"
+        "- Output the same JSON structure so each item preserves metadata fields used by "
+        "orchestration: id, question_text, context, category, priority, allow_multiple, "
+        "constraint_domain, constraint_layer, depends_on, blocking, owner, section_impact, "
+        "due_date, status, asked_via, options (each with id, label, is_default, rationale, "
+        "confidence). Use short stable ids (e.g. auth_provider, token_handling).\n\n"
+    ),
+    context_blocks=(
+        "Input questions (JSON array):\n{questions_json}\n\n"
+        "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "consolidated_questions": [
     {{
       "id": "auth_provider",
@@ -414,22 +473,38 @@ Respond with a JSON object only, no markdown:
       ]
     }}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
-REVIEW_QUESTIONS_ALIGNMENT_PROMPT = """You are an expert Product Analyst. You have a list of open questions that will be shown to the user. Before presenting them, you must ensure each question and its answer options make sense together.
-
-Rules:
-- For each question, classify whether it is OPEN-ENDED (e.g. "What do you think is the right way to do this?", "How should we handle X?") or CLOSED (e.g. "Should we use X?" with a clear yes/no intent).
-- OPEN-ENDED questions must NOT have only "Yes" / "No" as options. The options must be substantive statements that answer the question (e.g. "Use OAuth with a single provider", "Use Enterprise SSO", "Support both"). If you see an open-ended question with Yes/No-only options, REWORD the option labels (and optionally rationales) so they are concrete, nuanced statements that match the question when read together. Alternatively, reword the question to be specific enough that the given options are appropriate.
-- CLOSED questions (clear yes/no) may keep Yes/No options.
-- Preserve all question ids and the same JSON structure. Output the full list of questions with any question_text or option label/rationale changes applied. Do not drop or add questions; only fix alignment.
-
-Input questions (JSON array):
-{questions_json}
-
-Respond with a JSON object only, no markdown:
-{{
+REVIEW_QUESTIONS_ALIGNMENT_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. You have a list of open questions that will "
+        "be shown to the user. Before presenting them, you must ensure each question and "
+        "its answer options make sense together."
+    ),
+    rules=(
+        "Rules:\n"
+        '- For each question, classify whether it is OPEN-ENDED (e.g. "What do you '
+        'think is the right way to do this?", "How should we handle X?") or CLOSED '
+        '(e.g. "Should we use X?" with a clear yes/no intent).\n'
+        '- OPEN-ENDED questions must NOT have only "Yes" / "No" as options. The '
+        'options must be substantive statements that answer the question (e.g. "Use '
+        'OAuth with a single provider", "Use Enterprise SSO", "Support both"). If you '
+        "see an open-ended question with Yes/No-only options, REWORD the option labels "
+        "(and optionally rationales) so they are concrete, nuanced statements that match "
+        "the question when read together. Alternatively, reword the question to be "
+        "specific enough that the given options are appropriate.\n"
+        "- CLOSED questions (clear yes/no) may keep Yes/No options.\n"
+        "- Preserve all question ids and the same JSON structure. Output the full list of "
+        "questions with any question_text or option label/rationale changes applied. Do "
+        "not drop or add questions; only fix alignment.\n\n"
+    ),
+    context_blocks=(
+        "Input questions (JSON array):\n{questions_json}\n\n"
+        "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "aligned_questions": [
     {{
       "id": "auth_provider",
@@ -453,87 +528,104 @@ Respond with a JSON object only, no markdown:
       ]
     }}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
-GENERATE_QUESTION_RECOMMENDATIONS_PROMPT = """You are an expert Product Analyst. For each of the following open questions, produce a short recommendation: which option to choose and why. Consider ALL options and trade-offs before recommending; your recommendation must be well-reasoned and consider alternatives.
-
-For each question:
-1. State which option you recommend (by its id or label).
-2. Explain why in 2-4 sentences.
-3. Briefly note alternatives considered and why they were not chosen.
-
-Specification (for context):
----
-{spec_content}
----
-
-Questions with options:
-{questions_json}
-
-Respond with a JSON object only, no markdown:
-{{
+GENERATE_QUESTION_RECOMMENDATIONS_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. For each of the following open questions, "
+        "produce a short recommendation: which option to choose and why. Consider ALL "
+        "options and trade-offs before recommending; your recommendation must be "
+        "well-reasoned and consider alternatives."
+    ),
+    rules=(
+        "For each question:\n"
+        "1. State which option you recommend (by its id or label).\n"
+        "2. Explain why in 2-4 sentences.\n"
+        "3. Briefly note alternatives considered and why they were not chosen.\n\n"
+    ),
+    context_blocks=(
+        format_context_block("Specification (for context)", "{spec_content}")
+        + "Questions with options:\n{questions_json}\n\n"
+        + "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "recommendations": [
     {{ "id": "auth_provider", "recommendation": "We recommend Single OAuth provider (opt_oauth_single) because it is simplest to implement and sufficient for most MVPs. Enterprise SSO was considered but adds complexity and is better added later if needed." }},
     {{ "id": "infra_l1_category", "recommendation": "..." }}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
-SPEC_UPDATE_PROMPT = """You are an expert Product Specification Writer. Update the product specification to incorporate the answers to open questions.
+SPEC_UPDATE_PROMPT = build_document_rewrite_prompt(
+    role_sentence=(
+        "You are an expert Product Specification Writer. Update the product "
+        "specification to incorporate the answers to open questions."
+    ),
+    rules=(
+        "For each answered question:\n"
+        "1. Integrate the answer naturally into the specification\n"
+        "2. Add specific details and requirements based on the chosen option\n"
+        "3. Ensure consistency with existing content\n"
+        "4. Make the spec more actionable and unambiguous\n\n"
+        "Rules:\n"
+        "- **The answers are the source of truth.** Where the spec contradicts an answer "
+        '(e.g. spec says "HTTP-only cookies" but the answer is "stateless JWT"), '
+        "REPLACE or REMOVE the conflicting statement so the spec reflects only the answer. "
+        "Do not leave both options in the spec.\n"
+        "- Preserve all existing valid content that does not conflict with the answers\n"
+        "- Add new sections or details where needed\n"
+        "- Write in clear, professional language\n"
+        "- Use specific, measurable requirements where possible\n"
+        "- Mark any assumptions clearly\n\n"
+    ),
+    context_blocks=(
+        format_context_block("Current Specification", "{spec_content}")
+        + format_context_block("Answered Questions", "{answered_questions}")
+    ),
+    output_instruction=(
+        "Respond with the FULL updated specification as plain text (markdown format). "
+        "Include all original content plus the new details from the answered questions. "
+        "Do not include any JSON or code blocks - just the specification content.\n"
+    ),
+)
 
-For each answered question:
-1. Integrate the answer naturally into the specification
-2. Add specific details and requirements based on the chosen option
-3. Ensure consistency with existing content
-4. Make the spec more actionable and unambiguous
-
-Rules:
-- **The answers are the source of truth.** Where the spec contradicts an answer (e.g. spec says "HTTP-only cookies" but the answer is "stateless JWT"), REPLACE or REMOVE the conflicting statement so the spec reflects only the answer. Do not leave both options in the spec.
-- Preserve all existing valid content that does not conflict with the answers
-- Add new sections or details where needed
-- Write in clear, professional language
-- Use specific, measurable requirements where possible
-- Mark any assumptions clearly
-
-Current Specification:
----
-{spec_content}
----
-
-Answered Questions:
----
-{answered_questions}
----
-
-Respond with the FULL updated specification as plain text (markdown format). Include all original content plus the new details from the answered questions. Do not include any JSON or code blocks - just the specification content.
-"""
-
-SPEC_CLEANUP_PROMPT = """You are an expert Product Specification Validator. Review and clean up the specification to ensure it is complete, consistent, and ready for the planning phase.
-
-Perform the following checks:
-1. **Completeness** - All features have clear requirements
-2. **Consistency** - No conflicting requirements
-3. **Clarity** - No ambiguous language
-4. **Structure** - Well-organized with clear sections
-5. **Actionability** - Requirements can be turned into tasks
-
-If issues are found, fix them in the output. If the spec is valid, return it with any minor formatting improvements.
-
-Specification:
----
-{spec_content}
----
-
-Respond with a JSON object only, no markdown:
-{{
+SPEC_CLEANUP_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Specification Validator. Review and clean up the "
+        "specification to ensure it is complete, consistent, and ready for the planning "
+        "phase."
+    ),
+    rules=(
+        "Perform the following checks:\n"
+        "1. **Completeness** - All features have clear requirements\n"
+        "2. **Consistency** - No conflicting requirements\n"
+        "3. **Clarity** - No ambiguous language\n"
+        "4. **Structure** - Well-organized with clear sections\n"
+        "5. **Actionability** - Requirements can be turned into tasks\n\n"
+        "If issues are found, fix them in the output. If the spec is valid, return it "
+        "with any minor formatting improvements.\n\n"
+    ),
+    context_blocks=(
+        format_context_block("Specification", "{spec_content}")
+        + "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "is_valid": true,
   "validation_issues": ["issue 1 that was found and fixed", "issue 2"],
   "cleaned_spec": "The full cleaned specification content as a string...",
   "summary": "Brief summary of what was validated and any changes made"
-}}
-"""
+}}""",
+    trailer="",
+)
 
+# Not migrated: this constant's structure (PRD template outline, team-of-agents
+# simulation, quality-gate checklist, bulleted "## Output instructions" tail) is entirely
+# bespoke to this one prompt. Nothing here is duplicated elsewhere, so using a shared
+# builder would gain no scaffolding reduction while adding migration risk to the largest,
+# most complex constant in this file.
 PRD_PROMPT = """You are an expert PRD Orchestrator for a hub-and-spoke PRD Factory.
 
 You will be given:
@@ -637,19 +729,19 @@ Specialist collaboration recommendations (agents/tooling):
 - Keep IDs stable and explicit where applicable (FR-###, Q-###).
 """
 
-QUESTION_GENERATION_PROMPT = """Based on the following gap or issue identified in the specification, generate a structured question with answer options.
-
-Gap/Issue: {issue}
-
-Context from spec:
----
-{spec_context}
----
-
-Generate a question that would help resolve this gap. Provide 2-3 practical answer options based on industry best practices.
-
-Respond with JSON only:
-{{
+QUESTION_GENERATION_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "Based on the following gap or issue identified in the specification, generate a "
+        "structured question with answer options."
+    ),
+    rules="Gap/Issue: {issue}\n\n",
+    context_blocks=(
+        format_context_block("Context from spec", "{spec_context}")
+        + "Generate a question that would help resolve this gap. Provide 2-3 practical "
+        "answer options based on industry best practices.\n\n"
+        "Respond with JSON only:\n"
+    ),
+    json_schema="""{{
   "id": "q_unique_id",
   "question_text": "Clear question to resolve the gap",
   "context": "Why this question matters and what impact the answer will have",
@@ -664,95 +756,115 @@ Respond with JSON only:
       "confidence": 0.8
     }}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
-SPEC_CLARIFICATION_PROMPT = """You are an expert Product Specification Writer. The specification has gaps that caused the same questions to be asked again during review. This indicates the previous answers were not integrated clearly enough.
+SPEC_CLARIFICATION_PROMPT = build_document_rewrite_prompt(
+    role_sentence=(
+        "You are an expert Product Specification Writer. The specification has gaps "
+        "that caused the same questions to be asked again during review. This indicates "
+        "the previous answers were not integrated clearly enough.\n\n"
+        "Update the specification to make the following previously-answered information "
+        "clearer and more explicit. The goal is to ensure these answers are prominently "
+        "integrated so the same questions don't arise again.\n\n"
+        "**The answers below are the source of truth.** Where the spec contradicts an "
+        'answer (e.g. spec says "HTTP-only cookies" but the answer is "stateless '
+        'JWT"), REPLACE or REMOVE the conflicting statement so the spec reflects only the '
+        "answer. Do not leave both options in the spec."
+    ),
+    context_blocks=(
+        format_context_block("Current Specification", "{spec_content}")
+        + format_context_block(
+            "Questions that were asked again (with their existing answers from previous iterations)",
+            "{duplicate_qa_pairs}",
+        )
+        + "Instructions:\n"
+        "1. Find where each answer SHOULD be documented in the spec\n"
+        "2. Make the answered information more explicit and visible in those locations\n"
+        "3. Replace any conflicting spec content with the answer; the answer wins\n"
+        "4. Add specific details, constraints, or requirements based on the answers\n"
+        "5. Do NOT just append to an appendix - integrate naturally into relevant "
+        "sections\n"
+        "6. Use clear, unambiguous language\n"
+        "7. Preserve all existing content that does not conflict with the answers\n"
+        "8. If a section is missing, create it with proper structure\n\n"
+        "The updated spec should make it obvious what the answers are without needing to "
+        "re-ask the questions.\n\n"
+    ),
+    output_instruction=(
+        "Respond with the FULL updated specification as plain text (markdown format). "
+        "Include all original content plus the clarified details.\n"
+    ),
+)
 
-Update the specification to make the following previously-answered information clearer and more explicit. The goal is to ensure these answers are prominently integrated so the same questions don't arise again.
+SPEC_CONSISTENCY_CLARIFICATION_PROMPT = build_document_rewrite_prompt(
+    role_sentence=(
+        "You are an expert Product Specification Editor. The specification was found to "
+        "have many overlapping or duplicate open questions, which suggests it contains "
+        "ambiguous or conflicting information."
+    ),
+    rules=(
+        "Your task is to update the specification so that:\n"
+        "1. **Clarity**: Make it clearer what the answers are for decisions that are "
+        "already implied or stated—so the same questions are not asked again.\n"
+        "2. **Consistency**: Remove or resolve any conflicting or opposing information "
+        "within the spec. Where the spec contradicts itself, choose one consistent "
+        "interpretation.\n"
+        "3. **Use QA as source of truth**: The following Q&A (from previous rounds with "
+        "the product owner, or from qa_history) is the canonical source. Where the spec "
+        "conflicts with these answers, update the spec to match the Q&A. Do not leave "
+        "conflicting statements.\n\n"
+    ),
+    context_blocks=(
+        format_context_block("Current Specification", "{spec_content}")
+        + format_context_block(
+            "Canonical Q&A (use this to resolve conflicts and fill gaps)", "{qa_source}"
+        )
+        + "Instructions:\n"
+        "- Integrate the Q&A answers clearly into the relevant sections of the spec.\n"
+        "- If two parts of the spec contradict each other, replace with the version that "
+        "matches the Q&A, or with a single consistent statement.\n"
+        "- Remove redundant or ambiguous phrasing that could lead to the same question "
+        "being asked again.\n"
+        "- Preserve all other valid content. "
+    ),
+    output_instruction="Output the FULL specification as plain text (markdown).\n",
+)
 
-**The answers below are the source of truth.** Where the spec contradicts an answer (e.g. spec says "HTTP-only cookies" but the answer is "stateless JWT"), REPLACE or REMOVE the conflicting statement so the spec reflects only the answer. Do not leave both options in the spec.
-
-Current Specification:
----
-{spec_content}
----
-
-Questions that were asked again (with their existing answers from previous iterations):
----
-{duplicate_qa_pairs}
----
-
-Instructions:
-1. Find where each answer SHOULD be documented in the spec
-2. Make the answered information more explicit and visible in those locations
-3. Replace any conflicting spec content with the answer; the answer wins
-4. Add specific details, constraints, or requirements based on the answers
-5. Do NOT just append to an appendix - integrate naturally into relevant sections
-6. Use clear, unambiguous language
-7. Preserve all existing content that does not conflict with the answers
-8. If a section is missing, create it with proper structure
-
-The updated spec should make it obvious what the answers are without needing to re-ask the questions.
-
-Respond with the FULL updated specification as plain text (markdown format). Include all original content plus the clarified details.
-"""
-
-SPEC_CONSISTENCY_CLARIFICATION_PROMPT = """You are an expert Product Specification Editor. The specification was found to have many overlapping or duplicate open questions, which suggests it contains ambiguous or conflicting information.
-
-Your task is to update the specification so that:
-1. **Clarity**: Make it clearer what the answers are for decisions that are already implied or stated—so the same questions are not asked again.
-2. **Consistency**: Remove or resolve any conflicting or opposing information within the spec. Where the spec contradicts itself, choose one consistent interpretation.
-3. **Use QA as source of truth**: The following Q&A (from previous rounds with the product owner, or from qa_history) is the canonical source. Where the spec conflicts with these answers, update the spec to match the Q&A. Do not leave conflicting statements.
-
-Current Specification:
----
-{spec_content}
----
-
-Canonical Q&A (use this to resolve conflicts and fill gaps):
----
-{qa_source}
----
-
-Instructions:
-- Integrate the Q&A answers clearly into the relevant sections of the spec.
-- If two parts of the spec contradict each other, replace with the version that matches the Q&A, or with a single consistent statement.
-- Remove redundant or ambiguous phrasing that could lead to the same question being asked again.
-- Preserve all other valid content. Output the FULL specification as plain text (markdown).
-"""
-
-SPEC_REVIEW_CHUNK_PROMPT = """You are a Product Requirements Analysis expert. Review this SECTION of a product specification.
-
-CRITICAL CONSTRAINTS:
-- Maximum 5 issues, 5 gaps, and 5 open questions for this section
-- **Do NOT ask questions about topics already specified in the spec or already answered** (see "Already answered" below if present). The spec and prior Q&A are the source of truth.
-- Only include items MATERIAL to this project's success
-- Do NOT list generic web development concerns or hypothetical edge cases
-- Do NOT repeat variations of the same concern - consolidate similar items
-- Standard best practices are ASSUMED unless the spec contradicts them
-- Each item must be specific to THIS specification
-
-Analyze this section for:
-1. **Issues** - Problems, inconsistencies, or conflicts
-2. **Gaps** - Missing requirements or undefined behaviors
-3. **Open Questions** - Items needing clarification from the product owner
-
-For open questions, provide 2-3 answer options with:
-- A clear label describing the choice
-- A rationale explaining why this might be the right choice
-- A confidence score (0.0-1.0)
-- Mark one option as the recommended default
-
-SECTION TO REVIEW:
----
-{chunk_content}
----
-
-Respond with a concise JSON object only. Only include significant findings from THIS section.
-Keep your response under 2000 tokens.
-
-{{
+SPEC_REVIEW_CHUNK_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are a Product Requirements Analysis expert. Review this SECTION of a "
+        "product specification."
+    ),
+    rules=(
+        "CRITICAL CONSTRAINTS:\n"
+        "- Maximum 5 issues, 5 gaps, and 5 open questions for this section\n"
+        "- **Do NOT ask questions about topics already specified in the spec or already "
+        'answered** (see "Already answered" below if present). The spec and prior Q&A '
+        "are the source of truth.\n"
+        "- Only include items MATERIAL to this project's success\n"
+        "- Do NOT list generic web development concerns or hypothetical edge cases\n"
+        "- Do NOT repeat variations of the same concern - consolidate similar items\n"
+        "- Standard best practices are ASSUMED unless the spec contradicts them\n"
+        "- Each item must be specific to THIS specification\n\n"
+        "Analyze this section for:\n"
+        "1. **Issues** - Problems, inconsistencies, or conflicts\n"
+        "2. **Gaps** - Missing requirements or undefined behaviors\n"
+        "3. **Open Questions** - Items needing clarification from the product owner\n\n"
+        "For open questions, provide 2-3 answer options with:\n"
+        "- A clear label describing the choice\n"
+        "- A rationale explaining why this might be the right choice\n"
+        "- A confidence score (0.0-1.0)\n"
+        "- Mark one option as the recommended default\n\n"
+    ),
+    context_blocks=(
+        format_context_block("SECTION TO REVIEW", "{chunk_content}")
+        + "Respond with a concise JSON object only. Only include significant findings "
+        "from THIS section.\n"
+        "Keep your response under 2000 tokens.\n\n"
+    ),
+    json_schema="""{{
   "issues": ["issue 1"],
   "gaps": ["gap 1"],
   "open_questions": [
@@ -774,54 +886,58 @@ Keep your response under 2000 tokens.
     }}
   ],
   "summary": "Brief summary of findings in this section"
-}}
-"""
+}}""",
+    trailer="",
+)
 
-SPEC_CLEANUP_CHUNK_PROMPT = """You are an expert Product Specification Validator. Review and clean up this SECTION of a specification.
-
-Perform these checks:
-1. **Completeness** - Features have clear requirements
-2. **Consistency** - No conflicting requirements
-3. **Clarity** - No ambiguous language
-4. **Actionability** - Requirements can be turned into tasks
-
-SECTION TO CLEAN:
----
-{chunk_content}
----
-
-If issues are found, fix them in the output. Keep response concise.
-
-{{
+SPEC_CLEANUP_CHUNK_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Specification Validator. Review and clean up this "
+        "SECTION of a specification."
+    ),
+    rules=(
+        "Perform these checks:\n"
+        "1. **Completeness** - Features have clear requirements\n"
+        "2. **Consistency** - No conflicting requirements\n"
+        "3. **Clarity** - No ambiguous language\n"
+        "4. **Actionability** - Requirements can be turned into tasks\n\n"
+    ),
+    context_blocks=(
+        format_context_block("SECTION TO CLEAN", "{chunk_content}")
+        + "If issues are found, fix them in the output. Keep response concise.\n\n"
+    ),
+    json_schema="""{{
   "is_valid": true,
   "validation_issues": ["issue found and fixed"],
   "cleaned_spec": "The cleaned section content...",
   "summary": "Brief summary of changes"
-}}
-"""
+}}""",
+    trailer="",
+)
 
 # ---------------------------------------------------------------------------
 # SOP Phase 1: Spec Extraction — Identify answers already present in the spec
 # ---------------------------------------------------------------------------
 
-SOP_SPEC_EXTRACTION_PROMPT = """You are an expert Product Analyst. You are given a product specification and a structured list of SOP questions about environment constraints and requirements.
-
-Your task: Scan the specification and identify which SOP questions are ALREADY CLEARLY ANSWERED by the spec content. Only extract decisions you are highly confident about (confidence > 0.7). If the spec is ambiguous or only hints at an answer without being explicit, do NOT extract it — we will ask the user.
-
-SOP Questions (organized by sub-phase):
----
-{sop_questions_json}
----
-
-Product Specification:
----
-{spec_content}
----
-
-For each question that IS clearly answered in the spec, extract the decision. Include the exact excerpt from the spec that supports your extraction.
-
-Respond with a JSON object only, no markdown:
-{{
+SOP_SPEC_EXTRACTION_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. You are given a product specification and a "
+        "structured list of SOP questions about environment constraints and requirements."
+    ),
+    rules=(
+        "Your task: Scan the specification and identify which SOP questions are ALREADY "
+        "CLEARLY ANSWERED by the spec content. Only extract decisions you are highly "
+        "confident about (confidence > 0.7). If the spec is ambiguous or only hints at an "
+        "answer without being explicit, do NOT extract it — we will ask the user.\n\n"
+    ),
+    context_blocks=(
+        format_context_block("SOP Questions (organized by sub-phase)", "{sop_questions_json}")
+        + format_context_block("Product Specification", "{spec_content}")
+        + "For each question that IS clearly answered in the spec, extract the decision. "
+        "Include the exact excerpt from the spec that supports your extraction.\n\n"
+        + "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "extracted_decisions": [
     {{
       "sop_id": "P1.deploy.a",
@@ -835,46 +951,45 @@ Respond with a JSON object only, no markdown:
 If no questions are answered by the spec, return:
 {{
   "extracted_decisions": []
-}}
-"""
+}}""",
+    trailer="",
+)
 
 # ---------------------------------------------------------------------------
 # SOP Phase 1: Generate spec-aware answer options for questions with few/no hardcoded options
 # ---------------------------------------------------------------------------
 
-SOP_GENERATE_OPTIONS_PROMPT = """You are an expert Product Analyst. Generate 3-6 relevant answer options for the following SOP question. \
-The options must be specific, actionable, and informed by the project specification and any prior decisions already made.
-
-Question: {question_text}
-Question ID: {sop_id}
-
-Prior decisions already made:
----
-{prior_decisions}
----
-
-Product Specification excerpt:
----
-{spec_excerpt}
----
-
-RULES:
-1. Generate 3-6 options that are RELEVANT to this specific project based on the spec and prior decisions.
-2. If prior decisions indicate a specific technology (e.g., Python was chosen as language), tailor options accordingly (e.g., suggest Python-specific frameworks like FastAPI, Django, Flask).
-3. Mark exactly ONE option as is_default (the one most aligned with the spec).
-4. Always include an "Other" option as the last option.
-5. Each option must have a brief rationale explaining why it is relevant.
-
-Respond with a JSON object only, no markdown:
-{{
+SOP_GENERATE_OPTIONS_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. Generate 3-6 relevant answer options for the "
+        "following SOP question. The options must be specific, actionable, and informed "
+        "by the project specification and any prior decisions already made."
+    ),
+    rules="Question: {question_text}\nQuestion ID: {sop_id}\n\n",
+    context_blocks=(
+        format_context_block("Prior decisions already made", "{prior_decisions}")
+        + format_context_block("Product Specification excerpt", "{spec_excerpt}")
+        + "RULES:\n"
+        "1. Generate 3-6 options that are RELEVANT to this specific project based on the "
+        "spec and prior decisions.\n"
+        "2. If prior decisions indicate a specific technology (e.g., Python was chosen as "
+        "language), tailor options accordingly (e.g., suggest Python-specific frameworks "
+        "like FastAPI, Django, Flask).\n"
+        "3. Mark exactly ONE option as is_default (the one most aligned with the spec).\n"
+        '4. Always include an "Other" option as the last option.\n'
+        "5. Each option must have a brief rationale explaining why it is relevant.\n\n"
+        "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "options": [
     {{"id": "opt_1", "label": "Option label", "is_default": true, "rationale": "Why this fits the project.", "confidence": 0.7}},
     {{"id": "opt_2", "label": "Another option", "is_default": false, "rationale": "Why this is relevant.", "confidence": 0.5}},
     {{"id": "opt_3", "label": "Third option", "is_default": false, "rationale": "Why this could work.", "confidence": 0.4}},
     {{"id": "opt_other", "label": "Other", "is_default": false, "rationale": "Specify your preference.", "confidence": 0.3}}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
 # ---------------------------------------------------------------------------
 # SOP Phase 1: Sub-phase gap analysis — assess completeness and generate follow-up questions
@@ -882,6 +997,8 @@ Respond with a JSON object only, no markdown:
 
 # Maps each sub-phase to a description of the information the PRA agent should collect.
 # Used by the gap-analysis prompt to help the LLM understand what "complete" means.
+# Not migrated: this is a data mapping consumed by SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT's
+# .format() call, not a prompt template itself.
 SOP_SUB_PHASE_OBJECTIVES: Dict[str, str] = {
     "tenets": (
         "Establish the foundational context BEFORE any technical decisions. "
@@ -950,6 +1067,10 @@ SOP_SUB_PHASE_OBJECTIVES: Dict[str, str] = {
     ),
 }
 
+# Not migrated: uses "## Header"-style markdown section markers instead of
+# format_context_block's "**Label:**\n---\n...\n---" fencing, plus a dual-schema
+# ("if complete, return...") shape. Low value relative to the reconstruction effort
+# needed; deferred as a candidate for a future follow-up if full coverage is desired.
 SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT = """You are an expert Product Analyst performing a gap analysis on the "{sub_phase_name}" sub-phase \
 of a software project's environment constraints and requirements gathering.
 
@@ -1023,34 +1144,37 @@ If the sub-phase IS complete, return:
 # SOP Phase 1: Round Prompt — Generate questions for unanswered SOP items
 # ---------------------------------------------------------------------------
 
-SOP_PHASE1_ROUND_PROMPT = """You are an expert Product Analyst. Generate well-crafted open questions for the following SOP sub-phase items that have NOT yet been answered.
-
-Context: We are systematically gathering environment constraints and requirements before detailed spec review. Some questions have already been answered (from the spec or prior rounds). You must generate questions ONLY for the unanswered items listed below.
-
-Previously collected decisions (from spec extraction and prior user answers):
----
-{prior_decisions}
----
-
-Unanswered SOP items to generate questions for:
----
-{sub_phase_questions}
----
-
-Specification excerpt (for context):
----
-{spec_excerpt}
----
-
-For each unanswered item, generate a well-crafted question with:
-- Clear, specific question text contextualized by any prior decisions (e.g., if user chose Python, ask about Python-specific frameworks)
-- 2-6 answer options with id, label, is_default (exactly one true), rationale, and confidence
-- Appropriate category and priority
-- The sop_sub_phase field set to the sub-phase name
-- For multi-select questions, set allow_multiple: true
-
-Respond with a JSON object only, no markdown:
-{{
+SOP_PHASE1_ROUND_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. Generate well-crafted open questions for the "
+        "following SOP sub-phase items that have NOT yet been answered."
+    ),
+    rules=(
+        "Context: We are systematically gathering environment constraints and "
+        "requirements before detailed spec review. Some questions have already been "
+        "answered (from the spec or prior rounds). You must generate questions ONLY for "
+        "the unanswered items listed below.\n\n"
+    ),
+    context_blocks=(
+        format_context_block(
+            "Previously collected decisions (from spec extraction and prior user answers)",
+            "{prior_decisions}",
+        )
+        + format_context_block(
+            "Unanswered SOP items to generate questions for", "{sub_phase_questions}"
+        )
+        + format_context_block("Specification excerpt (for context)", "{spec_excerpt}")
+        + "For each unanswered item, generate a well-crafted question with:\n"
+        "- Clear, specific question text contextualized by any prior decisions (e.g., if "
+        "user chose Python, ask about Python-specific frameworks)\n"
+        "- 2-6 answer options with id, label, is_default (exactly one true), rationale, "
+        "and confidence\n"
+        "- Appropriate category and priority\n"
+        "- The sop_sub_phase field set to the sub-phase name\n"
+        "- For multi-select questions, set allow_multiple: true\n\n"
+        "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "open_questions": [
     {{
       "id": "P1.deploy.a",
@@ -1068,44 +1192,50 @@ Respond with a JSON object only, no markdown:
       ]
     }}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)
 
 # ---------------------------------------------------------------------------
 # SOP Phase 2: Architecture Analysis
 # ---------------------------------------------------------------------------
 
-SOP_ARCHITECTURE_ANALYSIS_PROMPT = """You are an expert Solutions Architect. Based on the product specification and the environment/constraint decisions collected during Phase 1, perform a comprehensive architecture analysis.
-
-Product Specification:
----
-{spec_content}
----
-
-Phase 1 Decisions (environment constraints and requirements):
----
-{phase1_decisions_json}
----
-
-Perform the following analysis:
-
-1. **Architecture Type**: Recommend an architecture type (2-tier, 3-tier, N-tier, serverless, event-driven, microservices, monolith, etc.) with clear rationale based on the requirements and constraints.
-
-2. **Data Types and Storage**: Identify the types of data the system will handle and recommend appropriate storage services for each, considering the user's stated preferences.
-
-3. **Task Types**: Classify the computational tasks (IO-bound, CPU-intensive, memory-intensive, GPU, real-time, batch, etc.) and note their compute requirements.
-
-4. **Gap Analysis**: Identify service/tool gaps — areas where the specification and Phase 1 decisions do not yet specify a needed tool or service. For each gap, provide 3-5 recommendations with rationale. Focus on gaps that are material to the project (CI/CD, monitoring, logging, caching, search, message queues, etc.).
-
-5. **Architecture Diagrams**: Produce architecture diagrams at multiple granularity levels:
-   - System overview (high-level components and their interactions)
-   - Data flow diagram (how data moves through the system)
-   Use Mermaid syntax for each diagram, followed by a textual description.
-
-6. **Summary**: A concise overall architecture summary.
-
-Respond with a JSON object only, no markdown:
-{{
+SOP_ARCHITECTURE_ANALYSIS_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Solutions Architect. Based on the product specification and "
+        "the environment/constraint decisions collected during Phase 1, perform a "
+        "comprehensive architecture analysis."
+    ),
+    context_blocks=(
+        format_context_block("Product Specification", "{spec_content}")
+        + format_context_block(
+            "Phase 1 Decisions (environment constraints and requirements)",
+            "{phase1_decisions_json}",
+        )
+        + "Perform the following analysis:\n\n"
+        "1. **Architecture Type**: Recommend an architecture type (2-tier, 3-tier, "
+        "N-tier, serverless, event-driven, microservices, monolith, etc.) with clear "
+        "rationale based on the requirements and constraints.\n\n"
+        "2. **Data Types and Storage**: Identify the types of data the system will "
+        "handle and recommend appropriate storage services for each, considering the "
+        "user's stated preferences.\n\n"
+        "3. **Task Types**: Classify the computational tasks (IO-bound, CPU-intensive, "
+        "memory-intensive, GPU, real-time, batch, etc.) and note their compute "
+        "requirements.\n\n"
+        "4. **Gap Analysis**: Identify service/tool gaps — areas where the specification "
+        "and Phase 1 decisions do not yet specify a needed tool or service. For each gap, "
+        "provide 3-5 recommendations with rationale. Focus on gaps that are material to "
+        "the project (CI/CD, monitoring, logging, caching, search, message queues, "
+        "etc.).\n\n"
+        "5. **Architecture Diagrams**: Produce architecture diagrams at multiple "
+        "granularity levels:\n"
+        "   - System overview (high-level components and their interactions)\n"
+        "   - Data flow diagram (how data moves through the system)\n"
+        "   Use Mermaid syntax for each diagram, followed by a textual description.\n\n"
+        "6. **Summary**: A concise overall architecture summary.\n\n"
+        "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "architecture_type": "3-tier",
   "architecture_rationale": "A 3-tier architecture separates concerns between presentation, business logic, and data layers, which aligns with the team's preference for simplicity and the moderate scale requirements...",
   "data_types_and_storage": [
@@ -1131,29 +1261,33 @@ Respond with a JSON object only, no markdown:
     "data_flow": "```mermaid\\nsequenceDiagram\\n  Client->>API: HTTP Request\\n  API->>Cache: Check cache\\n  Cache-->>API: Cache miss\\n  API->>DB: Query data\\n  DB-->>API: Return results\\n  API->>Cache: Update cache\\n  API-->>Client: Response\\n```\\n\\n**Textual Description:** Requests flow from the client to the API layer, which first checks the Redis cache. On cache miss, data is fetched from PostgreSQL, cached in Redis, and returned to the client."
   }},
   "summary": "The recommended architecture is a 3-tier system using..."
-}}
-"""
+}}""",
+    trailer="",
+)
 
 # ---------------------------------------------------------------------------
 # SOP Phase 2: Architecture Approval — Format results for user approval
 # ---------------------------------------------------------------------------
 
-SOP_ARCHITECTURE_APPROVAL_PROMPT = """You are an expert Product Analyst. The architecture analysis is complete. Format the results as approval questions for the user.
-
-Architecture Analysis Results:
----
-{architecture_results_json}
----
-
-Generate approval questions:
-1. One question for the overall architecture type recommendation (approve or suggest alternative)
-2. One question per tool gap that has multiple recommendations (user selects preferred option)
-
-For the architecture approval question, provide the recommended type as the default option plus 2-3 alternatives.
-For gap questions, list all recommendations as options with the first as default.
-
-Respond with a JSON object only, no markdown:
-{{
+SOP_ARCHITECTURE_APPROVAL_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert Product Analyst. The architecture analysis is complete. "
+        "Format the results as approval questions for the user."
+    ),
+    context_blocks=(
+        format_context_block("Architecture Analysis Results", "{architecture_results_json}")
+        + "Generate approval questions:\n"
+        "1. One question for the overall architecture type recommendation (approve or "
+        "suggest alternative)\n"
+        "2. One question per tool gap that has multiple recommendations (user selects "
+        "preferred option)\n\n"
+        "For the architecture approval question, provide the recommended type as the "
+        "default option plus 2-3 alternatives.\n"
+        "For gap questions, list all recommendations as options with the first as "
+        "default.\n\n"
+        "Respond with a JSON object only, no markdown:\n"
+    ),
+    json_schema="""{{
   "open_questions": [
     {{
       "id": "arch_type_approval",
@@ -1186,5 +1320,6 @@ Respond with a JSON object only, no markdown:
       ]
     }}
   ]
-}}
-"""
+}}""",
+    trailer="",
+)

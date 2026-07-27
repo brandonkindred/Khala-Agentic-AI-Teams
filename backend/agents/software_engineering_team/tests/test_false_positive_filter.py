@@ -228,8 +228,8 @@ def test_search_respects_max_matches() -> None:
 
 
 def test_search_rejects_nonpositive_max() -> None:
-    """``search`` asserts on a non-positive ``max_matches`` (precondition guard)."""
-    with pytest.raises(AssertionError):
+    """``search`` raises ``ValueError`` on a non-positive ``max_matches`` (precondition guard)."""
+    with pytest.raises(ValueError):
         CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=0)
 
 

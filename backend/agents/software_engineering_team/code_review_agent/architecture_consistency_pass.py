@@ -263,7 +263,9 @@ def _validate_finding_line(
     content = index.read_file(resolved)
     if content.startswith("Error:"):
         return None
-    total_lines = len(content.splitlines()) or 1
+    total_lines = len(content.splitlines())
+    if total_lines == 0:
+        return None
     return line if 1 <= line <= total_lines else None
 
 

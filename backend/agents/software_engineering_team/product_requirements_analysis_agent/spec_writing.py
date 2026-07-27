@@ -412,8 +412,8 @@ def update_spec_for_consistency_and_clarity(
     clarify answers and resolve conflicting information, then re-reviewed.
 
     Preconditions: ``version`` and ``consistency_loop`` are ints.
-    Postconditions: writes ``updated_spec_consistency_v{version}_loop{loop}.md`` and
-        ``updated_spec.md`` on success; returns ``current_spec`` on LLM failure.
+    Postconditions: writes ``updated_spec_consistency_v{version}_loop{consistency_loop}.md``
+        on success; returns ``current_spec`` on LLM failure.
     """
     qa_source = qa_history.strip() if qa_history else ""
     if all_answered_questions:

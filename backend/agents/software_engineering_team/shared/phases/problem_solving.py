@@ -197,6 +197,13 @@ def run_batch_coding_fixes_impl(
     if not isinstance(parsed, dict):  # defensive: a malformed parser result must not crash
         parsed = {}
     fixed_files = parsed.get("files") or {}
+    if not isinstance(fixed_files, dict):
+        logger.warning(
+            "[%s] Microtask %s: batch fix returned non-dict files; ignoring.",
+            task_id,
+            microtask_id,
+        )
+        fixed_files = {}
     issues_addressed = parsed.get("issues_addressed") or []
     summary = parsed.get("summary") or f"Batch fixed {len(fixed_files)} file(s)"
 

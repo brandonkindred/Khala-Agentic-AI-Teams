@@ -392,7 +392,8 @@ class CodebaseIndex:
             - A blank query returns no matches (a substring search for "" would
               match every line and is never a useful false-positive check).
         """
-        assert max_matches > 0, "max_matches must be positive"
+        if max_matches <= 0:
+            raise ValueError("max_matches must be positive")
         needle = (query or "").strip().lower()
         if not needle:
             return []
