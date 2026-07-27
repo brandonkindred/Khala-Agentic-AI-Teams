@@ -34,56 +34,107 @@ This team defines and operationalizes an enterprise brand system through a coord
 
 ## Agent setup and flow
 
-The orchestrator coordinates six specialist agents. Inputs are `BrandingMission`, `HumanReview`, and optional `BrandCheckRequest` list; output is a single `TeamOutput` whose status depends on `human_review.approved`.
+`BrandingTeamOrchestrator.run()` (`orchestrator.py`) drives the pipeline: it resolves the mission, builds `build_branding_graph(target_phase=...)` (`graphs/top_level.py`), serializes the mission into a task string, and invokes the graph. The result is a **single top-level Strands `Graph`** whose 5 nodes are themselves phase sub-graphs or swarms, wired **strictly sequentially** — `phase1_strategic_core → phase2_narrative → phase3_visual → phase4_channel → phase5_governance`. An optional `target_phase` stops the pipeline early; gating happens at graph-build time (later phase nodes/edges are simply never added), not via runtime conditional edges. `run_single_phase()` reuses the same per-phase builders to run one phase in isolation (e.g. from a Temporal activity).
+
+Brand-compliance checks (`BrandComplianceAgent`, a plain keyword-matching dataclass, not a graph node) and the market-research / design-asset integrations run **outside** the graph, after it completes — the orchestrator gathers them concurrently and assembles everything into a single `TeamOutput` whose status depends on the per-phase gates and `human_review.approved`.
 
 ```mermaid
 flowchart TB
-    subgraph api [API Layer]
-        RunRequest[RunBrandingTeamRequest]
-        RunRequest --> Mission[BrandingMission]
-        RunRequest --> HumanReview[HumanReview]
+    Mission[BrandingMission] --> P1
+
+    subgraph P1 ["Phase 1 · Strategic Core (Graph, fan-out/fan-in)"]
+        direction LR
+        P1nodes["discovery_auditor, purpose_vision_writer, values_articulator,
+        audience_segmenter, differentiation_mapper"] --> P1join[positioning_synthesizer]
     end
 
-    subgraph orch [BrandingTeamOrchestrator]
+    P1 --> P2
+
+    subgraph P2 ["Phase 2 · Narrative & Messaging (Swarm, dynamic handoff)"]
+        direction LR
+        P2a[storyteller] --> P2b[archetype_analyst]
+        P2b -. revise .-> P2a
+        P2b --> P2rest["tagline_writer → message_mapper →
+        persona_builder → voice_principles_drafter"]
+    end
+
+    P2 --> P3
+
+    subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph-of-Swarm)"]
         direction TB
-        Codifier[BrandCodificationAgent - Brand Strategist]
-        Moodboard[MoodBoardIdeationAgent - Brand Visual Ideation Lead]
-        Refinement[CreativeRefinementAgent - Creative Director]
-        Guidelines[BrandGuidelinesAgent - Brand Systems Architect]
-        Wiki[BrandWikiAgent - Knowledge Systems Manager]
-        Compliance[BrandComplianceAgent - Brand Compliance Reviewer]
+        P3swarm["diverge_swarm: creative_director dispatches
+        moodboard_conceptualist (editorial/minimalist/bold)"] --> P3conv[converge_decider]
+        P3conv --> P3fan["logo_specifier, color_system_builder, typography_builder,
+        iconography_director, photography_video_director,
+        voice_tone_builder, design_system_codifier"]
+        P3fan --> P3comp[visual_compositor]
     end
 
-    Mission --> Codifier
-    Codifier --> Codification[BrandCodification]
-    Mission --> Moodboard
-    Moodboard --> MoodBoards[MoodBoardConcept list]
-    Refinement --> RefinementPlan[CreativeRefinementPlan]
-    Mission --> Guidelines
-    Codification --> Guidelines
-    Guidelines --> WritingGuide[WritingGuidelines]
-    Guidelines --> BrandGuide[Brand guidelines list]
-    Guidelines --> DesignSystem[DesignSystemDefinition]
-    Mission --> Wiki
-    Wiki --> WikiBacklog[WikiEntry list]
-    Mission --> Compliance
-    BrandChecks[BrandCheckRequest list] --> Compliance
-    Compliance --> BrandCheckResults[BrandCheckResult list]
+    P3 --> P4
 
-    Codification --> TeamOutput[TeamOutput]
-    MoodBoards --> TeamOutput
-    RefinementPlan --> TeamOutput
-    WritingGuide --> TeamOutput
-    BrandGuide --> TeamOutput
-    DesignSystem --> TeamOutput
-    WikiBacklog --> TeamOutput
-    BrandCheckResults --> TeamOutput
-    HumanReview --> TeamOutput
+    subgraph P4 ["Phase 4 · Channel Activation (Graph, fan-out/fan-in)"]
+        direction LR
+        P4nodes["brand_experience_principler, website_guide, social_guide,
+        email_guide, events_guide, partnerships_guide, internal_guide,
+        brand_architecture_builder, brand_in_action_illustrator"] --> P4join[channel_compositor]
+    end
+
+    P4 --> P5
+
+    subgraph P5 ["Phase 5 · Governance & Evolution (Graph, fan-out/fan-in)"]
+        direction LR
+        P5nodes["ownership_definer, approval_workflow_designer, asset_wiki_planner,
+        training_planner, kpi_designer, evolution_framer, brand_rules_codifier"] --> P5join[governance_compositor]
+    end
+
+    P5 --> GraphResult[Graph result]
+
+    Mission --> Compliance[BrandComplianceAgent - outside the graph]
+    BrandChecks[BrandCheckRequest list] --> Compliance
+    Mission --> Integrations[Market research / design-asset adapters - outside the graph]
+
+    GraphResult --> TeamOutput[TeamOutput]
+    Compliance --> TeamOutput
+    Integrations --> TeamOutput
+    HumanReview[HumanReview] --> TeamOutput
 
     TeamOutput --> Status{human_review.approved?}
     Status -->|No| NeedsHuman[status: NEEDS_HUMAN_DECISION]
     Status -->|Yes| Ready[status: READY_FOR_ROLLOUT]
 ```
+
+Phase 3 is the most structurally involved phase — an inner `Swarm` nested as a single node inside the outer `Graph` — so it's worth expanding on its own:
+
+```mermaid
+flowchart LR
+    diverge[diverge_swarm] --> converge[converge_decider]
+    converge --> logo[logo_specifier]
+    converge --> color[color_system_builder]
+    converge --> typo[typography_builder]
+    converge --> icon[iconography_director]
+    converge --> photo[photography_video_director]
+    converge --> voice[voice_tone_builder]
+    converge --> design[design_system_codifier]
+    logo --> compositor[visual_compositor]
+    color --> compositor
+    typo --> compositor
+    icon --> compositor
+    photo --> compositor
+    voice --> compositor
+    design --> compositor
+```
+
+Where `diverge_swarm` is itself an inner Swarm: `creative_director` dispatches to three style-variant `moodboard_conceptualist` agents (editorial, minimalist, bold) and each hands back to `creative_director` when done.
+
+Per-phase participating nodes:
+
+| Phase | Construct | Nodes |
+|---|---|---|
+| 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
+| 2 — Narrative & Messaging | `Swarm`, dynamic handoff | `storyteller` (entry) → `archetype_analyst` (may hand back to `storyteller`) → `tagline_writer` → `message_mapper` → `persona_builder` → `voice_principles_drafter` |
+| 3 — Visual & Expressive Identity | Graph-of-Swarm | inner `Swarm`: `creative_director` + 3 `moodboard_conceptualist` variants → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
+| 4 — Channel Activation | `Graph`, fan-out/fan-in | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` → `channel_compositor` |
+| 5 — Governance & Evolution | `Graph`, fan-out/fan-in | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` → `governance_compositor` |
 
 ## API and session flow
 
