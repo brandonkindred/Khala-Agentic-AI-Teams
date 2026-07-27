@@ -330,6 +330,37 @@ def test_abort_is_set_before_a_slow_hook_so_queued_tasks_never_start() -> None:
     assert started["count"] == 1
 
 
+def test_abort_is_set_before_a_slow_hook_with_timeout_also_set() -> None:
+    """Same guarantee as the sibling test above, but with ``timeout`` set —
+    the internal abort flag must still be checked (and honored) by the
+    timeout-aware worker wrapper, not just the plain one used when
+    ``timeout`` is ``None``."""
+    started = {"count": 0}
+    lock = threading.Lock()
+
+    def fn(x: int) -> int:
+        with lock:
+            started["count"] += 1
+        if x == 0:
+            raise RuntimeError("fast")
+        return x
+
+    def slow_hook() -> None:
+        time.sleep(0.2)
+
+    with pytest.raises(RuntimeError, match="fast"):
+        parallel_map(
+            [0, 1, 2, 3],
+            fn,
+            max_workers=1,
+            wait_for_stragglers=True,
+            on_first_exception=slow_hook,
+            timeout=1.0,
+        )
+
+    assert started["count"] == 1
+
+
 def test_on_first_exception_hook_raising_does_not_mask_worker_error(caplog) -> None:
     """A raising hook is logged and discarded — the original worker exception
     still propagates rather than being replaced by the hook's error."""

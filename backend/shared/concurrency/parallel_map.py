@@ -360,29 +360,39 @@ def parallel_map(
     # Postconditions above; a task that already passed the check is treated
     # as legitimately "already running".
     abort = threading.Event()
-    # Only populated (and only consulted) when ``timeout`` is set — each cell
-    # is written exactly once, by that item's own worker thread, so no lock
-    # is needed. ``None`` means "not started yet" (queued behind a busy
-    # worker), which must never count against the item's own budget.
-    start_times: list[Optional[float]] = [None] * n
-    # Recorded by the worker itself right when ``fn`` returns (or raises) —
-    # not by whatever thread later happens to notice the future is done.
-    # ``parallel_map``'s own loop can be delayed elsewhere (e.g. a slow
-    # ``on_timeout`` hook for a different item), so measuring "was this over
-    # budget" against the *observing* thread's clock would blame a task for
-    # a delay that was never its own; this is the timestamp of the work
-    # actually finishing.
-    finish_times: list[Optional[float]] = [None] * n
+    if timeout is None:
+        # Exactly the pre-existing implementation for this path — no
+        # timeout bookkeeping allocated or touched per call.
+        start_times: "list[Optional[float]]" = []
+        finish_times: "list[Optional[float]]" = []
 
-    def _guarded(i: int, item: T) -> Optional[R]:
-        if abort.is_set():
-            return None
-        if timeout is not None:
-            start_times[i] = time.monotonic()
-        try:
+        def _guarded(i: int, item: T) -> Optional[R]:
+            if abort.is_set():
+                return None
             return fn(item)
-        finally:
-            if timeout is not None:
+    else:
+        # Only populated (and only consulted) when ``timeout`` is set — each
+        # cell is written exactly once, by that item's own worker thread, so
+        # no lock is needed. ``None`` means "not started yet" (queued behind
+        # a busy worker), which must never count against the item's own
+        # budget.
+        start_times = [None] * n
+        # Recorded by the worker itself right when ``fn`` returns (or
+        # raises) — not by whatever thread later happens to notice the
+        # future is done. ``parallel_map``'s own loop can be delayed
+        # elsewhere (e.g. a slow ``on_timeout`` hook for a different item),
+        # so measuring "was this over budget" against the *observing*
+        # thread's clock would blame a task for a delay that was never its
+        # own; this is the timestamp of the work actually finishing.
+        finish_times = [None] * n
+
+        def _guarded(i: int, item: T) -> Optional[R]:
+            if abort.is_set():
+                return None
+            start_times[i] = time.monotonic()
+            try:
+                return fn(item)
+            finally:
                 finish_times[i] = time.monotonic()
 
     def _submit(pool: ThreadPoolExecutor, i: int, item: T):
