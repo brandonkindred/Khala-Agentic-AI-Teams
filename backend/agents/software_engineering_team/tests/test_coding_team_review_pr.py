@@ -1420,7 +1420,12 @@ class TestReviewEndpoint:
         # exception text is never surfaced on the PR.
         gh = review_app["github"]["client"]
         assert any("could not complete and did not post findings" in b for _n, b in gh.comments)
-        assert not any(("llm down" in b or "RuntimeError" in b) for _n, b in gh.comments)
+        all_bodies = (
+            [b for _n, b in gh.comments]
+            + [r.get("body", "") for r in gh.reviews]
+            + [c.get("body", "") for c in gh.review_comments]
+        )
+        assert not any(("llm down" in b or "RuntimeError" in b) for b in all_bodies)
 
     def test_no_changed_files_completes(self, review_app) -> None:
         review_app["github"]["client"].files = []
