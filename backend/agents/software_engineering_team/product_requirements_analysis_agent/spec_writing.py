@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from software_engineering_team.shared.context_sizing import compute_prd_snippet_chars
 from software_engineering_team.shared.json_utils import (
     default_decompose_by_sections,
     parse_json_with_recovery,
 )
+
+if TYPE_CHECKING:
+    from llm_service import LLMClient
 
 from .llm_io import call_llm_text
 from .models import AnsweredQuestion, OpenQuestion, SpecCleanupResult
@@ -269,7 +272,7 @@ def build_specialist_collaboration_plan(
 
 def generate_prd_document(
     model: Any,
-    llm: Any,
+    llm: "LLMClient",
     cleaned_spec: str,
     answered_questions: List[AnsweredQuestion],
 ) -> str:
@@ -442,7 +445,7 @@ def update_spec_for_consistency_and_clarity(
 
 
 def run_spec_cleanup(
-    llm: Any,
+    llm: "LLMClient",
     spec_content: str,
     repo_path: Path,
     on_chunk_progress: Optional[Callable[[int, int], None]] = None,

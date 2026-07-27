@@ -497,6 +497,25 @@ def test_problem_solve_llm_exception(monkeypatch):
     assert "fixed 0 of 1" in out.summary
 
 
+def test_problem_solve_parse_exception(monkeypatch):
+    """An exception raised while parsing/applying a single issue's fix (after
+    a successful LLM call) is caught per-issue, same as an LLM call failure:
+    the issue counts as unfixed rather than aborting the remaining issues."""
+    agent = _make(monkeypatch, "raw-response")
+
+    def boom_parser(raw):
+        raise ValueError("malformed agent output")
+
+    monkeypatch.setattr(agent, "_parse_single_issue", boom_parser)
+    out = agent.problem_solve(
+        _Input(
+            current_files={"x.ts": "old"},
+            review_issues=[ReviewIssue(source="demo", file_path="x.ts")],
+        )
+    )
+    assert "fixed 0 of 1" in out.summary
+
+
 def test_constructor_resolves_text_model(monkeypatch):
     """By default (``uses_json_model`` False), the constructor resolves only
     a text-response-format strands model, not a JSON one."""

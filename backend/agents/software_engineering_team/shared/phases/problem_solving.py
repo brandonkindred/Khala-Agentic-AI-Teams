@@ -228,23 +228,22 @@ def run_batch_coding_fixes_impl(
 
     unresolved_issues: List[Any] = []
     unresolved_indices: set = set()
-    if addressed_count < len(actionable):
-        addressed_indices = set()
-        for item in issues_addressed:
-            if not isinstance(item, dict):
-                # Defensive: the LLM may emit a non-dict entry (e.g. a bare
-                # string) which has no ``.get`` — skip it rather than crash.
-                continue
-            try:
-                idx = int(item.get("issue_index", 0)) - 1
-                if 0 <= idx < len(actionable):
-                    addressed_indices.add(idx)
-            except (ValueError, TypeError):
-                pass
-        for idx, issue in enumerate(actionable):
-            if idx not in addressed_indices:
-                unresolved_issues.append(issue)
-                unresolved_indices.add(idx)
+    addressed_indices: set = set()
+    for item in issues_addressed:
+        if not isinstance(item, dict):
+            # Defensive: the LLM may emit a non-dict entry (e.g. a bare
+            # string) which has no ``.get`` — skip it rather than crash.
+            continue
+        try:
+            idx = int(item.get("issue_index", 0)) - 1
+            if 0 <= idx < len(actionable):
+                addressed_indices.add(idx)
+        except (ValueError, TypeError):
+            pass
+    for idx, issue in enumerate(actionable):
+        if idx not in addressed_indices:
+            unresolved_issues.append(issue)
+            unresolved_indices.add(idx)
 
     # A rejected file's issue must stay unresolved even if the LLM claimed to
     # have addressed it -- the merge kept the prior (unfixed) version. Tracked
@@ -386,16 +385,32 @@ def _fix_issues_one_at_a_time_impl(
                 )
                 break
 
-            parsed = parse_single(raw)
-            if not isinstance(parsed, dict):  # defensive: malformed parser result
-                parsed = {}
-            fixed_files = parsed.get("files") or {}
-            if not fixed_files:
+            try:
+                parsed = parse_single(raw)
+                if not isinstance(parsed, dict):  # defensive: malformed parser result
+                    parsed = {}
+                fixed_files = parsed.get("files") or {}
+                had_files = bool(fixed_files)
+                rejected_files = {}
+                if fixed_files:
+                    fixed_files, rejected_files = reject_invalid_python(fixed_files)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] %s%sfix parsing/validation failed (issue %d, attempt %d): %s",
+                    task_id,
+                    mt_ctx,
+                    phase_ctx,
+                    issue_idx + 1,
+                    attempt,
+                    exc,
+                )
+                continue
+
+            if not had_files:
                 if parsed.get("resolved"):
                     resolved_this = True
                 break
 
-            fixed_files, rejected_files = reject_invalid_python(fixed_files)
             if rejected_files:
                 logger.warning(
                     "[%s] %s%sfix (issue %d, attempt %d) returned unparsable Python for "
