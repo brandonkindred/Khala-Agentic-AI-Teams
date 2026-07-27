@@ -321,14 +321,47 @@ def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
         draft_output_path=tmp_path / "out.md",
     )
     assert "Revised by user feedback" in out.draft
-    assert (tmp_path / "out.md").exists()
+    written = (tmp_path / "out.md").read_text()
+    assert "Revised by user feedback" in written
+    assert "Body." in written
 
 
-def test_revise_from_user_feedback_empty_draft() -> None:
-    """Whitespace-only draft is returned unchanged (no LLM call)."""
+def test_revise_from_user_feedback_literal_braces_in_feedback(monkeypatch) -> None:
+    """Feedback containing literal braces (e.g. a JSON snippet) must not raise."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
     a = _make_agent()
+    captured_prompts = []
+
+    def fake_call_text(self, prompt, system_prompt=""):
+        captured_prompts.append(prompt)
+        return '{"draft": 0}\n---DRAFT---\n# Revised\nBody.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call_text)
+    feedback = 'Please fix this snippet: {"key": "value", "nested": {"a": 1}}'
+    out = a.revise_from_user_feedback(
+        draft="# Old\nBody",
+        user_feedback=feedback,
+        content_plan_text="# Plan",
+    )
+    assert "Revised" in out.draft
+    assert feedback in captured_prompts[0]
+
+
+def test_revise_from_user_feedback_empty_draft(monkeypatch) -> None:
+    """Whitespace-only draft is returned unchanged (no LLM call)."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+    calls: list = []
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_text",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or "should not be called",
+    )
     out = a.revise_from_user_feedback(draft="   ", user_feedback="x", content_plan_text="cp")
     assert out.draft == "   "
+    assert calls == []
 
 
 def test_revise_from_user_feedback_no_marker_then_json_fallback(monkeypatch) -> None:
@@ -397,6 +430,44 @@ def test_revise_from_user_feedback_transient_retries_then_fallback(monkeypatch) 
     assert "User Feedback Recovered" in out.draft
 
 
+def test_revise_from_user_feedback_json_fallback_wrapped_rate_limit_reraises(monkeypatch) -> None:
+    """A wrapped transient error from the JSON fallback must propagate, not be swallowed.
+
+    Regression test: the fallback block previously checked ``(LLMRateLimitError,
+    LLMTemporaryError)`` without unwrapping ``EventLoopException`` first, so a wrapped
+    transient error fell through to the broad ``except Exception`` and was silently
+    swallowed, returning the original (unrevised) draft instead of propagating for
+    Temporal to retry.
+    """
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise LLMTemporaryError("503")
+
+    wrapped = LLMRateLimitError("429")
+
+    def fallback_boom(self, p, system_prompt=""):
+        raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", fallback_boom)
+
+    with pytest.raises(LLMRateLimitError) as excinfo:
+        a.revise_from_user_feedback(
+            draft="# Original", user_feedback="tighten", content_plan_text="cp"
+        )
+    assert excinfo.value is wrapped
+
+
 def test_revise_from_user_feedback_json_parse_error_skips_sleep(monkeypatch) -> None:
     """LLMJsonParseError must use the no-sleep handler, not the transient backoff."""
     import agents.blogging.blog_writer_agent.agent as wa_mod
@@ -458,10 +529,12 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
     """Non-transient LLM failure still returns a fallback string."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
+    from llm_service import LLMJsonParseError
+
     a = _make_agent()
 
     def boom(self, p, system_prompt=""):
-        raise RuntimeError("nope")
+        raise LLMJsonParseError("nope")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     out = a.generate_escalation_summary(
@@ -471,6 +544,25 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
     )
     # Returns a fallback string (non-empty) or empty
     assert isinstance(out, str)
+
+
+def test_generate_escalation_summary_reraises_non_llm_error(monkeypatch) -> None:
+    """A programming error (not an LLM failure) must propagate, not be swallowed."""
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+
+    def boom(self, p, system_prompt=""):
+        raise TypeError("bad internal state")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(TypeError, match="bad internal state"):
+        a.generate_escalation_summary(
+            revision_count=10,
+            latest_feedback_items=[],
+            persistent_issues=[],
+        )
 
 
 def test_generate_escalation_summary_rate_limit_reraises(monkeypatch) -> None:
@@ -632,7 +724,7 @@ def test_revise_programming_error_propagates(monkeypatch) -> None:
         )
 
 
-def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
+def test_revise_falls_back_to_original_when_llm_fails(monkeypatch) -> None:
     """If text yields no draft and json fallback fails, return original draft."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent

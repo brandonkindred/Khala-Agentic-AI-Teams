@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
 from agents.blogging.blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
 from agents.blogging.shared.agent_base import _BlogAgentBase
@@ -34,7 +35,7 @@ from llm_service import (
     extract_json_from_response,
 )
 
-from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS
+from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS, PersistentFeedbackItem
 from .models import (
     ReviseWriterInput,
     RevisionPlan,
@@ -56,6 +57,9 @@ from .prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+BATCH_EXECUTE_MAX_RETRIES = 3
+BATCH_EXECUTE_BACKOFF_BASE_SECONDS = 2.0
 
 _PLACEHOLDER_DRAFT = "# Draft\n\nNo draft was generated. Check the model response or try again."
 
@@ -279,6 +283,21 @@ class BlogWriterAgent(_BlogAgentBase):
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
         self._style_prompt = "\n\n".join(parts)
 
+    def _call_agent(self, model: Any, prompt: str, system_prompt: str = "") -> str:
+        """Construct a Strands Agent, invoke it, and return stripped text.
+
+        Shared invocation path for ``_call_text`` and ``_call_json_raw``, which
+        differ only in which model they pass.
+
+        Preconditions:
+            - ``model`` is a configured LLM client/model object.
+            - ``prompt`` is a non-empty string.
+        Postconditions:
+            - Returns the agent's response as a stripped string.
+        """
+        agent = Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
+        return str(agent(prompt)).strip()
+
     def _call_text(self, prompt: str, system_prompt: str = "") -> str:
         """Call the text-mode Strands Agent and return its stripped text output.
 
@@ -286,9 +305,7 @@ class BlogWriterAgent(_BlogAgentBase):
         marker + Markdown hybrid format. The text-mode sibling avoids forcing
         ``response_format=json_object`` on the wire so the marker survives.
         """
-        agent = Agent(model=self._text_model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
-        result = agent(prompt)
-        return str(result).strip()
+        return self._call_agent(self._text_model, prompt, system_prompt)
 
     def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
         """Invoke the injected model via Strands and return its stripped assistant text.
@@ -300,9 +317,7 @@ class BlogWriterAgent(_BlogAgentBase):
         parsing when a caller needs to extract JSON itself (e.g. planning paths
         that call ``extract_json_from_response``).
         """
-        agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
-        result = agent(prompt)
-        return str(result).strip()
+        return self._call_agent(self._model, prompt, system_prompt)
 
     def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
         """Invoke the injected model via Strands and parse JSON from the result.
@@ -319,7 +334,10 @@ class BlogWriterAgent(_BlogAgentBase):
             prompt + "\n\nRespond with valid JSON only, no markdown fences.",
             system_prompt,
         )
-        return extract_json_from_response(raw)
+        data = extract_json_from_response(raw)
+        if not isinstance(data, dict):
+            raise LLMJsonParseError(f"Expected a JSON object, got {type(data).__name__}")
+        return data
 
     def _fallback_draft_via_json(self, prompt: str, system_prompt: str = "") -> Optional[str]:
         """Parse a revised draft via shared JSON retry when the text path fails.
@@ -1361,7 +1379,7 @@ class BlogWriterAgent(_BlogAgentBase):
         )
         current_draft = draft
         primary_succeeded = False
-        for attempt in range(3):
+        for attempt in range(BATCH_EXECUTE_MAX_RETRIES):
             try:
                 raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
@@ -1372,15 +1390,21 @@ class BlogWriterAgent(_BlogAgentBase):
             # See _revise_one_item: LLMJsonParseError from the Strands Agent call
             # retries without the transient backoff sleep.
             except LLMJsonParseError as e:
-                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
+                logger.warning(
+                    "Batch revise failed (attempt %s/%s): %s",
+                    attempt + 1,
+                    BATCH_EXECUTE_MAX_RETRIES,
+                    e,
+                )
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
-                        "Batch revise transient error (attempt %s/3); retrying.",
+                        "Batch revise transient error (attempt %s/%s); retrying.",
                         attempt + 1,
+                        BATCH_EXECUTE_MAX_RETRIES,
                     )
-                    time.sleep(2.0 * (2**attempt))
+                    time.sleep(BATCH_EXECUTE_BACKOFF_BASE_SECONDS * (2**attempt))
                     continue
                 raise
         if not primary_succeeded:
@@ -1557,7 +1581,7 @@ class BlogWriterAgent(_BlogAgentBase):
         )
 
         prompt_parts = [
-            USER_FEEDBACK_REVISION_INSTRUCTIONS.format(user_feedback=user_feedback),
+            USER_FEEDBACK_REVISION_INSTRUCTIONS.replace("{user_feedback}", user_feedback),
             "",
             "---",
             "BRAND AND STYLE (mandatory for every sentence):",
@@ -1631,7 +1655,7 @@ class BlogWriterAgent(_BlogAgentBase):
 
         current_draft = draft
         primary_succeeded = False
-        for attempt in range(3):
+        for attempt in range(BATCH_EXECUTE_MAX_RETRIES):
             try:
                 raw_response = self._call_text(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
@@ -1642,15 +1666,21 @@ class BlogWriterAgent(_BlogAgentBase):
             # See _revise_one_item: LLMJsonParseError from the Strands Agent call
             # retries without the transient backoff sleep (test_revise_from_user_feedback_json_parse_error_skips_sleep).
             except LLMJsonParseError as e:
-                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
+                logger.warning(
+                    "User-feedback revision failed (attempt %s/%s): %s",
+                    attempt + 1,
+                    BATCH_EXECUTE_MAX_RETRIES,
+                    e,
+                )
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
-                        "User-feedback revision transient error (attempt %s/3); retrying.",
+                        "User-feedback revision transient error (attempt %s/%s); retrying.",
                         attempt + 1,
+                        BATCH_EXECUTE_MAX_RETRIES,
                     )
-                    time.sleep(2.0 * (2**attempt))
+                    time.sleep(BATCH_EXECUTE_BACKOFF_BASE_SECONDS * (2**attempt))
                     continue
                 raise
 
@@ -1661,9 +1691,10 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
                 if fallback:
                     current_draft = fallback
-            except (LLMRateLimitError, LLMTemporaryError):
-                raise
             except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    raise cause
                 logger.warning(
                     "User-feedback JSON fallback failed after retries; keeping original draft: %s",
                     e,
@@ -1677,8 +1708,8 @@ class BlogWriterAgent(_BlogAgentBase):
     def generate_escalation_summary(
         self,
         revision_count: int,
-        latest_feedback_items: list[Any],
-        persistent_issues: list[Any],
+        latest_feedback_items: list[FeedbackItem],
+        persistent_issues: list[PersistentFeedbackItem],
     ) -> str:
         """Generate a human-readable summary when the copy-edit loop hits the escalation threshold.
 
@@ -1691,12 +1722,12 @@ class BlogWriterAgent(_BlogAgentBase):
         fall back to a generic summary string.
         """
         feedback_text = "\n".join(
-            f"- [{getattr(item, 'severity', 'unknown')}] {getattr(item, 'category', '')}: {getattr(item, 'issue', '')}"
-            for item in latest_feedback_items
+            f"- [{item.severity}] {item.category}: {item.issue}" for item in latest_feedback_items
         )
         persistent_text = (
             "\n".join(
-                f"- [{getattr(item, 'severity', 'unknown')}] {getattr(item, 'category', '')} (flagged {getattr(item, 'occurrence_count', '?')} times): {getattr(item, 'issue', '')}"
+                f"- [{item.severity}] {item.category} "
+                f"(flagged {item.occurrence_count} times): {item.issue}"
                 for item in persistent_issues
             )
             if persistent_issues
@@ -1715,6 +1746,8 @@ class BlogWriterAgent(_BlogAgentBase):
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
+            if not isinstance(cause, LLMError):
+                raise
             logger.warning("Escalation summary generation failed: %s", e)
             return (
                 f"The draft has been through {revision_count} automated revision cycles "
