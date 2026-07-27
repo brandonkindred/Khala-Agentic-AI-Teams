@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 from agents.blogging.blog_plan_critic_agent import BlogPlanCriticAgent
 from agents.blogging.blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
 from agents.blogging.shared.agent_base import _BlogAgentBase
@@ -34,7 +35,7 @@ from llm_service import (
     extract_json_from_response,
 )
 
-from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS
+from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS, PersistentFeedbackItem
 from .models import (
     ReviseWriterInput,
     RevisionPlan,
@@ -1547,8 +1548,8 @@ class BlogWriterAgent(_BlogAgentBase):
     def generate_escalation_summary(
         self,
         revision_count: int,
-        latest_feedback_items: list[Any],
-        persistent_issues: list[Any],
+        latest_feedback_items: list[FeedbackItem],
+        persistent_issues: list[PersistentFeedbackItem],
     ) -> str:
         """Generate a human-readable summary when the copy-edit loop hits the escalation threshold.
 
@@ -1561,12 +1562,12 @@ class BlogWriterAgent(_BlogAgentBase):
         fall back to a generic summary string.
         """
         feedback_text = "\n".join(
-            f"- [{getattr(item, 'severity', 'unknown')}] {getattr(item, 'category', '')}: {getattr(item, 'issue', '')}"
-            for item in latest_feedback_items
+            f"- [{item.severity}] {item.category}: {item.issue}" for item in latest_feedback_items
         )
         persistent_text = (
             "\n".join(
-                f"- [{getattr(item, 'severity', 'unknown')}] {getattr(item, 'category', '')} (flagged {getattr(item, 'occurrence_count', '?')} times): {getattr(item, 'issue', '')}"
+                f"- [{item.severity}] {item.category} "
+                f"(flagged {item.occurrence_count} times): {item.issue}"
                 for item in persistent_issues
             )
             if persistent_issues
