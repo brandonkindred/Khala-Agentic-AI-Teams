@@ -37,9 +37,12 @@ def _phase_header(phase: BrandPhase) -> str:
 # Body content (numbered items + gate condition) for each phase's "GUIDED FLOW"
 # section, keyed by phase so ``_phase_section`` can assemble whole sections in
 # ``PHASE_ORDER`` order rather than relying on their fixed physical position in
-# this file matching the pipeline's order. ``{next_phase}`` is substituted with
-# the 1-indexed position of the *following* ``PHASE_ORDER`` entry; the last
-# phase's body has no gate condition, so it has no placeholder to fill.
+# this file matching the pipeline's order. ``{prev_phase}``/``{next_phase}`` are
+# substituted with a reference to the preceding/following ``PHASE_ORDER`` entry
+# (e.g. "Phase 2"), or a phaseless fallback phrase when there is no such entry
+# (the phase sits at that end of the pipeline) — never a nonexistent phase
+# number like "Phase 0". The last phase's body has no gate condition, so it has
+# no ``{next_phase}`` placeholder to fill.
 _PHASE_BODIES: dict[BrandPhase, str] = {
     BrandPhase.STRATEGIC_CORE: """\
 The foundation everything else derives from. If this is wrong, everything downstream is wrong.
@@ -55,10 +58,10 @@ Offer curated sets of values for the client to react to if they need a starting 
 8. **Positioning statement** — For [audience] who need [X], [company] is the [differentiator] that \
 [delivers value] because [proof].
 
-**Gate condition:** Strategy must be validated before moving to Phase {next_phase}. Confirm with the client that \
+**Gate condition:** Strategy must be validated before moving to {next_phase}. Confirm with the client that \
 they're confident in the strategic foundation.""",
     BrandPhase.NARRATIVE_MESSAGING: """\
-Depends entirely on Phase {prev_phase}. You can't write the story until you know the strategy.
+Depends entirely on {prev_phase}. You can't write the story until you know the strategy.
 6. **Brand personality** — Present personality as a spectrum of independent dimensions. For example:
    - Formal ↔ Casual
    - Playful ↔ Serious
@@ -73,9 +76,9 @@ Depends entirely on Phase {prev_phase}. You can't write the story until you know
 11. **Elevator pitches** (5-second, 30-second, 2-minute).
 12. **Inspiration / references** — Any brands they admire or want to sound like?
 
-**Gate condition:** Messaging must be approved and stable before moving to Phase {next_phase}.""",
+**Gate condition:** Messaging must be approved and stable before moving to {next_phase}.""",
     BrandPhase.VISUAL_IDENTITY: """\
-Depends on Phase {prev_phase} — visual identity should express the narrative, not invent it.
+Depends on {prev_phase} — visual identity should express the narrative, not invent it.
 13. **Color inspiration** — Ask what colors, brands, environments, or feelings inspire them visually. \
 Treat their answer as **inspiration, not a final decision**.
 14. **Color palette selection** — Based on their inspiration, generate **3–5 distinct color palettes**, \
@@ -96,15 +99,15 @@ loves a palette and explicitly chooses it.**
 and let the client pick.
 17. **Photography, imagery, and illustration style**.
 
-**Gate condition:** Identity system must be locked before moving to Phase {next_phase}.""",
+**Gate condition:** Identity system must be locked before moving to {next_phase}.""",
     BrandPhase.CHANNEL_ACTIVATION: """\
-Depends on Phase {prev_phase}.
+Depends on {prev_phase}.
 18. **Primary channels** — Where does the brand need to show up?
 19. **Brand experience principles** — What should every touchpoint feel like?
 20. **Multi-product or sub-brand considerations** — Any brand architecture needs?
 21. **Naming conventions** for products or features.
 
-**Gate condition:** At least one channel strategy must be defined before Phase {next_phase}.""",
+**Gate condition:** At least one channel strategy must be defined before {next_phase}.""",
     BrandPhase.GOVERNANCE: """\
 Can only be built once there's something to govern.
 22. **Ownership** — Who owns the brand internally?
@@ -122,13 +125,15 @@ def _phase_section(phase: BrandPhase) -> str:
     Postconditions:
         Returns ``_phase_header(phase)`` followed by ``_PHASE_BODIES[phase]``
         on the next line, with any ``{prev_phase}``/``{next_phase}``
-        placeholders in the body substituted with the 1-indexed position of
-        the preceding/following ``PHASE_ORDER`` entry (bodies with no such
-        dependency/gate-condition reference, e.g. the first/last phase, have
-        no corresponding placeholder and are unaffected).
+        placeholders in the body substituted with ``"Phase {n}"`` for the
+        preceding/following ``PHASE_ORDER`` entry, or a phaseless fallback
+        phrase when *phase* sits at that end of ``PHASE_ORDER`` (no
+        nonexistent phase number, e.g. "Phase 0", is ever rendered).
     """
     n = PHASE_ORDER.index(phase) + 1
-    body = _PHASE_BODIES[phase].format(prev_phase=n - 1, next_phase=n + 1)
+    prev_phase = f"Phase {n - 1}" if n > 1 else "the prior phase in this flow"
+    next_phase = f"Phase {n + 1}" if n < len(PHASE_ORDER) else "the next phase in this flow"
+    body = _PHASE_BODIES[phase].format(prev_phase=prev_phase, next_phase=next_phase)
     return f"{_phase_header(phase)}\n{body}"
 
 

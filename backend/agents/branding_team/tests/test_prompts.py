@@ -195,3 +195,25 @@ def test_system_prompt_sections_follow_reordered_phase_order(
     finally:
         monkeypatch.setattr(shared_mod, "PHASE_ORDER", original_order)
         importlib.reload(prompts_mod)
+
+
+def test_system_prompt_omits_nonexistent_phase_numbers_at_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A phase moved to the first/last PHASE_ORDER slot must not reference a nonexistent phase."""
+    import branding_team.assistant.prompts as prompts_mod
+    import branding_team.graphs.shared as shared_mod
+
+    original_order = list(shared_mod.PHASE_ORDER)
+    # Rotate so Narrative Messaging (normally 2nd) leads and Strategic Core (normally 1st) trails.
+    monkeypatch.setattr(shared_mod, "PHASE_ORDER", original_order[1:] + original_order[:1])
+    try:
+        importlib.reload(prompts_mod)
+        reordered = prompts_mod.SYSTEM_PROMPT
+        assert "Phase 0" not in reordered
+        assert f"Phase {len(original_order) + 1}" not in reordered
+        assert "Depends entirely on the prior phase in this flow." in reordered
+        assert "before moving to the next phase in this flow" in reordered
+    finally:
+        monkeypatch.setattr(shared_mod, "PHASE_ORDER", original_order)
+        importlib.reload(prompts_mod)
