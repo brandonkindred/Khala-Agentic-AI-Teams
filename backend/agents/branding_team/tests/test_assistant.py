@@ -381,6 +381,29 @@ def test_branding_assistant_agent_explicit_kwargs_override_legacy_llm() -> None:
     legacy.assert_not_called()
 
 
+def test_branding_assistant_agent_default_conversation_agent_uses_build_agent() -> None:
+    """Default construction routes the conversation stage through ``build_agent``.
+
+    Runs under ``LLM_PROVIDER=dummy`` (no real LLM, no Postgres): construction
+    resolves a dummy Strands model and never invokes it. Only the conversation
+    stage is left to default-construct; the extraction stage is injected so
+    this test stays hermetic on that side.
+    """
+    from strands import Agent
+    from strands.handlers import null_callback_handler
+
+    from branding_team.assistant.prompts import SYSTEM_PROMPT
+
+    extraction_llm = MagicMock()
+    agent = BrandingAssistantAgent(extraction_llm=extraction_llm)
+
+    conversation_agent = agent._conversation_agent
+    assert isinstance(conversation_agent, Agent)
+    assert conversation_agent.name == "conversation"
+    assert conversation_agent.system_prompt == SYSTEM_PROMPT
+    assert conversation_agent.callback_handler is null_callback_handler
+
+
 def test_branding_assistant_agent_handles_conversation_llm_failure() -> None:
     conversation_llm = MagicMock(side_effect=Exception("LLM unavailable"))
     extraction_llm = MagicMock()
