@@ -701,11 +701,11 @@ def _build_tools(index: CodebaseIndex) -> list:
             construct (all other languages). Returns an error string if the path
             is not readable; never raises.
         """
-        content = index.read_file(path)
-        if content.startswith("Error:"):
-            return content
         resolved = index.resolve_path(path)
-        display_path = resolved if resolved and resolved != index.EXISTING_CODEBASE_PATH else path
+        if not resolved:
+            return f"Error: {path!r} is not a readable path."
+        content = index.read_file(path)
+        display_path = resolved if resolved != index.EXISTING_CODEBASE_PATH else path
         # Strip ``N: `` line-number prefixes that the PR-review path injects via
         # ``render_annotated_hunks``; remap to the physical line index so the
         # helper functions operate on plain code, then restore original numbers

@@ -351,6 +351,15 @@ def test_find_function_at_line_unknown_path() -> None:
     assert result.startswith("Error")
 
 
+def test_find_function_at_line_content_literally_starting_with_error() -> None:
+    """A readable file whose content starts with 'Error:' is not mistaken for a failure."""
+    code = '"""Error: this is a docstring, not a read failure."""\ndef alpha():\n    pass\n'
+    idx = CodebaseIndex(files={"fixtures/log_sample.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("fixtures/log_sample.py", 2)
+    assert "alpha" in result
+
+
 def test_find_function_at_line_python_syntax_error() -> None:
     """Tool returns a parse-error message for a Python file with invalid syntax."""
     code = "def foo(:\n    pass\n"  # SyntaxError: missing closing paren
