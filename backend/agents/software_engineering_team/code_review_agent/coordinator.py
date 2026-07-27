@@ -88,7 +88,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import OrderedDict
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
 from shared.env_config import env_bool
@@ -398,6 +398,20 @@ def _merge_narrative(
     return concatenated_summary, concatenated_notes
 
 
+class _TailPassResult(NamedTuple):
+    """Merged output of :func:`_run_tail_passes`.
+
+    ``issues`` is the single ordered, merged findings list; ``has_additive_findings``
+    is carried separately (not re-derivable from ``issues`` alone once merged)
+    because the caller needs it standalone to decide whether the narrative
+    synthesis pass must run even for a single-chunk review (see
+    ``_merge_narrative``'s ``has_additive_pass_findings`` parameter).
+    """
+
+    issues: List[CodeReviewIssue]
+    has_additive_findings: bool
+
+
 def _run_tail_passes(
     *,
     llm: LLMClient,
@@ -405,7 +419,7 @@ def _run_tail_passes(
     genuine_issues: List[CodeReviewIssue],
     repo_reader: Optional[RepoReader],
     shared_index: CodebaseIndex,
-) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue], List[CodeReviewIssue]]:
+) -> _TailPassResult:
     """Run the false-positive / architecture / side-effect tail passes.
 
     All three are once-per-submission, additive-only, read-only checks over
@@ -424,12 +438,14 @@ def _run_tail_passes(
         - ``shared_index`` was built from the same ``input_data``/``repo_reader``.
 
     Postconditions:
-        - Returns ``(verified, architecture_findings, side_effect_findings)``:
-          ``verified`` is ``genuine_issues`` unchanged when
-          ``input_data.skip_false_positive_filter`` is set (the filter call is
-          skipped entirely), else the false-positive filter's result; the other
-          two are each pass's raw findings list (possibly empty), for the caller
-          to fold into ``verified`` itself.
+        - Returns a :class:`_TailPassResult` whose ``issues`` is the
+          false-positive-filtered (or, when ``input_data.skip_false_positive_filter``
+          is set, unfiltered) ``genuine_issues``, followed by the architecture
+          pass's findings, followed by the side-effect pass's findings — the
+          same order the caller's merge produced before this fan-out existed,
+          regardless of which pass's underlying call actually completes first —
+          and whose ``has_additive_findings`` is True iff the architecture
+          and/or side-effect pass contributed at least one finding.
         - When ``llm`` is (or wraps) a ``DummyLLMClient`` (see
           ``_tail_passes_run_sequentially`` — such doubles use a shared
           non-thread-safe scripted response index), fewer than two passes are
@@ -487,7 +503,16 @@ def _run_tail_passes(
         results = {name: output for (name, _), output in zip(calls, outputs)}
 
     verified = results.get("filter", genuine_issues)
-    return verified, results["architecture"], results["side_effect"]
+    architecture_findings = results["architecture"]
+    side_effect_findings = results["side_effect"]
+    if architecture_findings:
+        verified = [*verified, *architecture_findings]
+    if side_effect_findings:
+        verified = [*verified, *side_effect_findings]
+    return _TailPassResult(
+        issues=verified,
+        has_additive_findings=bool(architecture_findings) or bool(side_effect_findings),
+    )
 
 
 def run_coordinator(
@@ -499,7 +524,15 @@ def run_coordinator(
     """Map-reduce review entry point: bounded chunks in, merged verdict out.
 
     Preconditions:
-        - ``llm`` implements ``LLMClient`` (context sizing + chunk review calls).
+        - ``llm`` implements ``LLMClient`` (context sizing + chunk review calls)
+          and, unless it is (or wraps) a ``DummyLLMClient``, must tolerate
+          concurrent calls from worker threads: the map phase already fans
+          chunk reviews out (see ``_map_chunks``), and the false-positive /
+          architecture-consistency / side-effect tail passes fan out the same
+          way (see ``_run_tail_passes``) whenever ``_tail_passes_run_sequentially``
+          and the ``CODE_REVIEW_MAP_PARALLELISM`` budget both allow it. The
+          central ``llm_service`` clients already guard their shared state
+          internally for this.
         - ``input_data`` carries the code under review via ``files`` or ``code``.
         - ``progress_callback`` is None or satisfies the
           ``ReviewProgressCallback`` contract (non-raising, accepts
@@ -526,7 +559,13 @@ def run_coordinator(
           positive; when that removes the last critical/high finding the gate
           approves (a chunk-local false positive never blocks the merge). The
           check is fail-safe — any verifier failure keeps the findings — and
-          never touches the not-reviewed coverage findings.
+          never touches the not-reviewed coverage findings. This pass and the
+          architecture-consistency / side-effect passes below it run
+          concurrently via ``shared.concurrency.parallel_map`` when safe to do
+          so, falling back to the sequential order (false-positive filter,
+          then architecture, then side-effect) otherwise; either way the
+          merged ``issues`` order and content are identical (see
+          ``_run_tail_passes``).
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - A submission byte-identical to one this process already approved *and
@@ -713,17 +752,14 @@ def run_coordinator(
     # (The latter two are restricted internally to the default CODE_REVIEW
     # profile -- see their own docstrings for why the other profiles must never
     # receive these findings.)
-    verified, architecture_findings, side_effect_findings = _run_tail_passes(
+    tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,
         genuine_issues=genuine_issues,
         repo_reader=repo_reader,
         shared_index=shared_index,
     )
-    if architecture_findings:
-        verified = [*verified, *architecture_findings]
-    if side_effect_findings:
-        verified = [*verified, *side_effect_findings]
+    verified = tail_pass_result.issues
 
     notify_review_progress(
         progress_callback,
@@ -760,7 +796,7 @@ def run_coordinator(
         approved,
         deduped,
         outcome,
-        has_additive_pass_findings=bool(architecture_findings) or bool(side_effect_findings),
+        has_additive_pass_findings=tail_pass_result.has_additive_findings,
     )
 
     logger.info(
