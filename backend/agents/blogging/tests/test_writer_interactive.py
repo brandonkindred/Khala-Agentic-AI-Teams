@@ -279,6 +279,28 @@ def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
     assert (tmp_path / "out.md").exists()
 
 
+def test_revise_from_user_feedback_literal_braces_in_feedback(monkeypatch) -> None:
+    """Feedback containing literal braces (e.g. a JSON snippet) must not raise."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+    captured_prompts = []
+
+    def fake_call_text(self, prompt, system_prompt=""):
+        captured_prompts.append(prompt)
+        return '{"draft": 0}\n---DRAFT---\n# Revised\nBody.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake_call_text)
+    feedback = 'Please fix this snippet: {"key": "value", "nested": {"a": 1}}'
+    out = a.revise_from_user_feedback(
+        draft="# Old\nBody",
+        user_feedback=feedback,
+        content_plan_text="# Plan",
+    )
+    assert "Revised" in out.draft
+    assert feedback in captured_prompts[0]
+
+
 def test_revise_from_user_feedback_empty_draft() -> None:
     """Whitespace-only draft is returned unchanged (no LLM call)."""
     a = _make_agent()
