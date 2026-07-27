@@ -49,6 +49,132 @@ def _is_number_not_bool(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _run_with_timeout(
+    futures: list,
+    index_of: dict,
+    start_times: "list[Optional[float]]",
+    submitted_items: list,
+    ordered: list,
+    completion: list,
+    timeout: float,
+    workers: int,
+    on_timeout: Optional[Callable[[T], None]],
+) -> bool:
+    """Drain *futures* in completion order, degrading any item that exceeds
+    *timeout* (measured from its own ``start_times`` entry) to ``None``
+    instead of aborting. Returns whether anything was degraded — the caller
+    uses this to decide the ``wait_for_stragglers`` behavior on shutdown.
+    """
+    timed_out = False
+
+    def _degrade(i: int) -> None:
+        nonlocal timed_out
+        timed_out = True
+        if on_timeout is not None:
+            try:
+                on_timeout(submitted_items[i])
+            except Exception:
+                logger.exception("on_timeout hook raised for a degraded item; the item's result remains None")
+        ordered[i] = None
+        completion.append(None)
+
+    pending = set(futures)
+    poll_interval = min(timeout, _TIMEOUT_POLL_INTERVAL_SECONDS)
+    # Count of items currently presumed to be abandoned stragglers still
+    # occupying a worker thread we've given up watching. This is a live
+    # estimate, not a running total: it's decremented back down whenever the
+    # pool shows any sign of life (a future completes, or a queued item gets
+    # to start), since that proves at least one worker isn't permanently
+    # stuck after all.
+    stragglers = 0
+    # Set the first moment every worker slot is presumed occupied by an
+    # abandoned straggler. A single instant of saturation proves nothing on
+    # its own — the straggler may simply be a bit slow and about to return,
+    # freeing its worker for the next queued item — so a not-yet-started
+    # item only gets force-degraded once saturation has persisted for a
+    # further full ``timeout`` with no sign of it starting, giving it the
+    # same budget a normal item gets before it's called stuck.
+    saturation_since: Optional[float] = None
+    # Indices already credited as "started" — so a queued item that started
+    # two iterations ago isn't counted as fresh progress again on every
+    # subsequent poll.
+    started_seen: set[int] = set()
+
+    def _record_progress(count: int) -> None:
+        # Called with each independent sign of life this poll: a real
+        # completion, or a queued item finally starting. Either disproves
+        # "every worker is permanently stuck", so it walks the saturation
+        # estimate back down instead of letting it accumulate forever
+        # across unrelated stragglers.
+        nonlocal stragglers, saturation_since
+        if count and stragglers:
+            stragglers = max(0, stragglers - count)
+            if stragglers < workers:
+                saturation_since = None
+
+    while pending:
+        done, pending = wait(pending, timeout=poll_interval, return_when=FIRST_COMPLETED)
+        now = time.monotonic()
+        for fut in done:
+            i = index_of[fut]
+            started_at = start_times[i]
+            # A future can be both "done" and already over its own budget if
+            # this loop was busy (e.g. a slow on_timeout hook for a
+            # different item) past the next poll. Genuine worker exceptions
+            # still always fast-fail regardless of timing; only a
+            # *successful*-but-overdue completion is degraded instead of
+            # accepted.
+            if fut.exception() is None and started_at is not None and now - started_at >= timeout:
+                _degrade(i)
+            else:
+                value = fut.result()  # re-raises the worker's exception with its traceback
+                ordered[i] = value
+                completion.append(value)
+        _record_progress(len(done))
+        if not pending:
+            break
+        newly_started = 0
+        for fut in pending:
+            i = index_of[fut]
+            if i not in started_seen and start_times[i] is not None:
+                started_seen.add(i)
+                newly_started += 1
+        _record_progress(newly_started)
+        for fut in list(pending):
+            i = index_of[fut]
+            started_at = start_times[i]
+            if started_at is not None and now - started_at >= timeout:
+                # Degrade, don't abort: this item alone becomes None; its
+                # future is left running in the background (it already
+                # started, so it can't be cancelled) and the rest of the
+                # batch is unaffected. This never touches ``abort`` — a
+                # timeout is not a worker exception.
+                pending.discard(fut)
+                stragglers += 1
+                _degrade(i)
+        if pending and stragglers >= workers:
+            if saturation_since is None:
+                saturation_since = now
+            elif now - saturation_since >= timeout:
+                # Saturation has persisted for a full timeout with no worker
+                # freeing up: every slot is genuinely stuck, so a
+                # not-yet-started item behind it can never be scheduled and
+                # would spin forever. Cancel it while it's still queued —
+                # this both stops it from ever running unobserved in the
+                # background after we return, and doubles as the
+                # correctness check: if cancel() fails, a worker freed up
+                # and started it after all (race), so it's left in
+                # ``pending`` to be tracked normally against its own start
+                # time instead.
+                for fut in list(pending):
+                    i = index_of[fut]
+                    if start_times[i] is None and fut.cancel():
+                        pending.discard(fut)
+                        _degrade(i)
+
+    return timed_out
+
+
 def parallel_map(
     items: Collection[T],
     fn: Callable[[T], R],
@@ -292,76 +418,17 @@ def parallel_map(
             # Same completion-order draining as above, interleaved with a
             # per-item deadline check on whatever's still pending: a short
             # poll bounds how late a timeout is noticed without busy-looping.
-            pending = set(futures)
-            poll_interval = min(timeout, _TIMEOUT_POLL_INTERVAL_SECONDS)
-            # Count of items degraded-and-abandoned so far: once a straggler is
-            # discarded from ``pending`` its worker thread is never watched
-            # again, so if it never returns that thread is gone for good.
-            stragglers = 0
-            # Set the first moment every worker slot is presumed occupied by
-            # an abandoned straggler. A single instant of saturation proves
-            # nothing on its own — the straggler may simply be a bit slow and
-            # about to return, freeing its worker for the next queued item —
-            # so a not-yet-started item only gets force-degraded once
-            # saturation has persisted for a further full ``timeout`` with no
-            # sign of it starting, giving it the same budget a normal item
-            # gets before it's called stuck.
-            saturation_since: Optional[float] = None
-
-            def _degrade(i: int) -> None:
-                nonlocal timed_out
-                timed_out = True
-                if on_timeout is not None:
-                    try:
-                        on_timeout(submitted_items[i])
-                    except Exception:
-                        logger.exception(
-                            "on_timeout hook raised for a degraded item; "
-                            "the item's result remains None"
-                        )
-                ordered[i] = None
-                completion.append(None)
-
-            while pending:
-                done, pending = wait(pending, timeout=poll_interval, return_when=FIRST_COMPLETED)
-                for fut in done:
-                    value = fut.result()  # re-raises the worker's exception with its traceback
-                    ordered[index_of[fut]] = value
-                    completion.append(value)
-                if not pending:
-                    break
-                now = time.monotonic()
-                for fut in list(pending):
-                    i = index_of[fut]
-                    started_at = start_times[i]
-                    if started_at is not None and now - started_at >= timeout:
-                        # Degrade, don't abort: this item alone becomes None;
-                        # its future is left running in the background (it
-                        # already started, so it can't be cancelled) and the
-                        # rest of the batch is unaffected. This never touches
-                        # ``abort`` — a timeout is not a worker exception.
-                        pending.discard(fut)
-                        stragglers += 1
-                        _degrade(i)
-                if pending and stragglers >= workers:
-                    if saturation_since is None:
-                        saturation_since = now
-                    elif now - saturation_since >= timeout:
-                        # Saturation has persisted for a full timeout with no
-                        # worker freeing up: every slot is genuinely stuck, so
-                        # a not-yet-started item behind it can never be
-                        # scheduled and would spin forever. Cancel it while
-                        # it's still queued — this both stops it from ever
-                        # running unobserved in the background after we
-                        # return, and doubles as the correctness check: if
-                        # cancel() fails, a worker freed up and started it
-                        # after all (race), so it's left in ``pending`` to be
-                        # tracked normally against its own start time instead.
-                        for fut in list(pending):
-                            i = index_of[fut]
-                            if start_times[i] is None and fut.cancel():
-                                pending.discard(fut)
-                                _degrade(i)
+            timed_out = _run_with_timeout(
+                futures,
+                index_of,
+                start_times,
+                submitted_items,
+                ordered,
+                completion,
+                timeout,
+                workers,
+                on_timeout,
+            )
     except BaseException as exc:
         # Set before anything else below (including the hook, which is
         # caller-supplied and may be slow) to give not-yet-started tasks the

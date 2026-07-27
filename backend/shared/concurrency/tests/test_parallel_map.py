@@ -454,6 +454,78 @@ def test_timeout_queued_item_still_runs_behind_a_merely_slow_not_hung_worker() -
     assert out == [None, 10]
 
 
+def test_timeout_degrades_a_late_but_successfully_completed_future() -> None:
+    """A future that genuinely ran past its own budget must be degraded even
+    if it happens to complete (successfully) while parallel_map's loop is
+    busy elsewhere (here: a slow on_timeout hook for a different, hung
+    item) and only gets to observe it as already-``done`` afterward — it
+    must not slip through as a real result just because the loop was late
+    to check its deadline while it was still pending."""
+    release_hang = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_hang.wait(timeout=5)  # permanently hung, released in finally
+            return 0
+        if x == 1:
+            # Comfortably within budget; frees a worker at ~0.15s so item 2
+            # starts well after item 0 (needed so item 0's own deadline is
+            # reached — and its slow hook fires — before item 2's is, even
+            # accounting for poll-interval jitter).
+            time.sleep(0.15)
+            return 11
+        # Starts at ~0.15s, finishes at ~0.55s: 0.4s of real runtime against
+        # a 0.3s budget — genuinely over budget, and finishes while item 0's
+        # slow hook (below) still has parallel_map's loop tied up.
+        time.sleep(0.40)
+        return 22
+
+    def on_timeout(item: int) -> None:
+        if item == 0:
+            # Long enough to span item 2's real completion (~0.55s) before
+            # the loop gets back around to calling `wait()` again.
+            time.sleep(0.4)
+
+    try:
+        out = parallel_map(
+            [0, 1, 2],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.3,
+            on_timeout=on_timeout,
+        )
+        assert out == [None, 11, None]
+    finally:
+        release_hang.set()
+
+
+def test_timeout_saturation_resets_once_the_pool_shows_progress() -> None:
+    """The saturation grace-period fallback must not accumulate forever: once
+    an abandoned straggler's worker resumes and makes real progress (here:
+    several small in-budget items complete one after another on the single
+    worker), later queued items must still get to run instead of being
+    force-cancelled just because a stale straggler count once reached the
+    worker count."""
+    release_hang = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_hang.wait(timeout=0.2)  # slightly over budget, then returns
+            return 0
+        time.sleep(0.01)  # comfortably within budget
+        return x * 10
+
+    threading.Timer(0.06, release_hang.set).start()
+    try:
+        out = parallel_map([0, 1, 2, 3], fn, max_workers=1, skip_none=False, timeout=0.05)
+        # Item 0 alone degrades (it ran over budget); every item queued
+        # behind it keeps running normally once the worker recovers.
+        assert out == [None, 10, 20, 30]
+    finally:
+        release_hang.set()
+
+
 def test_timeout_uses_item_not_index_for_non_subscriptable_items() -> None:
     """on_timeout receives the actual submitted item even when `items` is a
     sized-but-not-subscriptable iterable (e.g. a set), rather than indexing
