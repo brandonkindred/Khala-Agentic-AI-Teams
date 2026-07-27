@@ -235,7 +235,7 @@ class BrandingTeamOrchestrator:
         mission: BrandingMission,
         phase: BrandPhase,
         prior_outputs: Optional[dict[str, dict]] = None,
-    ) -> BaseModel:
+    ) -> "tuple[BaseModel, bool]":
         """Run a single pipeline phase in isolation and return its output model.
 
         The monolithic ``build_branding_graph`` wires phases as sequential nodes,
@@ -254,9 +254,12 @@ class BrandingTeamOrchestrator:
               JSON-safe phase-output dicts (``model_dump(mode="json")``), or is
               ``None``/empty for the first phase.
         Postconditions:
-            - Returns an instance of the phase's output model (never ``None``);
-              a parse failure yields a default-constructed model, matching
-              ``_extract_phase_output``'s contract.
+            - Returns ``(output, degraded)`` from ``_extract_phase_output``:
+              ``output`` is never ``None`` (a parse failure yields a
+              default-constructed model); ``degraded`` is ``True`` iff that
+              default was used. The caller (the Temporal phase activity) owns
+              folding ``degraded`` into the run's durable degradation record —
+              this method does not persist anything itself.
         """
         if phase not in _PHASE_SPEC:
             raise ValueError(f"{phase!r} is not a runnable branding phase")
@@ -272,8 +275,7 @@ class BrandingTeamOrchestrator:
 
         task = self._phase_task(mission, phase, prior_outputs or {})
         result = run_coroutine(graph.invoke_async(task))
-        output, _degraded = self._extract_phase_output(result, node_id, model_cls)
-        return output
+        return self._extract_phase_output(result, node_id, model_cls)
 
     @staticmethod
     def _phase_task(
