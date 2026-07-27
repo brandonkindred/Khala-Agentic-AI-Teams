@@ -20,17 +20,21 @@ _PHASE_SUBTITLES: dict[BrandPhase, str] = {
 }
 
 
-def _phase_header(phase: BrandPhase) -> str:
+def _phase_header(phase: BrandPhase, n: int | None = None) -> str:
     """Render a "GUIDED FLOW" section header for *phase*.
 
     Preconditions:
         ``phase`` is present in ``PHASE_ORDER``, ``PHASE_TITLES``, and
-        ``_PHASE_SUBTITLES``.
+        ``_PHASE_SUBTITLES``. When provided, ``n`` is *phase*'s already-known
+        1-indexed position in ``PHASE_ORDER`` (callers that have already
+        looked it up can pass it to avoid a redundant ``PHASE_ORDER.index``
+        call); when omitted, it is computed here.
     Postconditions:
         Returns ``'**Phase {n} — {title} ("{subtitle}")**'`` where ``n`` is
         the phase's 1-indexed position in ``PHASE_ORDER``.
     """
-    n = PHASE_ORDER.index(phase) + 1
+    if n is None:
+        n = PHASE_ORDER.index(phase) + 1
     return f'**Phase {n} — {PHASE_TITLES[phase]} ("{_PHASE_SUBTITLES[phase]}")**'
 
 
@@ -134,7 +138,7 @@ def _phase_section(phase: BrandPhase) -> str:
     prev_phase = f"Phase {n - 1}" if n > 1 else "the prior phase in this flow"
     next_phase = f"Phase {n + 1}" if n < len(PHASE_ORDER) else "the next phase in this flow"
     body = _PHASE_BODIES[phase].format(prev_phase=prev_phase, next_phase=next_phase)
-    return f"{_phase_header(phase)}\n{body}"
+    return f"{_phase_header(phase, n)}\n{body}"
 
 
 # The "GUIDED FLOW" section's phase blocks, assembled in ``PHASE_ORDER`` order

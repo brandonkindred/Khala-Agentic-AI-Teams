@@ -13,7 +13,7 @@ import importlib
 
 import pytest
 
-from branding_team.assistant.prompts import SYSTEM_PROMPT
+from branding_team.assistant.prompts import SYSTEM_PROMPT, _phase_header
 from branding_team.graphs.shared import PHASE_ORDER, PHASE_TITLES
 
 # Captured verbatim from ``SYSTEM_PROMPT`` before it was wired to the
@@ -157,12 +157,30 @@ NOT your job. Do not output JSON or structured data of any kind. Write like a hu
 
 
 def test_system_prompt_matches_pre_refactor_content() -> None:
+    """Snapshot assertion: rendered SYSTEM_PROMPT is byte-for-byte unchanged.
+
+    Preconditions: ``_ORIGINAL_SYSTEM_PROMPT`` was captured verbatim before
+    the phase-order helper was wired in.
+    Postconditions: ``SYSTEM_PROMPT`` equals the pre-refactor literal snapshot.
+    """
     assert SYSTEM_PROMPT == _ORIGINAL_SYSTEM_PROMPT
 
 
 def test_system_prompt_headers_derived_from_phase_titles() -> None:
+    """Each phase header in SYSTEM_PROMPT derives from PHASE_ORDER/PHASE_TITLES.
+
+    Iterates over ``PHASE_ORDER`` and asserts that ``Phase N — Title`` appears
+    in the rendered ``SYSTEM_PROMPT``, where the title comes from
+    ``PHASE_TITLES``.
+    """
     for i, phase in enumerate(PHASE_ORDER, start=1):
         assert f"Phase {i} — {PHASE_TITLES[phase]}" in SYSTEM_PROMPT
+
+
+def test_phase_header_computes_index_when_omitted() -> None:
+    """``_phase_header`` derives ``n`` itself when the caller doesn't supply it."""
+    phase = PHASE_ORDER[0]
+    assert _phase_header(phase) == _phase_header(phase, 1)
 
 
 def test_system_prompt_sections_follow_reordered_phase_order(
