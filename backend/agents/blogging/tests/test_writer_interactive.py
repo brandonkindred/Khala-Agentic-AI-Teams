@@ -950,7 +950,11 @@ def test_revise_wrapped_json_parse_error_retries_then_fallback(monkeypatch) -> N
         lambda self, draft, items, ri: RevisionPlan(summary="planned", changes=[], risks=[]),
     )
 
+    call_count = 0
+
     def boom(self, *a, **kw):
+        nonlocal call_count
+        call_count += 1
         raise EventLoopException(LLMJsonParseError("bad json", response_preview="x"))
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
@@ -975,6 +979,7 @@ def test_revise_wrapped_json_parse_error_retries_then_fallback(monkeypatch) -> N
     )
     assert "Batch Recovered From Parse Error" in out.draft
     assert sleep_calls == []
+    assert call_count > 1
 
 
 def test_revise_generate_revision_plan_happy(monkeypatch) -> None:

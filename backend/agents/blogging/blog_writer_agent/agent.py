@@ -184,10 +184,21 @@ def _extract_json_array_from_text(
           have ``required_keys``) does not short-circuit the scan; scanning
           continues past it toward the real payload.
         - If no matching array of dicts is found, returns the first syntactically
-          valid empty ``[]`` encountered — this cannot be distinguished from an
-          empty Markdown link such as ``[label]()``, so a response containing
-          only such a link and no real array-of-dicts payload also returns
-          ``[]`` here — or ``None`` if no array matched at all.
+          valid empty ``[]`` encountered — this cannot be distinguished from a
+          literally empty Markdown link ``[]()`` (an empty pair of brackets is
+          valid JSON), so a response containing only such a link and no real
+          array-of-dicts payload also returns ``[]`` here. A Markdown link with
+          non-empty text, e.g. ``[label](url)``, is not valid JSON at that
+          ``[`` and is simply skipped like any other non-match. Returns
+          ``None`` if no array matched at all.
+
+    Limitation: the scan looks for a literal ``[`` anywhere in ``text``,
+    including inside a JSON string value (e.g. an object field whose value is
+    the literal text ``"[{...}]"``), so it can extract an array nested inside
+    a string rather than only a true top-level/prose array. This has not been
+    observed in practice for the reviewer/uncertainty response shapes this is
+    used for, but is a known edge case if a future prompt's schema puts
+    JSON-looking text inside a string field.
     """
     decoder = json.JSONDecoder()
     search_from = 0
