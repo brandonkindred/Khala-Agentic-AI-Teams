@@ -25,7 +25,6 @@ from software_engineering_team.shared.phases.rollback import (
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
-from software_engineering_team.shared.v2_models import BaseExecutionResult
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +190,7 @@ def run_execution_impl(
     only_microtask_ids: Optional[List[str]],
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
-) -> BaseExecutionResult[Any]:
+) -> Any:
     """Execute microtasks in the planner's stated order, best-effort on dependencies.
 
     If ``only_microtask_ids`` is set, only those microtasks are run (e.g. fix
@@ -343,10 +342,11 @@ class GatedExecutionConfig:
     # frontend "found").
     gate_issue_log_verb: str
     # When True, QA and Security run concurrently via parallel_map against the
-    # same post-Code-Review snapshot (backend only — see
-    # docs/GATE_DEPENDENCY_GRAPH.md). Defaults False (today's fully sequential
-    # QA -> Security behavior), so the frontend config is unaffected until its
-    # tool-agent fan-out is scoped per gate the way the backend's already is.
+    # same post-Code-Review snapshot (see docs/GATE_DEPENDENCY_GRAPH.md).
+    # Defaults False (fully sequential QA -> Security) on this shared
+    # dataclass; both backend_code_v2_team and frontend_code_v2_team override
+    # it to True in their own ``GATE_CONFIG`` now that frontend's tool-agent
+    # fan-out is scoped per gate the way the backend's already is.
     parallelize_qa_security: bool = False
     # ``mt.status`` set instead of ``status_qa``/``status_security`` when
     # ``parallelize_qa_security`` is in effect: QA and Security run at once, so

@@ -156,7 +156,7 @@ Edge classification:
   gate meant to surface `ACCESSIBILITY`/`UI_DESIGN` findings, which have no
   dedicated gate of their own.
 
-  **Residual duplication (audited, not yet fixed):** `deps.tool_agents`' full
+  **Residual duplication (audited, now fixed — see below):** `deps.tool_agents`' full
   mapping also contains `TESTING_QA` and `SECURITY`
   (`frontend_code_v2_team/orchestrator.py:98-104`). So within one microtask
   review cycle: the CR gate's full fan-out calls `TESTING_QA.review()` and
@@ -183,8 +183,7 @@ Edge classification:
   `deps.tool_agent_cache` into their `run_microtask_review` call — the backend
   team never reads this attribute, so it is a no-op there (consistent with the
   backend never having had this duplication). The design below is what was
-  implemented:
-  modeled directly on the existing `AgentReviewCache`
+  implemented, modeled directly on the existing `AgentReviewCache`
   (`shared/agent_review.py:32-60`) that already prevents this same class of
   duplication for the QA/security *LLM* steps.
   - **Cache key**: a digest of `(kind.value, current_files content,
@@ -308,24 +307,28 @@ Edge classification:
   change (today Security only starts once QA has already passed), not a drop-in
   optimization — it changes the retry/restart semantics described above and needs
   its own design before implementation.
-- QA and Security analysis calls **on the frontend** are not yet in this bucket:
-  the QA/Security gates' own tool-agent fan-out is already scoped per gate
-  (`_scoped_tool_agents`, see the dependency-graph note above) as of commit
-  `abd5bb5`, matching the backend's `_run_agent_testing_phase` filter — but the
-  CR gate's full-mapping fan-out previously called `TESTING_QA`/`SECURITY` a
-  second time on top of each gate's own dedicated call (the residual 2x
-  duplication documented above); this is now closed by the caching design
-  above (implemented). Concurrency is only safe once that residual duplication is
-  closed — the caching design above is the intended seam: a second concurrent
-  call for an already-cached key becomes a cache hit instead of a second live
-  call into a shared tool-agent instance.
+- QA and Security analysis calls **on the frontend**: the QA/Security gates'
+  own tool-agent fan-out is scoped per gate (`_scoped_tool_agents`, see the
+  dependency-graph note above) as of commit `abd5bb5`, matching the backend's
+  `_run_agent_testing_phase` filter, and `frontend_code_v2_team`'s
+  `GATE_CONFIG` now sets `parallelize_qa_security=True` (matching the
+  backend), so QA and Security run concurrently by default on the frontend
+  too. The CR gate's full-mapping fan-out previously called
+  `TESTING_QA`/`SECURITY` a second time on top of each gate's own dedicated
+  call (the residual 2x duplication documented above) — that duplication was
+  a real but pre-existing cost, not a concurrency-safety issue, since Code
+  Review always finishes (and re-passes) before the concurrent QA+Security
+  phase begins, so there was no shared mutable state accessed at the same
+  time. It is now closed by the caching design above (implemented): a second
+  concurrent call for an already-cached key becomes a cache hit instead of a
+  second live call into a shared tool-agent instance.
 
-The follow-up implementation issue should scope itself to the backend QA/Security
-analysis concurrency item above (extending it to the frontend only after the
-residual CR-vs-QA/Security tool-agent duplication is closed via the caching
-design above), and, only after isolating build verification's repair path from
-its read-only checks, the Code-Review sub-steps item — rather than attempting to
-parallelize the full sequential chain. DbC is out of scope for parallelization —
-if it is wired in, it needs an explicit serialized position in the sequence, not
-a concurrent or independent one. Any redesign must also preserve (or deliberately
-revisit) the frontend-only terminal edge at the cycle cap noted above.
+The follow-up implementation issue closed the residual CR-vs-QA/Security
+tool-agent duplication via the caching design above. What remains is, only
+after isolating build verification's repair path from its read-only checks,
+the Code-Review sub-steps item — rather than attempting to parallelize the
+full sequential chain. DbC is out of scope for parallelization — if it is
+wired in, it needs an explicit serialized position in the sequence, not a
+concurrent or independent one. Any redesign must also preserve (or
+deliberately revisit) the frontend-only terminal edge at the cycle cap noted
+above.
