@@ -21,7 +21,6 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
 )
 from software_engineering_team.shared.repo_writer import write_agent_output
-from software_engineering_team.shared.security_service import infra_gate_passed
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
     TeamLeadSharedState,
@@ -46,7 +45,7 @@ from .models import (
     ReleaseReadiness,
     SubtaskContract,
 )
-from .phases import run_phase1_intake_clarify, run_phase2_design_fanout
+from .phases import assemble_quality_gates, run_phase1_intake_clarify, run_phase2_design_fanout
 
 # Commit-message template for the shared deliver helper. ``deliver_inline_merge``
 # calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
@@ -690,41 +689,25 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             )
             acceptance_trace = list(val.acceptance_trace)
 
-            quality_gates = dict(val.quality_gates)
-            # The infra security gate routes both the DevSecOps LLM review and the
-            # policy-as-code (checkov) scan through the unified infra decision. This
-            # is force-assigned (not setdefault) so the authoritative DevSecOps +
-            # policy result always wins — a validation-agent-supplied "pass" must
-            # never mask a failing review or checkov scan.
-            quality_gates["security_review"] = (
-                "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail"
+            qg = assemble_quality_gates(
+                task_spec=task_spec,
+                val=val,
+                devsec=devsec,
+                policy_checks=policy_checks,
+                change_review=change_review,
+                aggregated_artifacts=aggregated_artifacts,
             )
-            quality_gates.setdefault("change_review", "pass" if change_review.approved else "fail")
+            quality_gates = qg.quality_gates
 
             def _quality_gates_check() -> Optional[DevOpsTeamResult]:
                 """Fail the phase when any assembled quality gate is ``fail``.
 
-                Preconditions: ``quality_gates``, ``devsec``, ``change_review``,
-                  ``val``, ``task_spec``, and ``aggregated_artifacts`` are set by
-                  Phase 4 setup above.
+                Preconditions: ``qg`` is set by Phase 4 setup above.
                 Postconditions: returns the blocked ``DevOpsTeamResult`` with the
                   existing completion-package shape when any gate fails; otherwise
                   ``None``.
                 """
-                if any(v == "fail" for v in quality_gates.values()):
-                    return DevOpsTeamResult(
-                        success=False,
-                        failure_reason="Quality gates failed",
-                        completion_package=DevOpsCompletionPackage(
-                            task_id=task_spec.task_id,
-                            status="blocked",
-                            files_changed=sorted(aggregated_artifacts.keys()),
-                            quality_gates=quality_gates,
-                            notes=[devsec.summary, change_review.summary, val.summary],
-                            risks_remaining=[f.issue for f in devsec.findings if f.blocking],
-                        ),
-                    )
-                return None
+                return qg.gate_result
 
             def _build_verifier_check() -> Optional[DevOpsTeamResult]:
                 """Fail the phase when an injected build verifier rejects the repo.

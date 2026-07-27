@@ -386,7 +386,8 @@ class BlogWriterAgent(_BlogAgentBase):
               ``EventLoopException``, propagate unwrapped from
               ``call_json_with_retry`` so the draft-stage retry funnel can catch them.
         """
-        assert isinstance(prompt, str) and prompt.strip(), "prompt must be a non-empty string"
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
 
         soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
         strict_json_suffix = (
@@ -536,7 +537,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 if (
                     re.search(r"\[CLAIM:", after)
                     or re.search(r"https?://", after)
-                    or re.search(r"\]\(http", after)
+                    or re.search(r"\]\(https?://", after)
                 ):
                     continue
                 violations.append(
@@ -980,14 +981,17 @@ class BlogWriterAgent(_BlogAgentBase):
                 "",
             ]
         )
-        if revise_input.previous_feedback_items:  # pragma: no cover - prompt-assembly branch when previous_feedback_items are supplied; covered by integration tests that exercise the revise loop end-to-end.
+        if revise_input.previous_feedback_items:
             prev_lines = []
             for i, item in enumerate(
                 revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
             ):
                 location = getattr(item, "location", None)
                 loc = f" [{location}]" if location else ""
-                prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
+                severity = getattr(item, "severity", "unknown")
+                category = getattr(item, "category", "")
+                issue = getattr(item, "issue", "")
+                prev_lines.append(f"{i}. [{severity}] {category}{loc}: {issue}")
             prompt_parts.extend(
                 [
                     "---",

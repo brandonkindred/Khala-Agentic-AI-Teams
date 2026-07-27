@@ -248,6 +248,30 @@ def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
     assert len(result.linter_issues) == 1
 
 
+def test_read_affected_files_rejects_path_traversal(tmp_path: Path) -> None:
+    """Lint issues pointing outside the repo (via ../ or absolute paths) must
+    not be read, to prevent path-traversal disclosure of arbitrary host files."""
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "app").mkdir()
+    (repo_path / "app" / "main.py").write_text("print('hello')\n")
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top-secret-content")
+
+    issues = [
+        LintIssue(file_path="../secret.txt", line=1, column=1, rule="X", message="traversal"),
+        LintIssue(file_path=str(secret), line=1, column=1, rule="X", message="absolute"),
+        LintIssue(file_path="app/main.py", line=1, column=1, rule="X", message="in-repo"),
+    ]
+
+    result = LintingToolAgent._read_affected_files(repo_path, issues)
+
+    assert "top-secret-content" not in result
+    assert "app/main.py" in result
+    assert "print('hello')" in result
+
+
 def test_agent_run_recovers_markdown_fenced_llm_response(tmp_path: Path, monkeypatch) -> None:
     """A markdown-fenced JSON reply from the LLM is recovered into real edits
     instead of crashing the bare ``json.loads`` the tool agent used to run."""

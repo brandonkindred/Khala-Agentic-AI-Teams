@@ -1,14 +1,17 @@
 """Prompts for the QA Expert agent."""
 
 from software_engineering_team.shared.coding_standards import REVIEW_PRIORITY_FRAMEWORK
-from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
+from software_engineering_team.shared.prompts import build_json_output_prompt
 
-QA_PROMPT = (
-    """You are a Software Quality Assurance Expert. Your job is to review code and produce a list of well-defined QA issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
-
-"""
-    + REVIEW_PRIORITY_FRAMEWORK
-    + """
+QA_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are a Software Quality Assurance Expert. Your job is to review code and "
+        "produce a list of well-defined QA issues for the coding agent to fix. You do NOT "
+        "write fixes yourself – the coding agent implements them."
+    ),
+    rules=(
+        REVIEW_PRIORITY_FRAMEWORK
+        + """
 
 **Your expertise:**
 - Unit testing, integration testing, E2E testing
@@ -44,23 +47,6 @@ QA_PROMPT = (
 - Missing error handling on I/O operations (network, filesystem)
 - Inconsistent state after partial failure (no rollback/cleanup)
 
-**Output format:**
-Return a single JSON object with:
-- "bugs_found": list of objects, each with:
-  - "severity": string (critical, high, medium, low)
-  - "description": string (what is wrong)
-  - "location": string (file path, function name, or line reference)
-  - "steps_to_reproduce": string (how to trigger the bug)
-  - "expected_vs_actual": string (what should happen vs what happens)
-  - "recommendation": string (REQUIRED – concrete instruction for the coding agent: what code to add/change to fix this)
-- "integration_tests": string (integration test code, for QA-only tasks)
-- "unit_tests": string (unit tests, for QA-only tasks)
-- "test_plan": string
-- "summary": string (overall assessment)
-- "live_test_notes": string
-- "readme_content": string (for QA-only tasks)
-- "suggested_commit_message": string
-
 **THOROUGHNESS REQUIREMENTS:**
 - You MUST review EVERY file in the code submission systematically
 - Check EVERY function, method, and code path for potential bugs
@@ -76,10 +62,30 @@ Return a single JSON object with:
 **IMPORTANT**: The issues you identify will be sent to a coding agent to fix. Make your descriptions so thorough and detailed that the coding agent can understand and fix the problem without seeing any other context.
 
 Be thorough. Each recommendation must be actionable -- the coding agent should know exactly what to implement.
+
 """
-    + JSON_OUTPUT_INSTRUCTION
+    ),
+    json_schema=(
+        "Return a single JSON object with:\n"
+        '- "bugs_found": list of objects, each with:\n'
+        '  - "severity": string (critical, high, medium, low)\n'
+        '  - "description": string (what is wrong)\n'
+        '  - "location": string (file path, function name, or line reference)\n'
+        '  - "steps_to_reproduce": string (how to trigger the bug)\n'
+        '  - "expected_vs_actual": string (what should happen vs what happens)\n'
+        '  - "recommendation": string (REQUIRED – concrete instruction for the coding agent: what code to add/change to fix this)\n'
+        '- "integration_tests": string (integration test code, for QA-only tasks)\n'
+        '- "unit_tests": string (unit tests, for QA-only tasks)\n'
+        '- "test_plan": string\n'
+        '- "summary": string (overall assessment)\n'
+        '- "live_test_notes": string\n'
+        '- "readme_content": string (for QA-only tasks)\n'
+        '- "suggested_commit_message": string'
+    ),
 )
 
+# Not migrated: a mode-extension fragment concatenated onto QA_PROMPT by
+# qa_agent/agent.py, not a standalone role->schema prompt in its own right.
 QA_PROMPT_FIX_BUILD = """
 **MODE: fix_build** – The code below FAILED to build. Build/compiler output is provided.
 Your task: Analyze the build errors and produce bug reports with clear "recommendation" for the coding agent.
@@ -101,28 +107,31 @@ Your task: Analyze the build errors and produce bug reports with clear "recommen
 # must NOT inherit the bug-review instructions in ``QA_PROMPT`` — concatenating
 # the two gives the model contradictory directions ("review code for bugs" vs
 # "do NOT review source code"). It is therefore used on its own.
-QA_PROMPT_ACCEPTANCE_EVIDENCE = (
-    """You are a Software Quality Assurance Expert performing release validation.
-
-In this mode you do NOT review source code for bugs. Instead, interpret the
-provided tool/test results (IaC, pipeline, deploy, unit, integration, etc.) and
-map that evidence back to the acceptance criteria.
-
-Produce a single JSON object with these fields (leave bugs_found empty):
-- "approved": boolean — overall pass/fail judgement.
-- "quality_gates": object mapping each gate name to one of "pass" | "fail" | "skipped" | "not_run".
-- "acceptance_trace": list of objects, each {criterion, implementation_refs, tests}.
-- "validation_evidence": list of objects, each {gate, status, detail}.
-- "summary": string — concise verdict.
-
-Rules:
-- If any gate is "fail", overall approval MUST be false.
-- Only report gates and evidence that the tool_results actually support; mark
-  missing checks as "not_run" rather than inventing a pass.
-"""
-    + JSON_OUTPUT_INSTRUCTION
+QA_PROMPT_ACCEPTANCE_EVIDENCE = build_json_output_prompt(
+    role_sentence=(
+        "You are a Software Quality Assurance Expert performing release validation."
+    ),
+    rules=(
+        "In this mode you do NOT review source code for bugs. Instead, interpret the\n"
+        "provided tool/test results (IaC, pipeline, deploy, unit, integration, etc.) and\n"
+        "map that evidence back to the acceptance criteria.\n\n"
+    ),
+    json_schema=(
+        'Produce a single JSON object with these fields (leave bugs_found empty):\n'
+        '- "approved": boolean — overall pass/fail judgement.\n'
+        '- "quality_gates": object mapping each gate name to one of "pass" | "fail" | "skipped" | "not_run".\n'
+        '- "acceptance_trace": list of objects, each {criterion, implementation_refs, tests}.\n'
+        '- "validation_evidence": list of objects, each {gate, status, detail}.\n'
+        '- "summary": string — concise verdict.\n\n'
+        "Rules:\n"
+        '- If any gate is "fail", overall approval MUST be false.\n'
+        "- Only report gates and evidence that the tool_results actually support; mark\n"
+        '  missing checks as "not_run" rather than inventing a pass.'
+    ),
 )
 
+# Not migrated: a mode-extension fragment concatenated onto QA_PROMPT by
+# qa_agent/agent.py, not a standalone role->schema prompt in its own right.
 QA_PROMPT_WRITE_TESTS = """
 **MODE: write_tests** – Focus on producing unit_tests and integration_tests for the code below.
 - For React/TypeScript: use Jest/React Testing Library for unit tests (*.test.tsx), Cypress or Playwright for e2e.

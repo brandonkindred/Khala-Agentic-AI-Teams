@@ -114,7 +114,10 @@ class LintingToolAgent:
                 continue
             if len(seen_files) >= MAX_AFFECTED_FILES:
                 break
-            file_abs = repo_path / issue.file_path
+            file_abs = (repo_path / issue.file_path).resolve()
+            repo_resolved = repo_path.resolve()
+            if file_abs != repo_resolved and repo_resolved not in file_abs.parents:
+                continue
             if not file_abs.is_file():
                 continue
             try:

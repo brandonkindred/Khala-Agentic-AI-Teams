@@ -462,6 +462,49 @@ def test_build_revise_all_items_prompt_persistent_issues_getattr() -> None:
     assert "2. [major] clarity [intro] (flagged 3 times): vague opening" in prompt
 
 
+def test_build_revise_all_items_prompt_previous_feedback_items_getattr() -> None:
+    """Sparse previous-feedback objects must not AttributeError during prompt build."""
+    from types import SimpleNamespace
+
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent_with_guidelines()
+    plan = make_content_plan(
+        overarching_topic="X",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    sparse = SimpleNamespace()  # no optional attrs
+    complete = SimpleNamespace(
+        severity="minor",
+        category="grammar",
+        location="para 2",
+        issue="missing comma",
+    )
+    revise_input = ReviseWriterInput.model_construct(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        content_plan=plan,
+        previous_feedback_items=[sparse, complete],
+        length_guidance="",
+        target_word_count=1000,
+    )
+    prompt = a._build_revise_all_items_prompt(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        revision_plan="Fix feedback.",
+        style_guide_text="Style Guide",
+        revise_input=revise_input,
+    )
+    assert "RECENTLY RESOLVED FEEDBACK" in prompt
+    assert "1. [unknown]" in prompt
+    assert "2. [minor] grammar [para 2]: missing comma" in prompt
+
+
 def test_writer_format_feedback_item_line_missing_required_raises() -> None:
     """Duck-typed items missing severity/category/issue raise ValueError, not AttributeError."""
     from types import SimpleNamespace

@@ -6,11 +6,19 @@ input size, re-anchors line numbers from split segments, re-checks each genuine
 finding against the whole submission to drop false positives the bounded chunk
 review could not have caught (`false_positive_filter`), and applies the
 deterministic approval gate with its anti-loop safety nets. A chunk that
-cannot be reviewed after recovery degrades to a blocking ``high`` "not
-reviewed" finding (rejecting the review so unreviewed code never passes the
-gate) rather than aborting the run; an infrastructure failure or a run in which
-no chunk could be reviewed raises ``CodeReviewUnavailableError``, and an
-unexpected reviewer defect propagates unchanged (fails closed).
+cannot be reviewed after recovery degrades gracefully rather than aborting the
+run: by default it is surfaced only non-blockingly (never posted, never
+affecting ``approved``) via ``CodeReviewOutput.not_reviewed_ranges`` on the
+in-process path (``coordinator.run_coordinator``'s
+``CODE_REVIEW_BLOCK_ON_UNREVIEWED``, unset by default); the Temporal-dispatched
+path (this class's default when not constructed with ``force_in_process=True``)
+currently always folds not-reviewed ranges into the approval gate as a blocking
+``high`` finding regardless of that env var, so the same input can produce a
+different ``approved`` verdict depending on dispatch mode — see
+``temporal/activities.py``'s reduce activity. An infrastructure failure or a
+run in which no chunk could be reviewed at all raises
+``CodeReviewUnavailableError``, and an unexpected reviewer defect propagates
+unchanged (fails closed).
 """
 
 from __future__ import annotations
@@ -122,9 +130,14 @@ class CodeReviewAgent:
         Postconditions:
             - Returns the coordinator's merged verdict covering every submitted
               line; ``approved is False`` implies at least one critical/high issue.
-              A chunk unreviewable after recovery is named by a blocking ``high``
-              "not reviewed" finding, so the merged review is rejected and
-              unreviewed code never passes the gate as approved.
+              A chunk unreviewable after recovery degrades gracefully rather than
+              failing the run: on the in-process path it is non-blocking by
+              default (surfaced only via ``not_reviewed_ranges``; set
+              ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` to restore the legacy blocking
+              ``high`` "not reviewed" finding), while the Temporal-dispatched
+              path (the default unless this instance was constructed with
+              ``force_in_process=True``) currently always treats it as blocking
+              regardless of that env var — see the module docstring.
             - Findings that the verifier confirms are false positives (judged
               against the full codebase) are absent from the result; the
               not-reviewed coverage findings are never removed this way.

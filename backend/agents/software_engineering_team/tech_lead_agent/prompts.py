@@ -1,5 +1,15 @@
 """Prompts for the coding_team Tech Lead agent."""
 
+# Not migrated to the shared JSON builders (build_json_output_prompt /
+# build_document_rewrite_prompt): every prompt below is a SYSTEM/USER message
+# pair, not a single role->schema string, and each USER template ends with a
+# terse inline "Respond with JSON: {...}" trailer rather than the builder's
+# dedicated "**Output format (JSON only):**\n<schema>" block. None of these
+# five pairs share structure with each other or with a sibling module, so
+# reproducing the builder's shape here would mean rewording the schema
+# instructions (a real content change), not just relocating existing text —
+# out of scope per the issue's "where structure matches" limit.
+
 PLAN_TO_TASK_GRAPH_SYSTEM = """You are a Tech Lead for a software delivery team. You receive a plan from the Planning team (product/spec/architecture). Your job is to turn that plan into a Task Graph: a list of tasks with dependencies and a list of implementation teams/stacks. You do NOT create the product plan; you only break it down into implementable tasks and define which specialist v2 team, frontend_v2 or backend_v2, is needed.
 
 The coding team includes two specialist v2 implementation teams:
