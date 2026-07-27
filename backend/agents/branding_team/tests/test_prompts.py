@@ -215,12 +215,20 @@ def test_system_prompt_sections_follow_reordered_phase_order(
         importlib.reload(prompts_mod)
 
 
-def test_system_prompt_omits_nonexistent_phase_numbers_at_boundaries(
+def test_system_prompt_omits_dependency_and_gate_clauses_at_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A phase moved to the first/last PHASE_ORDER slot must not reference a nonexistent phase."""
+    """A phase moved to the first/last PHASE_ORDER slot must not fabricate a dependency/gate clause.
+
+    Earlier revisions substituted a phaseless filler phrase (e.g. "before
+    moving to the next phase in this flow") when a phase's real neighbor
+    didn't exist, which was itself a logically impossible instruction — there
+    is no next phase to move to. The dependency/gate clause must instead be
+    omitted entirely in that case.
+    """
     import branding_team.assistant.prompts as prompts_mod
     import branding_team.graphs.shared as shared_mod
+    from branding_team.models import BrandPhase
 
     original_order = list(shared_mod.PHASE_ORDER)
     # Rotate so Narrative Messaging (normally 2nd) leads and Strategic Core (normally 1st) trails.
@@ -230,8 +238,17 @@ def test_system_prompt_omits_nonexistent_phase_numbers_at_boundaries(
         reordered = prompts_mod.SYSTEM_PROMPT
         assert "Phase 0" not in reordered
         assert f"Phase {len(original_order) + 1}" not in reordered
-        assert "Depends entirely on the prior phase in this flow." in reordered
-        assert "before moving to the next phase in this flow" in reordered
+        assert "prior phase in this flow" not in reordered
+        assert "next phase in this flow" not in reordered
+
+        header1 = prompts_mod._phase_header(BrandPhase.NARRATIVE_MESSAGING, 1)
+        header5 = prompts_mod._phase_header(BrandPhase.STRATEGIC_CORE, 5)
+        idx1, idx5 = reordered.index(header1), reordered.index(header5)
+        # Narrative Messaging leads: no fabricated "Depends on ..." lead-in, straight to its items.
+        assert "Depends" not in reordered[idx1 : idx1 + len(header1) + 5]
+        assert "6. **Brand personality**" in reordered[idx1:idx5]
+        # Strategic Core trails: no fabricated gate condition sending it "before" a nonexistent phase.
+        assert "Gate condition" not in reordered[idx5:]
     finally:
         monkeypatch.setattr(shared_mod, "PHASE_ORDER", original_order)
         importlib.reload(prompts_mod)
