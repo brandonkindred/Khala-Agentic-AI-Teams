@@ -426,6 +426,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                     **extra,
                 )
                 raw = self._run_agent(self._model, prompt)
+                parsed = self._parse_single_issue(raw)
+                fixed_files = parsed.get("files") or {}
+                if fixed_files:
+                    merged.update(fixed_files)
+                    fixed_count += 1
             except Exception as e:
                 self._logger.warning(
                     "%s fix for issue %s failed: %s",
@@ -434,11 +439,6 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                     e,
                 )
                 continue
-            parsed = self._parse_single_issue(raw)
-            fixed_files = parsed.get("files") or {}
-            if fixed_files:
-                merged.update(fixed_files)
-                fixed_count += 1
         return ToolAgentPhaseOutput(
             files=merged,
             summary=f"{self.name}: fixed {fixed_count} of {len(issues)} issue(s) (one at a time).",
