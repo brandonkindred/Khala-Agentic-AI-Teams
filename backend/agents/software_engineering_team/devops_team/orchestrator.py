@@ -304,38 +304,24 @@ class _DebugPatchState:
                 self.exec_findings.extend(findings)
 
 
-class DevOpsTeamLeadAgent(TeamLeadSharedState):
+class DevOpsTeamLeadAgent(BaseTeamLead):
     """Coordinates specialized DevOps agents with hard gates.
 
-    Inherits ``TeamLeadSharedState`` for the optional per-run status hook
-    (``_report_status`` / ``_status_callback``). Pipeline phase status always
-    emits INFO logs via :meth:`_log_pipeline_status`; the optional callback is
-    a separate forward channel and may be set/cleared per run without losing
-    historical log output.
-
-    This class intentionally does **not** subclass ``BaseTeamLead``: that type's
-    constructor and shared-state wiring differ from DevOps's
-    ``TeamLeadSharedState`` setup. Instead, pure phase/retry helpers are aliased
-    from ``BaseTeamLead`` as unbound methods on this class (see
-    ``_run_gated_phases`` / ``_run_bounded_retry_loop`` below) so call sites can
-    use ``self._run_*`` without inheriting ``BaseTeamLead`` instance state.
+    Inherits ``BaseTeamLead`` (and, transitively, ``TeamLeadSharedState``) for
+    LLM resolution and the optional per-run status hook (``_report_status`` /
+    ``_status_callback``). Pipeline phase status always emits INFO logs via
+    :meth:`_log_pipeline_status`; the optional callback is a separate forward
+    channel and may be set/cleared per run without losing historical log
+    output. DevOps does not use ``BaseTeamLead``'s per-repo briefing cache
+    (:meth:`BaseTeamLead._repo_context_cache_for`), so ``__init__`` passes
+    empty extension/exclude-dir sets and a zero char budget for that unused
+    feature.
 
     Invariants: ``self.llm`` is the client passed to ``__init__``; specialist
     agents and tools are constructed once; ``_status_callback`` defaults to
     None (mixin default) and is independent of fallback logging.
     """
 
-    # Unbound-method reuse (not inheritance): assign BaseTeamLead helpers onto
-    # this class so ``self._run_gated_phases`` / ``self._run_bounded_retry_loop``
-    # work without subclassing BaseTeamLead. The helpers only need ``self`` for
-    # the Python method call signature — they do not read BaseTeamLead fields.
-    # Alias BaseTeamLead._run_gated_phases onto this class as
-    # self._run_gated_phases. This is required because BaseTeamLead._run_phase_gates
-    # (invoked unbound elsewhere in this file) internally calls
-    # self._run_gated_phases, and DevOpsTeamLead does not inherit from
-    # BaseTeamLead.
-    _run_gated_phases = BaseTeamLead._run_gated_phases
-    _run_bounded_retry_loop = BaseTeamLead._run_bounded_retry_loop
     # Tool-dispatch logic lives in ``tool_dispatch.py``; aliased here so
     # ``self._run_execution_tools(...)`` keeps its existing bound-method call
     # shape (see devops_team/tool_dispatch.py for the implementation).
@@ -343,12 +329,13 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
-        TeamLeadSharedState.__init__(
+        BaseTeamLead.__init__(
             self,
-            llm_getter=lambda _agent_id: llm_client,
-            shared_config={},
+            llm_client,
+            extensions=frozenset(),
+            exclude_dirs=frozenset(),
+            max_chars=0,
         )
-        self.llm = llm_client
         self.task_clarifier = DevOpsTaskClarifierAgent(llm_client)
         self.iac_agent = InfrastructureAsCodeAgent(llm_client)
         self.cicd_agent = CICDPipelineAgent(llm_client)
@@ -961,12 +948,7 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
                         )
                 return None
 
-            # Consume BaseTeamLead's intra-phase multi-gate hook without inheriting
-            # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-            return BaseTeamLead._run_phase_gates(
-                self,
-                [_quality_gates_check, _build_verifier_check],
-            )
+            return self._run_phase_gates([_quality_gates_check, _build_verifier_check])
 
         def _phase5_completion_deliver() -> Optional[DevOpsTeamResult]:
             """Phase 5: completion package assembly + deliver/merge.
@@ -1088,17 +1070,14 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             completion.quality_gates = quality_gates
             return None
 
-        # Consume BaseTeamLead's gate-based phase sequencer without inheriting
-        # the code-v2 BaseTeamLead constructor (DevOps uses TeamLeadSharedState).
-        early_exit = BaseTeamLead._run_gated_phases(
-            self,
+        early_exit = self._run_gated_phases(
             [
                 _phase1_intake_clarify,
                 _phase2_parallel_design,
                 _phase3_branch_write,
                 _phase4_validation_review,
                 _phase5_completion_deliver,
-            ],
+            ]
         )
         if early_exit is not None:
             return early_exit
