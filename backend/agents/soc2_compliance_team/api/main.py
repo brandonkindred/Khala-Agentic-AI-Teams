@@ -80,8 +80,10 @@ app = create_team_app(
 # (stale)" before it gets a chance to complete, and _update_job_terminal's
 # first-writer-wins guard would then treat that false failure as
 # authoritative and silently discard the real completion. Keep the same ~30
-# minute margin above the thread-mode ceiling that this threshold held above
-# the pre-doubling combined ceiling (90 min above 60 min combined).
+# minute margin above the thread-mode ceiling that this threshold held
+# pre-doubling: 90 min total minus the 60 min pre-doubling combined ceiling
+# = a 30 min margin; 120 min new combined ceiling + that same 30 min margin
+# = 150 min.
 _STALE_JOB_THRESHOLD_SECONDS = 150 * 60
 
 _stale_monitor_stop = start_stale_job_monitor(

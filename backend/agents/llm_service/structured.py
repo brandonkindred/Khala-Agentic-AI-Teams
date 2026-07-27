@@ -336,10 +336,14 @@ def complete_validated_via_reasoning(
     ``formatting_instructions`` when the caller has specific JSON-shape
     guidance (keys/types) it wants the first attempt to see.
 
-    Preconditions/Postconditions/failure semantics: see
-    :func:`complete_json_via_reasoning`; the formatting call additionally
-    retries up to ``correction_attempts`` times on a parse/validation
-    failure, exactly as :func:`complete_validated` does today.
+    Preconditions: ``objective`` is non-empty. Unlike
+    :func:`complete_json_via_reasoning`, ``formatting_instructions`` is
+    optional here — when omitted, the hardcoded generic transcription
+    instruction above is used alone.
+    Postconditions/failure semantics: see :func:`complete_json_via_reasoning`;
+    the formatting call additionally retries up to ``correction_attempts``
+    times on a parse/validation failure, exactly as :func:`complete_validated`
+    does today.
     """
     if not objective:
         raise ValueError("objective must be non-empty")

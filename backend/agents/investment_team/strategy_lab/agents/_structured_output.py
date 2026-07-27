@@ -53,6 +53,10 @@ override."""
 
 _MIN_TIMEOUT_S = 0.001  # smallest usable per-attempt timeout; guards against a zero/negative env override
 
+# Matches the reasoning_temperature default in llm_service/structured.py's
+# complete_json_via_reasoning / complete_validated_via_reasoning.
+_DEFAULT_REASONING_TEMPERATURE = 0.3
+
 _REASONING_USER_PROMPT_SUFFIX = (
     "\n\n---\n"
     "OVERRIDE FOR THIS PASS ONLY: ignore every instruction above that tells "
@@ -153,18 +157,20 @@ def invoke_structured_with_schema(
     ``StrategyLabLLMError``) when :func:`extract_json_object` cannot recover a
     balanced JSON object from the response.
     """
-    assert structured_output_available(), (
-        "precondition: caller must verify structured_output_available() before "
-        "invoking (only that path exposes an adapter with a .client)"
-    )
-    assert agent_key and system_prompt and user_prompt and phase and objective, (
-        "precondition: agent_key, system_prompt, user_prompt, phase, and objective "
-        "must be non-empty"
-    )
-    assert reasoning_system_prompt, "precondition: reasoning_system_prompt must be non-empty"
-    assert isinstance(schema, Mapping) and schema, (
-        "precondition: schema must be a non-empty mapping"
-    )
+    if not structured_output_available():
+        raise ValueError(
+            "precondition: caller must verify structured_output_available() before "
+            "invoking (only that path exposes an adapter with a .client)"
+        )
+    if not (agent_key and system_prompt and user_prompt and phase and objective):
+        raise ValueError(
+            "precondition: agent_key, system_prompt, user_prompt, phase, and objective "
+            "must be non-empty"
+        )
+    if not reasoning_system_prompt:
+        raise ValueError("precondition: reasoning_system_prompt must be non-empty")
+    if not (isinstance(schema, Mapping) and schema):
+        raise ValueError("precondition: schema must be a non-empty mapping")
     client = get_strands_model(agent_key).client
 
     def _call(prompt: str) -> str:
@@ -182,7 +188,7 @@ def invoke_structured_with_schema(
                 prompt + _REASONING_USER_PROMPT_SUFFIX,
                 objective=f"{objective} (reasoning)",
                 system_prompt=reasoning_system_prompt,
-                temperature=0.3,
+                temperature=_DEFAULT_REASONING_TEMPERATURE,
                 think=True,
             )
         except LLMSemanticExhaustionError as exc:

@@ -132,7 +132,8 @@ class _RecordingAgent:
 
 
 class _StubClient:
-    """Backing ``LLMClient`` stand-in that records every ``complete_json`` call."""
+    """Backing ``LLMClient`` stand-in that records every ``complete()``
+    (reasoning pass) and ``complete_json()`` (formatting pass) call."""
 
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result

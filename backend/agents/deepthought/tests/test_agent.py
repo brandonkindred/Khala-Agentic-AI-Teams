@@ -419,6 +419,9 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
         {"role": "user", "content": "Tell me about Mars"},
         {"role": "assistant", "content": "Mars is the 4th planet."},
     ]
+    mock_llm.complete.return_value = (
+        "The user previously asked about Mars; answering the follow-up directly."
+    )
     mock_llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,
@@ -438,12 +441,16 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
     assert "Mars" in user_prompt
 
     # The formatting call sees only the reasoning pass's prose, never the
-    # raw conversation history.
+    # raw conversation history — check for the raw history's structure
+    # (role labels, the verbatim assistant reply), not the topic word
+    # "Mars", since the reasoning prose legitimately mentions the topic too.
     format_call = mock_llm.complete_json.call_args
     format_input = (format_call.kwargs.get("system_prompt") or "") + str(
         format_call.args[0] if format_call.args else ""
     )
-    assert "Mars" not in format_input
+    assert "Mars is the 4th planet." not in format_input
+    assert "User: Tell me about Mars" not in format_input
+    assert "Assistant: Mars is the 4th planet." not in format_input
 
 
 # ------------------------------------------------------------------

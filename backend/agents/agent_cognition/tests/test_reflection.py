@@ -72,7 +72,9 @@ class CannedLLM(LLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        self.json_calls.append({"prompt": prompt, "system_prompt": system_prompt, "think": think})
+        self.json_calls.append(
+            {"prompt": prompt, "system_prompt": system_prompt, "think": think, "temperature": temperature}
+        )
         # Returned verbatim (no per-item ``dict()`` copy) so a non-object item can
         # flow through to exercise reflection's drop-malformed-item path.
         return {"proposals": list(self._proposals)}
@@ -857,6 +859,7 @@ def test_reflect_persists_pending_proposal_and_leaves_rules_untouched(
     report = reflection.reflect("a", _NOW)
 
     assert report.proposed == 1
+    assert report.llm_calls == 2  # reasoning pass + formatting pass
     pending = store.list_proposals("a", status=ProposalStatus.PENDING)
     assert len(pending) == 1
     assert pending[0].action == ProposalAction.ADD
@@ -877,7 +880,8 @@ def test_reflected_proposal_activates_only_after_approval(monkeypatch: pytest.Mo
         "get_client",
         lambda key: CannedLLM([{"action": "add", "text": "approved later"}]),
     )
-    reflection.reflect("a", _NOW)
+    report = reflection.reflect("a", _NOW)
+    assert report.llm_calls == 2  # reasoning pass + formatting pass
     (proposal,) = store.list_proposals("a", status=ProposalStatus.PENDING)
 
     # Before approval: no active rules at all.
@@ -899,5 +903,6 @@ def test_reflect_supersedes_stale_pending_end_to_end(monkeypatch: pytest.MonkeyP
     report = reflection.reflect("a", _NOW)
 
     assert report.superseded == 1
+    assert report.llm_calls == 2  # reasoning pass + formatting pass
     assert store.get_proposal("a", stale.id).status == ProposalStatus.SUPERSEDED  # type: ignore[union-attr]
     assert store.list_proposals("a", status=ProposalStatus.PENDING) == []

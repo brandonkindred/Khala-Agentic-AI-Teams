@@ -215,7 +215,7 @@ def test_invoke_structured_with_schema_requires_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: False)
-    with pytest.raises(AssertionError, match="precondition"):
+    with pytest.raises(ValueError, match="precondition"):
         so_mod.invoke_structured_with_schema(
             "strategy_design",
             "sys",
@@ -247,7 +247,7 @@ def test_invoke_structured_with_schema_rejects_empty_inputs(
         "reasoning_system_prompt": "sys" + so_mod.REASONING_MODE_SUFFIX,
     }
     kwargs[field] = ""
-    with pytest.raises(AssertionError, match="precondition"):
+    with pytest.raises(ValueError, match="precondition"):
         so_mod.invoke_structured_with_schema(**kwargs)
 
 
@@ -255,7 +255,7 @@ def test_invoke_structured_with_schema_rejects_empty_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    with pytest.raises(AssertionError, match="precondition"):
+    with pytest.raises(ValueError, match="precondition"):
         so_mod.invoke_structured_with_schema(
             "strategy_design",
             "sys",

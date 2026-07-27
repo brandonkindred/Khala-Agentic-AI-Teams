@@ -256,11 +256,15 @@ class ReportWriterAgent:
               ``_produce_next_steps``) performs exactly two sequential LLM
               calls: a reasoning prose pass (``think=True``) followed by a
               JSON formatting pass (``think=False``).
-            - In the compliance-report branch, any finding that fails to
-              deserialize back into ``TSCFinding`` is logged and dropped: its
-              category key is kept in the returned report's
+            - In the compliance-report branch, ``findings_by_tsc`` is built by
+              re-parsing the category's already-serialized dicts back into
+              ``TSCFinding``. If ANY finding in a category fails to
+              deserialize, the whole category's findings are logged and
+              dropped together (the try/except wraps the category's full
+              list comprehension) — its key is kept in the returned report's
               ``findings_by_tsc`` field with an empty list, rather than
-              failing the report.
+              failing the report or partially keeping that category's other,
+              validly-parsed findings.
         """
         has_findings = any(
             not r.compliant

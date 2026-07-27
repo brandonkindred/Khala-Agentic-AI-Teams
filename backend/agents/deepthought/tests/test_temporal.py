@@ -427,7 +427,9 @@ def test_analyse_activity_injects_knowledge_summary():
             captured["system"] = k.get("system_prompt", "")
             return "TXT"
 
-        def complete_json(self, *a, **k):
+        def complete_json(self, prompt="", *a, **k):
+            captured["format_system"] = k.get("system_prompt", "") or ""
+            captured["format_prompt"] = prompt
             return {"can_answer_directly": True, "direct_answer": "ok", "confidence": 0.5}
 
     payload = AnalysePayload(
@@ -445,6 +447,10 @@ def test_analyse_activity_injects_knowledge_summary():
     # The workflow-rendered summary reaches the prompt verbatim — no per-node KB
     # is shipped to the activity.
     assert "an earlier finding worth reusing" in captured["system"]
+    # ...and never leaks into the formatting call, which only sees the
+    # reasoning pass's prose.
+    assert "an earlier finding worth reusing" not in captured["format_system"]
+    assert "an earlier finding worth reusing" not in captured["format_prompt"]
 
 
 def test_analyse_activity_decomposition():

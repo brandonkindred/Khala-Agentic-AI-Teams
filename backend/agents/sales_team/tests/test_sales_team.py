@@ -72,13 +72,16 @@ from sales_team.orchestrator import (
 
 
 class CannedLLMClient(LLMClient):
-    """LLMClient that returns pre-programmed dicts from a list, in order.
+    """LLMClient test double for the two-pass reasoning pattern.
 
-    Each call to ``complete_json`` pops the next response off the queue and
-    returns it as a dict. Tests program expected responses in setup, then
-    assert on agent output. This gives richer control than the shared
-    ``DummyLLMClient`` whose pattern-match fallbacks don't understand sales
-    prompts.
+    ``complete()`` (the think=True reasoning pass) returns a harmless
+    placeholder string and records the call in ``reasoning_calls`` — it
+    never touches the programmed response queue. ``complete_json()`` (the
+    think=False formatting pass) pops the next response off the queue,
+    returns it as a dict, and records the call in ``calls``. Tests program
+    expected ``complete_json`` responses in setup, then assert on agent
+    output. This gives richer control than the shared ``DummyLLMClient``
+    whose pattern-match fallbacks don't understand sales prompts.
     """
 
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
@@ -119,7 +122,7 @@ class CannedLLMClient(LLMClient):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         self.calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "temperature": temperature}
+            {"prompt": prompt, "system_prompt": system_prompt, "temperature": temperature, "think": think}
         )
         if not self._responses:
             raise AssertionError(
@@ -816,6 +819,7 @@ class TestLearningEngine:
         assert result.total_outcomes_analyzed == 0
         assert saved["insights"] is result
         assert client.calls == []
+        assert client.reasoning_calls == []
 
     def test_refresh_builds_insights_from_llm_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
         saved: Dict[str, Any] = {}
@@ -863,6 +867,7 @@ class TestLearningEngine:
         assert "Acme" in client.reasoning_calls[0]["prompt"]
         assert len(client.calls) == 1
         assert client.calls[0]["temperature"] == 0.0
+        assert client.calls[0]["think"] is False
         assert "Reasoning: proceeding as configured by the test fixture" in client.calls[0]["prompt"]
         assert "Acme" not in client.calls[0]["prompt"]
 
