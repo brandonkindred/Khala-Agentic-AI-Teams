@@ -845,14 +845,17 @@ class BlogWriterAgent(_BlogAgentBase):
                 "",
             ]
         )
-        if revise_input.previous_feedback_items:  # pragma: no cover - prompt-assembly branch when previous_feedback_items are supplied; covered by integration tests that exercise the revise loop end-to-end.
+        if revise_input.previous_feedback_items:
             prev_lines = []
             for i, item in enumerate(
                 revise_input.previous_feedback_items[:MAX_PREVIOUS_FEEDBACK_ITEMS], 1
             ):
                 location = getattr(item, "location", None)
                 loc = f" [{location}]" if location else ""
-                prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
+                severity = getattr(item, "severity", "unknown")
+                category = getattr(item, "category", "")
+                issue = getattr(item, "issue", "")
+                prev_lines.append(f"{i}. [{severity}] {category}{loc}: {issue}")
             prompt_parts.extend(
                 [
                     "---",
