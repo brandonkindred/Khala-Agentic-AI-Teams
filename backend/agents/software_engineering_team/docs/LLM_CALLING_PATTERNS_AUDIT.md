@@ -117,10 +117,21 @@ Three concrete recipes ship on top of it:
   exception is **not caught** and aborts the entire `problem_solve` batch —
   the opposite of the per-item tolerance the class's sibling helper
   (`_call_partial_tolerant`) would provide, had it been wired in here.
+- **The "tier" label is internal, not part of the returned contract.**
+  `FallbackPayload.tier` exists only inside the base's fallback helpers;
+  every concrete caller (`BaseReviewToolAgent.review`,
+  `JsonGeneratorToolAgent.run`, `PlanGeneratorToolAgent.plan`) unwraps it into
+  a plain `recommendations`/`summary` (plus `success` where the output model
+  carries that field) and returns that — `ToolAgentOutput` and
+  `ToolAgentPhaseOutput` have no `tier` field at all. Concretely, in
+  `JsonGeneratorToolAgent.run` the no-model and call-error paths both produce
+  the same shape (`success=False`, generic empty `files`/`recommendations`);
+  an external caller cannot inspect *which* tier fired without string-matching
+  the summary text. So "distinguishable" below means only "a human reading
+  the log/summary can tell them apart," not "the output type exposes it."
 - **Net effect:** for the no-model, call-error, and parse-failure tiers this
   pattern degrades to a `ToolAgentOutput`/`ToolAgentPhaseOutput` shape rather
-  than propagating, with the tiers distinguishable in the returned payload
-  for callers that care — but, per the two gaps above (non-object JSON in
+  than propagating — but, per the two gaps above (non-object JSON in
   `review()`, and the parse step in `problem_solve()`), that guarantee is not
   exhaustive over every possible model-output shape.
 
@@ -160,8 +171,15 @@ scaffold, previously duplicated verbatim four times.
 - **Calling the agent or an invalid `structured_output`** — the returned
   `structured_output` not being an instance of `output_model` — *is* caught
   by the single broad `except Exception` inside `run_structured_persona` and
-  routed to `fallback_factory(exc)`. **Never raises** for failures in this
-  narrower window.
+  routed to `fallback_factory(exc)`. This does not make the window
+  raise-proof, though: `fallback_factory(exc)` itself runs unguarded inside
+  that `except` suite, so if the caller-supplied factory raises (a bug in the
+  factory, not in the LLM call), that new exception propagates out of
+  `run_structured_persona` uncaught — `tests/test_persona_agent_base.py::
+  test_fallback_factory_exception_propagates` verifies exactly this. So
+  "never raises" holds only when `fallback_factory` itself is well-behaved
+  (which its precondition assumes); it is not a runtime guarantee against a
+  broken factory.
 - The fallback is **type-specific and caller-authored**, not a generic empty
   shape: e.g. `security_agent`'s `_fallback` returns a
   `SecurityOutput(vulnerabilities=[], approved=False, summary=f"Security
@@ -284,19 +302,28 @@ at all):
 
 ## Pattern 5 — Hand-rolled call sites (heterogeneous, per-call-site policy)
 
-Outside the four shared bases/helpers above, a substantial number of agents
-build a Strands `Agent` and call it directly, each with its **own,
-independently-authored** error-handling policy. This is a pattern only in
-the sense that "no shared helper is used" — the actual failure behavior
-varies call site to call site, which is itself the main finding: a new
-contributor has at least four *different* hand-rolled precedents to copy
-from, not one.
+Outside the four shared bases above, a substantial number of agents build a
+Strands `Agent` and call it directly, each with its **own,
+independently-authored** failure-handling *policy* — the decision of what to
+do when a call still fails after any parsing/retry help. That qualifier
+matters: a couple of these sites *do* reuse a shared low-level helper,
+`agent_call_json` (`shared/llm_recovery.py`) — `tech_lead_agent`'s
+`_call_json` delegates to it for JSON parsing (layered under its own
+`call_llm_with_retries` wrapper), and `build_fix_specialist/agent.py` calls
+it directly. So "no shared helper anywhere in the call path" is not the
+defining property of this pattern; what's actually heterogeneous is the
+**policy layered on top** — what each site does once parsing/retries are
+exhausted (raise vs. generic sentinel vs. domain-specific fail-closed value)
+is authored independently per call site, unlike Patterns 1–4's single shared
+policy. A new contributor still has at least four *different* end-to-end
+precedents to copy from, not one.
 
 Representative call sites and their distinct behaviors:
 
 - **`tech_lead_agent/agent.py`** — the Task Graph engine's Tech Lead. Its
   `_call_json` helper (used by `run_plan_to_task_graph`, `run_groom_task`,
-  etc.) wraps the call in `call_llm_with_retries` (exponential backoff,
+  etc.) parses via the shared `agent_call_json` (`shared/llm_recovery.py`)
+  and wraps the call in `call_llm_with_retries` (exponential backoff,
   `max_attempts=_review_retry_attempts()`) and, on any exception surviving
   retries, **logs a warning and returns a caller-supplied `default` dict**
   — never raises. A `retries=False` mode exists for call sites (like
