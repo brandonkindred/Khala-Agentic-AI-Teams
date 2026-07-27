@@ -1,6 +1,6 @@
 """
-Frontend stack profile: language detection + the knobs that select frontend
-behavior in the shared code-v2 phase implementations.
+Frontend stack profile: language/tooling detection + the knobs that select
+frontend behavior in the shared code-v2 phase implementations.
 
 ``_detect_language`` lives here (rather than in ``planning.py``) so the profile
 can reference it without importing the heavier phase module — ``planning.py``
@@ -9,8 +9,10 @@ re-exports it for callers and tests. See ``shared/stack_profile.py``.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
+from typing import Tuple
 
 from shared.repo_context.repo_utils import find_repo_files
 from software_engineering_team.shared.models import Task
@@ -21,6 +23,19 @@ from ..models import ToolAgentPhaseInput
 from ..prompts import TYPESCRIPT_CONVENTIONS
 
 logger = logging.getLogger(__name__)
+
+# Frontend repo-briefing filter contract: the extensions read into the development
+# agent's context and the directories pruned from the walk. Single-sourced here so
+# the fresh-walk ``_read_repo_code`` and the incremental ``RepoContextCache`` the
+# team lead threads in cannot drift apart (the cache's byte-identical invariant
+# depends on them matching).
+_FRONTEND_REPO_EXTENSIONS = frozenset(
+    {".ts", ".tsx", ".js", ".jsx", ".html", ".css", ".scss", ".json", ".yaml", ".yml"}
+)
+_FRONTEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "dist", "build", ".angular"})
+# Character budget for the repo briefing (whole files only; the next chunk that
+# would exceed it stops the briefing).
+_FRONTEND_REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _detect_language(repo_path: Path, task: Task) -> str:
@@ -72,6 +87,47 @@ def _detect_language(repo_path: Path, task: Task) -> str:
     return "typescript"
 
 
+def _detect_tooling(repo_path: Path) -> Tuple[bool, bool]:
+    """Return ``(has_lint, has_test)`` for the configured frontend tooling.
+
+    Detects ESLint/Angular configs as lint, and Vitest/Jest/Karma or a real
+    ``npm test`` script as testing. Best-effort: an unparseable ``package.json``
+    just means no test script was found.
+
+    Preconditions: ``repo_path`` is a directory.
+    Postconditions: returns two booleans. Raises ``AssertionError`` if the
+      precondition is violated (a non-directory ``repo_path`` is a caller
+      bug, not a runtime failure mode this method recovers from).
+    """
+    assert repo_path.is_dir(), "repo_path must be a directory"
+    has_lint = (
+        next(repo_path.glob("eslint.config.*"), None) is not None
+        or next(repo_path.glob(".eslintrc*"), None) is not None
+        or (repo_path / "angular.json").exists()
+    )
+    has_test = False
+    if (
+        next(repo_path.glob("vitest.config.*"), None) is not None
+        or next(repo_path.glob("jest.config.*"), None) is not None
+        or (repo_path / "karma.conf.js").exists()
+    ):
+        has_test = True
+    else:
+        pkg_json = repo_path / "package.json"
+        if pkg_json.exists():
+            try:
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                test_script = pkg.get("scripts", {}).get("test", "")
+                if test_script and "no test" not in test_script and "exit 1" not in test_script:
+                    has_test = True
+            except Exception as exc:
+                # A malformed package.json means no test script was found;
+                # log at DEBUG so a real config problem is observable during
+                # debugging without failing the best-effort pre-flight gate.
+                logger.debug("[%s] failed to parse package.json: %s", repo_path, exc)
+    return has_lint, has_test
+
+
 PROFILE = StackProfile(
     name="frontend",
     default_language="typescript",
@@ -81,6 +137,10 @@ PROFILE = StackProfile(
     has_language_conventions=False,
     build_verify_label="frontend_code_v2",
     detect_language=_detect_language,
+    repo_extensions=_FRONTEND_REPO_EXTENSIONS,
+    repo_exclude_dirs=_FRONTEND_REPO_EXCLUDE_DIRS,
+    repo_max_chars=_FRONTEND_REPO_BRIEFING_MAX_CHARS,
+    detect_tooling=_detect_tooling,
 )
 
 
