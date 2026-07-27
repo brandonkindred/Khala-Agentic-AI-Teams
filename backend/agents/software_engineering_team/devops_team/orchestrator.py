@@ -712,12 +712,12 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             """Phase 1: environment policy + task clarification gates.
 
             Preconditions: ``task_spec`` is the pipeline input for this run.
-            Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
-              clarifier rejection; otherwise builds subtask contracts, logs their
-              count, and returns ``None`` so later phases run.
-
-            Delegates to :func:`intake_design.run_intake_clarification`; see
-            that module for the extracted implementation.
+            Postconditions: returns the value of
+              :func:`intake_design.run_intake_clarification` — a failed
+              ``DevOpsTeamResult`` on env-policy or clarifier rejection, or
+              ``None`` so later phases run. See that module's docstring for
+              the extracted implementation (subtask-contract construction and
+              logging now live there, not in this wrapper).
             """
             return run_intake_clarification(self, task_spec)
 
@@ -725,14 +725,24 @@ class DevOpsTeamLeadAgent(TeamLeadSharedState):
             """Phase 2: change design / implementation (3-way parallel fan-out).
 
             Preconditions: Phase 1 returned ``None``.
-            Postconditions: sets ``iac_result``, ``cicd_result``, ``deploy_result``,
-              and ``aggregated_artifacts`` from the parallel fan-out; always returns
-              ``None`` (this phase has no early-exit gate today).
+            Postconditions: copies ``iac_result``, ``cicd_result``,
+              ``deploy_result``, and ``aggregated_artifacts`` from the
+              ``DesignFanOutState`` returned by
+              :func:`intake_design.run_design_fan_out` into the pipeline's
+              nonlocal variables; always returns ``None`` (this phase has no
+              early-exit gate today).
 
-            Delegates to :func:`intake_design.run_design_fan_out`, which returns
-            an explicit ``DesignFanOutState`` rather than mutating nonlocals
-            itself; this wrapper copies that state onto the pipeline's nonlocal
-            variables so Phases 3-5 keep reading the same names.
+            This wrapper is a compatibility shim, not the final design: Phases
+            3-5 below still read ``iac_result`` / ``cicd_result`` /
+            ``deploy_result`` / ``aggregated_artifacts`` as nonlocal closure
+            variables (as they did before this extraction), so the returned
+            ``DesignFanOutState`` is unpacked into those names here rather
+            than threaded through as an explicit object end-to-end. Passing
+            ``DesignFanOutState`` (or a broader pipeline-state object) into
+            Phases 3-5 directly is a further decomposition step, tracked
+            under the parent devops_team orchestrator decomposition issue —
+            out of scope for this extraction, which only moves Phase 1/2
+            logic out of nested closures without changing Phase 3-5 behavior.
             """
             nonlocal iac_result, cicd_result, deploy_result, aggregated_artifacts
             state = run_design_fan_out(self, task_spec, repo_path)
