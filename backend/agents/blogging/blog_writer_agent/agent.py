@@ -217,6 +217,21 @@ class BlogWriterAgent(_BlogAgentBase):
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
         self._style_prompt = "\n\n".join(parts)
 
+    def _call_agent(self, model: Any, prompt: str, system_prompt: str = "") -> str:
+        """Construct a Strands Agent, invoke it, and return stripped text.
+
+        Shared invocation path for ``_call_text`` and ``_call_json_raw``, which
+        differ only in which model they pass.
+
+        Preconditions:
+            - ``model`` is a configured LLM client/model object.
+            - ``prompt`` is a non-empty string.
+        Postconditions:
+            - Returns the agent's response as a stripped string.
+        """
+        agent = Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
+        return str(agent(prompt)).strip()
+
     def _call_text(self, prompt: str, system_prompt: str = "") -> str:
         """Call the text-mode Strands Agent and return raw prose.
 
@@ -224,9 +239,7 @@ class BlogWriterAgent(_BlogAgentBase):
         marker + Markdown hybrid format. The text-mode sibling avoids forcing
         ``response_format=json_object`` on the wire so the marker survives.
         """
-        agent = Agent(model=self._text_model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
-        result = agent(prompt)
-        return str(result).strip()
+        return self._call_agent(self._text_model, prompt, system_prompt)
 
     def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
         """Invoke the injected model via Strands and return raw assistant text.
@@ -238,9 +251,7 @@ class BlogWriterAgent(_BlogAgentBase):
         parsing when a caller needs to extract JSON itself (e.g. planning paths
         that call ``extract_json_from_response``).
         """
-        agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
-        result = agent(prompt)
-        return str(result).strip()
+        return self._call_agent(self._model, prompt, system_prompt)
 
     def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
         """Invoke the injected model via Strands and parse JSON from the result.
