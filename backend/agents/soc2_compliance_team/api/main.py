@@ -65,14 +65,24 @@ app = create_team_app(
 # doubled from 30 to 60 minutes for the same reason) — Temporal's own
 # per-activity timeouts are the primary "is this stuck"
 # detector on that path, feeding a genuine failure into mark_failed_activity.
-# This monitor is a backstop for what Temporal can't self-heal (e.g.
-# thread-mode, or the whole worker process dying), so its threshold must stay
-# comfortably above those ceilings — otherwise it can mark a legitimate
-# long-running Temporal audit "failed (stale)" before it gets a chance to
-# complete, and _update_job_terminal's first-writer-wins guard would then
-# treat that false failure as authoritative and silently discard the real
-# completion.
-_STALE_JOB_THRESHOLD_SECONDS = 120 * 60
+#
+# In thread mode, _run_audit_job touches the job once before
+# SOC2AuditOrchestrator.run() and not again until it returns, so the
+# uninterrupted window is the combined criteria + report ceiling
+# (_CRITERIA_TIMEOUT_SECONDS + _REPORT_TIMEOUT_SECONDS, each doubled from 30
+# to 60 minutes for the same two-call reason — 120 minutes combined) plus
+# repository-loading and thread-scheduling overhead before that.
+#
+# This monitor is a backstop for what neither path can self-heal (thread-mode
+# has no per-stage timeout of its own; Temporal mode covers the whole worker
+# process dying), so its threshold must stay comfortably above BOTH ceilings
+# above — otherwise it can mark a legitimate long-running audit "failed
+# (stale)" before it gets a chance to complete, and _update_job_terminal's
+# first-writer-wins guard would then treat that false failure as
+# authoritative and silently discard the real completion. Keep the same ~30
+# minute margin above the thread-mode ceiling that this threshold held above
+# the pre-doubling combined ceiling (90 min above 60 min combined).
+_STALE_JOB_THRESHOLD_SECONDS = 150 * 60
 
 _stale_monitor_stop = start_stale_job_monitor(
     job_store._job_manager,
