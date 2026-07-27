@@ -608,7 +608,7 @@ def test_revise_programming_error_propagates(monkeypatch) -> None:
         )
 
 
-def test_revise_falls_back_to_original_when_llm_fails(monkeypatch, tmp_path) -> None:
+def test_revise_falls_back_to_original_when_llm_fails(monkeypatch) -> None:
     """If text yields no draft and json fallback fails, return original draft."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
