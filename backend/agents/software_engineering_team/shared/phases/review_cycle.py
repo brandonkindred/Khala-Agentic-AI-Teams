@@ -48,10 +48,13 @@ def _dedup_issues(issues: List[Any], seen: set[tuple[str, str]]) -> List[Any]:
         ``seen`` accumulates ``(file_path, description)`` keys across calls.
     Postconditions:
         Returns issues whose key was not already in ``seen``; mutates ``seen``.
+        Elements of ``issues`` are read via ``getattr`` rather than assumed to
+        carry ``file_path``/``description`` attributes, so a shapeless element
+        (e.g. a dict) is deduped on an empty-string key instead of raising.
     """
     unique: List[Any] = []
     for issue in issues:
-        key = (issue.file_path or "", issue.description or "")
+        key = (getattr(issue, "file_path", None) or "", getattr(issue, "description", None) or "")
         if key not in seen:
             seen.add(key)
             unique.append(issue)
