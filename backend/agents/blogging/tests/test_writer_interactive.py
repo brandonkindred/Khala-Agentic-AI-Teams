@@ -363,6 +363,44 @@ def test_revise_from_user_feedback_transient_retries_then_fallback(monkeypatch) 
     assert "User Feedback Recovered" in out.draft
 
 
+def test_revise_from_user_feedback_json_fallback_wrapped_rate_limit_reraises(monkeypatch) -> None:
+    """A wrapped transient error from the JSON fallback must propagate, not be swallowed.
+
+    Regression test: the fallback block previously checked ``(LLMRateLimitError,
+    LLMTemporaryError)`` without unwrapping ``EventLoopException`` first, so a wrapped
+    transient error fell through to the broad ``except Exception`` and was silently
+    swallowed, returning the original (unrevised) draft instead of propagating for
+    Temporal to retry.
+    """
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from strands.types.exceptions import EventLoopException
+
+    from llm_service import LLMRateLimitError, LLMTemporaryError
+
+    a = _make_agent()
+    import agents.blogging.blog_writer_agent.agent as wa_mod
+
+    monkeypatch.setattr(wa_mod.time, "sleep", lambda *_: None)
+
+    def boom(self, p, system_prompt=""):
+        raise LLMTemporaryError("503")
+
+    wrapped = LLMRateLimitError("429")
+
+    def fallback_boom(self, p, system_prompt=""):
+        raise EventLoopException(wrapped)
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    monkeypatch.setattr(BlogWriterAgent, "_fallback_draft_via_json", fallback_boom)
+
+    with pytest.raises(LLMRateLimitError) as excinfo:
+        a.revise_from_user_feedback(
+            draft="# Original", user_feedback="tighten", content_plan_text="cp"
+        )
+    assert excinfo.value is wrapped
+
+
 def test_revise_from_user_feedback_json_parse_error_skips_sleep(monkeypatch) -> None:
     """LLMJsonParseError must use the no-sleep handler, not the transient backoff."""
     import agents.blogging.blog_writer_agent.agent as wa_mod
