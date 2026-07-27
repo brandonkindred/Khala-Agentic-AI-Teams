@@ -404,6 +404,29 @@ def test_branding_assistant_agent_default_conversation_agent_uses_build_agent() 
     assert conversation_agent.callback_handler is null_callback_handler
 
 
+def test_branding_assistant_agent_default_extraction_agent_uses_build_agent() -> None:
+    """Default construction routes the extraction stage through ``build_agent``.
+
+    Runs under ``LLM_PROVIDER=dummy`` (no real LLM, no Postgres): construction
+    resolves a dummy Strands model and never invokes it. Only the extraction
+    stage is left to default-construct; the conversation stage is injected so
+    this test stays hermetic on that side.
+    """
+    from strands import Agent
+    from strands.handlers import null_callback_handler
+
+    from branding_team.assistant.prompts import EXTRACTION_SYSTEM_PROMPT
+
+    conversation_llm = MagicMock()
+    agent = BrandingAssistantAgent(conversation_llm=conversation_llm)
+
+    extraction_agent = agent._extraction_agent
+    assert isinstance(extraction_agent, Agent)
+    assert extraction_agent.name == "extraction"
+    assert extraction_agent.system_prompt == EXTRACTION_SYSTEM_PROMPT
+    assert extraction_agent.callback_handler is null_callback_handler
+
+
 def test_branding_assistant_agent_handles_conversation_llm_failure() -> None:
     conversation_llm = MagicMock(side_effect=Exception("LLM unavailable"))
     extraction_llm = MagicMock()
