@@ -573,19 +573,26 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
 
     Delegates JSON recovery (whole-string parse, then fenced/prose-wrapped
     brace-slice fallback) to the shared ``recover_json_object`` helper rather
-    than re-deriving that logic here.
+    than re-deriving that logic here. Recovery is anchored on
+    ``model_class``'s field names so a reply containing more than one JSON
+    object (e.g. the real payload followed by a usage/metadata echo) selects
+    the object that actually carries the expected schema — every field on
+    these phase models defaults, so an unanchored recovery could otherwise
+    validate successfully against an unrelated trailing object and silently
+    report success on a payload no agent ever produced.
 
     Preconditions:
         ``model_class`` is a ``pydantic.BaseModel`` subclass.
     Postconditions:
         Returns a validated ``model_class`` instance when JSON can be
         recovered from ``text`` and validates against the schema; returns
-        ``None`` for empty text, unrecoverable text, or a schema mismatch.
-        Never raises.
+        ``None`` for empty text, unrecoverable text, text where no candidate
+        object carries any of ``model_class``'s field names, or a schema
+        mismatch. Never raises.
     """
     if not text:
         return None
-    data = recover_json_object(text)
+    data = recover_json_object(text, required_keys=model_class.model_fields.keys())
     if data is None:
         return None
     # ValidationError covers a schema mismatch between the recovered JSON and

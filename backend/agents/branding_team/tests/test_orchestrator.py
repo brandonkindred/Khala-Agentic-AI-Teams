@@ -6,6 +6,7 @@ return a canned result and verify the orchestrator correctly assembles
 ``TeamOutput`` from it.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -519,6 +520,46 @@ def test_unparseable_phase_output_marks_phase_degraded() -> None:
     # Unaffected phases still parse normally and are not marked degraded.
     assert result.strategic_core is not None
     assert result.strategic_core.positioning_statement
+
+
+def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None:
+    """A reply carrying the real phase payload followed by an unrelated JSON
+    object (e.g. a usage/metadata echo) must still recover the real payload —
+    not silently accept the trailing object just because it parses too, which
+    would validate against defaults and wrongly report degraded=False."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    real_payload = _full_narrative()
+    agent_result = MagicMock()
+    agent_result.message = {
+        "content": [
+            {
+                "text": real_payload.model_dump_json()
+                + "\n"
+                + json.dumps({"usage": {"tokens": 42}, "model": "some-model"})
+            }
+        ]
+    }
+    mock_result.result["phase2_narrative"].get_agent_results.return_value = [agent_result]
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.build_branding_graph",
+        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert result.narrative_messaging is not None
+    assert result.narrative_messaging.tagline == real_payload.tagline
 
 
 def test_gather_integrations_market_research_failure_returns_none() -> None:

@@ -12,14 +12,16 @@ Not yet wired into either call site — that migration is tracked separately.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Collection, Dict, Optional
 
 from shared.llm_recovery import extract_json_object
 
 __all__ = ["recover_json_object"]
 
 
-def recover_json_object(text: str) -> Optional[Dict[str, Any]]:
+def recover_json_object(
+    text: str, required_keys: Optional[Collection[str]] = None
+) -> Optional[Dict[str, Any]]:
     """Recover a JSON object from LLM text, tolerating markdown fences and prose.
 
     A thin, strict wrapper over ``shared.llm_recovery.extract_json_object``
@@ -30,10 +32,20 @@ def recover_json_object(text: str) -> Optional[Dict[str, Any]]:
 
     Preconditions:
         - ``text`` is a ``str`` (may be empty).
+        - ``required_keys``, when given, is the caller's expected schema keys.
+          When a reply contains more than one JSON object (e.g. the real
+          payload followed by a usage/metadata echo), passing the target
+          schema's field names anchors selection on the object that actually
+          carries them instead of silently accepting an unrelated trailing
+          object — critical for schemas where every field defaults, since an
+          unanchored recovery would otherwise validate successfully against
+          the wrong object.
     Postconditions:
         - Returns the parsed ``dict`` on success, or ``None`` when no
-          strictly-valid JSON object can be recovered. Never raises.
+          strictly-valid JSON object can be recovered, or (with
+          ``required_keys`` set) none of the candidate objects carry any of
+          them. Never raises.
     """
     if not text:
         return None
-    return extract_json_object(text, repair=False)
+    return extract_json_object(text, required_keys, repair=False)
