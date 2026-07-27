@@ -246,8 +246,12 @@ class BlogWriterAgent(_BlogAgentBase):
         Preconditions:
             - llm_client is not None.
         Callers load writing style and brand spec files before instantiation and pass full contents here.
+
+        Raises:
+            ValueError: if ``llm_client`` is ``None``.
         """
-        assert llm_client is not None, "llm_client must not be None"
+        if llm_client is None:
+            raise ValueError("llm_client must not be None")
         super().__init__(llm_client)
         # ``_call_text`` produces the ``---DRAFT---`` hybrid format (JSON
         # marker line + Markdown body), which only works when the underlying
@@ -1066,8 +1070,9 @@ class BlogWriterAgent(_BlogAgentBase):
         """Build a structured revision plan, with a plain-text fallback.
 
         Calls the JSON-oriented LLM path first and converts its response to a
-        ``RevisionPlan``. Non-transient structured-call failures fall back to a
-        plain-text plan; transient LLM errors are unwrapped and re-raised.
+        ``RevisionPlan``. Any non-transient failure — including an unexpected
+        programming error, not only LLM/structured-call failures — falls back to
+        a plain-text plan; transient LLM errors are unwrapped and re-raised.
         """
         prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
         try:
@@ -1467,12 +1472,14 @@ class BlogWriterAgent(_BlogAgentBase):
         concrete guideline updates that can be persisted to the writing style guide.
 
         Returns an empty list when the feedback has no guideline-relevant content,
-        the response is malformed / non-dict, or the model returned unparsable
-        JSON (``LLMJsonParseError``, soft-failed with a logged traceback).
+        the response is malformed / non-dict, or any non-transient ``LLMError``
+        (including ``LLMJsonParseError`` and ``LLMPermanentError``) is soft-failed
+        with a logged traceback — this is an optional analysis step, and a
+        non-transient LLM failure here should not abort the draft stage.
         Transient ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when
         wrapped in ``EventLoopException``) propagate so Temporal can retry the
-        draft stage. Any other exception is an unexpected bug and propagates
-        rather than being swallowed.
+        draft stage. An unexpected programming error (not an ``LLMError``)
+        propagates rather than being swallowed.
         """
         prompt = ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT.format(
             user_feedback=user_feedback,
@@ -1503,7 +1510,7 @@ class BlogWriterAgent(_BlogAgentBase):
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
-            if not isinstance(cause, LLMJsonParseError):
+            if not isinstance(cause, LLMError):
                 raise
             logger.exception("Guideline update analysis failed: %s", cause)
             return []

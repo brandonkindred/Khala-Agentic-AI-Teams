@@ -240,6 +240,25 @@ def test_analyze_feedback_json_parse_error(monkeypatch) -> None:
     assert a.analyze_user_feedback_for_guideline_updates("fb", "g") == []
 
 
+def test_analyze_feedback_permanent_error_soft_fails(monkeypatch) -> None:
+    """A non-transient LLMPermanentError is soft-failed, not propagated.
+
+    This is an optional analysis step in the draft pipeline; a permanent LLM
+    failure here should not abort the whole draft stage.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    from llm_service import LLMPermanentError
+
+    a = _make_agent()
+
+    def boom(self, p, **kw):
+        raise LLMPermanentError("permanent")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom)
+    assert a.analyze_user_feedback_for_guideline_updates("fb", "g") == []
+
+
 def test_analyze_feedback_unexpected_error_propagates(monkeypatch) -> None:
     """Unexpected/programming-bug exceptions must propagate, not be swallowed."""
     import pytest
