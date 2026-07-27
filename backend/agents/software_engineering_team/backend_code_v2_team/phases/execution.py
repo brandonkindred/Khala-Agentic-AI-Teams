@@ -236,7 +236,10 @@ def _qa_gate(
 
     Preconditions: ``deps.qa_agent``/``deps.tool_agents`` are set consistently
       with what the caller wants exercised; ``files`` is the microtask's
-      current ``{path: content}`` output.
+      current ``{path: content}`` output. ``llm`` is accepted for signature
+      uniformity with the gate interface (``GatedExecutionConfig.run_qa_gate``)
+      but is not used by this gate — the QA phase runs via ``deps.qa_agent``/
+      ``deps.tool_agents`` instead.
     Postconditions: the review/agent logic itself never raises (an outright
       QA-agent or tool-agent failure is contained to a synthetic issue or a
       logged warning); an exception from ``detail_callback`` — which is
@@ -277,7 +280,11 @@ def _security_gate(
 
     Preconditions: ``deps.security_agent``/``deps.tool_agents`` are set
       consistently with what the caller wants exercised; ``files`` is the
-      microtask's current ``{path: content}`` output.
+      microtask's current ``{path: content}`` output. ``llm`` is accepted for
+      signature uniformity with the gate interface
+      (``GatedExecutionConfig.run_security_gate``) but is not used by this
+      gate — the security phase runs via ``deps.security_agent``/
+      ``deps.tool_agents`` instead.
     Postconditions: the review/agent logic itself never raises (an outright
       security-agent or tool-agent failure is contained to a synthetic issue
       or a logged warning); an exception from ``detail_callback`` — which is
@@ -383,15 +390,16 @@ def run_execution_with_review_gates(
     """
     Execute microtasks with batch-based review cycles.
 
-    After each microtask is coded, it must pass through sequential review phases:
+    After each microtask is coded, it must pass through review phases:
     1. Code Review (build + lint + code review) - batch fix all issues
-    2. QA Testing - batch fix all issues, then restart from Code Review
-    3. Security Testing - batch fix all issues, then restart from Code Review
-    4. Documentation - self-review loop (3-5 iterations, never fails)
+    2. QA Testing + Security Testing - independent, concurrent analysis passes
+       over the same post-Code-Review snapshot (``GATE_CONFIG.parallelize_qa_security``
+       is ``True``); batch fix all issues from either, then restart from Code Review
+    3. Documentation - self-review loop (3-5 iterations, never fails)
 
     Key behavior:
     - Each review phase collects ALL issues and sends them to the coding agent at once
-    - After QA or Security fixes, the flow restarts from Code Review
+    - After QA and/or Security fixes, the flow restarts from Code Review
     - Documentation uses self-review iterations (no failure mode)
 
     ``progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)`` is called during execution.

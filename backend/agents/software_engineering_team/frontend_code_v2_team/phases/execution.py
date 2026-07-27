@@ -102,8 +102,12 @@ def _run_general_microtask(
     Postconditions: returns the parsed ``{path: content}`` map produced by
       ``_run_general_microtask_impl`` using this team's ``EXECUTION_PROMPT`` /
       ``parse_files_and_summary_template`` / ``PROFILE`` and a fresh
-      ``_llm_runner()``; see that shared implementation for the full contract
-      (a ``.py`` file whose content fails to parse is dropped, not returned).
+      ``_llm_runner()``; see that shared implementation for the full contract.
+      Its rejection guard is a generic, unconditional ``.py``-suffix check
+      shared with the backend team (not scoped by ``language``), so it rarely
+      fires here since this team's output is mostly ``.ts``/``.tsx``/etc. —
+      but any stray ``.py`` file whose content fails to parse is still
+      dropped, not returned.
     """
     return _run_general_microtask_impl(
         llm=llm,
