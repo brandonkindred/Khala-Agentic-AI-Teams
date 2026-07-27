@@ -3,23 +3,24 @@ Stack profile for the code-v2 teams.
 
 ``backend_code_v2_team`` and ``frontend_code_v2_team`` run structurally
 identical phase logic that differs only in a handful of stack-specific knobs:
-which language conventions to inject, how to label the detected language, and
-how to detect it. :class:`StackProfile` captures those knobs as data + one
-callable so the shared phase implementations can be written once and selected
-per team — mirroring the ``SecurityProfile`` pattern in
+which language conventions to inject, how to label the detected language, how
+to detect it, which files belong in the repo briefing, and how to detect
+configured lint/test tooling. :class:`StackProfile` captures those knobs as
+data + callables so the shared phase implementations can be written once and
+selected per team — mirroring the ``SecurityProfile`` pattern in
 ``shared/security_service.py``.
 
 This module holds **only** the dataclass — it imports nothing from either team,
 so the ``shared → team → shared`` import cycle cannot form. Each team constructs
 its own frozen instance (see ``<team>/phases/_profile.py``), passing its own
-``detect_language`` and convention constants.
+``detect_language``/``detect_tooling`` callables and stack-specific constants.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Protocol
+from typing import Any, Callable, Dict, FrozenSet, Protocol, Tuple
 
 from software_engineering_team.shared.models import Task
 
@@ -97,15 +98,28 @@ class StackProfile:
     build_verify_label: str
     """Label passed to ``build_verifier(repo_path, label, task_id)`` in the
     review phase's build-verification step (e.g. ``"backend_code_v2"`` /
-    ``"frontend_code_v2"``).
-
-    Mirrors ``ReviewConfig.build_verify_label`` in ``shared/v2_review.py``
-    (same value, set alongside it in each team's ``_profile.py``) until the
-    ``review.py`` consolidation (tracked separately) settles which of the two
-    objects the shared review body reads from."""
+    ``"frontend_code_v2"``). The single source of truth for this label —
+    each team's ``_run_build_verification`` reads it off ``PROFILE``."""
 
     detect_language: Callable[[Path, Task], str]
     """Infer the project's language/stack from the repo and task."""
+
+    repo_extensions: FrozenSet[str]
+    """File extensions read into the repo briefing (e.g. ``{".py", ".java"}``).
+    Also the extension set threaded into the team's ``RepoContextCache`` — the
+    single source of truth ``_read_repo_code`` and the cache must agree on."""
+
+    repo_exclude_dirs: FrozenSet[str]
+    """Directory names pruned from the repo-briefing walk (e.g. ``node_modules``,
+    ``.git``)."""
+
+    repo_max_chars: int
+    """Character budget for the repo briefing (whole files only; the next chunk
+    that would exceed it stops the briefing)."""
+
+    detect_tooling: Callable[[Path], Tuple[bool, bool]]
+    """Return ``(has_lint, has_test)`` for the stack's configured tooling,
+    given the repo path."""
 
     def __post_init__(self) -> None:
         """Enforce the ``conventions_by_language`` invariant at construction.

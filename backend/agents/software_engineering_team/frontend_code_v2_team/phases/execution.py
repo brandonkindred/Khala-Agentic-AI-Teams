@@ -173,7 +173,8 @@ def run_execution(
 # ``source`` (matching the previous inline loop) -- so each gate's tool-agent
 # fan-out invokes exactly one tool agent instead of every wired kind, mirroring
 # ``backend_code_v2_team``'s per-gate scoping and removing the shared-instance
-# race that blocked enabling ``parallelize_qa_security`` for this team.
+# race that previously blocked enabling ``parallelize_qa_security`` for this
+# team -- ``GATE_CONFIG`` below now sets it to ``True``, matching backend.
 # ``.review`` is imported lazily to keep the module import free of the circular
 # ``review`` <-> ``execution`` dependency.
 
@@ -422,6 +423,7 @@ GATE_CONFIG = GatedExecutionConfig(
     status_code_review=MicrotaskStatus.IN_REVIEW,
     status_qa=MicrotaskStatus.IN_REVIEW,
     status_security=MicrotaskStatus.IN_REVIEW,
+    status_qa_security=MicrotaskStatus.IN_QA_SECURITY_TESTING,
     max_total_cycles=lambda config: config.max_retries * 3,
     code_review_retry_cap=lambda config: config.max_retries,
     max_cycles_requires_failing_gate=False,
@@ -430,6 +432,13 @@ GATE_CONFIG = GatedExecutionConfig(
         f"{total} microtasks, max_retries={config.max_retries}, on_failure={config.on_failure}"
     ),
     gate_issue_log_verb="found",
+    # QA and Security are independent analysis calls over the same
+    # post-Code-Review snapshot on the frontend too (each gate scopes its
+    # tool-agent call to its own kind via ``_scoped_tool_agents`` above) --
+    # matching backend_code_v2_team's existing concurrent behavior. See
+    # docs/GATE_DEPENDENCY_GRAPH.md for the residual CR-gate tool-agent
+    # duplication this does not (yet) resolve.
+    parallelize_qa_security=True,
 )
 
 

@@ -11,18 +11,6 @@ import dataclasses
 
 import pytest
 
-from software_engineering_team.backend_code_v2_team.phases._profile import (
-    PROFILE as BACKEND_PROFILE,
-)
-from software_engineering_team.backend_code_v2_team.phases._profile import (
-    REVIEW_CONFIG as BACKEND_REVIEW_CONFIG,
-)
-from software_engineering_team.frontend_code_v2_team.phases._profile import (
-    PROFILE as FRONTEND_PROFILE,
-)
-from software_engineering_team.frontend_code_v2_team.phases._profile import (
-    REVIEW_CONFIG as FRONTEND_REVIEW_CONFIG,
-)
 from software_engineering_team.shared.stack_profile import StackProfile
 
 _PROFILE_KWARGS = dict(
@@ -34,6 +22,10 @@ _PROFILE_KWARGS = dict(
     has_language_conventions=True,
     build_verify_label="backend_code_v2",
     detect_language=lambda _p, _t: "python",
+    repo_extensions=frozenset({".py"}),
+    repo_exclude_dirs=frozenset({".git"}),
+    repo_max_chars=1000,
+    detect_tooling=lambda _p: (True, True),
 )
 
 
@@ -48,6 +40,10 @@ def test_construction_round_trips_all_fields():
     assert profile.has_language_conventions is True
     assert profile.build_verify_label == "backend_code_v2"
     assert profile.detect_language(None, None) == "python"
+    assert profile.repo_extensions == frozenset({".py"})
+    assert profile.repo_exclude_dirs == frozenset({".git"})
+    assert profile.repo_max_chars == 1000
+    assert profile.detect_tooling(None) == (True, True)
 
 
 def test_frozen_instance_rejects_attribute_assignment():
@@ -62,13 +58,3 @@ def test_missing_default_key_raises():
     kwargs = dict(_PROFILE_KWARGS, conventions_by_language={"java": "JAVA"})
     with pytest.raises(ValueError, match="_default"):
         StackProfile(**kwargs)
-
-
-def test_backend_build_verify_label_matches_review_config():
-    """Guards against the two duplicated sources of truth silently diverging."""
-    assert BACKEND_PROFILE.build_verify_label == BACKEND_REVIEW_CONFIG.build_verify_label
-
-
-def test_frontend_build_verify_label_matches_review_config():
-    """Guards against the two duplicated sources of truth silently diverging."""
-    assert FRONTEND_PROFILE.build_verify_label == FRONTEND_REVIEW_CONFIG.build_verify_label

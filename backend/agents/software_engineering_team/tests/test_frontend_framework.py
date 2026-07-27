@@ -52,6 +52,9 @@ def test_get_frontend_framework_from_spec_no_false_positives() -> None:
     """Words like 'reaction' or 'vue' as substring don't match."""
     assert get_frontend_framework_from_spec("User reaction to the event.") is None
     assert get_frontend_framework_from_spec("We need a revue of the process.") is None
+    assert get_frontend_framework_from_spec("The vueapp directory holds config.") is None
+    assert get_frontend_framework_from_spec("See the vueapplication repo.") is None
+    assert get_frontend_framework_from_spec("Check vuefrontend for details.") is None
 
 
 def test_get_frontend_framework_from_spec_angular() -> None:

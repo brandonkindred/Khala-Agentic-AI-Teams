@@ -945,7 +945,7 @@ class TestDebugPatchOnce:
 
     def test_continues_reexec_when_patch_write_fails(self, monkeypatch) -> None:
         """Write failure logs a warning but still re-execs and returns state."""
-        from software_engineering_team.devops_team import orchestrator as orch_mod
+        from software_engineering_team.devops_team import debug_patch as debug_patch_mod
         from software_engineering_team.devops_team.infra_debug_agent import IaCDebugOutput
         from software_engineering_team.devops_team.infra_patch_agent import IaCPatchOutput
         from software_engineering_team.devops_team.orchestrator import DevOpsTeamLeadAgent
@@ -967,7 +967,7 @@ class TestDebugPatchOnce:
         lead.infra_debug_agent = _Debug()  # type: ignore[assignment]
         lead.infra_patch_agent = _Patch()  # type: ignore[assignment]
         monkeypatch.setattr(
-            orch_mod,
+            debug_patch_mod,
             "write_agent_output",
             lambda **_kwargs: (False, "disk full"),
         )

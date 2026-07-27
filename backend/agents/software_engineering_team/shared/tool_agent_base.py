@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
@@ -43,8 +44,13 @@ from software_engineering_team.shared.v2_models import (
     ToolAgentPhaseOutput,
 )
 
-# Default per-issue context budget (subclasses may override via class attr).
-DEFAULT_MAX_RELEVANT_CODE_CHARS = 8_000
+# Default per-issue context budget for the single-issue fix prompt (subclasses
+# may override via class attr). Deliberately generous (on the same scale as
+# CODE_REVIEW_ABS_CHUNK_CHARS in context_sizing.py): unlike the review phase's
+# read-only code context, this feeds a prompt the model edits, so truncating
+# it risks a broken fix — the cap exists only to bound a pathological single
+# file, not to restrict normal usage.
+DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
 
 
 def relevant_code_for_issue(
@@ -176,12 +182,12 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # ``language_conventions``. Empty → no injection (e.g. frontend agents whose
     # single-issue prompt has no ``{language_conventions}`` slot). Backend agents
     # set ``{"java": JAVA_CONVENTIONS, "_default": PYTHON_CONVENTIONS}``.
-    conventions_by_language: Dict[str, str] = {}
+    conventions_by_language: Optional[Dict[str, str]] = None
 
     # When set (as a ``staticmethod``), ``review`` runs this build runner over the
     # resolved ``repo_path`` instead of the LLM review path. The runner takes a
     # ``pathlib.Path`` and returns a list of :class:`ReviewIssue`.
-    build_runner: Optional[Callable[[Any], List["ReviewIssue"]]] = None
+    build_runner: Optional[Callable[[Path], List["ReviewIssue"]]] = None
     # Noun used in the build-review summary, e.g. "build/test issue(s)" (backend)
     # vs "build issue(s)" (frontend).
     build_review_noun: str = "issue(s)"
@@ -225,14 +231,14 @@ class BaseReviewToolAgent(LlmToolAgentBase):
 
         Driven by :attr:`conventions_by_language`: when it is non-empty, inject
         ``language_conventions`` selected by ``inp.language`` (falling back to the
-        ``"_default"`` entry); when empty, inject nothing — preserving frontend
-        agents whose single-issue prompt has no ``{language_conventions}`` slot.
+        ``"_default"`` entry); when empty, inject nothing — this agent's
+        single-issue prompt has no ``{language_conventions}`` slot to fill.
 
         Preconditions: when set, ``conventions_by_language`` maps lowercased
         language names (plus optional ``"_default"``) to convention strings.
         Postconditions: returns ``{}`` or ``{"language_conventions": <str>}``.
         """
-        conv = self.conventions_by_language
+        conv = self.conventions_by_language or {}
         if not conv:
             return {}
         lang = (getattr(inp, "language", None) or "").strip().lower()
@@ -262,6 +268,8 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         ``pathlib.Path`` and returning a list of :class:`ReviewIssue`).
         Postconditions: returns a :class:`ToolAgentPhaseOutput`; when ``repo_path``
         is unset/missing the issue list is empty and the summary says "skipped".
+        :attr:`build_runner` is called uncaught — any exception it raises is a
+        defect and propagates to the caller.
         """
         from pathlib import Path
 
@@ -283,9 +291,10 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         Preconditions: :attr:`review_via_engine` is set; ``inp.current_files``
         maps path -> content.
         Postconditions: returns a :class:`ToolAgentPhaseOutput` whose ``issues``
-        carry this agent's :attr:`issue_source`. A ``CodeReviewUnavailableError``
-        (the review could not be run) degrades to a "(LLM error)" summary with no
-        issues; any other exception is a defect and propagates. Each engine
+        carry this agent's :attr:`issue_source`. Only a ``CodeReviewUnavailableError``
+        (the review could not be run) is caught, and degrades to a "(LLM error)"
+        summary with no issues; every other exception type is left uncaught and
+        propagates unchanged to the caller. Each engine
         ``CodeReviewIssue.suggestion`` becomes the ``ReviewIssue.recommendation``.
         """
         from software_engineering_team.code_review_agent import (
@@ -336,7 +345,14 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         ``Optional[str] = None`` for subclasses that take one of those other
         two paths, so a subclass using the default one-shot LLM path must
         set it.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput`.
+        Postconditions: returns a :class:`ToolAgentPhaseOutput`. Only the
+        default one-shot LLM path (neither :attr:`build_runner` nor
+        :attr:`review_via_engine` set) never raises — a missing model, empty
+        code, or LLM failure each degrade to a skipped/failed summary with no
+        issues. When :attr:`build_runner` or :attr:`review_via_engine` is
+        set, an unexpected exception from the runner/engine is a defect and
+        propagates uncaught; see :meth:`_build_review` and
+        :meth:`_engine_review`.
         """
         if self.build_runner is not None:
             return self._build_review(inp)
@@ -399,16 +415,16 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         fixed_count = 0
         for issue in issues:
             relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
-            prompt = self.problem_solving_prompt.format(
-                source=issue.source or self.issue_source,
-                severity=issue.severity or self.default_severity,
-                description=issue.description or "",
-                file_path=issue.file_path or "N/A",
-                recommendation=issue.recommendation or self.default_recommendation,
-                current_code=relevant_code,
-                **extra,
-            )
             try:
+                prompt = self.problem_solving_prompt.format(
+                    source=issue.source or self.issue_source,
+                    severity=issue.severity or self.default_severity,
+                    description=issue.description or "",
+                    file_path=issue.file_path or "N/A",
+                    recommendation=issue.recommendation or self.default_recommendation,
+                    current_code=relevant_code.replace("{", "{{").replace("}", "}}"),
+                    **extra,
+                )
                 raw = self._run_agent(self._model, prompt)
             except Exception as e:
                 self._logger.warning(
