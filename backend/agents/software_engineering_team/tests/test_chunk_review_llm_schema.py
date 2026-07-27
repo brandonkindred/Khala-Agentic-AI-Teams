@@ -42,21 +42,27 @@ def test_full_payload_matches_test_chunk_reviewer_markdown_fenced_sample() -> No
     assert parsed.summary == "Found one issue."
 
 
-def test_minimal_payload_defaults_missing_fields() -> None:
-    """Matches ``test_missing_new_output_fields_default_to_empty``: a model
-    reply that omits ``spec_compliance_notes`` still validates, defaulting it
-    to an empty string (mirrors ``_run_chunk_review``'s
-    ``str(data.get("spec_compliance_notes", "") or "")`` fallback)."""
+def test_missing_top_level_field_is_rejected_by_the_stricter_schema() -> None:
+    """``test_missing_new_output_fields_default_to_empty`` (test_chunk_reviewer.py)
+    shows today's hand-rolled parsing tolerates an ``_run_chunk_review`` reply
+    that omits ``spec_compliance_notes``, defaulting it to ``""``. The prompt's
+    own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE``) tells the
+    model to always emit all four top-level keys, so a reply missing one is a
+    truncated/malformed response, not a legitimately empty field: the pilot
+    schema requires all four and rejects this payload instead of silently
+    defaulting, so a real truncated response would drive
+    ``complete_validated``'s corrective retry rather than looking like a
+    clean, empty-issue approval."""
     payload = {"approved": True, "issues": [], "summary": "ok"}
-    parsed = ChunkReviewLLMResponse.model_validate(payload)
-    assert parsed.spec_compliance_notes == ""
-    assert parsed.issues == []
+    with pytest.raises(ValidationError):
+        ChunkReviewLLMResponse.model_validate(payload)
 
 
 def test_issue_missing_file_path_defaults_to_blank() -> None:
     """Matches ``test_chunk_review_agent_passes_blank_file_path_through_unchanged``:
     an issue with no ``file_path`` key validates, defaulting to ``""`` rather
-    than being fabricated from the chunk label."""
+    than being fabricated from the chunk label. All four top-level fields are
+    present so only the per-issue ``file_path`` default is under test here."""
     payload = {
         "approved": False,
         "issues": [
@@ -68,6 +74,7 @@ def test_issue_missing_file_path_defaults_to_blank() -> None:
             }
         ],
         "summary": "Fix naming.",
+        "spec_compliance_notes": "",
     }
     parsed = ChunkReviewLLMResponse.model_validate(payload)
     assert parsed.issues[0].file_path == ""
@@ -125,6 +132,7 @@ def test_out_of_set_category_is_rejected_by_the_stricter_schema() -> None:
             }
         ],
         "summary": "Critical issue found.",
+        "spec_compliance_notes": "",
     }
     with pytest.raises(ValidationError):
         ChunkReviewLLMResponse.model_validate(payload)
@@ -138,17 +146,21 @@ def test_out_of_set_severity_is_rejected_by_the_stricter_schema() -> None:
         ChunkReviewIssueLLM.model_validate({"description": "d", "severity": "blocker"})
 
 
-def test_defaults_match_current_hand_rolled_fallbacks() -> None:
-    """An empty top-level response validates with the exact defaults
-    ``_run_chunk_review`` falls back to when the model reply omits every
-    field: ``approved=False``, ``issues=[]``, ``summary=""``,
-    ``spec_compliance_notes=""``."""
-    parsed = ChunkReviewLLMResponse.model_validate({})
-    assert parsed.approved is False
-    assert parsed.issues == []
-    assert parsed.summary == ""
-    assert parsed.spec_compliance_notes == ""
+def test_empty_top_level_response_is_rejected() -> None:
+    """An empty top-level response (a fully truncated reply) is rejected: all
+    four fields are required, so this is a schema-validation failure rather
+    than the legacy hand-rolled defaults (``approved=False``, ``issues=[]``,
+    ``summary=""``, ``spec_compliance_notes=""``) it used to silently produce."""
+    with pytest.raises(ValidationError):
+        ChunkReviewLLMResponse.model_validate({})
 
+
+def test_issue_defaults_match_current_hand_rolled_fallbacks() -> None:
+    """An empty per-issue dict validates with the exact defaults
+    ``chunking._issues_from_chunk_output`` falls back to for an omitted
+    field. Unlike the top-level response, individual issue fields stay
+    optional/defaulted -- an issue that omits, say, ``pre_existing`` is a
+    legitimately incomplete-but-usable finding, not a truncated reply."""
     issue = ChunkReviewIssueLLM.model_validate({})
     assert issue.severity == "high"
     assert issue.category == "general"

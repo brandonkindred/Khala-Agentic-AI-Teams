@@ -431,22 +431,28 @@ class ChunkReviewLLMResponse(BaseModel):
     ``.get()``/``str()``/``bool()`` coercions (chunk_reviewer.py). This model
     documents and validates that contract; wiring it into an actual
     ``generate_structured`` call is a separate, follow-up change.
+
+    All four fields are required, not defaulted: the chunk-review prompt's
+    own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in
+    chunk_reviewer.py) explicitly tells the model to always emit exactly
+    these four keys, so a reply missing one is a truncated/malformed
+    response, not a legitimately empty field. Defaulting them here would
+    reproduce the hand-parser's permissive ``.get(..., default)`` fallbacks
+    in the one place meant to demonstrate the opposite — a missing field
+    must fail validation and drive ``complete_validated``'s corrective
+    retry, not silently look like a clean, empty-issue approval.
     """
 
     approved: bool = Field(
-        default=False,
         description="True if chunk has no critical/high issues",
     )
     issues: List[ChunkReviewIssueLLM] = Field(
-        default_factory=list,
         description="Issues found in this chunk",
     )
     summary: str = Field(
-        default="",
         description="Review summary for this chunk",
     )
     spec_compliance_notes: str = Field(
-        default="",
         description="Notes on how well the chunk meets the spec and acceptance criteria",
     )
 
