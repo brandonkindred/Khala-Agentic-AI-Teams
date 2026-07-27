@@ -2755,9 +2755,10 @@ class TestPreservationProperties:
                 or (c.get("subject_type") == "file" and "line" not in c)
             )
         ]
-        assert len(in_diff_mixed) >= 1, (
-            f"[{description}] Mixed run: no comment found for in-diff finding "
-            f"(path={in_path!r}, line={in_line}). all_comments={all_comments_mixed}"
+        assert len(in_diff_mixed) == 1, (
+            f"[{description}] Mixed run: expected exactly 1 comment for in-diff finding "
+            f"(path={in_path!r}, line={in_line}), got {len(in_diff_mixed)}. "
+            f"all_comments={all_comments_mixed}"
         )
         mixed_shape = {
             "path": in_diff_mixed[0].get("path"),
@@ -3614,6 +3615,10 @@ class TestPreExistingFindings:
                 assert "old latent bug" not in c.get("body", "")
         assert all("old latent bug" not in b for _n, b in gh.comments)
         assert all("old latent bug" not in rc.get("body", "") for rc in gh.review_comments)
+        # Nor did it leak into the submitted review's own top-level body.
+        assert all(
+            "old latent bug" not in review.get("body", "") for review in gh.submitted_reviews
+        )
         # It is stored as a proposal instead.
         proposals = summary["pending_issue_proposals"]
         assert len(proposals) == 1
@@ -3641,6 +3646,9 @@ class TestPreExistingFindings:
         assert summary["total_issues"] == 0
         assert gh.submitted_reviews and gh.submitted_reviews[0]["event"] == "COMMENT"
         assert gh.reactions and gh.reactions[0][1] == "+1"
+        # The suppressed narrative never leaked the pre-existing finding into
+        # the submitted review's own top-level body either.
+        assert all("latent" not in review.get("body", "") for review in gh.submitted_reviews)
         # But the pre-existing bug is still surfaced as a proposal.
         assert len(summary["pending_issue_proposals"]) == 1
 

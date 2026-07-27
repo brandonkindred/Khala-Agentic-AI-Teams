@@ -451,6 +451,10 @@ class TestRunReviewerUnit:
         assert call["pre_numbered"] is False
         assert call["files"] == {"a.py": "content"}
         assert call["task_requirements"] == pr_review._whole_file_focus("PR body")
+        # Content assertions so a simultaneous regression in _run_reviewer and
+        # _whole_file_focus cannot hide behind the equality check above.
+        assert "PR body" in call["task_requirements"]
+        assert "pre_existing" in call["task_requirements"]
 
     def test_only_code_runs_one_hunk_call(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
