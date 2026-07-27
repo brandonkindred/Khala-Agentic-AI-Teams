@@ -422,10 +422,12 @@ def choose_event(issues: Iterable[Any], author: str = "", reviewer: str = "") ->
     """Pick the GitHub review event from the findings and authorship.
 
     Postconditions:
-        - Returns ``REQUEST_CHANGES`` when any finding is critical/high **and** the
-          reviewer did not author the PR (GitHub 422s on requesting changes to your
-          own PR); otherwise ``COMMENT``. ``PR_REVIEW_EVENT`` (COMMENT /
-          REQUEST_CHANGES / APPROVE) overrides this when set.
+        - Returns ``REQUEST_CHANGES`` when any finding is critical/high **and**
+          ``author``/``reviewer`` are both known (non-empty) and different (GitHub
+          422s on requesting changes to your own PR); otherwise ``COMMENT``. When
+          authorship is unknown (either name empty), this defaults to ``COMMENT``
+          rather than assuming the reviewer isn't the author. ``PR_REVIEW_EVENT``
+          (COMMENT / REQUEST_CHANGES / APPROVE) overrides this when set.
     """
     override = (os.environ.get("PR_REVIEW_EVENT") or "").strip().upper()
     if override in {"COMMENT", "REQUEST_CHANGES", "APPROVE"}:
@@ -433,7 +435,6 @@ def choose_event(issues: Iterable[Any], author: str = "", reviewer: str = "") ->
     has_blocking = any(
         (getattr(i, "severity", "") or "").lower() in _BLOCKING_SEVERITIES for i in issues
     )
-    same_author = bool(author) and bool(reviewer) and author == reviewer
-    if has_blocking and not same_author:
+    if has_blocking and author and reviewer and author != reviewer:
         return "REQUEST_CHANGES"
     return "COMMENT"
