@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # _read_affected_files) file content to the prompt, so this bounds both prompt
 # size and LLM output size for a single fix-generation call.
 MAX_ISSUES_FOR_LLM = 30
+MAX_AFFECTED_FILES = 15
 MAX_AFFECTED_CODE_CHARS = 60_000  # Cap context to avoid blowing up the LLM context window
 
 
@@ -116,16 +117,23 @@ class LintingToolAgent:
     def _read_affected_files(repo_path: Path, issues: List[LintIssue]) -> str:
         """Read and concatenate content of files mentioned in lint issues.
 
-        De-duplicates file paths and caps total content to
-        ``MAX_AFFECTED_CODE_CHARS`` so a large or numerous affected file can't
-        blow the fix-generation prompt past the model's context window.
+        De-duplicates file paths, caps the number of files to
+        ``MAX_AFFECTED_FILES`` and total content to ``MAX_AFFECTED_CODE_CHARS``
+        so a large or numerous affected file can't blow the fix-generation
+        prompt past the model's context window. Rejects any ``file_path`` that
+        resolves outside ``repo_path``.
         """
         seen_files: Dict[str, str] = {}
         total_chars = 0
         for issue in issues:
             if issue.file_path in seen_files:
                 continue
-            file_abs = repo_path / issue.file_path
+            if len(seen_files) >= MAX_AFFECTED_FILES:
+                break
+            file_abs = (repo_path / issue.file_path).resolve()
+            repo_resolved = repo_path.resolve()
+            if file_abs != repo_resolved and repo_resolved not in file_abs.parents:
+                continue
             if not file_abs.is_file():
                 continue
             try:
