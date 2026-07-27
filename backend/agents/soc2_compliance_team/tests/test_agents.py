@@ -380,7 +380,7 @@ def test_report_writer_prompt_serializes_findings_as_json() -> None:
     ]
     ReportWriterAgent().run(llm, "/repo", tsc_results)
 
-    prompt = llm.calls[0]["prompt"]
+    prompt = llm.reasoning_calls[0]["prompt"]
     assert '"severity": "high"' in prompt
     assert "<FindingSeverity" not in prompt
     assert "<TSCCategory" not in prompt

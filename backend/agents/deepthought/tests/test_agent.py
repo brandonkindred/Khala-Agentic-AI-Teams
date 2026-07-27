@@ -16,12 +16,13 @@ def _complete_side_effect(*deliberation_and_synthesis_values):
     """Route ``mock_llm.complete`` calls by objective.
 
     ``_analyse`` now issues a think=True reasoning-pass ``.complete()`` call
-    before its ``.complete_json()`` formatting call; that reasoning call gets
-    a generic placeholder (its content doesn't matter to these tests) so it
-    doesn't consume slots meant for deliberation/synthesis. Values are pulled
-    in call order for anything else (deliberation, then synthesis) —
-    resolved by objective rather than by position so this is robust to
-    child-agent thread scheduling.
+    before its ``.complete_json()`` formatting call; that reasoning call is
+    the only one resolved by objective — it gets a generic placeholder (its
+    content doesn't matter to these tests) so it doesn't consume slots meant
+    for deliberation/synthesis. All other calls are consumed positionally, in
+    order, from ``deliberation_and_synthesis_values``; this assumes no
+    interleaving non-reasoning ``.complete()`` calls from concurrently
+    scheduled child-agent threads.
     """
     it = iter(deliberation_and_synthesis_values)
 
@@ -257,6 +258,7 @@ def test_knowledge_base_deduplication(mock_llm, knowledge_base):
     assert result.reused_from_cache
     assert result.answer == "The meaning is 42"
     # LLM should not have been called
+    mock_llm.complete.assert_not_called()
     mock_llm.complete_json.assert_not_called()
 
 
@@ -295,6 +297,7 @@ def test_result_cache_hit(mock_llm):
     assert result.reused_from_cache
     assert result.answer == "cached answer"
     assert result.agent_id == "new-1"  # ID should be updated
+    mock_llm.complete.assert_not_called()
     mock_llm.complete_json.assert_not_called()
 
 
@@ -383,6 +386,14 @@ def test_original_query_threaded_to_children(root_spec, mock_llm):
     system_prompt = first_complete_call.kwargs.get("system_prompt", "")
     assert original_msg in system_prompt
 
+    # The formatting call sees only the reasoning pass's prose, never the
+    # raw original_query text.
+    format_call = mock_llm.complete_json.call_args
+    format_input = (format_call.kwargs.get("system_prompt") or "") + str(
+        format_call.args[0] if format_call.args else ""
+    )
+    assert original_msg not in format_input
+
 
 # ------------------------------------------------------------------
 # Conversation history threading
@@ -412,6 +423,14 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
     first_complete_call = mock_llm.complete.call_args_list[0]
     user_prompt = first_complete_call.args[0] if first_complete_call.args else ""
     assert "Mars" in user_prompt
+
+    # The formatting call sees only the reasoning pass's prose, never the
+    # raw conversation history.
+    format_call = mock_llm.complete_json.call_args
+    format_input = (format_call.kwargs.get("system_prompt") or "") + str(
+        format_call.args[0] if format_call.args else ""
+    )
+    assert "Mars" not in format_input
 
 
 # ------------------------------------------------------------------

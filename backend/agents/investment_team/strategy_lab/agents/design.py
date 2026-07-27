@@ -437,7 +437,12 @@ class DesignAgent:
         shape miss) and :meth:`_legacy_parse_retry_loop` (the unconstrained
         JSON-and-DSL retry loop) — see their docstrings for the full degrade
         contract. This method's own contract — inputs, outputs, exceptions
-        — is unchanged by the split.
+        — is unchanged by the split, but under the hood
+        ``_structured_preflight`` now issues two sequential LLM calls
+        (reasoning then formatting) charged/timed as a single unit via
+        :func:`so.invoke_structured_with_schema`, and degrades to
+        ``_legacy_parse_retry_loop`` (a single-call path) on either pass's
+        ``schema_forced`` semantic exhaustion.
         """
         structured_available = so.structured_output_available()
         prompt = user_prompt

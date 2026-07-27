@@ -1,8 +1,9 @@
 """SOC2 Trust Service Criteria audit agents and report writer.
 
 The class-based agents (``SecurityTSCAgent`` … ``PrivacyTSCAgent`` and
-``ReportWriterAgent``) each make one ``llm.complete_json`` call and return a
-typed result. They are the audit pipeline's units of work: the thread-mode
+``ReportWriterAgent``) each perform one reasoning pass followed by one JSON
+formatting pass via :func:`complete_json_via_reasoning` and return a typed
+result. They are the audit pipeline's units of work: the thread-mode
 orchestrator and the Temporal activities both drive them via
 :mod:`soc2_compliance_team.pipeline`.
 """
@@ -12,6 +13,8 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, List
+
+from pydantic import ValidationError
 
 from llm_service import compact_text, complete_json_via_reasoning
 
@@ -248,9 +251,14 @@ class ReportWriterAgent:
             - Returns ``(compliance_report, next_steps_document)`` with exactly
               one element non-None: the compliance report when any result is
               non-compliant or has a critical/high finding, otherwise the
-              next-steps document. Performs exactly two LLM calls (a reasoning
-              prose pass followed by a JSON formatting pass) via whichever of
-              ``_produce_compliance_report``/``_produce_next_steps`` is chosen.
+              next-steps document.
+            - The chosen helper (``_produce_compliance_report`` or
+              ``_produce_next_steps``) performs exactly two sequential LLM
+              calls: a reasoning prose pass (``think=True``) followed by a
+              JSON formatting pass (``think=False``).
+            - In the compliance-report branch, any finding that fails to
+              deserialize back into ``TSCFinding`` is logged and dropped from
+              ``findings_by_tsc`` rather than failing the whole report.
         """
         has_findings = any(
             not r.compliant
@@ -319,7 +327,7 @@ recommendations)."""
         for cat, list_dicts in findings_by_tsc.items():
             try:
                 findings_typed[cat] = [TSCFinding(**d) for d in list_dicts]
-            except Exception as exc:  # noqa: BLE001 — report is best-effort
+            except ValidationError as exc:
                 # Log before dropping: silently returning an empty list makes a
                 # malformed-findings bug invisible in production.
                 logger.warning(
