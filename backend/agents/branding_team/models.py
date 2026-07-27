@@ -193,36 +193,52 @@ class BrandDiscoveryAudit(BaseModel):
 
 
 class PurposeVisionOutput(BaseModel):
-    """Brand purpose, mission, and vision statements."""
+    """Brand purpose, mission, and vision statements.
 
-    brand_purpose: str = ""
-    mission_statement: str = ""
-    vision_statement: str = ""
+    Fields are required and non-empty: unlike ``StrategicCoreOutput`` (a
+    merge target whose fields must default so partial per-agent fragments
+    validate against it), this is the agent's *own* structured-output
+    schema — an empty/omitted field here should fail Strands' validation and
+    trigger a retry rather than silently accepting a blank statement.
+    """
+
+    brand_purpose: str = Field(min_length=1)
+    mission_statement: str = Field(min_length=1)
+    vision_statement: str = Field(min_length=1)
 
 
 class CoreValuesOutput(BaseModel):
-    """A set of brand core values."""
+    """A set of brand core values (see ``PurposeVisionOutput`` on required fields).
 
-    core_values: List[CoreValue] = Field(default_factory=list)
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
+    """
+
+    core_values: List[CoreValue] = Field(min_length=3, max_length=5)
 
 
 class AudienceSegmentsOutput(BaseModel):
-    """A set of target audience segments."""
+    """A set of target audience segments (see ``PurposeVisionOutput`` on required fields).
 
-    target_audience_segments: List[AudienceSegment] = Field(default_factory=list)
+    ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
+    """
+
+    target_audience_segments: List[AudienceSegment] = Field(min_length=1, max_length=3)
 
 
 class DifferentiationPillarsOutput(BaseModel):
-    """A set of competitive differentiation pillars."""
+    """A set of competitive differentiation pillars (see ``PurposeVisionOutput`` on required fields).
 
-    differentiation_pillars: List[DifferentiationPillar] = Field(default_factory=list)
+    ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
+    """
+
+    differentiation_pillars: List[DifferentiationPillar] = Field(min_length=2, max_length=4)
 
 
 class PositioningOutput(BaseModel):
-    """Synthesised positioning statement and brand promise."""
+    """Synthesised positioning statement and brand promise (see ``PurposeVisionOutput`` on required fields)."""
 
-    positioning_statement: str = ""
-    brand_promise: str = ""
+    positioning_statement: str = Field(min_length=1)
+    brand_promise: str = Field(min_length=1)
 
 
 class StrategicCoreOutput(BaseModel):
