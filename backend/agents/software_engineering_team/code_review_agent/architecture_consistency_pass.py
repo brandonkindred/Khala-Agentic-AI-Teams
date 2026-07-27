@@ -53,11 +53,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_arch_overview_chars,
-    compute_code_review_map_chunk_chars,
-    parse_env_int,
-)
+from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 from software_engineering_team.shared.models import SystemArchitecture
 
 from .architecture_context import render_architecture_context
@@ -74,11 +70,6 @@ logger = logging.getLogger(__name__)
 # disables the pass (see docs/ENV_VARS.md). Any other value (or unset) leaves it enabled.
 _PASS_ENV = "CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS"
 
-# Cap on the architecture document inlined into the single prompt this pass sends.
-# Generous relative to the per-chunk excerpt cap (``CODE_REVIEW_ARCH_OVERVIEW_CHARS``)
-# because this pass pays the cost once per submission, not once per chunk.
-_ARCH_DOC_ABS_CHARS = 40_000  # CODE_REVIEW_ARCH_DOC_CHARS, floor 2_000
-
 _ALLOWED_CATEGORIES = frozenset({"architecture", "refactor"})
 _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
@@ -87,18 +78,17 @@ def _build_prompt(
     index: CodebaseIndex,
     architecture: SystemArchitecture,
     max_inline_chars: int,
-    max_arch_doc_chars: int,
 ) -> str:
     """Render the single user prompt for this pass.
 
     Postconditions:
-        - Inlines the architecture document (folding in the rendered
+        - Inlines the architecture document in full (folding in the rendered
           ``overview``/``components``/``decisions`` alongside it, or in its
-          place when no full document is set) up to ``max_arch_doc_chars``,
-          then the submission's changed files up to a combined
-          ``max_inline_chars`` budget; any files/content beyond either budget
-          are named as reachable via the attached tools rather than silently
-          dropped.
+          place when no full document is set) -- no tool exposes the document
+          itself, so unlike the changed files below it is never truncated --
+          then the submission's changed files up to a ``max_inline_chars``
+          budget; any file content beyond that budget is named as reachable
+          via the attached tools rather than silently dropped.
     """
     parts: List[str] = []
 
@@ -110,17 +100,11 @@ def _build_prompt(
         )
         if p
     )
-    inlined_doc = arch_doc[:max_arch_doc_chars]
-    doc_fence = _code_fence_for(inlined_doc)
+    doc_fence = _code_fence_for(arch_doc)
     parts.append("**Architecture document:**")
     parts.append(doc_fence)
-    parts.append(inlined_doc or "(no architecture document provided)")
+    parts.append(arch_doc or "(no architecture document provided)")
     parts.append(doc_fence)
-    if len(arch_doc) > max_arch_doc_chars:
-        parts.append(
-            f"(Only the first {max_arch_doc_chars} characters of the architecture document are "
-            "shown above; the rest was not available to this pass.)"
-        )
     parts.append("")
 
     changed_files = list(index.files.items())
@@ -428,25 +412,14 @@ def _run_pass(
         return []
 
     model = resolve_code_review_model(llm)
-    configured_arch_doc_chars = parse_env_int(
-        "CODE_REVIEW_ARCH_DOC_CHARS", _ARCH_DOC_ABS_CHARS, 2_000
-    )
-    # ``compute_code_review_map_chunk_chars`` plus ``compute_code_review_arch_overview_chars``
-    # approximates the total content this model's context can carry for a code+architecture
-    # prompt of this shape (the two already sum to a context-derived ceiling for the map-phase
-    # prompt this pass's own prompt closely resembles). Split that total between the architecture
-    # document and the inlined code -- at most half to the document -- rather than inlining the
-    # full (env-configurable, not context-aware) document cap unconditionally: on a smaller-context
-    # model a generous CODE_REVIEW_ARCH_DOC_CHARS could otherwise consume the whole budget by
-    # itself and push the combined prompt past the model's real context regardless of how much the
-    # code side shrinks.
-    available_total = compute_code_review_map_chunk_chars(
-        llm
-    ) + compute_code_review_arch_overview_chars(llm)
-    max_arch_doc_chars = min(configured_arch_doc_chars, available_total // 2)
-    max_inline_chars = max(available_total - max_arch_doc_chars, 0)
+    # The architecture document itself is always inlined in full (see _build_prompt) --
+    # no tool exposes it, so there is no fallback path for a truncated excerpt. The
+    # changed-file budget below is independent of the document's size: overflow files
+    # remain reachable via read_file()/list_files(), so capping this budget on its own
+    # merits (the model's context for a map-phase-shaped prompt) is sufficient.
+    max_inline_chars = compute_code_review_map_chunk_chars(llm)
 
-    prompt = _build_prompt(index, architecture, max_inline_chars, max_arch_doc_chars)
+    prompt = _build_prompt(index, architecture, max_inline_chars)
     agent = Agent(
         model=model,
         system_prompt=ARCHITECTURE_CONSISTENCY_PROMPT,

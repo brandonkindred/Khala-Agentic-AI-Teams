@@ -382,16 +382,32 @@ def _fix_issues_one_at_a_time_impl(
                 )
                 break
 
-            parsed = parse_single(raw)
-            if not isinstance(parsed, dict):  # defensive: malformed parser result
-                parsed = {}
-            fixed_files = parsed.get("files") or {}
-            if not fixed_files:
+            try:
+                parsed = parse_single(raw)
+                if not isinstance(parsed, dict):  # defensive: malformed parser result
+                    parsed = {}
+                fixed_files = parsed.get("files") or {}
+                had_files = bool(fixed_files)
+                rejected_files = {}
+                if fixed_files:
+                    fixed_files, rejected_files = reject_invalid_python(fixed_files)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] %s%sfix parsing/validation failed (issue %d, attempt %d): %s",
+                    task_id,
+                    mt_ctx,
+                    phase_ctx,
+                    issue_idx + 1,
+                    attempt,
+                    exc,
+                )
+                continue
+
+            if not had_files:
                 if parsed.get("resolved"):
                     resolved_this = True
                 break
 
-            fixed_files, rejected_files = reject_invalid_python(fixed_files)
             if rejected_files:
                 logger.warning(
                     "[%s] %s%sfix (issue %d, attempt %d) returned unparsable Python for "

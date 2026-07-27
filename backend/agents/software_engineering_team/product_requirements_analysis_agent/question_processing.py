@@ -307,15 +307,20 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
 
     Preconditions: ``index`` is a non-negative int; ``opt_data`` is the decoded item.
     Postconditions: returns a valid :class:`QuestionOption`; a non-dict becomes a
-        label-only option defaulting only at ``index == 0``.
+        label-only option defaulting only at ``index == 0``; a non-numeric or ``None``
+        ``confidence`` value defaults to 0.5 instead of raising.
     """
     if isinstance(opt_data, dict):
+        try:
+            confidence = float(opt_data.get("confidence", 0.5))
+        except (ValueError, TypeError):
+            confidence = 0.5
         return QuestionOption(
             id=_str_or_default(opt_data.get("id"), f"opt{index}"),
             label=_str_or_default(opt_data.get("label")),
             is_default=bool(opt_data.get("is_default", False)),
             rationale=_str_or_default(opt_data.get("rationale")),
-            confidence=float(opt_data.get("confidence", 0.5)),
+            confidence=confidence,
         )
     return QuestionOption(
         id=f"opt{index}",

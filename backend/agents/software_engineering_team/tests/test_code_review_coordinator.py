@@ -931,7 +931,8 @@ def _bisecting_failure(msg: str = "no content") -> LLMTruncatedError:
 class _SelectiveRaiser(DummyLLMClient):
     """Raises for prompts containing a marker; otherwise delegates to Dummy.
 
-    Records every prompt so tests can count map calls.
+    Records every prompt so tests can count map calls. Thread-safe for use
+    with concurrent tail-pass execution.
     """
 
     def __init__(self, marker: str, exc: Optional[Exception] = None) -> None:
@@ -939,11 +940,13 @@ class _SelectiveRaiser(DummyLLMClient):
         self.marker = marker
         self.exc = exc or _bisecting_failure("LLM output truncated")
         self.prompts: List[str] = []
+        self._lock = threading.Lock()
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.prompts.append(prompt)
-        if self.marker in prompt:
-            raise self.exc
+        with self._lock:
+            self.prompts.append(prompt)
+            if self.marker in prompt:
+                raise self.exc
         return super().complete_json(prompt, **kwargs)
 
 
@@ -1580,6 +1583,7 @@ def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
     degrades to a not-reviewed outcome rather than raising."""
     from code_review_agent import mapping
 
+    monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
     reviewer = _ThinkAwareReviewer(
         LLMSemanticExhaustionError("still nothing"), recover_on_think_off=False
@@ -2688,6 +2692,22 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
         repo_reader=reader,
     )
     assert captured["reader"] is reader
+
+
+def test_coordinator_runs_with_submission_cache_disabled(monkeypatch) -> None:
+    """``run_coordinator`` must not crash when the submission cache is disabled
+    (``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` resolves to 0). Guards the explicit
+    ``cached = None`` initialization: without it, any future refactor that reads
+    ``cached`` outside the cache-enabled branch would raise ``UnboundLocalError``
+    for this codepath."""
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.setattr(coord, "_submission_cache_size", lambda: 0)
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+    assert result.approved is True
 
 
 def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
