@@ -181,13 +181,19 @@ def _code_review_gate(
 ) -> GateOutcome:
     """Run the backend code-review phase (build + lint + code review).
 
-    Preconditions: ``deps.build_verifier``/``deps.code_review_agent``/
-      ``deps.linting_tool_agent`` are set consistently with what the caller
-      wants exercised (each is independently optional/skippable by
-      ``run_code_review_phase``); ``files`` is the microtask's current
-      ``{path: content}`` output.
-    Postconditions: never raises (shared containment in
-      ``run_code_review_phase``); returns a ``GateOutcome`` with
+    Preconditions: ``deps.build_verifier``/``deps.linting_tool_agent`` are
+      independently skippable — build verification/linting are skipped
+      (treated as passing/absent), not failed, when unset.
+      ``deps.code_review_agent`` is not skippable in that sense: when unset,
+      ``run_code_review_phase`` runs the LLM reviewer directly instead of an
+      external agent, so a code-review LLM call always happens regardless.
+      ``files`` is the microtask's current ``{path: content}`` output.
+    Postconditions: the review/agent logic itself never raises (build, lint,
+      and code-review failures are all contained to synthetic issues or
+      logged warnings); an exception from ``detail_callback`` — which is
+      invoked outside that containment and, in the gated loop, forwards to
+      the caller-supplied ``progress_callback`` — is not caught here and
+      propagates uncaught. Returns a ``GateOutcome`` with
       ``passed``/``issues``/``summary`` copied from the resulting
       ``PhaseReviewResult``, ``raw_issue_count`` defaulting to ``None`` if
       absent.
@@ -231,8 +237,12 @@ def _qa_gate(
     Preconditions: ``deps.qa_agent``/``deps.tool_agents`` are set consistently
       with what the caller wants exercised; ``files`` is the microtask's
       current ``{path: content}`` output.
-    Postconditions: never raises (shared containment in
-      ``run_qa_testing_phase``); returns a ``GateOutcome`` with
+    Postconditions: the review/agent logic itself never raises (an outright
+      QA-agent or tool-agent failure is contained to a synthetic issue or a
+      logged warning); an exception from ``detail_callback`` — which is
+      invoked outside that containment and, in the gated loop, forwards to
+      the caller-supplied ``progress_callback`` — is not caught here and
+      propagates uncaught. Returns a ``GateOutcome`` with
       ``passed``/``issues``/``summary`` copied directly from the resulting
       ``PhaseReviewResult`` (no filtering — the backend's phase call is
       already scoped to QA only, unlike the frontend's ``_qa_gate``).
@@ -268,8 +278,12 @@ def _security_gate(
     Preconditions: ``deps.security_agent``/``deps.tool_agents`` are set
       consistently with what the caller wants exercised; ``files`` is the
       microtask's current ``{path: content}`` output.
-    Postconditions: never raises (shared containment in
-      ``run_security_testing_phase``); returns a ``GateOutcome`` with
+    Postconditions: the review/agent logic itself never raises (an outright
+      security-agent or tool-agent failure is contained to a synthetic issue
+      or a logged warning); an exception from ``detail_callback`` — which is
+      invoked outside that containment and, in the gated loop, forwards to
+      the caller-supplied ``progress_callback`` — is not caught here and
+      propagates uncaught. Returns a ``GateOutcome`` with
       ``passed``/``issues``/``summary`` copied directly from the resulting
       ``PhaseReviewResult`` (no filtering — the backend's phase call is
       already scoped to security only, unlike the frontend's

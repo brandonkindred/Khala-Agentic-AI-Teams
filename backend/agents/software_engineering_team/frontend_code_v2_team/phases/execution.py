@@ -214,16 +214,20 @@ def _code_review_gate(
       ``deps.linting_tool_agent``/``deps.tool_agents`` are set consistently
       with what the caller wants exercised; ``files`` is the microtask's
       current ``{path: content}`` output.
-    Postconditions: never raises (shared containment in
-      ``run_microtask_review``); calls it with ``qa_agent=None,
-      security_agent=None`` (disabling only those two LLM review steps) and
-      the full, unscoped ``deps.tool_agents`` mapping — unlike the QA/security
-      gates, this call does not narrow ``tool_agents`` to a single kind, so
-      the returned ``issues`` can include build/lint/code-review findings
-      *and* every wired tool agent's findings (e.g. accessibility,
-      ui_design), not only code-review-sourced ones. Copies
-      ``passed``/``issues``/``summary``/``raw_issue_count`` (defaulting to
-      ``None``) from the result unfiltered.
+    Postconditions: the review/agent logic itself never raises (build, lint,
+      code-review, and tool-agent failures are all contained to synthetic
+      issues or logged warnings); an exception from ``detail_callback`` —
+      which is invoked outside that containment and, in the gated loop,
+      forwards to the caller-supplied ``progress_callback`` — is not caught
+      here and propagates uncaught. Calls ``run_microtask_review`` with
+      ``qa_agent=None, security_agent=None`` (disabling only those two LLM
+      review steps) and the full, unscoped ``deps.tool_agents`` mapping —
+      unlike the QA/security gates, this call does not narrow ``tool_agents``
+      to a single kind, so the returned ``issues`` can include
+      build/lint/code-review findings *and* every wired tool agent's findings
+      (e.g. accessibility, ui_design), not only code-review-sourced ones.
+      Copies ``passed``/``issues``/``summary``/``raw_issue_count`` (defaulting
+      to ``None``) from the result unfiltered.
     """
     from .review import run_microtask_review
 
@@ -268,14 +272,19 @@ def _qa_gate(
     Preconditions: ``deps.qa_agent``/``deps.tool_agents`` are set consistently
       with what the caller wants exercised; ``files`` is the microtask's
       current ``{path: content}`` output.
-    Postconditions: never raises (shared containment in
-      ``run_microtask_review``); calls it with only ``qa_agent`` enabled and
-      ``tool_agents`` scoped to ``ToolAgentKind.TESTING_QA`` via
-      ``_scoped_tool_agents`` (``None`` when that kind isn't wired), then
-      filters ``r.issues`` to ``source == "qa"`` before returning. ``passed``
-      is computed as ``not qa_issues`` (true iff no QA-sourced issue survives
-      filtering) rather than taken from ``r.passed`` — a stray non-QA issue
-      in ``r.issues`` cannot fail this gate.
+    Postconditions: the review/agent logic itself never raises (an outright
+      QA-agent or tool-agent failure is contained to a synthetic issue or a
+      logged warning); an exception from ``detail_callback`` — which is
+      invoked outside that containment and, in the gated loop, forwards to
+      the caller-supplied ``progress_callback`` — is not caught here and
+      propagates uncaught. Calls ``run_microtask_review`` with only
+      ``qa_agent`` enabled and ``tool_agents`` scoped to
+      ``ToolAgentKind.TESTING_QA`` via ``_scoped_tool_agents`` (``None`` when
+      that kind isn't wired), then filters ``r.issues`` to ``source == "qa"``
+      before returning. ``passed`` is computed as ``not qa_issues`` (true iff
+      no QA-sourced issue survives filtering) rather than taken from
+      ``r.passed`` — a stray non-QA issue in ``r.issues`` cannot fail this
+      gate.
     """
     from .review import run_microtask_review
 
@@ -315,15 +324,19 @@ def _security_gate(
     Preconditions: ``deps.security_agent``/``deps.tool_agents`` are set
       consistently with what the caller wants exercised; ``files`` is the
       microtask's current ``{path: content}`` output.
-    Postconditions: never raises (shared containment in
-      ``run_microtask_review``); calls it with only ``security_agent``
-      enabled and ``tool_agents`` scoped to ``ToolAgentKind.SECURITY`` via
-      ``_scoped_tool_agents`` (``None`` when that kind isn't wired), then
-      filters ``r.issues`` to ``source == "security"`` before returning.
-      ``passed`` is computed as ``not sec_issues`` (true iff no
-      security-sourced issue survives filtering) rather than taken from
-      ``r.passed`` — a stray non-security issue in ``r.issues`` cannot fail
-      this gate.
+    Postconditions: the review/agent logic itself never raises (an outright
+      security-agent or tool-agent failure is contained to a synthetic issue
+      or a logged warning); an exception from ``detail_callback`` — which is
+      invoked outside that containment and, in the gated loop, forwards to
+      the caller-supplied ``progress_callback`` — is not caught here and
+      propagates uncaught. Calls ``run_microtask_review`` with only
+      ``security_agent`` enabled and ``tool_agents`` scoped to
+      ``ToolAgentKind.SECURITY`` via ``_scoped_tool_agents`` (``None`` when
+      that kind isn't wired), then filters ``r.issues`` to
+      ``source == "security"`` before returning. ``passed`` is computed as
+      ``not sec_issues`` (true iff no security-sourced issue survives
+      filtering) rather than taken from ``r.passed`` — a stray non-security
+      issue in ``r.issues`` cannot fail this gate.
     """
     from .review import run_microtask_review
 
