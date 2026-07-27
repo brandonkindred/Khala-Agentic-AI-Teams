@@ -25,7 +25,6 @@ backend/
     llm_service/             # Centralized LLM client (Ollama, Claude)
     agent_registry/          # Agent Console catalog: per-agent YAML manifests → /api/agents
     agent_console/           # Agent Console data layer: runs, saved inputs, diff
-    integrations/            # Shared integration contracts (Google login, Medium, etc.)
     artifact_registry/       # Shared artifact persistence
     event_bus/               # Cross-team event publishing
     api/                     # Legacy blog API surface (see blogging/ for current pipeline)

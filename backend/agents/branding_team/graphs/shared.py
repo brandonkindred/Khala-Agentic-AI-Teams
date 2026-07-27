@@ -26,19 +26,21 @@ if TYPE_CHECKING:
 OutputMode = Literal["json", "text"]
 
 
-# Every branding agent resolves the *same* model (agent_key="branding"),
-# differing only by response format. Building the graph instantiates ~40
+# Every branding agent resolves a model keyed by (agent_key, output_mode),
+# defaulting to agent_key="branding". Building the graph instantiates ~40
 # agents per run; without memoisation each one constructs a fresh
 # LLMClientModel. The model is a stateless wrapper over the cached LLM
-# client, so one instance per response format is safe to share across all
-# agents and all runs. The Agents themselves are NOT cached — they carry
-# per-invocation conversation state and must stay distinct per graph build.
+# client, so one instance per (agent_key, output_mode) pair is safe to share
+# across all agents and all runs. The Agents themselves are NOT cached —
+# they carry per-invocation conversation state and must stay distinct per
+# graph build.
 #
-# ``maxsize`` bounds the cache: ``OutputMode`` is a fixed two-value set
-# ("json"/"text"), so this never holds more than a couple of entries.
-@lru_cache(maxsize=4)
-def _branding_model(output_mode: OutputMode) -> "LLMClientModel":
-    return get_strands_model("branding", response_format=output_mode)
+# ``maxsize`` bounds the cache: the key space is small (today, just the
+# "branding" default plus any override), so this never holds more than a
+# handful of entries.
+@lru_cache(maxsize=8)
+def _branding_model(agent_key: str, output_mode: OutputMode) -> "LLMClientModel":
+    return get_strands_model(agent_key, response_format=output_mode)
 
 
 def build_agent(
@@ -49,13 +51,14 @@ def build_agent(
     structured_output: Any | None = None,
     tools: list | None = None,
     description: str = "",
+    agent_key: str = "branding",
 ) -> Agent:
     """Create a ``strands.Agent`` pre-configured for branding work.
 
     The backing model is the project's centralized ``LLMClientModel`` resolved
-    via ``get_strands_model("branding", response_format=output_mode)`` — this
+    via ``get_strands_model(agent_key, response_format=output_mode)`` — this
     routes through Ollama (or any configured ``LLM_PROVIDER``) and inherits
-    retries, telemetry, and per-agent model routing (``LLM_MODEL_branding``).
+    retries, telemetry, and per-agent model routing (``LLM_MODEL_<agent_key>``).
     Passing a bare model string here would make Strands treat it as a Bedrock
     model ID and fail with ``NoCredentialsError`` outside AWS.
 
@@ -82,13 +85,18 @@ def build_agent(
         Optional list of tools the agent may invoke.
     description:
         Short human-readable description of the agent's purpose.
+    agent_key:
+        LLM routing key passed to ``get_strands_model``, controlling which
+        ``LLM_MODEL_<agent_key>`` override (if any) resolves the backing
+        model. Defaults to ``"branding"``, preserving the behavior of all
+        existing call sites.
     """
     if output_mode not in ("json", "text"):
         raise ValueError(f"output_mode must be 'json' or 'text', got {output_mode!r}")
     kwargs: dict[str, Any] = {
         "name": name,
         "system_prompt": system_prompt,
-        "model": _branding_model(output_mode),
+        "model": _branding_model(agent_key, output_mode),
         "callback_handler": None,
     }
     if structured_output is not None:
@@ -159,6 +167,45 @@ def should_advance_past(phase_idx: int, target_phase: Optional[BrandPhase]) -> b
     if target_phase is None:
         return True
     return phase_index(target_phase) > phase_idx
+
+
+# Human-readable display titles for each pipeline phase, keyed by BrandPhase.
+# These mirror the hand-written phase list in the ``models``/``prompts`` module
+# docstrings — kept as an explicit mapping (not derived mechanically from
+# ``phase.value``) because several titles use "&" and phrasing that a simple
+# ``phase.value.replace("_", " ").title()`` cannot reproduce (e.g. "Narrative &
+# Messaging", not "Narrative Messaging"; "Visual & Expressive Identity", not
+# "Visual Identity").
+PHASE_TITLES: dict[BrandPhase, str] = {
+    BrandPhase.STRATEGIC_CORE: "Strategic Core",
+    BrandPhase.NARRATIVE_MESSAGING: "Narrative & Messaging",
+    BrandPhase.VISUAL_IDENTITY: "Visual & Expressive Identity",
+    BrandPhase.CHANNEL_ACTIVATION: "Experience & Channel Activation",
+    BrandPhase.GOVERNANCE: "Governance & Evolution",
+}
+
+
+def phase_order_text() -> str:
+    """Render the pipeline's phase order as "Phase N — Title" lines.
+
+    Derives the list from ``PHASE_ORDER`` (execution order) and
+    ``PHASE_TITLES`` (display names) instead of literal prose, so the two
+    stay in sync automatically as the pipeline evolves.
+
+    Preconditions:
+        Every phase in ``PHASE_ORDER`` has an entry in ``PHASE_TITLES``.
+    Postconditions:
+        Returns a string with exactly ``len(PHASE_ORDER)`` lines, one per
+        ``PHASE_ORDER`` entry in order, 1-indexed, formatted as
+        ``"Phase {n} — {title}"`` and joined by ``"\n"`` (no trailing
+        newline).
+    """
+    assert all(phase in PHASE_TITLES for phase in PHASE_ORDER), (
+        "PHASE_TITLES must have a display title for every PHASE_ORDER entry"
+    )
+    return "\n".join(
+        f"Phase {i} — {PHASE_TITLES[phase]}" for i, phase in enumerate(PHASE_ORDER, start=1)
+    )
 
 
 # ---------------------------------------------------------------------------
