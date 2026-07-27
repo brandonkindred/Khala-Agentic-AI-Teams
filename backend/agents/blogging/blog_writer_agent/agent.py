@@ -265,7 +265,10 @@ class BlogWriterAgent(_BlogAgentBase):
             prompt + "\n\nRespond with valid JSON only, no markdown fences.",
             system_prompt,
         )
-        return extract_json_from_response(raw)
+        data = extract_json_from_response(raw)
+        if not isinstance(data, dict):
+            raise LLMJsonParseError(f"Expected a JSON object, got {type(data).__name__}")
+        return data
 
     def _fallback_draft_via_json(self, prompt: str, system_prompt: str = "") -> Optional[str]:
         """Parse a revised draft via shared JSON retry when the text path fails.
