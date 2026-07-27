@@ -20,6 +20,7 @@ dispatch table and the module list passed to ``install_fake_postgres``.
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from typing import Any
 
@@ -678,7 +679,8 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
         ``shared.postgres.PostgresHelperMixin``, which calls ``pg_cursor()``
         in ``shared.postgres.client`` (their own modules are not patched here).
     Postconditions:
-        ``POSTGRES_HOST`` is set so ``pg_cursor``'s ``is_postgres_enabled()``
+        ``POSTGRES_HOST`` is set (preserving a real, already-configured value
+        rather than overwriting it) so ``pg_cursor``'s ``is_postgres_enabled()``
         guard falls through instead of yielding ``None``.
         ``shared.postgres.client.get_conn`` is patched to yield a shared
         ``FakeConn`` backed by the returned default db and branding's SQL
@@ -686,7 +688,14 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
     """
     import shared.postgres.client as client_mod
 
-    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    # Preserve a real POSTGRES_HOST (e.g. the CI Postgres service container) rather
+    # than overwriting it: shared.postgres.runner.ensure_team_schema (invoked from the
+    # app-factory lifespan on every TestClient startup) imports get_conn directly from
+    # shared.postgres.client, a separate binding this fixture's get_conn patch below
+    # cannot reach. Clobbering POSTGRES_HOST to an unresolvable placeholder host would
+    # make that call lazily create — and permanently cache — a broken connection pool
+    # for the rest of the test session, breaking every later real-Postgres test too.
+    monkeypatch.setenv("POSTGRES_HOST", os.environ.get("POSTGRES_HOST") or "postgres")
 
     # BrandingStore, BrandingConversationStore, and BrandingSessionStore all use
     # shared.postgres.PostgresHelperMixin, which resolves get_conn via
