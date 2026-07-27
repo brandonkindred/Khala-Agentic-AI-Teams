@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
@@ -186,7 +187,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # When set (as a ``staticmethod``), ``review`` runs this build runner over the
     # resolved ``repo_path`` instead of the LLM review path. The runner takes a
     # ``pathlib.Path`` and returns a list of :class:`ReviewIssue`.
-    build_runner: Optional[Callable[[Any], List["ReviewIssue"]]] = None
+    build_runner: Optional[Callable[[Path], List["ReviewIssue"]]] = None
     # Noun used in the build-review summary, e.g. "build/test issue(s)" (backend)
     # vs "build issue(s)" (frontend).
     build_review_noun: str = "issue(s)"
