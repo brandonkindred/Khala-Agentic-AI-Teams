@@ -526,6 +526,79 @@ def test_timeout_saturation_resets_once_the_pool_shows_progress() -> None:
         release_hang.set()
 
 
+def test_timeout_abandoned_stragglers_tracked_individually_not_by_pool_progress() -> None:
+    """Unrelated progress on a healthy worker must never be credited as a
+    *different*, still-genuinely-hung worker recovering. With max_workers=2:
+    worker 1 hangs forever from the start; worker 2 cycles through several
+    quick, in-budget items and only then also hangs forever. The queued item
+    behind both must still eventually be degraded (saturation correctly
+    reached once a second worker is truly stuck) rather than polled forever
+    because the first hang's contribution was wiped out by worker 2's
+    unrelated completions."""
+    release_a = threading.Event()
+    release_z = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_a.wait(timeout=5)  # worker 1: permanently hung
+            return 0
+        if 1 <= x <= 5:
+            time.sleep(0.02)  # worker 2: several quick, in-budget items
+            return x * 10
+        if x == 6:
+            release_z.wait(timeout=5)  # worker 2: now also permanently hung
+            return 6
+        return 70  # item 7: queued behind both hangs, must never get to run
+
+    try:
+        out = parallel_map(
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.2,
+        )
+        assert out == [None, 10, 20, 30, 40, 50, None, None]
+    finally:
+        release_a.set()
+        release_z.set()
+
+
+def test_timeout_accepts_a_genuinely_on_time_completion_observed_late() -> None:
+    """A task that actually finishes within its own budget must be accepted
+    with its real value even if parallel_map's loop doesn't get around to
+    observing it as done until well after — here, because a different item's
+    on_timeout hook is slow. Elapsed time must be measured against the
+    worker's own recorded finish time, not the observing thread's clock."""
+    release_hang = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_hang.wait(timeout=5)  # permanently hung, released in finally
+            return 0
+        time.sleep(0.02)  # finishes comfortably within the 0.2s budget
+        return 42
+
+    def on_timeout(item: int) -> None:
+        if item == 0:
+            # Delays the loop well past item 1's real completion (~0.02s),
+            # long after it was genuinely already done and within budget.
+            time.sleep(0.3)
+
+    try:
+        out = parallel_map(
+            [0, 1],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.2,
+            on_timeout=on_timeout,
+        )
+        assert out == [None, 42]
+    finally:
+        release_hang.set()
+
+
 def test_timeout_uses_item_not_index_for_non_subscriptable_items() -> None:
     """on_timeout receives the actual submitted item even when `items` is a
     sized-but-not-subscriptable iterable (e.g. a set), rather than indexing
