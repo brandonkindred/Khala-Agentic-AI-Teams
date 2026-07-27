@@ -35,57 +35,6 @@ class BloggingError(Exception):
         return self.message
 
 
-class LLMError(BloggingError):
-    """LLM operation failed.
-
-    Raised when the LLM returns an error response or is unreachable.
-    For code that calls llm_service directly, catch llm_service.LLMError (and
-    subclasses such as LLMRateLimitError, LLMJsonParseError) instead; this class
-    remains for backward compatibility in the blogging pipeline.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: Optional[int] = None,
-        phase: Optional[str] = None,
-        cause: Optional[Exception] = None,
-    ):
-        super().__init__(message, phase=phase, cause=cause)
-        self.status_code = status_code
-
-
-class LLMRateLimitError(LLMError):
-    """Raised when the LLM returns 429 Too Many Requests and retries are exhausted."""
-
-
-class LLMTemporaryError(LLMError):
-    """Raised when the LLM returns 5xx or network errors and retries are exhausted."""
-
-
-class LLMUnreachableError(LLMError):
-    """Raised when the LLM is unreachable after all retry attempts."""
-
-
-class LLMJsonParseError(LLMError):
-    """LLM returned invalid JSON after recovery attempts.
-
-    Includes the raw response preview for debugging.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        response_preview: str = "",
-        phase: Optional[str] = None,
-        cause: Optional[Exception] = None,
-    ):
-        super().__init__(message, phase=phase, cause=cause)
-        self.response_preview = response_preview if response_preview else ""
-
-
 class ResearchError(BloggingError):
     """Research phase failed.
 

@@ -60,7 +60,7 @@ from ..models import (
 )
 from ..output_templates import parse_documentation_self_review_template, parse_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
-from ._profile import REVIEW_CONFIG
+from ._profile import PROFILE, REVIEW_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ def _run_build_verification(
     if build_verifier is None:
         return True, "No build verifier provided; skipping."
     try:
-        return build_verifier(repo_path, "backend_code_v2", task_id)
+        return build_verifier(repo_path, PROFILE.build_verify_label, task_id)
     except Exception as exc:
         logger.warning("[%s] Build verifier raised: %s", task_id, exc)
         return False, str(exc)
@@ -204,7 +204,7 @@ def run_review(
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> ReviewResult:
@@ -256,7 +256,7 @@ def run_microtask_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     cache: Optional[AgentReviewCache] = None,
@@ -314,7 +314,7 @@ def run_code_review_phase(
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> PhaseReviewResult:
@@ -362,7 +362,7 @@ def run_qa_testing_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
@@ -404,7 +404,7 @@ def run_security_testing_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
