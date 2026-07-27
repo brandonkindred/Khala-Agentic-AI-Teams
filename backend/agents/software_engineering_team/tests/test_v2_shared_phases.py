@@ -909,6 +909,47 @@ def test_fix_issues_one_at_a_time_impl_resolves_then_reports_unresolved():
     assert len(unresolved) == 1
 
 
+def test_fix_issues_one_at_a_time_impl_survives_parse_failure(caplog):
+    """A parser exception on one attempt is logged and the loop retries, not aborts."""
+    responses = iter(["raw-1", "raw-2"])
+
+    def _parse_single(_raw):
+        parsed = next(parse_results)
+        if parsed is _RAISE:
+            raise ValueError("malformed LLM output")
+        return parsed
+
+    _RAISE = object()
+    parse_results = iter(
+        [
+            _RAISE,  # attempt 1: parser raises
+            {"files": {"a.py": "fixed"}, "resolved": True, "summary": "s", "root_cause": "rc"},
+        ]
+    )
+
+    runner = LlmRunner(
+        agent_factory=lambda *, model=None: lambda _p: next(responses),
+        resolve_model=lambda _llm: None,
+    )
+    with caplog.at_level("WARNING"):
+        merged, fixes, unresolved = sh_ps._fix_issues_one_at_a_time_impl(
+            llm=object(),
+            actionable=[_issue()],
+            current_files={"a.py": "orig"},
+            lang_conv="PY",
+            task_id="t1",
+            single_issue_prompt="{source}{severity}{description}{file_path}{recommendation}{current_code}",
+            parse_single=_parse_single,
+            has_language_conventions=False,
+            runner=runner,
+        )
+    # The parse failure on attempt 1 doesn't abort the phase -- attempt 2 still runs and resolves.
+    assert merged["a.py"] == "fixed"
+    assert len(fixes) == 1 and fixes[0]["fix"] == "s"
+    assert not unresolved
+    assert any("parsing/validation failed" in r.message for r in caplog.records)
+
+
 # --- prompt byte-identity regression lock --------------------------------
 
 
