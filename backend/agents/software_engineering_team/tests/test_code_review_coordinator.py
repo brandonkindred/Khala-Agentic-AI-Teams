@@ -2407,8 +2407,19 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
 def test_no_stale_progress_reports_after_map_failure() -> None:
     """A worker still in flight when the map phase fails must never report
     progress afterwards — a stale 'reviewing' report would overwrite the
-    caller's recorded failure state."""
+    caller's recorded failure state.
+
+    ``parallel_map``'s fast-fail abort flag only *narrows* (its own docstring's
+    word), never eliminates, the window in which a not-yet-started task is
+    skipped instead of run — a task must already be past its own abort check
+    (i.e. actually "in flight") for cancellation to be a no-op. The fast-fail
+    branch below therefore waits on ``slow_started`` before raising, so the
+    slow chunk's worker is deterministically already blocked in ``release.wait``
+    (past that check) before the abort flag can ever be set, instead of
+    racing raw thread-scheduling timing to get there first.
+    """
     release = threading.Event()
+    slow_started = threading.Event()
     calls: list = []
 
     class _OneFailsOneBlocks(DummyLLMClient):
@@ -2418,7 +2429,9 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if "FAILME" in prompt:
+                assert slow_started.wait(timeout=10), "slow chunk must start first"
                 raise LLMRateLimitError("429")
+            slow_started.set()
             release.wait(timeout=10)
             result = super().complete_json(prompt, **kwargs)
             self.slow_finished.set()
