@@ -24,7 +24,7 @@ import contextvars
 import logging
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from typing import Callable, Collection, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -50,10 +50,10 @@ def _is_number_not_bool(value: object) -> bool:
 
 
 def _run_with_timeout(
-    futures: list,
-    index_of: dict,
-    start_times: "list[Optional[float]]",
-    finish_times: "list[Optional[float]]",
+    futures: list[Future],
+    index_of: dict[Future, int],
+    start_times: list[Optional[float]],
+    finish_times: list[Optional[float]],
     submitted_items: list,
     ordered: list,
     completion: list,
@@ -61,11 +61,34 @@ def _run_with_timeout(
     workers: int,
     on_timeout: Optional[Callable[[T], None]],
 ) -> bool:
-    """Drain *futures* in completion order, degrading any item that exceeds
-    *timeout* (measured from its own ``start_times``/``finish_times`` entries)
-    to ``None`` instead of aborting. Returns whether anything was degraded —
-    the caller uses this to decide the ``wait_for_stragglers`` behavior on
-    shutdown.
+    """Drain *futures* in completion order, degrading any item that reaches or
+    exceeds *timeout* (measured from its own ``start_times``/``finish_times``
+    entries) to ``None`` instead of aborting.
+
+    Preconditions:
+        - ``futures``, ``start_times``, ``finish_times``, ``submitted_items``,
+          and ``ordered`` all have the same length, and every future in
+          ``futures`` maps (via ``index_of``) to a valid index into all four.
+        - ``ordered`` is pre-sized (e.g. ``[None] * n``) — this function only
+          assigns ``ordered[i]``, never appends to it. ``completion`` starts
+          empty; this function only appends to it.
+        - ``start_times[i]`` is written by item ``i``'s own worker before
+          ``fn`` runs, and ``finish_times[i]`` right after, whenever
+          ``timeout`` is not ``None`` for the caller — both are ``None`` for
+          an item that hasn't started yet.
+        - ``timeout > 0`` and ``workers >= 1`` (both already validated by
+          the caller, ``parallel_map``).
+
+    Postconditions:
+        - Every index reachable through ``index_of`` gets exactly one write
+          to ``ordered`` and exactly one append to ``completion`` — either
+          the future's real result, or ``None`` for a degraded item.
+        - Returns ``True`` iff at least one item was degraded; the caller
+          uses this to choose the ``wait_for_stragglers`` shutdown behavior.
+        - Mutates only ``ordered`` and ``completion`` from the caller's
+          state (plus reading, never writing, ``start_times``/
+          ``finish_times``/``submitted_items``) — the sets and counters used
+          internally to track stragglers are local to this call.
     """
     timed_out = False
 
@@ -88,7 +111,7 @@ def _run_with_timeout(
     # progress elsewhere in the pool (other queued items starting or
     # completing on a healthy worker) proves nothing about whether this one
     # ever will, so it must never be credited as this straggler recovering.
-    abandoned: set = set()
+    abandoned: set[Future] = set()
     # Set the first moment every worker slot is presumed occupied by an
     # abandoned straggler. A single instant of saturation proves nothing on
     # its own — the straggler may simply be a bit slow and about to return,
@@ -231,7 +254,7 @@ def parallel_map(
             from when that item's ``fn`` call actually **starts running**
             in its worker thread (not from submission — so an item still
             queued behind a busy worker isn't charged for its wait). When a
-            task exceeds its own budget, only that task is degraded to a
+            task reaches or exceeds its own budget, only that task is degraded to a
             ``None`` result (subject to ``skip_none`` like any other
             ``None``); the rest of the batch continues unaffected. Default
             ``None`` disables timeouts entirely — the loop is byte-for-byte
@@ -249,8 +272,9 @@ def parallel_map(
         whose ``fn`` returned ``None``. The annotation is ``Optional[R]`` rather
         than ``R`` because it must stay sound for the ``skip_none=False`` path;
         callers on that path should treat elements as possibly ``None``. Length
-        equals ``len(items)`` unless ``skip_none`` dropped some (or a worker
-        raised, in which case nothing is returned).
+        equals ``len(items)`` unless ``skip_none`` dropped some — including any
+        item degraded to ``None`` by a ``timeout`` — or a worker raised (in
+        which case nothing is returned).
 
     Preconditions (enforced — invalid input raises at the boundary, and the
     checks survive ``python -O`` which strips ``assert``):
@@ -287,7 +311,7 @@ def parallel_map(
           propagates.
         - On success with ``preserve_order`` True, ``result[i]`` corresponds to
           ``items[i]`` (before any ``skip_none`` filtering).
-        - When ``timeout`` is set, a task that exceeds it is **degraded, not
+        - When ``timeout`` is set, a task that reaches or exceeds it is **degraded, not
           aborted**: its result becomes ``None`` (``on_timeout`` is invoked
           with the original item first, if provided), the rest of the batch
           keeps running unaffected, and this does *not* trip the fast-fail

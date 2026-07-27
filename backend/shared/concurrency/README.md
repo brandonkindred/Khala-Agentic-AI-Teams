@@ -105,7 +105,7 @@ Parameters cover the axes the original copies differed on:
 - `timeout` / `on_timeout` — optional per-item wall-clock budget in seconds,
   measured from when that item's `fn` actually starts running (not from
   submission, so queued-behind-a-busy-worker time is never charged). A task
-  that exceeds it is **degraded, not aborted**: its result becomes `None`
+  that reaches or exceeds it is **degraded, not aborted**: its result becomes `None`
   (`on_timeout(item)` is invoked first, if given) while the rest of the batch
   keeps running unaffected. Default `None` disables timeouts entirely and
   runs the original code path unchanged.
