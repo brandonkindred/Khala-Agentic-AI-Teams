@@ -201,6 +201,27 @@ def test_read_file_ambiguous_suffix() -> None:
     assert "a/main.py" in msg and "b/main.py" in msg
 
 
+def test_read_file_or_none_matches_read_file_on_success() -> None:
+    """``read_file_or_none`` returns the same content as ``read_file`` on every hit path."""
+    idx = CodebaseIndex(files={"app/services/main.py": "Error: this is real code, not a failure"})
+    # A real file whose content happens to start with "Error:" is still returned in full —
+    # unlike sniffing read_file's return value, read_file_or_none never mistakes it for a
+    # failure sentinel.
+    assert (
+        idx.read_file_or_none("app/services/main.py") == "Error: this is real code, not a failure"
+    )
+    assert idx.read_file_or_none("main.py") == "Error: this is real code, not a failure"
+
+
+def test_read_file_or_none_returns_none_on_failure() -> None:
+    """``read_file_or_none`` returns None (not an error string) for blank, missing, and ambiguous paths."""
+    idx = CodebaseIndex(files={"a/main.py": "A", "b/main.py": "B"})
+    assert idx.read_file_or_none("  ") is None
+    assert idx.read_file_or_none("does/not/exist.py") is None
+    assert idx.read_file_or_none("main.py") is None  # ambiguous suffix
+    assert idx.read_file_or_none(CodebaseIndex.EXISTING_CODEBASE_PATH) is None  # no excerpt
+
+
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
     """``list_files`` appends the existing-codebase pseudo-path only when an excerpt is present."""
     assert CodebaseIndex(files={"a.py": "x"}).list_files() == ["a.py"]
