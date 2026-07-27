@@ -184,6 +184,37 @@ def test_writer_llm_self_review_numeric_citation_before_array_applies_fixes(monk
     assert state["i"] == 2
 
 
+def test_writer_llm_self_review_unrelated_dict_array_before_issues_applies_fixes(
+    monkeypatch,
+) -> None:
+    """An unrelated dict array (e.g. a `references` list) must not be mistaken for issues.
+
+    Regression test: a non-empty list of dicts that doesn't match the issues
+    schema (no ``issue`` key) is syntactically valid JSON, but the scanner must
+    keep looking for the real issues array instead of short-circuiting on it.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        'Example metadata:\n```json\n{"references": [{"title": "source"}]}\n```\n'
+        "Actual issues:\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
 def test_writer_llm_self_review_non_list_json_returns_draft(monkeypatch) -> None:
     """A JSON object (not an array) is treated as no issues."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent

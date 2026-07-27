@@ -157,20 +157,33 @@ def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
     return ""
 
 
-def _extract_json_array_from_text(text: str) -> Optional[list]:
+def _extract_json_array_from_text(
+    text: str, *, required_keys: tuple[str, ...] = ()
+) -> Optional[list]:
     """Parse a JSON array of objects from ``text``, including when prefixed by prose.
 
     Preconditions:
         - ``text`` is a string (may be empty).
+        - ``required_keys``, if given, are the keys used to recognize the real
+          payload (e.g. ``("issue",)`` for self-review issues, ``("question",)``
+          for uncertainty questions): at least one element of a candidate array
+          must contain all of them. This rejects an unrelated dict array (e.g. a
+          ``references`` list salvaged from surrounding prose) that would
+          otherwise pass a bare "is it a list of dicts" check, while still
+          tolerating a real payload where some items are individually malformed
+          (the caller's own per-item validation skips those).
     Postconditions:
-        - Returns the first decoded JSON array whose elements are all dicts, found
+        - Returns the first decoded JSON array whose elements are all dicts and
+          at least one of which contains every key in ``required_keys``, found
           by scanning for ``[`` and using ``json.JSONDecoder.raw_decode``.
         - A syntactically valid but schema-mismatched array (e.g. a numeric
-          citation like ``[1]``, or ``[]`` from an empty Markdown link
-          ``[label]()``) does not short-circuit the scan; scanning continues past
-          it toward the real payload.
-        - If no array of dicts is found, returns the first genuinely empty ``[]``
-          match (a real "no items" response), or ``None`` if no array matched at all.
+          citation like ``[1]``, ``[]`` from an empty Markdown link
+          ``[label]()``, or a dict array none of whose elements have
+          ``required_keys``) does not short-circuit the scan; scanning
+          continues past it toward the real payload.
+        - If no matching array of dicts is found, returns the first genuinely
+          empty ``[]`` match (a real "no items" response), or ``None`` if no
+          array matched at all.
     """
     decoder = json.JSONDecoder()
     search_from = 0
@@ -185,7 +198,11 @@ def _extract_json_array_from_text(text: str) -> Optional[list]:
             search_from = i + 1
             continue
         if isinstance(value, list):
-            if value and all(isinstance(el, dict) for el in value):
+            if (
+                value
+                and all(isinstance(el, dict) for el in value)
+                and any(all(k in el for k in required_keys) for el in value)
+            ):
                 return value
             if not value and empty_fallback is None:
                 empty_fallback = value
@@ -609,7 +626,7 @@ class BlogWriterAgent(_BlogAgentBase):
             try:
                 parsed = extract_json_from_response(cleaned)
             except LLMJsonParseError:
-                issues = _extract_json_array_from_text(cleaned)
+                issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
             else:
                 if isinstance(parsed, list):
                     issues = parsed
@@ -617,7 +634,7 @@ class BlogWriterAgent(_BlogAgentBase):
                     logger.info("LLM self-review: no issues found (response was not a JSON array)")
                     return draft
                 else:
-                    issues = _extract_json_array_from_text(cleaned)
+                    issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
             if issues is None:
                 logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft
@@ -1459,7 +1476,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
             )
             cleaned = raw.strip()
-            items = _extract_json_array_from_text(cleaned)
+            items = _extract_json_array_from_text(cleaned, required_keys=("question",))
             if not items:
                 return []
             questions = []

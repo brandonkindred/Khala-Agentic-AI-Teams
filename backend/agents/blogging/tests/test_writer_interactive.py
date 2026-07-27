@@ -93,6 +93,34 @@ def test_identify_uncertainty_questions_markdown_link_before_array(monkeypatch) 
     assert out[0].question_id == "q1"
 
 
+def test_identify_uncertainty_questions_unrelated_dict_array_before_questions(
+    monkeypatch,
+) -> None:
+    """An unrelated dict array (no `question` key) must not be mistaken for questions.
+
+    Regression test: a non-empty list of dicts that doesn't match the
+    uncertainty-question schema is syntactically valid JSON, but the scanner
+    must keep looking for the real questions array instead of short-circuiting.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+    response = 'Example metadata: {"references": [{"title": "source"}]}\n\n' + json.dumps(
+        [
+            {
+                "question_id": "q1",
+                "question": "What audience?",
+                "context": "ctx",
+                "section": "Intro",
+            }
+        ]
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, system_prompt="": response)
+    out = a.identify_uncertainty_questions("draft", "plan")
+    assert len(out) == 1
+    assert out[0].question_id == "q1"
+
+
 def test_identify_uncertainty_questions_malformed_items_skipped(monkeypatch) -> None:
     """Items missing `question` are skipped; missing `question_id` gets an auto id."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
