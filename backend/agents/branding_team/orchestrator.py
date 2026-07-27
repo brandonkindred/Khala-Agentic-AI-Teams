@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
 
 from branding_team.shared.coro_runner import run_coroutine
+from branding_team.shared.json_recovery import recover_json_object
 
 from .agents import BrandComplianceAgent
 from .graphs.phase1_strategic_core import build_phase1_graph
@@ -185,9 +186,17 @@ class BrandingTeamOrchestrator:
         result = run_coroutine(graph.invoke_async(task))
 
         # ---- Extract phase outputs from graph node results (table-driven) ----
-        strategic_core, narrative, visual_identity, channel_activation, governance = [
-            self._extract_phase_output(result, node_id, model_cls) if stop_idx >= min_idx else None
+        extractions = [
+            self._extract_phase_output(result, node_id, model_cls)
+            if stop_idx >= min_idx
+            else (None, False)
             for node_id, model_cls, min_idx in _PHASE_EXTRACTION
+        ]
+        strategic_core, narrative, visual_identity, channel_activation, governance = (
+            output for output, _ in extractions
+        )
+        degraded_phases = [
+            phase for phase, (_, degraded) in zip(PHASE_ORDER, extractions) if degraded
         ]
 
         # ---- Run compliance checks (outside the graph) ----
@@ -213,6 +222,7 @@ class BrandingTeamOrchestrator:
             competitive_snapshot=competitive_snapshot,
             design_asset_result=design_asset_result,
             stop_idx=stop_idx,
+            degraded_phases=degraded_phases,
         )
 
         if store and brand_id and resolved_client_id:
@@ -262,7 +272,8 @@ class BrandingTeamOrchestrator:
 
         task = self._phase_task(mission, phase, prior_outputs or {})
         result = run_coroutine(graph.invoke_async(task))
-        return self._extract_phase_output(result, node_id, model_cls)
+        output, _degraded = self._extract_phase_output(result, node_id, model_cls)
+        return output
 
     @staticmethod
     def _phase_task(
@@ -311,6 +322,7 @@ class BrandingTeamOrchestrator:
         competitive_snapshot: Any,
         design_asset_result: Any,
         stop_idx: int,
+        degraded_phases: Optional[List[BrandPhase]] = None,
     ) -> TeamOutput:
         """Assemble the final ``TeamOutput`` from computed phase artifacts.
 
@@ -322,9 +334,13 @@ class BrandingTeamOrchestrator:
             - The five phase outputs are their respective models or ``None`` (a
               phase not reached for this ``stop_idx``); ``checks`` is the compliance
               result list; ``competitive_snapshot``/``design_asset_result`` are the
-              integration results (or ``None`` when disabled).
+              integration results (or ``None`` when disabled); ``degraded_phases``
+              lists the phases whose output could not be parsed and was
+              default-constructed by ``_extract_phase_output`` (or ``None``/empty
+              when every reached phase parsed successfully).
         Postconditions:
-            - Returns a fully-populated ``TeamOutput``; performs no I/O and no
+            - Returns a fully-populated ``TeamOutput`` whose ``degraded_phases``
+              reflects the caller-supplied list; performs no I/O and no
               persistence (the caller owns ``store.append_brand_version``).
         """
         current_phase = self._determine_current_phase(
@@ -341,6 +357,7 @@ class BrandingTeamOrchestrator:
             mission_summary=mission_summary,
             current_phase=current_phase,
             phase_gates=phase_gates,
+            degraded_phases=degraded_phases or [],
             strategic_core=strategic_core,
             narrative_messaging=narrative,
             visual_identity=visual_identity,
@@ -475,12 +492,28 @@ class BrandingTeamOrchestrator:
         )
 
     @staticmethod
-    def _extract_phase_output(result, node_id: str, model_class):
+    def _extract_phase_output(result, node_id: str, model_class) -> "tuple[BaseModel, bool]":
         """Best-effort extraction of a phase output from graph results.
 
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
         objects.  We attempt to parse the agent's last text output as the
-        structured model.  If parsing fails, return a default instance.
+        structured model.
+
+        Preconditions:
+            - ``result`` is the Strands graph invocation result (or a test
+              double shaped like one); ``node_id`` identifies a node in
+              ``result.result``; ``model_class`` is the expected output model
+              for that node.
+        Postconditions:
+            - Returns ``(output, degraded)``. ``output`` is a parsed
+              ``model_class`` instance on success, or a default-constructed
+              ``model_class()`` when the node result is missing/malformed or
+              its text can't be parsed. ``degraded`` is ``True`` iff a default
+              was returned, and every such fall-through is logged (with
+              traceback for unexpected errors) rather than swallowed silently.
+              Callers that assemble a ``TeamOutput`` must fold ``degraded``
+              phases into ``TeamOutput.degraded_phases`` themselves — this
+              method does not know which ``BrandPhase`` it was called for.
         """
         try:
             if hasattr(result, "result") and hasattr(result.result, "get"):
@@ -493,7 +526,7 @@ class BrandingTeamOrchestrator:
                             text = _collect_message_text(last.message)
                             parsed = _parse_model_from_text(text, model_class)
                             if parsed is not None:
-                                return parsed
+                                return parsed, False
         except Exception:
             # Malformed JSON / schema mismatch already returns None from
             # _parse_model_from_text; reaching here means an unexpected error
@@ -503,7 +536,12 @@ class BrandingTeamOrchestrator:
                 node_id,
                 exc_info=True,
             )
-        return model_class()
+            return model_class(), True
+        logger.warning(
+            "Could not extract phase output for node %s from agent text; using default",
+            node_id,
+        )
+        return model_class(), True
 
 
 def _collect_message_text(message: dict) -> str:
@@ -529,27 +567,31 @@ def _collect_message_text(message: dict) -> str:
 
 
 def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
-    """Best-effort parse of ``text`` into ``model_class``; None on failure.
+    """Best-effort parse of ``text`` into ``model_class``; ``None`` on failure.
 
-    Tries the whole string first, then falls back to the outermost
-    ``{ ... }`` slice for replies that wrap JSON in prose.
+    Delegates JSON recovery (whole-string parse, then fenced/prose-wrapped
+    brace-slice fallback) to the shared ``recover_json_object`` helper rather
+    than re-deriving that logic here.
+
+    Preconditions:
+        ``model_class`` is a ``pydantic.BaseModel`` subclass.
+    Postconditions:
+        Returns a validated ``model_class`` instance when JSON can be
+        recovered from ``text`` and validates against the schema; returns
+        ``None`` for empty text, unrecoverable text, or a schema mismatch.
+        Never raises.
     """
     if not text:
         return None
-    # ValidationError covers both malformed JSON and schema mismatch from
-    # model_validate_json; anything else is a genuine bug and should surface.
+    data = recover_json_object(text)
+    if data is None:
+        return None
+    # ValidationError covers a schema mismatch between the recovered JSON and
+    # model_class; anything else is a genuine bug and should surface.
     try:
-        return model_class.model_validate_json(text)
+        return model_class.model_validate(data)
     except ValidationError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return model_class.model_validate_json(text[start:end])
-        except ValidationError:
-            return None
-    return None
+        return None
 
 
 def _bullets(title: str, items: Iterable[Any], fmt: Callable[[Any], str] = lambda x: x) -> str:
