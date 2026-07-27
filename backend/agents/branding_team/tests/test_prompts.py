@@ -9,6 +9,10 @@ and that doing so left the rendered prompt unchanged.
 
 from __future__ import annotations
 
+import importlib
+
+import pytest
+
 from branding_team.assistant.prompts import SYSTEM_PROMPT
 from branding_team.graphs.shared import PHASE_ORDER, PHASE_TITLES
 
@@ -159,3 +163,35 @@ def test_system_prompt_matches_pre_refactor_content() -> None:
 def test_system_prompt_headers_derived_from_phase_titles() -> None:
     for i, phase in enumerate(PHASE_ORDER, start=1):
         assert f"Phase {i} — {PHASE_TITLES[phase]}" in SYSTEM_PROMPT
+
+
+def test_system_prompt_sections_follow_reordered_phase_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Swapping two phases in PHASE_ORDER must reorder whole sections, not just header numbers."""
+    import branding_team.assistant.prompts as prompts_mod
+    import branding_team.graphs.shared as shared_mod
+
+    original_order = list(shared_mod.PHASE_ORDER)
+    reordered_phases = list(original_order)
+    reordered_phases[1], reordered_phases[2] = (
+        reordered_phases[2],
+        reordered_phases[1],
+    )  # swap Phase 2 <-> Phase 3
+    monkeypatch.setattr(shared_mod, "PHASE_ORDER", reordered_phases)
+    try:
+        importlib.reload(prompts_mod)
+        reordered = prompts_mod.SYSTEM_PROMPT
+        idx2 = reordered.index(
+            '**Phase 2 — Visual & Expressive Identity ("How we look and feel")**'
+        )
+        idx3 = reordered.index('**Phase 3 — Narrative & Messaging ("What we say and to whom")**')
+        assert idx2 < idx3
+        # Phase 2's body must now be Visual Identity's content, not Narrative Messaging's.
+        assert "Color palette selection" in reordered[idx2:idx3]
+        assert "Brand personality" in reordered[idx3:]
+        # The gate condition/dependency references must track the new positions.
+        assert "before moving to Phase 3" in reordered[idx2:idx3]
+    finally:
+        monkeypatch.setattr(shared_mod, "PHASE_ORDER", original_order)
+        importlib.reload(prompts_mod)
