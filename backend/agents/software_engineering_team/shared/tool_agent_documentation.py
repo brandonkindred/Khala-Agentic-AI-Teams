@@ -15,6 +15,15 @@ review family, the LLM is invoked through
 which resolves ``Agent`` from the *concrete subclass module* — so tests can still
 ``monkeypatch.setattr(<agent_module>, "Agent", ...)`` and the concrete modules keep
 a top-level ``from strands import Agent``.
+
+Unlike the review-lens tool agents (security, testing/QA, accessibility,
+performance, UX — which only report findings; see
+:class:`~software_engineering_team.shared.tool_agent_base.SingleIssueProblemSolveMixin`),
+this class defines its own independent ``problem_solve`` below rather than
+opting into that mixin. Documentation's fixes operate on the same class of
+artifact (prose/docs) it authors itself in other phases, so it isn't a
+reviewer second-guessing another agent's code — it's the same agent
+maintaining its own output.
 """
 
 from __future__ import annotations

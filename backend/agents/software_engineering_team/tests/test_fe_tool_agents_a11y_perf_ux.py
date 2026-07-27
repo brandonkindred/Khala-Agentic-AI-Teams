@@ -176,51 +176,10 @@ class TestAccessibility:
         out = a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
         assert out.issues == []
 
-    def test_problem_solve_no_model(self):
+    def test_no_problem_solve_capability(self):
+        """Accessibility is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
-        assert "skipped" in a.problem_solve(_fe_phase_input()).summary
-
-    def test_problem_solve_no_a11y_issues(self):
-        a, _ = self._agent()
-        a._model = object()
-        a._model_json = object()
-        out = a.problem_solve(
-            _fe_phase_input(review_issues=[_fe_review_issue(source="security")])
-        )
-        assert "No accessibility issues" in out.summary
-
-    def test_problem_solve_fixes(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        a._model_json = object()
-        _patch(
-            monkeypatch,
-            mod,
-            response="## FILE a.tsx ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n",
-        )
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"a.tsx": "x"},
-                review_issues=[
-                    _fe_review_issue(source="accessibility", file_path="a.tsx"),
-                    _fe_review_issue(source="tool_accessibility", file_path="b.tsx"),
-                ],
-            )
-        )
-        assert "2 of 2" in out.summary
-
-    def test_problem_solve_llm_exception(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        a._model_json = object()
-        _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"a.tsx": "x"},
-                review_issues=[_fe_review_issue(source="accessibility", file_path="a.tsx")],
-            )
-        )
-        assert "0 of 1" in out.summary
+        assert not hasattr(a, "problem_solve")
 
 
 # ---------------------------------------------------------------------------
@@ -303,35 +262,10 @@ class TestPerformance:
         _patch(monkeypatch, mod, "not json")
         assert a.review(_fe_phase_input(current_files={"a.ts": "x"})).issues == []
 
-    def test_problem_solve_no_model(self):
+    def test_no_problem_solve_capability(self):
+        """Performance is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
-        assert "skipped" in a.problem_solve(_fe_phase_input()).summary
-
-    def test_problem_solve_no_perf_issues(self):
-        a, _ = self._agent()
-        a._model = object()
-        a._model_json = object()
-        out = a.problem_solve(
-            _fe_phase_input(review_issues=[_fe_review_issue(source="security")])
-        )
-        assert "No performance issues" in out.summary
-
-    def test_problem_solve_fixes(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        a._model_json = object()
-        _patch(
-            monkeypatch,
-            mod,
-            response="## FILE a.ts ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n",
-        )
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"a.ts": "x"},
-                review_issues=[_fe_review_issue(source="performance", file_path="a.ts")],
-            )
-        )
-        assert "1 of 1" in out.summary
+        assert not hasattr(a, "problem_solve")
 
 
 # ---------------------------------------------------------------------------
@@ -408,26 +342,16 @@ class TestUxUsability:
         out = a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
         assert len(out.issues) == 1
 
-    def test_problem_solve_no_model(self):
+    def test_no_problem_solve_capability(self):
+        """UX/Usability is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
-        out = a.problem_solve(_fe_phase_input())
-        assert "skipped" in out.summary
-
-    def test_problem_solve_no_ux_issues(self):
-        a, _ = self._agent()
-        a._model = object()
-        a._model_json = object()
-        out = a.problem_solve(
-            _fe_phase_input(review_issues=[_fe_review_issue(source="security")])
-        )
-        assert "No" in out.summary
+        assert not hasattr(a, "problem_solve")
 
 
 # ---------------------------------------------------------------------------
-# Dual-model routing: review/plan must use the JSON-mode model;
-# problem_solve must use the text-mode model. The reviewer flagged a silent
-# zero-issues failure mode when review ran in text mode and the LLM returned
-# prose — JSON mode + retained text mode for the marker-template path closes it.
+# Dual-model routing: review/plan must use the JSON-mode model. The reviewer
+# flagged a silent zero-issues failure mode when review ran in text mode and
+# the LLM returned prose — JSON mode closes it.
 # ---------------------------------------------------------------------------
 
 
@@ -450,10 +374,6 @@ def _patch_recording(monkeypatch, mod, response):
 
     monkeypatch.setattr(mod, "Agent", fake_agent)
     return calls
-
-
-def _problem_solve_marker_payload() -> str:
-    return "## FILE a.tsx ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n"
 
 
 def test_accessibility_review_uses_json_mode_model(monkeypatch) -> None:
@@ -480,32 +400,6 @@ def test_accessibility_review_uses_json_mode_model(monkeypatch) -> None:
     )
 
 
-def test_accessibility_problem_solve_uses_text_mode_model(monkeypatch) -> None:
-    """The problem_solve path consumes a ``---FILES---`` marker template,
-    so it must keep using the text-mode ``_model`` — JSON mode would
-    force a JSON object on the wire and clobber the marker output."""
-    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility import (
-        agent as mod,
-    )
-
-    a = mod.AccessibilityToolAgent.__new__(mod.AccessibilityToolAgent)
-    text_sentinel = object()
-    json_sentinel = object()
-    a._model = text_sentinel
-    a._model_json = json_sentinel
-    a.llm = None
-    calls = _patch_recording(monkeypatch, mod, _problem_solve_marker_payload())
-
-    a.problem_solve(
-        _fe_phase_input(
-            current_files={"a.tsx": "x"},
-            review_issues=[_fe_review_issue(source="accessibility", file_path="a.tsx")],
-        )
-    )
-
-    assert calls and all(c is text_sentinel for c in calls)
-
-
 def test_performance_review_uses_json_mode_model(monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
         agent as mod,
@@ -522,29 +416,6 @@ def test_performance_review_uses_json_mode_model(monkeypatch) -> None:
     a.review(_fe_phase_input(current_files={"a.ts": "x"}))
 
     assert calls and all(c is json_sentinel for c in calls)
-
-
-def test_performance_problem_solve_uses_text_mode_model(monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.performance import (
-        agent as mod,
-    )
-
-    a = mod.PerformanceToolAgent.__new__(mod.PerformanceToolAgent)
-    text_sentinel = object()
-    json_sentinel = object()
-    a._model = text_sentinel
-    a._model_json = json_sentinel
-    a.llm = None
-    calls = _patch_recording(monkeypatch, mod, _problem_solve_marker_payload())
-
-    a.problem_solve(
-        _fe_phase_input(
-            current_files={"a.ts": "x"},
-            review_issues=[_fe_review_issue(source="performance", file_path="a.ts")],
-        )
-    )
-
-    assert calls and all(c is text_sentinel for c in calls)
 
 
 def test_ux_usability_plan_and_review_use_json_mode_model(monkeypatch) -> None:
@@ -567,29 +438,6 @@ def test_ux_usability_plan_and_review_use_json_mode_model(monkeypatch) -> None:
     calls = _patch_recording(monkeypatch, mod, json.dumps({"issues": [], "summary": "ok"}))
     a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
     assert calls and all(c is json_sentinel for c in calls), "review() must use _model_json"
-
-
-def test_ux_usability_problem_solve_uses_text_mode_model(monkeypatch) -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability import (
-        agent as mod,
-    )
-
-    a = mod.UxUsabilityToolAgent.__new__(mod.UxUsabilityToolAgent)
-    text_sentinel = object()
-    json_sentinel = object()
-    a._model = text_sentinel
-    a._model_json = json_sentinel
-    a.llm = None
-    calls = _patch_recording(monkeypatch, mod, _problem_solve_marker_payload())
-
-    a.problem_solve(
-        _fe_phase_input(
-            current_files={"a.tsx": "x"},
-            review_issues=[_fe_review_issue(source="ux", file_path="a.tsx")],
-        )
-    )
-
-    assert calls and all(c is text_sentinel for c in calls)
 
 
 def test_a11y_perf_ux_constructor_resolves_both_models_with_distinct_modes(monkeypatch) -> None:

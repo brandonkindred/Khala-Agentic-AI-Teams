@@ -44,8 +44,9 @@ logger = logging.getLogger(__name__)
 
 class QAExpertAgent:
     """
-    QA expert that reviews code for bugs, fixes them, runs live testing,
-    and ensures adequate integration tests.
+    QA expert that reviews code for bugs, runs live testing, and ensures
+    adequate integration tests. Reports bugs for the coding agent to fix —
+    never patches them itself (see ``QAOutput.bugs_found``).
 
     Approval semantics (note for consumers of ``QAOutput.approved``): the agent
     re-derives ``approved`` rather than trusting the LLM's raw flag, and the rule
@@ -74,7 +75,7 @@ class QAExpertAgent:
         }
 
     def run(self, input_data: QAInput) -> QAOutput:
-        """Review code, fix bugs, and produce integration tests."""
+        """Review code for bugs and produce integration tests. Reports bugs; does not fix them."""
         mode = self._select_mode(input_data)
         logger.info(
             "QA: reviewing %s chars of code, mode=%s",

@@ -400,7 +400,7 @@ def test_run_problem_solving_with_tool_agents(monkeypatch):
         task=_task(),
         review_result=_review_result([_issue()]),
         current_files={"a.py": "old"},
-        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+        tool_agents={ToolAgentKind.DOCUMENTATION: tool_agent},
     )
     assert out.files["b.py"] == "tool_fix = True"
     assert out.files["a.py"] == "fixed"
@@ -440,7 +440,7 @@ def test_run_problem_solving_tool_agent_partial_rejection(monkeypatch):
         task=_task(),
         review_result=_review_result([_issue()]),
         current_files={"a.py": "old", "c.py": "prior c content"},
-        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+        tool_agents={ToolAgentKind.DOCUMENTATION: tool_agent},
     )
     assert out.files["b.py"] == "valid = True"
     # c.py's broken rewrite was discarded -- prior content kept.
@@ -467,7 +467,7 @@ def test_run_problem_solving_tool_agent_raises(monkeypatch):
         task=_task(),
         review_result=_review_result([_issue()]),
         current_files={"a.py": "old"},
-        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+        tool_agents={ToolAgentKind.DOCUMENTATION: tool_agent},
     )
     assert out is not None
 
@@ -546,6 +546,28 @@ def test_run_qa_fixes():
     assert out.resolved is True
 
 
+def test_run_qa_fixes_does_not_consult_tool_agent_problem_solve():
+    """QA is review-only: even when a QA tool agent is wired, fixing must come
+    entirely from the generic coding-agent fix loop, never from the reviewer's
+    own problem_solve."""
+    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_qa_fixes,
+    )
+
+    tool_agent = MagicMock()
+
+    out = run_qa_fixes(
+        llm=MagicMock(),
+        microtask=_microtask(),
+        phase_result=_phase_result([_issue(severity="info", source="qa")], phase_name="qa"),
+        current_files={"a.py": "code"},
+        tool_agents={ToolAgentKind.TESTING_QA: tool_agent},
+    )
+    tool_agent.problem_solve.assert_not_called()
+    assert out.resolved is True
+
+
 def test_run_security_fixes():
     from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
         run_security_fixes,
@@ -559,6 +581,30 @@ def test_run_security_fixes():
         ),
         current_files={"a.py": "code"},
     )
+    assert out.resolved is True
+
+
+def test_run_security_fixes_does_not_consult_tool_agent_problem_solve():
+    """Security is review-only: even when a Security tool agent is wired,
+    fixing must come entirely from the generic coding-agent fix loop, never
+    from the reviewer's own problem_solve."""
+    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
+        run_security_fixes,
+    )
+
+    tool_agent = MagicMock()
+
+    out = run_security_fixes(
+        llm=MagicMock(),
+        microtask=_microtask(),
+        phase_result=_phase_result(
+            [_issue(severity="info", source="security")], phase_name="security"
+        ),
+        current_files={"a.py": "code"},
+        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+    )
+    tool_agent.problem_solve.assert_not_called()
     assert out.resolved is True
 
 

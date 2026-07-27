@@ -244,7 +244,7 @@ def test_fe_run_problem_solving_with_tool_agents(monkeypatch):
         task=_task(),
         review_result=_review_result([_issue()]),
         current_files={"a.ts": "old"},
-        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+        tool_agents={ToolAgentKind.DOCUMENTATION: tool_agent},
     )
     assert "b.ts" in out.files
 

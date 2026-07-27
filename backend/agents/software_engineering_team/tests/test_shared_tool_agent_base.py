@@ -14,6 +14,7 @@ from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
     ReviewToolAgent,
+    SingleIssueProblemSolveMixin,
     lenient_json_object,
     relevant_code_for_issue,
 )
@@ -136,7 +137,11 @@ def _stub_single_issue_parser(raw):
     return {"files": {"x.ts": "fixed"}} if raw else {"files": {}}
 
 
-class _DemoAgent(BaseReviewToolAgent):
+# Mixes in SingleIssueProblemSolveMixin (opt-in self-fix) to exercise the
+# mixin's mechanics, mirroring how BuildSpecialistToolAgentBase (the one real
+# consumer of self-fix) is composed — review-lens agents (security, QA,
+# accessibility, performance, UX) do NOT mix this in; see the mixin's docstring.
+class _DemoAgent(SingleIssueProblemSolveMixin, BaseReviewToolAgent):
     name = "Demo"
     empty_label = "demo issues"
     issue_source = "demo"

@@ -2,8 +2,11 @@
 
 Both code-v2 stacks ship a "build specialist" tool agent that runs the project
 build in the review phase, emits one :class:`ReviewIssue` per parsed failure, and
-fixes them one at a time via the inherited ``problem_solve``. The two stacks
-differ only in:
+fixes them one at a time via ``problem_solve`` (opted into via
+:class:`~software_engineering_team.shared.tool_agent_base.SingleIssueProblemSolveMixin`
+— unlike the review-lens tool agents, a build failure isn't a subjective
+opinion about someone else's code, so this agent owns fixing what it finds).
+The two stacks differ only in:
 
 * the build runner — backend runs a Python syntax check plus ``pytest``;
   frontend runs the detected JS framework build, and
@@ -31,7 +34,10 @@ import sys
 from pathlib import Path
 from typing import List
 
-from software_engineering_team.shared.tool_agent_base import ReviewToolAgent
+from software_engineering_team.shared.tool_agent_base import (
+    ReviewToolAgent,
+    SingleIssueProblemSolveMixin,
+)
 from software_engineering_team.shared.v2_models import ReviewIssue
 
 logger = logging.getLogger(__name__)
@@ -183,7 +189,7 @@ def run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     return issues
 
 
-class BuildSpecialistToolAgentBase(ReviewToolAgent):
+class BuildSpecialistToolAgentBase(SingleIssueProblemSolveMixin, ReviewToolAgent):
     """Shared base for the per-stack build-specialist tool agents.
 
     ``review`` runs the configured :attr:`build_runner` over the resolved

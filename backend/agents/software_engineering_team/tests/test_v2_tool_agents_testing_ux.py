@@ -108,35 +108,10 @@ class TestFETestingQA:
         out = a.review(_fe_phase_input(current_files={"x.ts": "code"}))
         assert len(out.issues) == 1
 
-    def test_problem_solve_fixes_issues(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        a._model_json = object()
-        _patch(monkeypatch, mod, "## FILE x.ts ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n")
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"x.ts": "old"},
-                review_issues=[
-                    _fe_issue(source="qa", file_path="x.ts"),
-                    _fe_issue(source="testing_qa", file_path="y.ts"),
-                    _fe_issue(source="tool_testing_qa", file_path="z.ts"),
-                ],
-            )
-        )
-        assert "3 of 3" in out.summary
-
-    def test_problem_solve_llm_failure(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        a._model_json = object()
-        _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"x.ts": "old"},
-                review_issues=[_fe_issue(source="qa", file_path="x.ts")],
-            )
-        )
-        assert "0 of 1" in out.summary
+    def test_no_problem_solve_capability(self):
+        """QA is review-only: fixing its findings is the coding agent's job."""
+        a, _ = self._agent()
+        assert not hasattr(a, "problem_solve")
 
 
 # ---------------------------------------------------------------------------
@@ -217,35 +192,10 @@ class TestFEUxUsability:
         out = a.review(_fe_phase_input(current_files={"a.tsx": "code"}))
         assert len(out.issues) == 1
 
-    def test_problem_solve_fixes_issues(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        a._model_json = object()
-        _patch(monkeypatch, mod, "## FILE a.tsx ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n")
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"a.tsx": "x"},
-                review_issues=[
-                    _fe_issue(source="ux", file_path="a.tsx"),
-                    _fe_issue(source="ux_usability", file_path="b.tsx"),
-                    _fe_issue(source="tool_ux_usability", file_path="c.tsx"),
-                ],
-            )
-        )
-        assert "3 of 3" in out.summary
-
-    def test_problem_solve_llm_failure(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        a._model_json = object()
-        _patch(monkeypatch, mod, raise_exc=RuntimeError("err"))
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"a.tsx": "x"},
-                review_issues=[_fe_issue(source="ux", file_path="a.tsx")],
-            )
-        )
-        assert "0 of 1" in out.summary
+    def test_no_problem_solve_capability(self):
+        """UX/Usability is review-only: fixing its findings is the coding agent's job."""
+        a, _ = self._agent()
+        assert not hasattr(a, "problem_solve")
 
     def test_review_invalid_json(self, monkeypatch):
         a, mod = self._agent()
@@ -293,14 +243,17 @@ class TestTestingQACollapse:
             "name",
             "empty_label",
             "issue_source",
-            "problem_solve_sources",
             "max_relevant_code_chars",
             "review_parse_mode",
             "plan_summary",
         ):
             assert getattr(be, attr) == getattr(fe, attr)
         assert be.issue_source == "qa"
-        assert be.problem_solve_sources == ("qa", "testing_qa", "tool_testing_qa")
+
+    def test_neither_has_problem_solve(self):
+        """QA is review-only in both stacks: fixing is the coding agent's job."""
+        assert not hasattr(self._be_agent(), "problem_solve")
+        assert not hasattr(self._fe_agent(), "problem_solve")
 
     def test_per_team_plan_recommendations_differ(self):
         be_plan = self._be_agent().plan(_be_phase_input())

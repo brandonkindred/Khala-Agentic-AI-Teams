@@ -1,22 +1,29 @@
 """
-Shared base class for the code-v2 "review + single-issue fix" tool agents.
+Shared base class for the code-v2 "review" tool agents.
 
 Both ``frontend_code_v2_team`` and ``backend_code_v2_team`` ship a family of
 tool agents (security, testing/QA, accessibility, performance, UX, build
 specialist, …) that share the exact same shape:
 
 * ``run`` delegates to ``execute`` (a logging stub),
-* ``plan`` returns static recommendations,
+* ``plan`` returns static recommendations, and
 * ``review`` asks an LLM to find issues and parses them (text-template or
-  lenient JSON) into :class:`ReviewIssue` objects, and
-* ``problem_solve`` fixes its own issues one at a time, feeding each issue's
-  relevant code into a single-issue prompt and merging the returned files.
+  lenient JSON) into :class:`ReviewIssue` objects.
 
 Only a handful of values differ per agent: the labels used in summaries/logs,
 the issue ``source`` and accepted source aliases, the review prompt, the code
 truncation limits, whether review parses text or JSON, and the single-issue
 prompt. :class:`BaseReviewToolAgent` captures the behavior; subclasses set the
 differing values as class attributes.
+
+Reviewers only report findings — fixing is the responsibility of the agent
+that requested the review (or, when an orchestrator/team-lead requested it,
+whichever agent that lead delegates to). Accordingly ``BaseReviewToolAgent``
+itself has no fix capability. A separate opt-in, :class:`SingleIssueProblemSolveMixin`,
+carries the one-issue-at-a-time self-fix loop for the small number of tool
+agents that legitimately own fixing their own findings (currently only the
+build specialist, whose "fix" is mechanically re-running the build rather than
+a subjective opinion about someone else's code — see that mixin's docstring).
 
 Two behaviors are load-bearing and must be preserved by every subclass:
 
@@ -121,13 +128,86 @@ def lenient_json_object(
         return {}
 
 
+class SingleIssueProblemSolveMixin:
+    """Opt-in one-issue-at-a-time self-fix loop.
+
+    Reserved for tool agents whose owning phase treats their own findings as
+    their own responsibility to fix — currently only
+    :class:`~software_engineering_team.shared.tool_agent_build_specialist.BuildSpecialistToolAgentBase`,
+    whose "fix" is mechanically re-running the build/tests until they pass,
+    not a subjective opinion about another agent's code. Review-lens tool
+    agents (security, testing/QA, accessibility, performance, UX) must NOT mix
+    this in: per the fix-ownership principle, a reviewer reports issues; the
+    agent that requested the review (or its orchestrator/team-lead) is
+    responsible for delegating the fix, never the reviewer itself.
+    :class:`~software_engineering_team.shared.tool_agent_documentation.DocumentationToolAgentBase`
+    defines its own independent ``problem_solve`` and does not use this mixin.
+
+    Preconditions:
+        Must be combined with a class supplying ``self._model``,
+        ``self._logger``, ``self._run_agent``, ``self._problem_solving_kwargs``,
+        ``self.max_relevant_code_chars``, ``self.problem_solving_prompt``,
+        ``self._parse_single_issue``, ``self.default_severity``,
+        ``self.default_recommendation``, ``self.name``, ``self.empty_label`` —
+        i.e. exactly what :class:`BaseReviewToolAgent` supplies.
+    """
+
+    problem_solve_sources: Tuple[str, ...] = ()
+
+    def problem_solve(self, inp) -> ToolAgentPhaseOutput:
+        if not self._model:
+            return ToolAgentPhaseOutput(summary=f"{self.name} problem_solve skipped (no LLM).")
+        issues = [
+            i for i in inp.review_issues if (i.source or "").strip() in self.problem_solve_sources
+        ]
+        if not issues:
+            return ToolAgentPhaseOutput(summary=f"No {self.empty_label} to fix.")
+        extra = self._problem_solving_kwargs(inp)
+        merged = dict(inp.current_files)
+        fixed_count = 0
+        for issue in issues:
+            relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
+            try:
+                prompt = self.problem_solving_prompt.format(
+                    source=issue.source or self.issue_source,
+                    severity=issue.severity or self.default_severity,
+                    description=issue.description or "",
+                    file_path=issue.file_path or "N/A",
+                    recommendation=issue.recommendation or self.default_recommendation,
+                    current_code=relevant_code.replace("{", "{{").replace("}", "}}"),
+                    **extra,
+                )
+                raw = self._run_agent(self._model, prompt)
+                parsed = self._parse_single_issue(raw)
+                fixed_files = parsed.get("files") or {}
+                if fixed_files:
+                    merged.update(fixed_files)
+                    fixed_count += 1
+            except Exception as e:
+                self._logger.warning(
+                    "%s fix for issue %s failed: %s",
+                    self.name,
+                    (issue.description or "")[:50],
+                    e,
+                )
+                continue
+        return ToolAgentPhaseOutput(
+            files=merged,
+            summary=f"{self.name}: fixed {fixed_count} of {len(issues)} issue(s) (one at a time).",
+        )
+
+
 class BaseReviewToolAgent(LlmToolAgentBase):
-    """Template for the review + single-issue-fix tool agents.
+    """Template for the review tool agents.
 
     Inherits :class:`~software_engineering_team.shared.llm_tool_agent_base.LlmToolAgentBase`
     for model resolution, LLM invocation, and the ``Agent`` factory. When
     :attr:`resolve_models` / :attr:`use_run_strands_agent` are set (Review
     recipe), those behaviors come from the shared base.
+
+    Fixing is out of scope for this class — see :class:`SingleIssueProblemSolveMixin`
+    for the opt-in self-fix loop used by the small number of tool agents that
+    legitimately own fixing their own findings.
 
     Invariants: instance state is limited to ``_model`` (always),
     ``_model_json`` (when :attr:`uses_json_model`), and ``llm`` — so tests that
@@ -149,7 +229,6 @@ class BaseReviewToolAgent(LlmToolAgentBase):
 
     # --- Issue routing ----------------------------------------------------
     issue_source: str = ""  # source set on emitted ReviewIssue
-    problem_solve_sources: Tuple[str, ...] = ()
 
     # --- Shared review engine (opt-in) -----------------------------------
     # When True, ``review`` delegates to the shared code-review engine
@@ -400,53 +479,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             summary=f"{review_label}: {len(issues)} issue(s) found.",
         )
 
-    def problem_solve(self, inp) -> ToolAgentPhaseOutput:
-        if not self._model:
-            return ToolAgentPhaseOutput(summary=f"{self.name} problem_solve skipped (no LLM).")
-        issues = [
-            i for i in inp.review_issues if (i.source or "").strip() in self.problem_solve_sources
-        ]
-        if not issues:
-            return ToolAgentPhaseOutput(summary=f"No {self.empty_label} to fix.")
-        extra = self._problem_solving_kwargs(inp)
-        merged = dict(inp.current_files)
-        fixed_count = 0
-        for issue in issues:
-            relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
-            try:
-                prompt = self.problem_solving_prompt.format(
-                    source=issue.source or self.issue_source,
-                    severity=issue.severity or self.default_severity,
-                    description=issue.description or "",
-                    file_path=issue.file_path or "N/A",
-                    recommendation=issue.recommendation or self.default_recommendation,
-                    current_code=relevant_code.replace("{", "{{").replace("}", "}}"),
-                    **extra,
-                )
-                raw = self._run_agent(self._model, prompt)
-                parsed = self._parse_single_issue(raw)
-                fixed_files = parsed.get("files") or {}
-                if fixed_files:
-                    merged.update(fixed_files)
-                    fixed_count += 1
-            except Exception as e:
-                self._logger.warning(
-                    "%s fix for issue %s failed: %s",
-                    self.name,
-                    (issue.description or "")[:50],
-                    e,
-                )
-                continue
-        return ToolAgentPhaseOutput(
-            files=merged,
-            summary=f"{self.name}: fixed {fixed_count} of {len(issues)} issue(s) (one at a time).",
-        )
-
     def deliver(self, inp) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(summary=f"{self.name} deliver.")
 
 
-# Preferred name for the generalized review + single-issue-fix base. The historical
+# Preferred name for the generalized review base. The historical
 # ``BaseReviewToolAgent`` name is retained above and aliased here so both stacks
 # (and their tests) can import either.
 ReviewToolAgent = BaseReviewToolAgent
