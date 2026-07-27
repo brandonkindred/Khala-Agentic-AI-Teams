@@ -263,6 +263,27 @@ def _not_reviewed_range_label(issue: CodeReviewIssue) -> str:
     return path
 
 
+def _tail_passes_run_sequentially(llm: LLMClient) -> bool:
+    """True when the coordinator's tail passes must run one at a time.
+
+    Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response index,
+    so they are not safe under concurrent fan-out. Mirrors
+    ``shared.v2_review._review_steps_run_sequentially``.
+
+    Production callers may pass a Strands ``LLMClientModel`` wrapper, which survives
+    clone paths. A bare ``isinstance(llm, DummyLLMClient)`` misses a dummy reached
+    through that wrapper, so unwrap via ``.client`` before checking.
+
+    Preconditions: ``llm`` is the LLM client that will be handed to the tail-pass thunks.
+    Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
+    """
+    from llm_service.clients.dummy import DummyLLMClient
+
+    if isinstance(llm, DummyLLMClient):
+        return True
+    return isinstance(getattr(llm, "client", None), DummyLLMClient)
+
+
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
     """Dedupe issues by (file_path, line, description).
 
