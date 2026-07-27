@@ -228,23 +228,22 @@ def run_batch_coding_fixes_impl(
 
     unresolved_issues: List[Any] = []
     unresolved_indices: set = set()
-    if addressed_count < len(actionable):
-        addressed_indices = set()
-        for item in issues_addressed:
-            if not isinstance(item, dict):
-                # Defensive: the LLM may emit a non-dict entry (e.g. a bare
-                # string) which has no ``.get`` — skip it rather than crash.
-                continue
-            try:
-                idx = int(item.get("issue_index", 0)) - 1
-                if 0 <= idx < len(actionable):
-                    addressed_indices.add(idx)
-            except (ValueError, TypeError):
-                pass
-        for idx, issue in enumerate(actionable):
-            if idx not in addressed_indices:
-                unresolved_issues.append(issue)
-                unresolved_indices.add(idx)
+    addressed_indices: set = set()
+    for item in issues_addressed:
+        if not isinstance(item, dict):
+            # Defensive: the LLM may emit a non-dict entry (e.g. a bare
+            # string) which has no ``.get`` — skip it rather than crash.
+            continue
+        try:
+            idx = int(item.get("issue_index", 0)) - 1
+            if 0 <= idx < len(actionable):
+                addressed_indices.add(idx)
+        except (ValueError, TypeError):
+            pass
+    for idx, issue in enumerate(actionable):
+        if idx not in addressed_indices:
+            unresolved_issues.append(issue)
+            unresolved_indices.add(idx)
 
     # A rejected file's issue must stay unresolved even if the LLM claimed to
     # have addressed it -- the merge kept the prior (unfixed) version. Tracked

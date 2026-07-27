@@ -884,6 +884,39 @@ def test_run_batch_coding_fixes_impl_tracks_unresolved_by_index_not_identity():
     assert not any(u is issue3 for u in result.unresolved_issues)
 
 
+def test_run_batch_coding_fixes_impl_detects_duplicate_addressed_indices():
+    """A same-length ``issues_addressed`` with a duplicate index must not report resolved.
+
+    ``actionable`` has 2 issues; ``issues_addressed`` also has 2 entries but both point
+    at issue_index 1, so issue 2 was never actually addressed. Length alone must not be
+    used as a shortcut to skip validation -- ``resolved`` must derive from the real set
+    of valid addressed indices.
+    """
+    parsed = {
+        "files": {"a.py": "fixed"},
+        "issues_addressed": [{"issue_index": 1}, {"issue_index": 1}],
+        "summary": "did it",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue(), _issue(description="bug2")],
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("ignored — parse stub returns the parsed dict"),
+    )
+    assert result.resolved is False
+    assert len(result.unresolved_issues) == 1
+
+
 def test_fix_issues_one_at_a_time_impl_resolves_then_reports_unresolved():
     """First issue resolves via a file fix; second never resolves → unresolved."""
     responses = iter(
