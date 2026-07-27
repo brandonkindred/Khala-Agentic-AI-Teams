@@ -258,7 +258,11 @@ class TestWholeFileFocusUnit:
 
     def test_note_instructs_pre_existing_field(self) -> None:
         result = pr_review._whole_file_focus("body")
-        assert "pre_existing" in result
+        # Both directions of the tag, not just the bare field name -- a note
+        # that only ever said "do not set pre_existing" would still contain
+        # the word "pre_existing" but would fail this.
+        assert "pre_existing: false" in result
+        assert "pre_existing: true" in result
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +288,11 @@ class TestHunkReviewFocusUnit:
 
     def test_note_instructs_pre_existing_field(self) -> None:
         result = pr_review._hunk_review_focus("body")
-        assert "pre_existing" in result
+        # Both directions of the tag, not just the bare field name -- a note
+        # that only ever said "do not set pre_existing" would still contain
+        # the word "pre_existing" but would fail this.
+        assert "pre_existing: false" in result
+        assert "pre_existing: true" in result
 
     def test_differs_from_whole_file_focus_with_hunk_specific_wording(self) -> None:
         # Guards against _hunk_review_focus regressing into a plain alias of

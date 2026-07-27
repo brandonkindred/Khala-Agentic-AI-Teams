@@ -1370,12 +1370,17 @@ def _post_review_comments(
     # engine from its FULL issue list (software_engineering_team's
     # synthesize_review_findings runs before this split), so the narrative
     # can describe a pre-existing finding's theme/location even though its
-    # own per-issue comment is suppressed. When any finding was
-    # pre-existing, fall back to build_review_body's deterministic "N
-    # findings reported" text instead of risking that leak.
+    # own per-issue comment is suppressed. Suppress on partition.proposals
+    # rather than partition.preexisting_issues directly: proposals is the
+    # actual signal a human will see something withheld from this PR (the
+    # two are equivalent today -- group_similar_findings never returns zero
+    # groups for a non-empty input, and annotate_duplicate_proposals never
+    # drops a proposal, only tags it -- but proposals is the one that would
+    # still be correct if that grouping/dedup contract ever changed).
+    suppress_narrative = bool(partition.proposals)
     body = build_review_body(
-        output.summary if not partition.preexisting_issues else "",
-        output.spec_compliance_notes if not partition.preexisting_issues else "",
+        output.summary if not suppress_narrative else "",
+        output.spec_compliance_notes if not suppress_narrative else "",
         issue_count=len(partition.pr_issues),
     )
     event = choose_event(partition.pr_issues, author=pr.author, reviewer=reviewer_login)
@@ -1398,7 +1403,12 @@ def _post_review_comments(
         # then a best-effort courtesy and that finding carries the review
         # (and surfaces any real error itself). Otherwise nothing reached
         # GitHub, so let the failure mark the job failed rather than
-        # report a hollow success.
+        # report a hollow success. A non-empty line_comments is deliberately
+        # NEVER tolerated even when file/standalone comments also exist: a
+        # rejected line-comment submission is a real, unexplained GitHub
+        # error (not the routine 422 _submit_review already retries around),
+        # so it must fail the job loudly rather than be silently masked by
+        # whatever else happens to post successfully.
         if line_comments or not (file_comments or partition.standalone_comments):
             raise
         logger.warning("Summary-only review failed; posting remaining findings only")
