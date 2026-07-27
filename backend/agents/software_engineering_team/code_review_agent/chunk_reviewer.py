@@ -116,7 +116,7 @@ class ChunkReviewAgent:
         ``code_chunk`` is the rendered chunk (one or more files, already sized to
         the model's context by the coordinator) plus optional task/spec/
         architecture/existing-codebase context and the sibling surface. The code
-        is reviewed verbatim; only the context excerpts are defensively capped.
+        and all context fields are passed through to the prompt in full.
 
     Output (``ChunkReviewOutput``):
         This chunk's findings only — ``approved`` (no critical/high issues),
@@ -130,7 +130,7 @@ class ChunkReviewAgent:
           whole-submission concerns (dedupe, false-positive verification, final
           verdict) belong to the coordinator.
         - The caller must have bounded ``code_chunk`` to the map budget; this
-          agent re-applies caps to context but never truncates the code.
+          agent does not truncate the code or any context field.
 
     Invariants:
         - Stateless apart from the injected ``llm`` handle: every ``run`` call

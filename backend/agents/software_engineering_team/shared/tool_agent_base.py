@@ -239,6 +239,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         return self._invoke_llm(model, prompt)
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
+        """Render ``current_files`` as ``--- path ---\\ncontent`` blocks, joined for the prompt."""
         return "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_files.items())
 
     def _problem_solving_kwargs(self, inp) -> Dict[str, Any]:
