@@ -285,9 +285,10 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         Preconditions: :attr:`review_via_engine` is set; ``inp.current_files``
         maps path -> content.
         Postconditions: returns a :class:`ToolAgentPhaseOutput` whose ``issues``
-        carry this agent's :attr:`issue_source`. A ``CodeReviewUnavailableError``
-        (the review could not be run) degrades to a "(LLM error)" summary with no
-        issues; any other exception is a defect and propagates. Each engine
+        carry this agent's :attr:`issue_source`. Only a ``CodeReviewUnavailableError``
+        (the review could not be run) is caught, and degrades to a "(LLM error)"
+        summary with no issues; every other exception type is left uncaught and
+        propagates unchanged to the caller. Each engine
         ``CodeReviewIssue.suggestion`` becomes the ``ReviewIssue.recommendation``.
         """
         from software_engineering_team.code_review_agent import (
