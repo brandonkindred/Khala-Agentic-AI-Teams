@@ -356,11 +356,12 @@ def complete_validated_via_reasoning(
         temperature=reasoning_temperature,
         think=True,
     )
+    instructions_block = f"{formatting_instructions}\n\n" if formatting_instructions else ""
     format_prompt = (
         "Convert the following analysis into a single JSON object matching "
         "the required schema. Return JSON only — no markdown fences, no "
-        f"prose outside the object.\n\n{formatting_instructions or ''}"
-        f"\n\n--- ANALYSIS ---\n{prose}\n--- END ANALYSIS ---"
+        f"prose outside the object.\n\n{instructions_block}"
+        f"--- ANALYSIS ---\n{prose}\n--- END ANALYSIS ---"
     )
     return complete_validated(
         client,
