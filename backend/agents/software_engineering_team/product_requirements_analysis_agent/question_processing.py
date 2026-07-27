@@ -230,15 +230,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             options.append(parse_question_option(opt, i))
 
         if options and not any(opt.is_default for opt in options):
-            sorted_opts = sorted(options, key=lambda o: o.confidence, reverse=True)
-            sorted_opts[0] = QuestionOption(
-                id=sorted_opts[0].id,
-                label=sorted_opts[0].label,
+            default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
+            options[default_idx] = QuestionOption(
+                id=options[default_idx].id,
+                label=options[default_idx].label,
                 is_default=True,
-                rationale=sorted_opts[0].rationale,
-                confidence=sorted_opts[0].confidence,
+                rationale=options[default_idx].rationale,
+                confidence=options[default_idx].confidence,
             )
-            options = sorted_opts
 
         raw_depends = q_data.get("depends_on")
         if isinstance(raw_depends, (list, tuple)):
