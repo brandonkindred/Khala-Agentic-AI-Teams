@@ -12,13 +12,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
-from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.team_lead_base import BaseTeamLead
-from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_orchestrator import BaseV2DevelopmentAgent
 
 from . import models as _models
@@ -27,6 +25,7 @@ from .models import (
     MicrotaskReviewConfig,
     ToolAgentKind,
 )
+from .phases._profile import PROFILE
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .phases.planning import run_planning
 from .phases.setup import configure_quality_tooling, run_setup
@@ -39,19 +38,6 @@ run_deliver = make_run_deliver(
     commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
     logger=logger,
 )
-
-# Backend repo-briefing filter contract: the extensions read into the development
-# agent's context and the directories pruned from the walk. Single-sourced here so
-# the fresh-walk ``_read_repo_code`` and the incremental ``RepoContextCache`` the
-# team lead threads in cannot drift apart (the cache's byte-identical invariant
-# depends on them matching).
-_BACKEND_REPO_EXTENSIONS = frozenset(
-    {".py", ".java", ".kt", ".yaml", ".yml", ".json", ".toml", ".cfg", ".txt"}
-)
-_BACKEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "__pycache__", "venv", ".venv"})
-# Character budget for the repo briefing (whole files only; the next chunk that
-# would exceed it stops the briefing).
-_BACKEND_REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
@@ -94,88 +80,22 @@ class BackendDevelopmentAgent(BaseV2DevelopmentAgent):
     Execution → Documentation → Deliver) with per-microtask review gates embedded
     in the Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
 
-    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
-    ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
-    ``_run_execution_phase`` / ``_record_execution_bookkeeping`` /
-    ``_run_documentation_phase`` / ``_run_deliver_and_finalize`` /
-    ``_run_development_workflow`` from :class:`BaseV2DevelopmentAgent`
-    (the job-update closure itself comes from the shared
-    ``team_lead_base.make_job_updater``); supplies the backend tooling
-    detection, repo-briefing sets, and a thin ``run_workflow`` that forwards
-    this module's own tool-agent builder, planning/execution/deliver
-    functions, and review classes into ``_run_development_workflow``.
+    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_repo_code`` /
+    ``_detect_tooling`` / ``_read_existing_code`` / ``_run_preflight`` /
+    ``_run_planning_and_branch_setup`` / ``_run_execution_phase`` /
+    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
+    ``_run_deliver_and_finalize`` / ``_run_development_workflow`` from
+    :class:`BaseV2DevelopmentAgent` (the job-update closure itself comes from
+    the shared ``team_lead_base.make_job_updater``); supplies its ``PROFILE``
+    (backend tooling detection + repo-briefing sets) and a thin
+    ``run_workflow`` that forwards this module's own tool-agent builder,
+    planning/execution/deliver functions, and review classes into
+    ``_run_development_workflow``.
     """
 
     _TEAM_LABEL = "Backend"
     _DELIVER_IN_PROGRESS_STATUS = "Committing changes and preparing delivery"
-
-    @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = _BACKEND_REPO_BRIEFING_MAX_CHARS) -> str:
-        """Read Python/Java source files from repo into a single string.
-
-        Delegates to the shared budgeted scanner so every per-domain reader shares
-        one implementation; the backend extension/exclude sets are the contract.
-        """
-        return read_repo_code_budgeted(
-            repo_path,
-            extensions=_BACKEND_REPO_EXTENSIONS,
-            exclude_dirs=_BACKEND_REPO_EXCLUDE_DIRS,
-            max_chars=max_chars,
-        )
-
-    @staticmethod
-    def _detect_tooling(repo_path: Path) -> Tuple[bool, bool]:
-        """Return ``(has_lint, has_test)`` for the configured backend tooling.
-
-        Detects ruff/flake8 (or a ``[tool.ruff]`` block in ``pyproject.toml``) as
-        lint, and a ``tests`` dir with a pytest config (``pytest.ini`` or a
-        ``[tool.pytest`` block in ``pyproject.toml``) as testing. Reads
-        ``pyproject.toml`` once and reuses it for both probes. Lint also
-        recognises a ``[flake8]`` section in ``setup.cfg`` — a common flake8
-        config location that the file-name-only ``.flake8`` probe would miss.
-
-        The ``[tool.ruff]`` / ``[tool.pytest`` pyproject checks use the shared
-        ``toml_has_section`` helper: a real TOML parse (stdlib ``tomllib`` on
-        Python 3.11+, the ``tomli`` backport if installed) that asks whether the
-        table actually exists, so a section header appearing inside a
-        multi-line string value can no longer produce a false positive; on
-        Python 3.10 without ``tomli`` (or on unparseable TOML) it falls back to
-        the line-anchored ``has_section_header`` text scan. The ``[flake8]``
-        ``setup.cfg`` probe stays on ``has_section_header`` (INI has no
-        multi-line strings, so the text scan is exact there). No hard dependency
-        is added: 3.11+ stdlib covers the real runtime, and 3.10 keeps the prior
-        best-effort text probe. The pre-flight only decides whether to fail the
-        task early for missing tooling, so a residual false positive errs toward
-        proceeding (a real build/lint gate still enforces correctness).
-
-        Preconditions: ``repo_path`` is a directory.
-        Postconditions: returns two booleans. Raises ``AssertionError`` if the
-          precondition is violated (a non-directory ``repo_path`` is a caller
-          bug, not a runtime failure mode this method recovers from).
-        """
-        assert repo_path.is_dir(), "repo_path must be a directory"
-        pyproject_path = repo_path / "pyproject.toml"
-        pyproject_text = (
-            pyproject_path.read_text(encoding="utf-8", errors="replace")
-            if pyproject_path.exists()
-            else ""
-        )
-        setup_cfg_path = repo_path / "setup.cfg"
-        setup_cfg_text = (
-            setup_cfg_path.read_text(encoding="utf-8", errors="replace")
-            if setup_cfg_path.exists()
-            else ""
-        )
-        has_lint = (
-            (repo_path / "ruff.toml").exists()
-            or (repo_path / ".flake8").exists()
-            or toml_has_section(pyproject_text, "[tool.ruff]")
-            or has_section_header(setup_cfg_text, "[flake8]")
-        )
-        has_test = (repo_path / "tests").is_dir() and (
-            (repo_path / "pytest.ini").exists() or toml_has_section(pyproject_text, "[tool.pytest")
-        )
-        return has_lint, has_test
+    PROFILE = PROFILE
 
     def run_workflow(
         self,
@@ -252,9 +172,9 @@ class BackendCodeV2TeamLead(BaseTeamLead):
     def __init__(self, llm_client: LLMClient) -> None:
         super().__init__(
             llm_client,
-            extensions=_BACKEND_REPO_EXTENSIONS,
-            exclude_dirs=_BACKEND_REPO_EXCLUDE_DIRS,
-            max_chars=_BACKEND_REPO_BRIEFING_MAX_CHARS,
+            extensions=PROFILE.repo_extensions,
+            exclude_dirs=PROFILE.repo_exclude_dirs,
+            max_chars=PROFILE.repo_max_chars,
         )
 
     def run_workflow(

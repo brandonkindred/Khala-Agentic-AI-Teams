@@ -22,6 +22,10 @@ _PROFILE_KWARGS = dict(
     has_language_conventions=True,
     build_verify_label="backend_code_v2",
     detect_language=lambda _p, _t: "python",
+    repo_extensions=frozenset({".py"}),
+    repo_exclude_dirs=frozenset({".git"}),
+    repo_max_chars=1000,
+    detect_tooling=lambda _p: (True, True),
 )
 
 
@@ -36,6 +40,10 @@ def test_construction_round_trips_all_fields():
     assert profile.has_language_conventions is True
     assert profile.build_verify_label == "backend_code_v2"
     assert profile.detect_language(None, None) == "python"
+    assert profile.repo_extensions == frozenset({".py"})
+    assert profile.repo_exclude_dirs == frozenset({".git"})
+    assert profile.repo_max_chars == 1000
+    assert profile.detect_tooling(None) == (True, True)
 
 
 def test_frozen_instance_rejects_attribute_assignment():
