@@ -63,7 +63,7 @@ from ..models import (
 )
 from ..output_templates import parse_documentation_self_review_template, parse_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
-from ._profile import REVIEW_CONFIG
+from ._profile import PROFILE, REVIEW_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +196,7 @@ def _run_build_verification(
     if build_verifier is None:
         return True, "No build verifier provided; skipping."
     try:
-        return build_verifier(repo_path, "frontend_code_v2", task_id)
+        return build_verifier(repo_path, PROFILE.build_verify_label, task_id)
     except Exception as exc:
         logger.warning("[%s] Build verifier raised: %s", task_id, exc)
         return False, str(exc)

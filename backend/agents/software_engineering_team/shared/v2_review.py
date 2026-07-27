@@ -102,8 +102,6 @@ class ReviewConfig:
 
     # ``agent_type`` passed to the linting tool agent's ``LintToolInput``.
     lint_agent_type: str
-    # Label passed to ``build_verifier(repo_path, label, task_id)``.
-    build_verify_label: str
     # ``recommendation`` on the run-review (non-microtask) build-failure issue.
     build_fail_recommendation_review: str
     # Remap linter severities into review severities, or ``None`` to keep raw.
