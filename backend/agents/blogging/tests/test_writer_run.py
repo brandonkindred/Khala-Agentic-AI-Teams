@@ -699,6 +699,22 @@ def test_fallback_draft_via_json_success(monkeypatch) -> None:
     assert "draft" in captured["strict"].lower()
 
 
+def test_fallback_draft_via_json_rejects_empty_prompt() -> None:
+    """Empty/whitespace-only prompt raises ValueError, surviving `-O` optimization."""
+
+    a = _agent()
+    with pytest.raises(ValueError, match="prompt must be a non-empty string"):
+        a._fallback_draft_via_json("   ")
+
+
+def test_fallback_draft_via_json_rejects_non_string_prompt() -> None:
+    """Non-string prompt raises ValueError, surviving `-O` optimization."""
+
+    a = _agent()
+    with pytest.raises(ValueError, match="prompt must be a non-empty string"):
+        a._fallback_draft_via_json(None)
+
+
 def test_fallback_draft_via_json_empty_draft_returns_none(monkeypatch) -> None:
     """Whitespace-only draft values are normalized to None so callers keep the original."""
 

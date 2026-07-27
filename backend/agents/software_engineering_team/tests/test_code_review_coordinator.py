@@ -931,7 +931,8 @@ def _bisecting_failure(msg: str = "no content") -> LLMTruncatedError:
 class _SelectiveRaiser(DummyLLMClient):
     """Raises for prompts containing a marker; otherwise delegates to Dummy.
 
-    Records every prompt so tests can count map calls.
+    Records every prompt so tests can count map calls. Thread-safe for use
+    with concurrent tail-pass execution.
     """
 
     def __init__(self, marker: str, exc: Optional[Exception] = None) -> None:
@@ -939,11 +940,13 @@ class _SelectiveRaiser(DummyLLMClient):
         self.marker = marker
         self.exc = exc or _bisecting_failure("LLM output truncated")
         self.prompts: List[str] = []
+        self._lock = threading.Lock()
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.prompts.append(prompt)
-        if self.marker in prompt:
-            raise self.exc
+        with self._lock:
+            self.prompts.append(prompt)
+            if self.marker in prompt:
+                raise self.exc
         return super().complete_json(prompt, **kwargs)
 
 
