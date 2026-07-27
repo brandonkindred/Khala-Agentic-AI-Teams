@@ -2,8 +2,9 @@
 
 ``bind_tools`` takes the list of tool ids declared on an agent and resolves each
 against the existing registries — ``agent_git_tools`` (bundled, repo-backed),
-``LlmToolsService`` (the LLM tool catalog), and ``IntegrationRegistry`` (platform
-integrations) — producing OpenAI-style tool *definitions* and their *handlers*,
+``LlmToolsService`` (the LLM tool catalog), and an optional caller-supplied
+integration registry (platform integrations; any object exposing
+``get_provider(tool_id)``) — producing OpenAI-style tool *definitions* and their *handlers*,
 and tagging each tool with the **execution site** it must run at:
 
 * ``in_process`` — the agent itself runs in the Unified API (no sandbox), so a
@@ -141,7 +142,7 @@ def bind_tools(
             repo path — the host injects it).
         tools_service: optional ``LlmToolsService`` used to confirm a non-git id is
             a known catalog tool before rejecting it as unbindable.
-        integration_registry: optional ``IntegrationRegistry``; a provider id
+        integration_registry: optional caller-supplied integration registry; a provider id
             resolves to a ``platform_bound`` tool.
 
     Preconditions: ``tool_ids`` is a list of non-empty strings.

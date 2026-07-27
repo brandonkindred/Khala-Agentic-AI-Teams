@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from agents.blogging.shared.artifacts import read_artifact, write_artifact
+from agents.blogging.shared.artifacts import read_artifact, read_latest_draft, write_artifact
 from agents.blogging.shared.brand_spec import BrandSpec
 
 from .checks import (
@@ -113,11 +113,7 @@ def run_validators_from_work_dir(
     Writes validator_report.json to work_dir.
     """
     work_path = Path(work_dir).resolve()
-    draft = read_artifact(work_dir, draft_artifact, default="")
-    if not draft:
-        draft = read_artifact(work_dir, "draft_v2.md", default="") or read_artifact(
-            work_dir, "draft_v1.md", default=""
-        )
+    draft = read_latest_draft(work_dir, draft_artifact)
 
     brand_path = brand_spec_path or (work_path / "brand_spec_prompt.md")
     _blogging_root = Path(__file__).resolve().parent.parent

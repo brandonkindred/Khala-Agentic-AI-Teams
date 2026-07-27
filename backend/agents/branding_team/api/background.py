@@ -89,9 +89,13 @@ def _run_branding_core(
           ``TeamOutput``.
         - If the job was cancelled, leaves the row as-is and returns (a
           cancelled run is terminal, not a failure).
-        - On a genuine failure, marks the row FAILED and **re-raises the
-          original exception** so callers (the Temporal activity) can surface it
-          as a failed workflow rather than a silently-"completed" one.
+        - On a genuine failure, attempts to mark the row FAILED via
+          ``mark_failed`` and then **re-raises the original exception**
+          regardless of whether that write succeeds — even if ``mark_failed``
+          itself raises, that secondary error is logged and swallowed rather
+          than replacing the original one. Callers (the Temporal activity) can
+          rely on the original exception surfacing as a failed workflow, but
+          should not assume the row was actually written FAILED.
     """
     from branding_team.api import main as _main
 

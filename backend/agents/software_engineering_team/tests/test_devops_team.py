@@ -15,6 +15,7 @@ from software_engineering_team.devops_team import (
     DevOpsTaskSpec,
     DevOpsTeamLeadAgent,
     DevOpsTeamResult,
+    tool_dispatch,
 )
 from software_engineering_team.devops_team.models import (
     CriterionTrace,
@@ -33,6 +34,17 @@ from software_engineering_team.devops_team.orchestrator import (
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
     DevOpsTaskClarifierInput,
+)
+from software_engineering_team.devops_team.tool_agents import (
+    CDKExecutionOutput,
+    CICDLintOutput,
+    DeploymentDryRunOutput,
+    DockerComposeExecutionOutput,
+    HelmExecutionOutput,
+    IaCValidationOutput,
+    PolicyAsCodeInput,
+    PolicyAsCodeOutput,
+    TerraformExecutionOutput,
 )
 from software_engineering_team.shared.git_utils import initialize_new_repo
 
@@ -1666,6 +1678,33 @@ class TestDevOpsTeamLeadAgentIntegration:
         # The feature branch was cleaned up after the merge.
         assert "feature/" not in branches
 
+    def test_completion_package_merge_sha_unknown_on_head_read_failure(self, monkeypatch) -> None:
+        """When the merge succeeds but the post-merge HEAD read fails, the
+        pipeline must not report ``status == "merged"`` with an empty SHA — it
+        reports ``merged_sha_unknown`` and notes the failure instead of
+        fabricating a successful-looking record."""
+        import software_engineering_team.devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "get_head_sha", lambda *a, **k: (False, ""))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_workflow(
+                repo_path=Path(tmp),
+                task_description="Add backend deployment automation",
+                requirements="Include prod approval gate and rollback plan",
+                build_verifier=MagicMock(return_value=(True, "")),
+                task_id="devops-head-sha-unknown",
+            )
+        assert result.success
+        gitops = result.completion_package.git_operations
+        assert gitops.merge is not None
+        assert gitops.merge.status == "merged_sha_unknown"
+        assert gitops.merge.merge_commit_hash == ""
+        assert any("HEAD SHA" in note for note in result.completion_package.notes)
+
     def test_delivery_merge_failure_blocks(self, monkeypatch) -> None:
         """When the real merge fails, the pipeline reports failure and a blocked
         completion package with an honest ``merge.status == "failed"`` — it does
@@ -1831,6 +1870,155 @@ class TestDevOpsTeamLeadAgentExecutionTools:
         agent = DevOpsTeamLeadAgent(mock_llm)
         results = agent._run_execution_tools("/tmp/nonexistent", {})
         assert results == []
+
+
+_RESULT_KEYS = {"tool", "command", "success", "checks", "findings", "failure_class"}
+
+
+class TestToolDispatchRunExecutionTools:
+    """Exercise tool_dispatch.run_execution_tools directly against a mock agent,
+    at the new module boundary rather than only incidentally through the
+    full DevOpsTeamLeadAgent pipeline."""
+
+    def test_returns_empty_list_for_no_artifacts(self) -> None:
+        assert tool_dispatch.run_execution_tools(MagicMock(), "/tmp/x", {}) == []
+
+    def test_terraform_only_runs_init_validate_plan_on_success(self) -> None:
+        agent = MagicMock()
+        agent.terraform_exec_tool.run.side_effect = [
+            TerraformExecutionOutput(success=True, checks={"terraform_init": "pass"}),
+            TerraformExecutionOutput(success=True, checks={"terraform_validate": "pass"}),
+            TerraformExecutionOutput(success=True, checks={"terraform_plan": "pass"}),
+        ]
+        results = tool_dispatch.run_execution_tools(
+            agent, "/tmp/x", {"infra/main.tf": "resource {}"}
+        )
+        assert [r["command"] for r in results] == ["init", "validate", "plan"]
+        for r in results:
+            assert set(r.keys()) == _RESULT_KEYS
+            assert r["tool"] == "terraform"
+            assert r["success"] is True
+
+    def test_terraform_breaks_on_first_failure(self) -> None:
+        agent = MagicMock()
+        agent.terraform_exec_tool.run.return_value = TerraformExecutionOutput(
+            success=False, checks={}, failure_class="init_failed"
+        )
+        results = tool_dispatch.run_execution_tools(
+            agent, "/tmp/x", {"infra/main.tf": "resource {}"}
+        )
+        assert len(results) == 1
+        assert results[0]["command"] == "init"
+        assert results[0]["success"] is False
+        assert agent.terraform_exec_tool.run.call_count == 1
+
+    def test_cdk_artifact_triggers_cdk_synth(self) -> None:
+        agent = MagicMock()
+        agent.cdk_exec_tool.run.return_value = CDKExecutionOutput(
+            success=True, checks={"cdk_synth": "pass"}
+        )
+        results = tool_dispatch.run_execution_tools(agent, "/tmp/x", {"cdk.json": "{}"})
+        assert len(results) == 1
+        assert results[0]["tool"] == "cdk"
+        assert results[0]["command"] == "synth"
+
+    @pytest.mark.parametrize(
+        "compose_file",
+        ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"],
+    )
+    def test_compose_artifact_triggers_compose_config(self, compose_file: str) -> None:
+        agent = MagicMock()
+        agent.compose_exec_tool.run.return_value = DockerComposeExecutionOutput(
+            success=True, checks={"compose_config": "pass"}
+        )
+        results = tool_dispatch.run_execution_tools(agent, "/tmp/x", {compose_file: "services: {}"})
+        assert len(results) == 1
+        assert results[0]["tool"] == "compose"
+        assert results[0]["command"] == "config"
+
+    def test_chart_artifact_triggers_helm_lint(self) -> None:
+        agent = MagicMock()
+        agent.helm_exec_tool.run.return_value = HelmExecutionOutput(
+            success=True, checks={"helm_lint": "pass"}
+        )
+        results = tool_dispatch.run_execution_tools(
+            agent, "/tmp/x", {"charts/app/Chart.yaml": "name: app"}
+        )
+        assert len(results) == 1
+        assert results[0]["tool"] == "helm"
+        assert results[0]["command"] == "lint"
+
+    def test_multiple_simultaneous_triggers_accumulate_all_results(self) -> None:
+        agent = MagicMock()
+        agent.terraform_exec_tool.run.return_value = TerraformExecutionOutput(
+            success=True, checks={}
+        )
+        agent.helm_exec_tool.run.return_value = HelmExecutionOutput(success=True, checks={})
+        results = tool_dispatch.run_execution_tools(
+            agent, "/tmp/x", {"infra/main.tf": "resource {}", "charts/app/Chart.yaml": "name: app"}
+        )
+        assert len(results) == 4
+        assert [r["tool"] for r in results] == ["terraform", "terraform", "terraform", "helm"]
+
+
+class TestToolDispatchRunValidationTools:
+    """Exercise tool_dispatch.run_validation_tools directly against a mock agent."""
+
+    def _mock_agent(self) -> MagicMock:
+        agent = MagicMock()
+        agent.iac_validation_tool.run.return_value = IaCValidationOutput(
+            success=True, checks={"iac_validate": "pass"}
+        )
+        agent.policy_tool.run.return_value = PolicyAsCodeOutput(
+            success=True, checks={"policy_checks": "pass"}
+        )
+        agent.cicd_lint_tool.run.return_value = CICDLintOutput(
+            success=True, checks={"pipeline_lint": "pass"}
+        )
+        agent.deploy_dry_run_tool.run.return_value = DeploymentDryRunOutput(
+            success=True, checks={"deployment_dry_run": "pass"}
+        )
+        return agent
+
+    def test_returns_validation_tool_results_with_merged_tool_gate_map(self) -> None:
+        agent = self._mock_agent()
+        vt = tool_dispatch.run_validation_tools(agent, Path("/tmp/x"))
+        assert isinstance(vt, tool_dispatch.ValidationToolResults)
+        assert vt.iac_checks is agent.iac_validation_tool.run.return_value
+        assert vt.policy_checks is agent.policy_tool.run.return_value
+        assert vt.cicd_checks is agent.cicd_lint_tool.run.return_value
+        assert vt.dry_run_checks is agent.deploy_dry_run_tool.run.return_value
+        assert vt.tool_gate_map == {
+            "iac_validate": "pass",
+            "policy_checks": "pass",
+            "pipeline_lint": "pass",
+            "deployment_dry_run": "pass",
+        }
+
+    def test_tool_gate_map_merge_later_dict_wins_on_key_collision(self) -> None:
+        agent = MagicMock()
+        agent.iac_validation_tool.run.return_value = IaCValidationOutput(
+            success=True, checks={"shared_key": "iac"}
+        )
+        agent.policy_tool.run.return_value = PolicyAsCodeOutput(
+            success=True, checks={"shared_key": "policy"}
+        )
+        agent.cicd_lint_tool.run.return_value = CICDLintOutput(
+            success=True, checks={"shared_key": "cicd"}
+        )
+        agent.deploy_dry_run_tool.run.return_value = DeploymentDryRunOutput(
+            success=True, checks={"shared_key": "dryrun"}
+        )
+        vt = tool_dispatch.run_validation_tools(agent, Path("/tmp/x"))
+        assert vt.tool_gate_map["shared_key"] == "dryrun"
+
+    def test_policy_scan_invoked_with_agent_policy_tool_as_runner(self) -> None:
+        agent = self._mock_agent()
+        repo_path = Path("/tmp/x")
+        tool_dispatch.run_validation_tools(agent, repo_path)
+        assert agent.policy_tool.run.call_count == 1
+        (call_arg,) = agent.policy_tool.run.call_args.args
+        assert call_arg == PolicyAsCodeInput(repo_path=str(repo_path))
 
 
 class TestMainOrchestratorRegistration:

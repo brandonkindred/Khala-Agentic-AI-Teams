@@ -3,7 +3,7 @@
 Centralizes the per-tool timeout values that the devops team's stateless
 tool-agents (IaC validation, dry-run, terraform/helm/cdk/docker-compose
 execution, policy-as-code, and the enterprise architect subprocess) pass to
-``subprocess``/``shared.command_runner.runner.run_command``. Each constant is
+``subprocess``/``shared.command_runner.executor.run_command``. Each constant is
 read once at import time via the shared ``env_int`` reader (see
 ``shared.env_config``), so a slow CI runner can raise any single tool's
 timeout without a code change, while an unset or garbage env value falls back

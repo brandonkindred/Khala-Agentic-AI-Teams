@@ -624,6 +624,61 @@ def test_missing_approved_falls_back_to_severity_counts(monkeypatch) -> None:
     assert result_blocking.approved is False
 
 
+def test_non_list_feedback_items_falls_back_to_empty(monkeypatch) -> None:
+    """A truthy but non-list `feedback_items` value from the model must not crash run().
+
+    Regression test: `data.get("feedback_items") or []` only falls back to `[]`
+    when the value is falsy. A dict (or string) is truthy and was previously
+    passed straight through to `_parse_feedback_items`, silently dropping all
+    feedback instead of being treated as the empty/invalid response it is.
+    """
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"summary": "reviewed", "feedback_items": {"issue": "not a list"}})
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert result.feedback_items == []
+    assert result.approved is True
+
+
+def test_non_string_summary_falls_back_to_default(monkeypatch) -> None:
+    """A non-string `summary` value from the model must not crash run().
+
+    Regression test: `(data.get("summary") or "").strip()` assumes the LLM-returned
+    `summary` is a string or None. A malformed response where `summary` is a list
+    (or dict, or other non-string) previously raised AttributeError from `.strip()`
+    instead of degrading gracefully.
+    """
+    from agents.blogging.blog_copy_editor_agent import agent as ce_mod
+
+    class _Agent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            return json.dumps({"summary": ["not", "a", "string"], "feedback_items": []})
+
+    monkeypatch.setattr(ce_mod, "Agent", _Agent)
+    agent = BlogCopyEditorAgent(
+        llm_client=DummyLLMClient(), writing_style_guide_content="", brand_spec_content=""
+    )
+
+    result = agent.run(CopyEditorInput(draft="# d\n\nsome body text here"))
+
+    assert result.summary == "No summary generated."
+
+
 def test_write_feedback_to_path_returns_false_on_failure(tmp_path: Path) -> None:
     """_write_feedback_to_path reports failure via return value (False) instead of raising."""
     agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())

@@ -26,6 +26,8 @@ Preconditions:
 
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -229,6 +231,8 @@ def _make_gate_config(
     status_cr=MS.IN_CODE_REVIEW,
     status_qa=MS.IN_QA_TESTING,
     status_sec=MS.IN_SECURITY_TESTING,
+    status_qa_sec=MS.IN_QA_SECURITY_TESTING,
+    parallelize_qa_security: bool = False,
 ) -> GatedExecutionConfig:
     return GatedExecutionConfig(
         models=be_models,
@@ -248,6 +252,8 @@ def _make_gate_config(
         max_cycles_requires_failing_gate=requires_failing,
         startup_log_message=lambda tid, total, c: f"start {tid} {total} on_failure={c.on_failure}",
         gate_issue_log_verb=verb,
+        parallelize_qa_security=parallelize_qa_security,
+        status_qa_security=status_qa_sec,
     )
 
 
@@ -283,10 +289,11 @@ def _run(
     review_deps: Optional[ReviewDependencies] = None,
     architecture: Optional[Any] = None,
     spec_content: str = "",
+    llm: Optional[Any] = None,
 ):
     return run_gated_execution_impl(
         gate_config=gate_config,
-        llm=DummyLLMClient(),
+        llm=llm if llm is not None else DummyLLMClient(),
         task=_task(),
         planning_result=_planning(microtasks),
         repo_path=tmp_path,
@@ -324,6 +331,7 @@ def test_progress_callback_contract(tmp_path):
         "code_review",
         "qa_testing",
         "security_testing",
+        "qa_security_testing",
         "documentation",
         "completed",
     }
@@ -815,6 +823,500 @@ def test_qa_and_security_gates_share_one_cache_instance_across_cycles(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Concurrent QA/Security fan-out (parallelize_qa_security)
+# ---------------------------------------------------------------------------
+
+
+class _NonDummyLLM:
+    """Stand-in "real" LLM client eligible for the concurrent QA/Security fan-out.
+
+    Anything that isn't a ``DummyLLMClient`` (or a wrapper around one) qualifies;
+    the stub gates below never actually call it.
+    """
+
+
+def test_parallel_qa_security_runs_both_gates_every_cycle(tmp_path):
+    """With ``parallelize_qa_security=True`` and a non-Dummy ``llm``, Security still
+    runs on a cycle where QA fails -- unlike the sequential path (see
+    ``test_qa_and_security_gates_share_one_cache_instance_across_cycles``), which
+    restarts from Code Review before Security is ever reached.
+    """
+    qa = _CapturingGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
+    sec = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(qa_gate=qa, security_gate=sec, parallelize_qa_security=True),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: None,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(qa.calls_kwargs) == 2
+    assert len(sec.calls_kwargs) == 2  # ran on cycle 1 too, concurrently with the failing QA call
+
+
+def test_parallel_qa_security_reports_combined_phase_not_premature_security(tmp_path):
+    """The concurrent branch must not announce "qa_testing" then immediately
+    "security_testing" before either gate has actually run -- that's the exact
+    mechanism behind the false "QA passed" checkmark this test guards against.
+    It should announce a single combined "qa_security_testing" phase instead,
+    with ``mt.status`` set to the matching status at the same time.
+    """
+    phases_seen: List[str] = []
+    statuses_during_qa_security_phase: List[Any] = []
+
+    def _progress(current_index, completed, total, title, phase, detail):
+        phases_seen.append(phase)
+        if phase == "qa_security_testing":
+            statuses_during_qa_security_phase.append(mt.status)
+
+    qa = _CapturingGate()
+    sec = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(qa_gate=qa, security_gate=sec, parallelize_qa_security=True),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+        progress=_progress,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    # The combined phase was announced (both the top-level announcement and
+    # each gate's own detail ticks, which forward through progress_callback),
+    # and mt.status was IN_QA_SECURITY_TESTING at every point it fired -- never
+    # IN_SECURITY_TESTING, which would imply QA had already passed.
+    assert statuses_during_qa_security_phase
+    assert set(statuses_during_qa_security_phase) == {MS.IN_QA_SECURITY_TESTING}
+    # Neither gate's bare phase name (which would let current_microtask_phase
+    # land on "security_testing" mid-run) is ever reported while concurrent.
+    assert "qa_testing" not in phases_seen
+    assert "security_testing" not in phases_seen
+
+
+def test_parallel_qa_security_batch_fix_uses_combined_phase(tmp_path):
+    """The "batch fixing" progress message on a failing concurrent cycle must also
+    use the combined "qa_security_testing" phase, not "qa_testing" alone -- both
+    gates' issues are being fixed together, not just QA's.
+    """
+    phases_seen: List[str] = []
+    qa = _CapturingGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
+    sec = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(qa_gate=qa, security_gate=sec, parallelize_qa_security=True),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: phases_seen.append(a[4]),
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert "qa_security_testing" in phases_seen
+    # No bare "qa_testing"/"security_testing" announcement while the cycle's
+    # outcome was still unresolved (only the combined phase).
+    assert phases_seen.count("qa_testing") == 0
+    assert phases_seen.count("security_testing") == 0
+
+
+def test_parallel_qa_security_combines_both_gates_issues_into_one_batch_fix(tmp_path):
+    """A cycle where both QA and Security fail batch-fixes their issues together in
+    one call, rather than fixing QA then restarting before Security ever runs.
+    """
+    qa_issue = ReviewIssue(source="qa", severity="high", description="qa issue", file_path="f")
+    sec_issue = ReviewIssue(
+        source="security", severity="high", description="security issue", file_path="f"
+    )
+    qa = _ScriptedGate([GateOutcome(passed=False, issues=[qa_issue], summary="qa")])
+    sec = _ScriptedGate([GateOutcome(passed=False, issues=[sec_issue], summary="sec")])
+    batch_fix_calls: List[Dict[str, Any]] = []
+
+    def _batch_fix_capturing(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        batch_fix_calls.append(kwargs)
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(
+            qa_gate=qa,
+            security_gate=sec,
+            batch_fix=_batch_fix_capturing,
+            parallelize_qa_security=True,
+        ),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: None,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(batch_fix_calls) == 1  # one combined fix, not two separate ones
+    sources = {issue.source for issue in batch_fix_calls[0]["issues"]}
+    assert sources == {"qa", "security"}
+
+
+def test_parallel_qa_security_falls_back_to_sequential_for_dummy_llm(tmp_path):
+    """``parallelize_qa_security=True`` still runs sequentially for a
+    ``DummyLLMClient`` (the default ``_run`` llm) -- its scripted response index
+    is not thread-safe, so the fan-out must not run concurrently for it.
+    """
+    qa = _CapturingGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
+    sec = _CapturingGate()
+    mt = _microtask()
+    _run(
+        _make_gate_config(qa_gate=qa, security_gate=sec, parallelize_qa_security=True),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=1),
+        progress=lambda *a: None,
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(qa.calls_kwargs) == 2
+    assert len(sec.calls_kwargs) == 1  # cycle 1 never reached security (QA restarted the cycle)
+
+
+def test_parallel_qa_security_unsafe_fix_breaks(tmp_path):
+    """Concurrent path's unsafe-write handling mirrors the sequential path's
+    (``test_qa_unsafe_fix_breaks``/``test_security_unsafe_fix_breaks``): an
+    unsafe fix write marks REVIEW_FAILED via the same
+    ``write_microtask_output_or_fail`` call, just reached through the combined
+    batch-fix branch instead of the QA-only or security-only one.
+    """
+    mt = _microtask()
+    cfg = _make_gate_config(
+        qa_gate=_fail_gate("qa"),
+        batch_fix=_batch_fix_unsafe,
+        parallelize_qa_security=True,
+    )
+    _run(
+        cfg,
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=1, sec=1, on_failure="skip_continue"),
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.REVIEW_FAILED
+
+
+def test_parallel_qa_security_only_batch_fixes_the_failing_gates_issues(tmp_path):
+    """A passing gate's (non-blocking) issues never reach the combined batch fix
+    -- only the failing gate's issues do, matching the sequential path's
+    per-gate behavior (a passing gate's issues were never sent to
+    ``run_batch_coding_fixes`` there either).
+    """
+    qa_medium_issue = ReviewIssue(
+        source="qa", severity="medium", description="qa non-blocking note", file_path="f"
+    )
+    sec_critical_issue = ReviewIssue(
+        source="security", severity="critical", description="security blocker", file_path="f"
+    )
+    # QA "passes" (no critical/high issues) but still reports a non-blocking issue;
+    # Security fails outright. Only the security issue should reach batch_fix.
+    qa = _ScriptedGate([GateOutcome(passed=True, issues=[qa_medium_issue], summary="qa")])
+    sec = _ScriptedGate([GateOutcome(passed=False, issues=[sec_critical_issue], summary="sec")])
+    batch_fix_calls: List[Dict[str, Any]] = []
+
+    def _batch_fix_capturing(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        batch_fix_calls.append(kwargs)
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(
+            qa_gate=qa,
+            security_gate=sec,
+            batch_fix=_batch_fix_capturing,
+            parallelize_qa_security=True,
+        ),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: None,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(batch_fix_calls) == 1
+    sources = {issue.source for issue in batch_fix_calls[0]["issues"]}
+    assert sources == {"security"}  # QA's non-blocking issue never reached the fixer
+
+
+# ---------------------------------------------------------------------------
+# Concurrent QA/Security fan-out: ordering, aggregation symmetry, exceptions,
+# and timing-variance determinism (issue #2554)
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_qa_security_preserves_global_gate_ordering(tmp_path):
+    """Ordering non-regression: Code Review always precedes the QA/Security pair,
+    a combined batch-fix always precedes the next Code Review (cycle restart),
+    and Documentation only starts after a cycle where both QA and Security
+    passed -- while QA vs Security's *relative* order within their concurrent
+    pair is deliberately left unconstrained (asserted as a set, not a sequence).
+
+    Cycle 1: Code Review passes, QA fails + Security passes concurrently ->
+    combined batch-fix -> restart. Cycle 2: Code Review passes, QA + Security
+    both pass -> Documentation runs. Expected global order (positions 1 and 5
+    are a free-order pair, not a fixed sequence):
+        [code_review, {qa, security}, batch_fix, code_review, {qa, security}, doc_review]
+    """
+    order: List[str] = []
+    order_lock = threading.Lock()
+
+    def _record(name: str) -> None:
+        with order_lock:
+            order.append(name)
+
+    def _cr_gate(**kwargs: Any) -> GateOutcome:
+        _record("code_review")
+        return GateOutcome(passed=True)
+
+    qa_calls = {"n": 0}
+
+    def _qa_gate(**kwargs: Any) -> GateOutcome:
+        _record("qa")
+        qa_calls["n"] += 1
+        if qa_calls["n"] == 1:
+            return GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")
+        return GateOutcome(passed=True)
+
+    def _sec_gate(**kwargs: Any) -> GateOutcome:
+        _record("security")
+        return GateOutcome(passed=True)
+
+    def _batch_fix_recording(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        _record("batch_fix")
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    def _doc_review_recording(
+        *, documentation=None, detail_callback=None, **kwargs: Any
+    ) -> SimpleNamespace:
+        _record("doc_review")
+        if detail_callback is not None:
+            detail_callback("doc")
+        return SimpleNamespace(documentation={}, iterations=1, final_quality_score=0.95)
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(
+            code_review_gate=_cr_gate,
+            qa_gate=_qa_gate,
+            security_gate=_sec_gate,
+            batch_fix=_batch_fix_recording,
+            doc_review=_doc_review_recording,
+            parallelize_qa_security=True,
+        ),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: None,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(order) == 8
+    assert order[0] == "code_review"  # cycle 1 CR precedes the QA/security pair
+    assert set(order[1:3]) == {"qa", "security"}  # concurrent pair: order is free
+    assert order[3] == "batch_fix"  # combined fix precedes the cycle restart
+    assert order[4] == "code_review"  # cycle 2 CR restarts before QA/security again
+    assert set(order[5:7]) == {"qa", "security"}
+    assert order[7] == "doc_review"  # Documentation only after both gates passed
+
+
+def test_parallel_qa_security_symmetric_case_qa_fails_security_passes_with_noise(tmp_path):
+    """Symmetric counterpart to
+    ``test_parallel_qa_security_only_batch_fixes_the_failing_gates_issues``
+    (which covers QA-passes-with-noise/Security-fails): here QA fails outright
+    and Security passes but still reports a non-blocking issue. Only QA's
+    issue should reach the combined batch fix.
+    """
+    qa_critical_issue = ReviewIssue(
+        source="qa", severity="critical", description="qa blocker", file_path="f"
+    )
+    sec_medium_issue = ReviewIssue(
+        source="security",
+        severity="medium",
+        description="security non-blocking note",
+        file_path="f",
+    )
+    qa = _ScriptedGate([GateOutcome(passed=False, issues=[qa_critical_issue], summary="qa")])
+    sec = _ScriptedGate([GateOutcome(passed=True, issues=[sec_medium_issue], summary="sec")])
+    batch_fix_calls: List[Dict[str, Any]] = []
+
+    def _batch_fix_capturing(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        batch_fix_calls.append(kwargs)
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(
+            qa_gate=qa,
+            security_gate=sec,
+            batch_fix=_batch_fix_capturing,
+            parallelize_qa_security=True,
+        ),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: None,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(batch_fix_calls) == 1
+    sources = {issue.source for issue in batch_fix_calls[0]["issues"]}
+    assert sources == {"qa"}  # security's non-blocking issue never reached the fixer
+
+
+def test_parallel_qa_security_gate_exception_propagates_without_hanging(tmp_path):
+    """Pins the current contract when a gate callable violates the "never raises"
+    assumption documented at ``_run_review_cycles``'s ``parallel_map`` call site
+    (review_cycle.py): a plain exception from one concurrent gate is **not**
+    swallowed or silently lost -- it propagates out of
+    ``run_gated_execution_impl`` unchanged (via ``parallel_map``'s fast-fail
+    ``fut.result()`` re-raise) -- and, because the call site passes
+    ``wait_for_stragglers=True``, the *other*, still-running gate is waited on
+    to completion first rather than abandoned in a leaked background thread.
+    """
+    sec_started = threading.Event()
+    sec_finished: List[bool] = []
+
+    def _qa_gate_raises(**kwargs: Any) -> GateOutcome:
+        # Wait until security's worker thread has actually entered its body
+        # (past ``parallel_map``'s ``_guarded`` abort check) before raising, so
+        # this deterministically exercises the "already-running task" path
+        # rather than racing thread-pool startup against an instant raise.
+        assert sec_started.wait(timeout=2), "security gate never started"
+        raise RuntimeError("qa boom")
+
+    def _security_gate_slow(**kwargs: Any) -> GateOutcome:
+        sec_started.set()
+        time.sleep(0.05)
+        sec_finished.append(True)
+        return GateOutcome(passed=True)
+
+    mt = _microtask()
+    with pytest.raises(RuntimeError, match="qa boom"):
+        _run(
+            _make_gate_config(
+                qa_gate=_qa_gate_raises,
+                security_gate=_security_gate_slow,
+                parallelize_qa_security=True,
+            ),
+            [mt],
+            tmp_path,
+            review_config=_config(cr=1, qa=1, sec=1),
+            progress=lambda *a: None,
+            llm=_NonDummyLLM(),
+        )
+
+    # The exception only surfaces after the already-running security call
+    # finished -- it was waited on, not left running in the background.
+    assert sec_finished == [True]
+
+
+@pytest.mark.parametrize(
+    "first_to_finish",
+    [
+        pytest.param("qa", id="qa_finishes_first"),
+        pytest.param("security", id="security_finishes_first"),
+    ],
+)
+def test_parallel_qa_security_aggregation_is_order_independent_under_timing_variance(
+    tmp_path, first_to_finish: str
+) -> None:
+    """No flakiness under concurrent execution: each gate's completion order is
+    forced deterministically via a ``threading.Event`` (the second gate blocks
+    until the first signals) rather than a fixed ``time.sleep`` race -- a bare
+    sleep does not guarantee which gate actually finishes first under a loaded
+    runner, so it could silently exercise the same order in both parametrized
+    cases without the test ever noticing. The actual completion order is
+    recorded and asserted here, and the combined batch-fix issue sources must
+    be identical (order-independent) regardless of which gate finished first.
+    """
+    qa_issue = ReviewIssue(source="qa", severity="high", description="qa issue", file_path="f")
+    sec_issue = ReviewIssue(
+        source="security", severity="high", description="security issue", file_path="f"
+    )
+
+    completion_order: List[str] = []
+    order_lock = threading.Lock()
+    release_event = threading.Event()
+
+    def _make_flaky_gate(name: str, issue: ReviewIssue, *, goes_first: bool):
+        # Fails on the first cycle only, then passes -- so the fan-out's single
+        # failing cycle still exercises the forced completion order, without
+        # exhausting the retry budget.
+        calls = {"n": 0}
+
+        def _gate(**kwargs: Any) -> GateOutcome:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                if goes_first:
+                    with order_lock:
+                        completion_order.append(name)
+                    release_event.set()
+                else:
+                    assert release_event.wait(timeout=2), f"{name} gate: dependency never finished"
+                    with order_lock:
+                        completion_order.append(name)
+                return GateOutcome(passed=False, issues=[issue], summary=name)
+            return GateOutcome(passed=True)
+
+        return _gate
+
+    _qa_gate = _make_flaky_gate("qa", qa_issue, goes_first=(first_to_finish == "qa"))
+    _sec_gate = _make_flaky_gate("security", sec_issue, goes_first=(first_to_finish == "security"))
+
+    batch_fix_calls: List[Dict[str, Any]] = []
+
+    def _batch_fix_capturing(*, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        batch_fix_calls.append(kwargs)
+        if detail_callback is not None:
+            detail_callback("fixing")
+        return SimpleNamespace(files=kwargs["current_files"])
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(
+            qa_gate=_qa_gate,
+            security_gate=_sec_gate,
+            batch_fix=_batch_fix_capturing,
+            parallelize_qa_security=True,
+        ),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=2, sec=2),
+        progress=lambda *a: None,
+        llm=_NonDummyLLM(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert completion_order == (
+        ["qa", "security"] if first_to_finish == "qa" else ["security", "qa"]
+    )
+    assert len(batch_fix_calls) == 1
+    sources = {issue.source for issue in batch_fix_calls[0]["issues"]}
+    assert sources == {"qa", "security"}
+
+
+# ---------------------------------------------------------------------------
 # Max-cycles semantics (the one genuine per-team behavioural fork)
 # ---------------------------------------------------------------------------
 
@@ -944,7 +1446,7 @@ def test_documentation_unsafe_path_is_skipped(tmp_path):
 
 def test_terminal_failing_outcome_prefers_cr_then_qa_then_sec():
     """_terminal_failing_outcome returns the first still-failing gate in cr→qa→sec order."""
-    from software_engineering_team.shared.phases.execution import _terminal_failing_outcome
+    from software_engineering_team.shared.phases.review_cycle import _terminal_failing_outcome
 
     cr_fail = GateOutcome(passed=False, issues=[_issue("code_review")], summary="cr")
     qa_fail = GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")
@@ -963,7 +1465,7 @@ def test_record_gate_outcome_on_code_review_retry_exhausted(tmp_path, monkeypatc
     """Code-review retry exhaustion records exactly one terminal gate outcome."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     mt = _microtask()
@@ -988,7 +1490,7 @@ def test_record_gate_outcome_on_max_cycles(tmp_path, monkeypatch):
     """Max-cycles REVIEW_FAILED records exactly one outcome with gate=review_max_cycles."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     mt = _microtask()
@@ -1010,7 +1512,7 @@ def test_record_gate_outcome_not_called_on_success(tmp_path, monkeypatch):
     """Happy-path completion must not record a gate rejection."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda *a, **k: calls.append((a, k)) or True,
     )
     _run(_make_gate_config(), [_microtask()], tmp_path, review_config=_config())
@@ -1021,7 +1523,7 @@ def test_record_gate_outcome_not_called_on_qa_recovered(tmp_path, monkeypatch):
     """Mid-loop QA fail → fix → pass is not a terminal failure; no recording."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda *a, **k: calls.append((a, k)) or True,
     )
     qa = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
@@ -1038,7 +1540,7 @@ def test_record_gate_outcome_not_called_on_unsafe_cr_write(tmp_path, monkeypatch
     """Write-path failure during code-review retry must not record retry exhaustion."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda *a, **k: calls.append((a, k)) or True,
     )
     mt = _microtask()
@@ -1072,7 +1574,7 @@ def test_grounding_circuit_breaker_trips_before_max_cycles(tmp_path, monkeypatch
     but the streak already hit the limit, so the breaker preempts QA entirely."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     cr = _ScriptedGate(
@@ -1116,7 +1618,7 @@ def test_grounding_low_ratio_no_trip_retry_exhausted(tmp_path, monkeypatch):
     microtask still fails via ordinary retry exhaustion, not the breaker."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
 
@@ -1143,7 +1645,7 @@ def test_grounding_pass_only_never_trips(tmp_path, monkeypatch):
     drops) never counts as a bad cycle -- passed calls are never grounding-bad."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
 
@@ -1196,7 +1698,7 @@ def test_grounding_breaker_disabled_never_records(tmp_path, monkeypatch):
     across repeated high-ratio failing CR cycles."""
     calls: List[tuple] = []
     monkeypatch.setattr(
-        "software_engineering_team.shared.phases.execution.record_gate_outcome",
+        "software_engineering_team.shared.phases.review_cycle.record_gate_outcome",
         lambda gate, result, **kw: calls.append((gate, result, kw)) or True,
     )
     cr = _ScriptedGate(

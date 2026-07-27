@@ -468,24 +468,26 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
 
     Preconditions:
         ``state`` is an ``_active_runs`` entry (or a persisted job dict of the
-        same shape); ``state["run_id"]``, ``state["status"]``,
-        ``state["started_at"]``, and ``state["total_cycles"]`` are present.
-        Every other field is read with a default, so a partially-populated
-        resume/snapshot dict is safe for those optional fields.
+        same shape); ``state["run_id"]`` is present. Every other field —
+        including ``status``, ``started_at``, and ``total_cycles`` — is read
+        with a default, so a partially-populated merged/resume/snapshot dict
+        (e.g. a job-service entry that only guarantees ``run_id``/``status``)
+        is safe.
     Postconditions:
         Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
-        field, defaulting each absent numeric/list field to its response default
-        (``0``/empty) — including ``tracker_merge_error_count`` (``0`` when
-        absent) — and mapping a present ``current_cycle`` dict to a
+        field, defaulting each absent field to its response default
+        (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
+        lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
+        and mapping a present ``current_cycle`` dict to a
         ``StrategyLabCycleProgress`` (``None`` when absent). Pure: ``state`` is
         not mutated.
     """
     cc = state.get("current_cycle")
     return StrategyLabRunStatusResponse(
         run_id=state["run_id"],
-        status=state["status"],
-        started_at=state["started_at"],
-        total_cycles=state["total_cycles"],
+        status=state.get("status", "unknown"),
+        started_at=state.get("started_at", ""),
+        total_cycles=state.get("total_cycles", 0),
         completed_cycles=state.get("completed_cycles", 0),
         skipped_cycles=state.get("skipped_cycles", 0),
         errored_cycles=state.get("errored_cycles", 0),
@@ -656,6 +658,15 @@ class PromotionDecisionResponse(BaseModel):
 
 
 class WorkflowStatusResponse(BaseModel):
+    """Trading-mode + audit/queue snapshot for the current workflow state.
+
+    Not a ``WorkflowStatus``-equivalent enum: investment_team has no
+    run-lifecycle status comparable to branding_team's or
+    market_research_team's ``WorkflowStatus``. See
+    ``backend/shared/hitl/README.md`` ("Non-shared: team WorkflowStatus")
+    for the full cross-team decision record.
+    """
+
     mode: str
     audit_log: List[str] = Field(default_factory=list)
     queue_counts: Dict[str, int] = Field(default_factory=dict)
@@ -3739,9 +3750,8 @@ def _run_paper_trading_background(
                 if raw is not None:
                     session = PaperTradingSession.parse_persisted(raw)
                     session.status = PaperTradingStatus.FAILED
-                    session.divergence_analysis = (
-                        "Failed to fetch market data from external sources."
-                    )
+                    session.error = "Failed to fetch market data from external sources."
+                    session.divergence_analysis = session.error
                     session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                     _paper_trading_sessions[session_id] = session
             return
@@ -3776,6 +3786,7 @@ def _run_paper_trading_background(
             if raw is not None:
                 session = PaperTradingSession.parse_persisted(raw)
                 session.status = PaperTradingStatus.FAILED
+                session.error = f"Paper trading crashed: {exc}"
                 session.divergence_analysis = f"Paper trading crashed: {exc}"
                 session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                 _paper_trading_sessions[session_id] = session

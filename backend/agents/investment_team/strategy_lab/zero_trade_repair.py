@@ -42,7 +42,7 @@ from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from .agents._llm_budget import DesignBudgetExhausted
 from .agents.zero_trade_repair import ZeroTradeRepairReport
 from .exceptions import OrchestratorContractError
-from .quality_gates.models import QualityGateResult
+from .quality_gates.models import QualityGateResult, join_gate_details
 
 if TYPE_CHECKING:  # circular at runtime; only needed for type hints.
     from .orchestrator import StrategyLabOrchestrator
@@ -402,7 +402,7 @@ class ZeroTradeRepairer:
                 new_gates=safety_gates,
                 extra_event={
                     "reason": "unsafe_code",
-                    "details": "; ".join(g.details for g in critical_safety),
+                    "details": join_gate_details(critical_safety),
                 },
             )
         return safety_gates
@@ -529,7 +529,7 @@ class ZeroTradeRepairer:
                 new_gates=safety_gates + post_repair_spec_gates,
                 extra_event={
                     "reason": "invalid_spec_after_repair",
-                    "details": "; ".join(g.details for g in spec_criticals),
+                    "details": join_gate_details(spec_criticals),
                 },
             )
         return post_repair_spec_gates
@@ -639,7 +639,7 @@ class ZeroTradeRepairer:
                 new_gates=safety_gates + post_repair_spec_gates + new_anomaly_gates,
                 extra_event={
                     "reason": "anomaly_after_repair",
-                    "details": "; ".join(g.details for g in new_critical),
+                    "details": join_gate_details(new_critical),
                 },
             )
         return new_anomaly_gates

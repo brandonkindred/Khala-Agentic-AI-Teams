@@ -423,6 +423,175 @@ class TestFrontendRunExecutionWithReviewGates:
         assert exc_info.value.microtask.id == "mt-1"
 
 
+class _FakeToolAgentOutput:
+    """Minimal ``ToolAgentOutput``-shaped stand-in: no issues, no recommendations."""
+
+    def __init__(self) -> None:
+        self.issues: list = []
+        self.recommendations: list = []
+
+
+class _FakeToolAgent:
+    """Records how many times ``.review()`` was invoked."""
+
+    def __init__(self) -> None:
+        self.review_calls = 0
+
+    def review(self, _phase_input: Any) -> _FakeToolAgentOutput:
+        self.review_calls += 1
+        return _FakeToolAgentOutput()
+
+
+class TestFrontendQaSecurityGateToolAgentScoping:
+    """Pins the fan-out scoping fix: the QA gate must invoke only the
+    ``testing_qa`` tool agent and the security gate only the ``security`` tool
+    agent, never both -- mirroring ``backend_code_v2_team``'s per-gate scoping
+    and removing the shared-instance race that blocked
+    ``parallelize_qa_security`` for this team.
+    """
+
+    def test_qa_gate_invokes_only_testing_qa_tool_agent(self, tmp_path):
+        from frontend_code_v2_team.models import Microtask, ToolAgentKind
+        from frontend_code_v2_team.phases.execution import ReviewDependencies, _qa_gate
+
+        qa_tool_agent = _FakeToolAgent()
+        security_tool_agent = _FakeToolAgent()
+        task = _create_test_task("frontend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        deps = ReviewDependencies(
+            tool_agents={
+                ToolAgentKind.TESTING_QA: qa_tool_agent,
+                ToolAgentKind.SECURITY: security_tool_agent,
+            }
+        )
+
+        _qa_gate(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files={"src/app.ts": "const x = 1;"},
+            deps=deps,
+            detail_callback=lambda _d: None,
+        )
+
+        assert qa_tool_agent.review_calls == 1
+        assert security_tool_agent.review_calls == 0
+
+    def test_security_gate_invokes_only_security_tool_agent(self, tmp_path):
+        from frontend_code_v2_team.models import Microtask, ToolAgentKind
+        from frontend_code_v2_team.phases.execution import ReviewDependencies, _security_gate
+
+        qa_tool_agent = _FakeToolAgent()
+        security_tool_agent = _FakeToolAgent()
+        task = _create_test_task("frontend")
+        mt = Microtask(id="mt-1", title="Test Microtask")
+        deps = ReviewDependencies(
+            tool_agents={
+                ToolAgentKind.TESTING_QA: qa_tool_agent,
+                ToolAgentKind.SECURITY: security_tool_agent,
+            }
+        )
+
+        _security_gate(
+            llm=MagicMock(),
+            task=task,
+            microtask=mt,
+            repo_path=tmp_path,
+            files={"src/app.ts": "const x = 1;"},
+            deps=deps,
+            detail_callback=lambda _d: None,
+        )
+
+        assert security_tool_agent.review_calls == 1
+        assert qa_tool_agent.review_calls == 0
+
+
+class TestFrontendQaSecurityCombinedPhaseSignal:
+    """Pins the #2659 phase-tracking fix pattern for frontend's own ``GATE_CONFIG``.
+
+    ``parallelize_qa_security`` stays ``False`` by default for this team (flipping
+    it is out of scope -- tracked separately), but ``GATE_CONFIG`` must already be
+    wired the same way ``backend_code_v2_team``'s is: when concurrent QA+Security
+    execution *is* exercised, it reports the combined ``"qa_security_testing"``
+    phase (never a bare "qa_testing" immediately followed by "security_testing")
+    with ``MicrotaskStatus.IN_QA_SECURITY_TESTING``, not a state that would let a
+    consumer infer QA had already passed.
+    """
+
+    def test_concurrent_qa_security_reports_combined_phase_and_status(self, tmp_path, monkeypatch):
+        from dataclasses import replace
+
+        from frontend_code_v2_team.models import (
+            Microtask,
+            MicrotaskReviewConfig,
+            MicrotaskStatus,
+            PlanningResult,
+            ToolAgentKind,
+        )
+        from frontend_code_v2_team.phases import execution as exec_mod
+        from frontend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
+        )
+
+        from software_engineering_team.shared.phases.execution import GateOutcome
+
+        class _NonDummyLLM:
+            """Anything that isn't a ``DummyLLMClient`` qualifies for the concurrent
+            fan-out; the stub gates below never actually call it."""
+
+        phases_seen: list = []
+        statuses_during_qa_security_phase: list = []
+
+        def _pass_gate(**_kwargs: Any) -> GateOutcome:
+            return GateOutcome(passed=True)
+
+        def _progress(current_index, completed, total, title, phase, detail):
+            phases_seen.append(phase)
+            if phase == "qa_security_testing":
+                statuses_during_qa_security_phase.append(mt.status)
+
+        monkeypatch.setattr(
+            exec_mod,
+            "GATE_CONFIG",
+            replace(
+                exec_mod.GATE_CONFIG,
+                run_code_review_gate=_pass_gate,
+                run_qa_gate=_pass_gate,
+                run_security_gate=_pass_gate,
+                run_general_microtask=lambda **_kw: {"src/app.ts": "export const app = 1;\n"},
+                run_documentation_self_review=lambda **_kw: MagicMock(
+                    documentation={},
+                    iterations=0,
+                    final_quality_score=1.0,
+                ),
+                parallelize_qa_security=True,
+            ),
+        )
+
+        (tmp_path / ".git").mkdir()
+        task = _create_test_task("frontend")
+        mt = Microtask(id="mt-1", title="Widget", tool_agent=ToolAgentKind.GENERAL)
+        planning_result = PlanningResult(microtasks=[mt], language="typescript")
+
+        run_execution_with_review_gates(
+            llm=_NonDummyLLM(),
+            task=task,
+            planning_result=planning_result,
+            repo_path=tmp_path,
+            review_config=MicrotaskReviewConfig(max_retries=1),
+            review_deps=ReviewDependencies(),
+            progress_callback=_progress,
+        )
+
+        assert mt.status == MicrotaskStatus.COMPLETED
+        assert statuses_during_qa_security_phase
+        assert set(statuses_during_qa_security_phase) == {MicrotaskStatus.IN_QA_SECURITY_TESTING}
+        assert "qa_testing" not in phases_seen
+        assert "security_testing" not in phases_seen
+
+
 # ---------------------------------------------------------------------------
 # Backend tests
 # ---------------------------------------------------------------------------

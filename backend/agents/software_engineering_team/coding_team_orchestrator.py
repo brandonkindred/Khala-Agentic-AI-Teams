@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from shared.dev_models import ReviewContext, SystemArchitecture
+from shared.observability import current_trace_id
 from software_engineering_team import hitl
 from software_engineering_team.activity import (
     ActivityBridge,  # noqa: F401 - late-bound via `_orch.ActivityBridge` in swarm_review.py
@@ -163,7 +164,12 @@ def _groom_one_task(
             plan_context=plan_context,
         )
     except Exception as e:  # noqa: BLE001 - one task's grooming failure must not abort the round
-        logger.warning("Tech Lead grooming failed for task %s: %s", task_id, e)
+        logger.warning(
+            "Tech Lead grooming failed for task %s: %s",
+            task_id,
+            e,
+            extra={"trace_id": current_trace_id()},
+        )
         return {
             "acceptance_criteria": [],
             "out_of_scope": "",
@@ -362,7 +368,12 @@ def run_coding_team_orchestrator(
             plan_input.open_questions = []
 
         if snapshot_tasks:
-            logger.info("Resuming job %s from snapshot (%d tasks)", job_id, len(snapshot_tasks))
+            logger.info(
+                "Resuming job %s from snapshot (%d tasks)",
+                job_id,
+                len(snapshot_tasks),
+                extra={"trace_id": current_trace_id()},
+            )
             graph.restore(
                 {
                     "tasks": snapshot_tasks,
@@ -401,7 +412,10 @@ def run_coding_team_orchestrator(
                 # this status into a "recommend closing" comment with the evidence and creates no PR.
                 evidence = str(out.get("completion_evidence") or "").strip()
                 logger.info(
-                    "Job %s: Tech Lead judged the work already complete: %s", job_id, evidence
+                    "Job %s: Tech Lead judged the work already complete: %s",
+                    job_id,
+                    evidence,
+                    extra={"trace_id": current_trace_id()},
                 )
                 coord.update(
                     status=JobStatus.ALREADY_COMPLETE.value,
@@ -418,9 +432,15 @@ def run_coding_team_orchestrator(
             normalized_tasks: List[Dict[str, Any]] = []
             for idx, t in enumerate(tasks_raw, start=1):
                 if not isinstance(t, dict):
-                    logger.warning("Skipping malformed task graph entry at index %s: %r", idx, t)
+                    logger.warning(
+                        "Skipping malformed task graph entry at index %s: %r",
+                        idx,
+                        t,
+                        extra={"trace_id": current_trace_id()},
+                    )
                     continue
-                task_id = str(t.get("id") or f"task_{idx}")
+                raw_id = t.get("id")
+                task_id = str(raw_id) if raw_id is not None else f"task_{idx}"
                 normalized_tasks.append(
                     {
                         "id": task_id,
@@ -489,7 +509,11 @@ def run_coding_team_orchestrator(
                     )
                 )
         except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
-            logger.error("Failed to build coding-team implementation workers: %s", exc)
+            logger.error(
+                "Failed to build coding-team implementation workers: %s",
+                exc,
+                extra={"trace_id": current_trace_id()},
+            )
             coord.update(
                 status=JobStatus.FAILED.value,
                 phase="completed",
@@ -777,7 +801,10 @@ class CodingTeamSwarm(
             try:
                 self._worktrees.prepare()
             except Exception as exc:  # noqa: BLE001 - a broken worktree setup fails the job, not the process
-                logger.exception("Failed to prepare implementation-worker git worktrees")
+                logger.exception(
+                    "Failed to prepare implementation-worker git worktrees",
+                    extra={"trace_id": current_trace_id()},
+                )
                 _update(
                     status=JobStatus.FAILED.value,
                     phase="completed",

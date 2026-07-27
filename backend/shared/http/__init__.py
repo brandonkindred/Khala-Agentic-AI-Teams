@@ -50,6 +50,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from shared.http.base_url import resolve_base_url
 from shared.http.retry import backoff_sleep, parse_retry_env_config, retry_delay
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "backoff_sleep",
     "parse_retry_env_config",
     "retry_delay",
+    "resolve_base_url",
 ]
 
 logger = logging.getLogger(__name__)
@@ -492,8 +494,8 @@ def get_pooled_async_client(timeout: float = 30.0) -> httpx.AsyncClient:
         return client
 
 
-async def aclose_async_pool() -> None:
-    """Await-close all pooled async clients on their owning loops.
+async def aclose_async_pool(*, only_current_loop: bool = False) -> None:
+    """Await-close pooled async clients on their owning loops.
 
     Prefer this from async code when teardown must finish before continuing.
     Clients owned by the current running loop are ``await``-ed directly; clients
@@ -508,14 +510,34 @@ async def aclose_async_pool() -> None:
     client silently discarded; the loop re-scans for such repooled clients up to
     ``_ACLOSE_POOL_MAX_ROUNDS`` times.
 
+    Preconditions:
+        - Called from within a running event loop.
     Postconditions:
-        - Successfully closed and dead-loop entries are removed from the pool.
+        - When ``only_current_loop`` is False (the default), every live pooled
+          client is targeted, regardless of which loop owns it — the original
+          whole-pool teardown behavior.
+        - When ``only_current_loop`` is True, only entries owned by the
+          calling loop are targeted; entries owned by other loops (including
+          other concurrently *running* loops) are left completely untouched —
+          not closed, not counted toward the "left tracked" warning. Use this
+          from a coroutine sharing the pool with unrelated concurrent loops
+          (e.g. multiple offloaded ``asyncio.run`` calls each on their own
+          worker thread), where closing a foreign loop's client could sever an
+          in-flight request that loop is still making.
+        - Successfully closed and (for the targeted scope) dead-loop entries
+          are removed from the pool.
         - Clients that remain open after a failed teardown stay tracked.
     """
     running = asyncio.get_running_loop()
+
+    def _targeted(items):
+        if only_current_loop:
+            return [(key, entry) for key, entry in items if entry.loop_ref() is running]
+        return list(items)
+
     for _round in range(_ACLOSE_POOL_MAX_ROUNDS):
         with _async_lock:
-            snapshot = list(_async_clients.items())
+            snapshot = _targeted(_async_clients.items())
         if not snapshot:
             return
         for key, entry in snapshot:
@@ -531,13 +553,13 @@ async def aclose_async_pool() -> None:
                 if not dropped:
                     _restore_async_pool_entry(key, entry)
         with _async_lock:
-            still_pooled = {key: id(entry) for key, entry in _async_clients.items()}
+            still_targeted = _targeted(_async_clients.items())
         # A round that closed nothing and saw nothing repooled will not do
         # better on the next pass — stop instead of spinning.
-        if still_pooled == {key: id(entry) for key, entry in snapshot}:
+        if {key: id(entry) for key, entry in still_targeted} == {key: id(entry) for key, entry in snapshot}:
             break
     with _async_lock:
-        remaining = len(_async_clients)
+        remaining = len(_targeted(_async_clients.items()))
     if remaining:
         logger.warning("aclose_async_pool left %d pooled AsyncClient(s) tracked after teardown", remaining)
 

@@ -43,8 +43,13 @@ from software_engineering_team.shared.v2_models import (
     ToolAgentPhaseOutput,
 )
 
-# Default per-issue context budget (subclasses may override via class attr).
-DEFAULT_MAX_RELEVANT_CODE_CHARS = 8_000
+# Default per-issue context budget for the single-issue fix prompt (subclasses
+# may override via class attr). Deliberately generous (on the same scale as
+# CODE_REVIEW_ABS_CHUNK_CHARS in context_sizing.py): unlike the review phase's
+# read-only code context, this feeds a prompt the model edits, so truncating
+# it risks a broken fix — the cap exists only to bound a pathological single
+# file, not to restrict normal usage.
+DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
 
 
 def relevant_code_for_issue(
@@ -161,7 +166,6 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # --- Prompts / parsing ------------------------------------------------
     review_prompt: Optional[str] = None
     problem_solving_prompt: Optional[str] = None
-    max_code_chars: int = 12_000
     max_relevant_code_chars: int = DEFAULT_MAX_RELEVANT_CODE_CHARS
     review_parse_mode: str = "text"  # "text" | "json"
     uses_json_model: bool = False
@@ -219,17 +223,15 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         return self._invoke_llm(model, prompt)
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
-        return "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:20])[
-            : self.max_code_chars
-        ]
+        return "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_files.items())
 
     def _problem_solving_kwargs(self, inp) -> Dict[str, Any]:
         """Extra ``.format`` kwargs for the single-issue prompt.
 
         Driven by :attr:`conventions_by_language`: when it is non-empty, inject
         ``language_conventions`` selected by ``inp.language`` (falling back to the
-        ``"_default"`` entry); when empty, inject nothing — preserving frontend
-        agents whose single-issue prompt has no ``{language_conventions}`` slot.
+        ``"_default"`` entry); when empty, inject nothing — this agent's
+        single-issue prompt has no ``{language_conventions}`` slot to fill.
 
         Preconditions: when set, ``conventions_by_language`` maps lowercased
         language names (plus optional ``"_default"``) to convention strings.
@@ -265,6 +267,8 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         ``pathlib.Path`` and returning a list of :class:`ReviewIssue`).
         Postconditions: returns a :class:`ToolAgentPhaseOutput`; when ``repo_path``
         is unset/missing the issue list is empty and the summary says "skipped".
+        :attr:`build_runner` is called uncaught — any exception it raises is a
+        defect and propagates to the caller.
         """
         from pathlib import Path
 
@@ -286,9 +290,10 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         Preconditions: :attr:`review_via_engine` is set; ``inp.current_files``
         maps path -> content.
         Postconditions: returns a :class:`ToolAgentPhaseOutput` whose ``issues``
-        carry this agent's :attr:`issue_source`. A ``CodeReviewUnavailableError``
-        (the review could not be run) degrades to a "(LLM error)" summary with no
-        issues; any other exception is a defect and propagates. Each engine
+        carry this agent's :attr:`issue_source`. Only a ``CodeReviewUnavailableError``
+        (the review could not be run) is caught, and degrades to a "(LLM error)"
+        summary with no issues; every other exception type is left uncaught and
+        propagates unchanged to the caller. Each engine
         ``CodeReviewIssue.suggestion`` becomes the ``ReviewIssue.recommendation``.
         """
         from software_engineering_team.code_review_agent import (
@@ -331,6 +336,23 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         )
 
     def review(self, inp) -> ToolAgentPhaseOutput:
+        """Run this agent's review phase.
+
+        Preconditions: when neither :attr:`build_runner` nor
+        :attr:`review_via_engine` is set, :attr:`review_prompt` must be a
+        non-``None`` template string — the base class declares it as
+        ``Optional[str] = None`` for subclasses that take one of those other
+        two paths, so a subclass using the default one-shot LLM path must
+        set it.
+        Postconditions: returns a :class:`ToolAgentPhaseOutput`. Only the
+        default one-shot LLM path (neither :attr:`build_runner` nor
+        :attr:`review_via_engine` set) never raises — a missing model, empty
+        code, or LLM failure each degrade to a skipped/failed summary with no
+        issues. When :attr:`build_runner` or :attr:`review_via_engine` is
+        set, an unexpected exception from the runner/engine is a defect and
+        propagates uncaught; see :meth:`_build_review` and
+        :meth:`_engine_review`.
+        """
         if self.build_runner is not None:
             return self._build_review(inp)
         if self.review_via_engine:
@@ -341,6 +363,12 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         code_text = self._build_code_text(inp.current_files)
         if not code_text.strip():
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no code).")
+        if self.review_prompt is None:
+            raise ValueError(
+                f"{type(self).__name__} has no review_prompt set; subclasses must set "
+                "review_prompt, review_via_engine=True, or build_runner when using the "
+                "default review() path."
+            )
         prompt = self.review_prompt.format(
             task_description=inp.task_description or "N/A",
             code=code_text,

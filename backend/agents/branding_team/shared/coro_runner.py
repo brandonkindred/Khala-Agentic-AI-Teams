@@ -22,6 +22,7 @@ import threading
 from typing import Awaitable, Optional, TypeVar
 
 from shared.env_config import env_int
+from shared.http import aclose_async_pool
 
 __all__ = ["run_coroutine"]
 
@@ -100,6 +101,38 @@ if hasattr(os, "register_at_fork"):  # POSIX only; no-op on platforms without fo
     os.register_at_fork(after_in_child=_reset_offload_pool_after_fork)
 
 
+async def _run_with_pool_cleanup(coroutine: Awaitable[_T]) -> _T:
+    """Await *coroutine*, then close any async HTTP clients it pooled on this loop.
+
+    ``asyncio.run`` (used by both branches of :func:`run_coroutine`) always
+    creates a private, single-use event loop that is closed immediately after
+    this coroutine returns. ``shared.http.get_pooled_async_client`` pools its
+    ``httpx.AsyncClient`` instances per running loop, and a client cannot be
+    closed once its owning loop is dead (see ``shared.http``'s pool
+    invariants) — so without this cleanup, any pooled async client *coroutine*
+    creates (e.g. via ``async_post_json``) leaks its transport when the
+    ephemeral loop closes. Closing here, while the loop is still running and
+    guaranteed to run no other coroutine afterward, is always safe.
+
+    The cleanup is scoped to *this* loop (``only_current_loop=True``): the
+    offload path in :func:`run_coroutine` can have several ``run_coroutine``
+    calls executing concurrently, each on its own worker thread with its own
+    ephemeral loop. An unscoped ``aclose_async_pool()`` closes every pooled
+    client process-wide, including ones owned by those other still-running
+    loops — severing an unrelated concurrent request mid-flight. Scoping to
+    the current loop closes only what *this* call created.
+
+    Postconditions:
+        Returns *coroutine*'s result, or propagates whatever it raises;
+        ``aclose_async_pool`` runs in a ``finally`` so cleanup happens on
+        both paths.
+    """
+    try:
+        return await coroutine
+    finally:
+        await aclose_async_pool(only_current_loop=True)
+
+
 def run_coroutine(coroutine: Awaitable[_T]) -> _T:
     """Run *coroutine* to completion from synchronous code.
 
@@ -119,6 +152,9 @@ def run_coroutine(coroutine: Awaitable[_T]) -> _T:
     Postconditions:
         Returns the coroutine's result or propagates whatever it raises; never
         calls ``asyncio.run`` while a loop is already running in this thread.
+        Any ``shared.http`` pooled async client created while running
+        *coroutine* is closed before the ephemeral event loop closes (see
+        ``_run_with_pool_cleanup``).
     """
     try:
         loop = asyncio.get_running_loop()
@@ -127,5 +163,5 @@ def run_coroutine(coroutine: Awaitable[_T]) -> _T:
     # asyncio.get_running_loop() only ever returns a *running* loop (it raises
     # RuntimeError otherwise), so a plain None-check is sufficient here.
     if loop is not None:
-        return _get_offload_pool().submit(asyncio.run, coroutine).result()
-    return asyncio.run(coroutine)
+        return _get_offload_pool().submit(asyncio.run, _run_with_pool_cleanup(coroutine)).result()
+    return asyncio.run(_run_with_pool_cleanup(coroutine))

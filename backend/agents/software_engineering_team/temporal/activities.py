@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 from temporalio import activity
 
 from shared.concurrency import BackgroundHeartbeat
-from shared.observability import bind_trace_id, new_trace_id
+from shared.observability import bind_trace_id, current_trace_id, new_trace_id
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
@@ -47,6 +47,7 @@ def run_orchestrator_activity(
         ``trace_id`` (workflow-supplied, or freshly generated when blank) is
         forwarded to ``run_orchestrator``, which binds it for the whole 4-phase run.
     """
+    resolved_trace_id = trace_id or new_trace_id()
     try:
         from software_engineering_team.orchestrator import run_orchestrator
 
@@ -56,10 +57,10 @@ def run_orchestrator_activity(
             spec_content_override=spec_content_override,
             resolved_questions_override=resolved_questions_override,
             planning_only=planning_only,
-            trace_id=trace_id or new_trace_id(),
+            trace_id=resolved_trace_id,
         )
     except Exception as e:
-        logger.exception("Orchestrator activity failed")
+        logger.exception("Orchestrator activity failed", extra={"trace_id": resolved_trace_id})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -74,12 +75,13 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
         ``trace_id`` (workflow-supplied, or freshly generated when blank) is
         forwarded to ``run_failed_tasks``, which binds it for the retry.
     """
+    resolved_trace_id = trace_id or new_trace_id()
     try:
         from software_engineering_team.orchestrator import run_failed_tasks
 
-        run_failed_tasks(job_id, trace_id=trace_id or new_trace_id())
+        run_failed_tasks(job_id, trace_id=resolved_trace_id)
     except Exception as e:
-        logger.exception("Retry failed activity failed")
+        logger.exception("Retry failed activity failed", extra={"trace_id": resolved_trace_id})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -203,7 +205,7 @@ def run_frontend_code_v2_activity(
     try:
         _run_frontend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
-        logger.exception("Frontend-code-v2 activity failed")
+        logger.exception("Frontend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -247,7 +249,7 @@ def run_backend_code_v2_activity(
     try:
         _run_backend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
-        logger.exception("Backend-code-v2 activity failed")
+        logger.exception("Backend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -273,7 +275,11 @@ def _run_product_analysis_impl(
 
     context_files = gather_context_files(repo_path)
     if context_files:
-        logger.info("Product analysis: Gathered %d context files", len(context_files))
+        logger.info(
+            "Product analysis: Gathered %d context files",
+            len(context_files),
+            extra={"trace_id": current_trace_id()},
+        )
 
     agent = ProductRequirementsAnalysisAgent(get_client("backend"))
     result = agent.run_workflow(
@@ -315,7 +321,7 @@ def run_product_analysis_activity(
     try:
         _run_product_analysis_impl(job_id, repo_path, spec_content, initial_spec_path)
     except Exception as e:
-        logger.exception("Product analysis activity failed")
+        logger.exception("Product analysis activity failed", extra={"trace_id": current_trace_id()})
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -435,7 +441,11 @@ def _parse_spec_activity_body(
         ).model_dump()
 
     except Exception as e:
-        logger.exception("parse_spec_activity failed for job %s", job_id)
+        logger.exception(
+            "parse_spec_activity failed for job %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -543,7 +553,11 @@ def _plan_project_activity_body(
         ).model_dump()
 
     except Exception as e:
-        logger.exception("plan_project_activity failed for job %s", job_id)
+        logger.exception(
+            "plan_project_activity failed for job %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
@@ -684,6 +698,10 @@ def _execute_coding_team_activity_body(
         return ExecutionResult(merged_count=0).model_dump()
 
     except Exception as e:
-        logger.exception("execute_coding_team_activity failed for job %s", job_id)
+        logger.exception(
+            "execute_coding_team_activity failed for job %s",
+            job_id,
+            extra={"trace_id": current_trace_id()},
+        )
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise

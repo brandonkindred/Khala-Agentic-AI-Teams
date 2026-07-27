@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
+from agents.blogging.shared.artifacts import write_artifact
 from agents.blogging.shared.content_plan import ContentPlan
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
@@ -32,16 +33,7 @@ from strands.types.exceptions import EventLoopException
 from .models import PlanCriticReport, PlanViolation
 from .prompts import PLAN_CRITIC_SYSTEM, PLAN_CRITIC_USER_TEMPLATE
 
-try:
-    from agents.blogging.shared.artifacts import write_artifact
-except ImportError:  # pragma: no cover - defensive; artifacts may be unavailable in tests
-    write_artifact = None  # type: ignore[assignment]
-
 logger = logging.getLogger(__name__)
-
-_RESEARCH_DIGEST_CHAR_CAP = 8000
-_BRAND_SPEC_CHAR_CAP = 16000
-_WRITING_GUIDELINES_CHAR_CAP = 16000
 
 
 def _fallback_report(reason: str) -> PlanCriticReport:

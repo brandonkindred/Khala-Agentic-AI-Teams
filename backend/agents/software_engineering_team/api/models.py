@@ -129,7 +129,12 @@ class TeamProgressEntry(BaseModel):
     )
     current_microtask_phase: Optional[str] = Field(
         None,
-        description="Current phase of the microtask: coding, code_review, qa_testing, security_testing, documentation, or completed.",
+        description=(
+            "Current phase of the microtask: coding, code_review, qa_testing, security_testing, "
+            "qa_security_testing, documentation, or completed. qa_security_testing means QA and "
+            "Security are running concurrently -- neither has a confirmed outcome yet, so it must "
+            "not be treated as qa_testing having passed."
+        ),
     )
     phase_detail: Optional[str] = Field(
         None,

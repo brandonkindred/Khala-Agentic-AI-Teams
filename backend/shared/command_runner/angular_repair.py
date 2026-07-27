@@ -18,8 +18,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from shared.command_runner.nvm import _get_nvm_script_prefix, run_command_with_nvm
-from shared.command_runner.runner import (
+from shared.command_runner.executor import (
     ANGULAR_VERSION,
     BUILD_TIMEOUT,
     FRONTEND_NODE_VERSION,
@@ -29,6 +28,7 @@ from shared.command_runner.runner import (
     patch_text_file,
     run_command,
 )
+from shared.command_runner.nvm import _get_nvm_script_prefix, run_command_with_nvm
 
 logger = logging.getLogger(__name__)
 

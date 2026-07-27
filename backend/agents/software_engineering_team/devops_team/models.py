@@ -209,5 +209,7 @@ class DevOpsCompletionPackage(BaseModel):
 class DevOpsTeamResult(BaseModel):
     success: bool
     failure_reason: str = ""
+    # Phase 4.6 debug-patch attempts consumed on a successful pipeline run;
+    # 1 means no retry was needed (single pass).
     iterations: int = 1
     completion_package: Optional[DevOpsCompletionPackage] = None

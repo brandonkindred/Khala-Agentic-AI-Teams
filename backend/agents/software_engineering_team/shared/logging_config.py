@@ -27,7 +27,17 @@ class HttpxErrorLevelFilter(logging.Filter):
         return True
 
 
-LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+class TraceIdFilter(logging.Filter):
+    """Default ``record.trace_id`` to "" so ``LOG_FORMAT``'s ``%(trace_id)s`` never
+    raises ``KeyError`` on records logged without ``extra={"trace_id": ...}``."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "trace_id"):
+            record.trace_id = ""
+        return True
+
+
+LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | trace=%(trace_id)s | %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
 
 # Default log filename when log_file path is a directory (avoid Errno 21 "Is a directory")
@@ -84,8 +94,11 @@ def setup_logging(
     for h in root.handlers[:]:
         root.removeHandler(h)
 
+    trace_id_filter = TraceIdFilter()
+
     console = logging.StreamHandler(sys.stderr)
     console.setFormatter(formatter)
+    console.addFilter(trace_id_filter)
     root.addHandler(console)
 
     if log_file:
@@ -96,6 +109,7 @@ def setup_logging(
         try:
             file_handler = logging.FileHandler(log_file, encoding="utf-8")
             file_handler.setFormatter(formatter)
+            file_handler.addFilter(trace_id_filter)
             root.addHandler(file_handler)
         except OSError as e:
             logging.getLogger(__name__).warning(

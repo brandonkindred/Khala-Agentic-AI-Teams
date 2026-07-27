@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
-import time
 from typing import Optional
-
-import httpx
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
 from branding_team.shared.coro_runner import run_coroutine
 from shared.env_config import env_float
-
-_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+from shared.http.base_url import resolve_base_url
+from shared.http.job_polling import (
+    DEFAULT_TERMINAL_STATUSES,
+    async_get_json,
+    async_poll_until_terminal,
+    async_post_json,
+)
 
 
 def _poll_interval_s() -> float:
@@ -29,7 +29,7 @@ def _request_timeout_s() -> float:
 
 
 def _base_url() -> Optional[str]:
-    return os.environ.get("UNIFIED_API_BASE_URL") or os.environ.get("BRANDING_MARKET_RESEARCH_URL")
+    return resolve_base_url("UNIFIED_API_BASE_URL", "BRANDING_MARKET_RESEARCH_URL")
 
 
 def _build_payload(mission: BrandingMission) -> dict:
@@ -90,32 +90,29 @@ async def request_market_research_async(
     request_timeout = _request_timeout_s()
     total_timeout = _total_timeout_s()
     poll_interval = _poll_interval_s()
-    try:
-        async with httpx.AsyncClient() as client:
-            submit = await client.post(
-                f"{root}/market-research/run", json=payload, timeout=request_timeout
-            )
-            submit.raise_for_status()
-            job_id = submit.json().get("job_id")
-            if not job_id:
-                raise RuntimeError("Market research submit returned no job_id")
+    submitted = await async_post_json(
+        f"{root}/market-research/run",
+        payload,
+        timeout=request_timeout,
+        log_context="Market research submit",
+    )
+    if submitted is None:
+        raise RuntimeError("Market research request failed: submit request failed")
+    job_id = submitted.get("job_id")
+    if not job_id:
+        raise RuntimeError("Market research submit returned no job_id")
 
-            deadline = time.monotonic() + total_timeout
-            while True:
-                status = await client.get(
-                    f"{root}/market-research/status/{job_id}", timeout=request_timeout
-                )
-                status.raise_for_status()
-                data = status.json()
-                if data.get("status") in _TERMINAL_STATUSES:
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"Market research job {job_id} timed out after {total_timeout}s"
-                    )
-                await asyncio.sleep(poll_interval)
-    except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as e:
-        raise RuntimeError(f"Market research request failed: {e}") from e
+    data = await async_poll_until_terminal(
+        lambda: async_get_json(
+            f"{root}/market-research/status/{job_id}",
+            timeout=request_timeout,
+            log_context=f"Market research status for {job_id}",
+        ),
+        terminal_statuses=DEFAULT_TERMINAL_STATUSES,
+        poll_interval=poll_interval,
+        total_timeout=total_timeout,
+        log_context=f"market research job {job_id}",
+    )
 
     if data.get("status") != "completed":
         raise RuntimeError(

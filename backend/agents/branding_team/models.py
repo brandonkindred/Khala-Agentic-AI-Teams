@@ -45,7 +45,9 @@ class WorkflowStatus(str, Enum):
 
     Intentionally team-local (not in ``shared.hitl``): the terminal
     ``READY_FOR_ROLLOUT`` is branding-specific. Only the string value
-    ``needs_human_decision`` overlaps other teams' enums.
+    ``needs_human_decision`` overlaps other teams' enums. See
+    ``backend/shared/hitl/README.md`` ("Non-shared: team WorkflowStatus")
+    for the full cross-team decision record.
     """
 
     NEEDS_HUMAN_DECISION = "needs_human_decision"
@@ -534,10 +536,23 @@ class WikiEntry(BaseModel):
 
 
 class TeamOutput(BaseModel):
+    """Aggregate output of a branding run: status, phase artifacts, and cross-cutting results.
+
+    Invariants:
+        - ``degraded_phases`` lists only phases whose structured output could not
+          be parsed from the LLM's response and was defaulted to a bare
+          ``model_class()`` instance; an empty list (the default) means every
+          populated phase output reflects a successfully parsed LLM response.
+          This field is not self-maintaining — a call site that defaults a
+          phase output on parse failure (e.g. ``orchestrator._extract_phase_output``)
+          must append that phase here itself.
+    """
+
     status: WorkflowStatus
     mission_summary: str
     current_phase: BrandPhase = BrandPhase.STRATEGIC_CORE
     phase_gates: List[PhaseGate] = Field(default_factory=list)
+    degraded_phases: List[BrandPhase] = Field(default_factory=list)
 
     # Phase outputs
     strategic_core: Optional[StrategicCoreOutput] = None

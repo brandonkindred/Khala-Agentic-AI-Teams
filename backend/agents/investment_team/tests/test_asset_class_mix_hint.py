@@ -26,6 +26,7 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 from investment_team.strategy_lab_context import (
     _edge_exploitation_steer,
+    _executed_records,
     asset_class_mix_hint,
 )
 
@@ -53,6 +54,8 @@ def _record(
     backtest_status: str = "completed",
     annual: float = 5.0,
     win: float = 55.0,
+    is_winning: bool = False,
+    is_publishable: bool = False,
 ) -> StrategyLabRecord:
     suffix = uuid.uuid4().hex[:6]
     strategy = StrategySpec(
@@ -85,7 +88,8 @@ def _record(
         lab_record_id=f"lab-{suffix}",
         strategy=strategy,
         backtest=backtest,
-        is_winning=False,
+        is_winning=is_winning,
+        is_publishable=is_publishable,
         strategy_rationale="r",
         analysis_narrative="ok",
         created_at=now,
@@ -312,3 +316,70 @@ def test_edge_steer_asserts_its_preconditions() -> None:
         _edge_exploitation_steer(rec, ["stocks"], "", tail=24)
     with pytest.raises(AssertionError):
         _edge_exploitation_steer(rec, ["stocks"], "menu", tail=0)
+
+
+def test_edge_steer_prefers_publishable_bucket_over_higher_raw_return_bucket() -> None:
+    """A class whose apparent edge is only backed by non-publishable "wins"
+    (overfit / unrealistic) must not outrank a class with genuine publishable
+    evidence, even when its raw annualized return is far higher."""
+    records = [
+        _record("crypto", annual=80.0, win=90.0),  # high raw return, never publishable
+        _record("stocks", annual=9.0, win=55.0, is_winning=True, is_publishable=True),
+    ]
+    out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
+    assert "stocks scores best among publishable wins" in out, out
+    assert "crypto" not in out.lower(), out
+
+
+def test_edge_steer_ranks_by_publishable_stats_within_the_publishable_tier() -> None:
+    """When more than one bucket has publishable evidence, ranking among them
+    uses the publishable-only mean, not the raw (possibly overfit-inflated)
+    mean over all records in the bucket."""
+    records = [
+        _record("crypto", annual=80.0, win=90.0),  # non-publishable noise, ignored for ranking
+        _record("crypto", annual=10.0, win=52.0, is_winning=True, is_publishable=True),
+        _record("stocks", annual=15.0, win=60.0, is_winning=True, is_publishable=True),
+    ]
+    out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
+    assert "stocks scores best among publishable wins" in out, out
+
+
+def test_edge_steer_tie_breaks_on_win_rate_within_publishable_tier() -> None:
+    """When two buckets tie on publishable_annual_return, the higher
+    publishable_win_rate wins — the dual-objective tie-break applies within
+    the publishable tier too, not just the raw-stats tier."""
+    records = [
+        _record("crypto", annual=10.0, win=55.0, is_winning=True, is_publishable=True),
+        _record("stocks", annual=10.0, win=60.0, is_winning=True, is_publishable=True),
+    ]
+    out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
+    assert "stocks scores best among publishable wins" in out, out
+
+
+def test_edge_steer_falls_back_to_raw_stats_when_nothing_is_publishable() -> None:
+    """With no publishable evidence anywhere in the allowed classes, the
+    message text is identical to the original raw-stats-only behavior."""
+    records = [_record("crypto", annual=25.0, win=53.0), _record("stocks", annual=10.0, win=62.0)]
+    out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
+    assert "crypto scores best so far" in out, out
+    assert "publishable" not in out.lower(), out
+
+
+def test_edge_steer_shares_a_cache_with_a_prior_executed_records_call() -> None:
+    """A shared ``cache`` dict lets ``_edge_exploitation_steer`` reuse the
+    sort/filter pass a caller already ran via ``_executed_records`` with the
+    same ``tail`` window — the exact duplication ``asset_class_mix_hint``
+    exhibits internally in exploit mode — instead of recomputing it, while
+    still returning the same result as the uncached call."""
+    records = [_record("crypto", annual=25.0, win=53.0), _record("stocks", annual=10.0, win=62.0)]
+    cache: dict = {}
+    _executed_records(records, max_records=24, cache=cache)
+    assert len(cache) == 1
+    out = _edge_exploitation_steer(
+        records, ["stocks", "crypto"], "stocks, or crypto", tail=24, cache=cache
+    )
+    # No new cache entry — the tail=24 call reused the existing one.
+    assert len(cache) == 1
+    assert out == _edge_exploitation_steer(
+        records, ["stocks", "crypto"], "stocks, or crypto", tail=24
+    )

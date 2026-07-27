@@ -21,10 +21,10 @@ back into static ones — see the identical, pre-existing idiom in
 ``zero_trade_repair.py`` (its import of ``_maybe_attach_coverage_report``)
 for precedent.
 
-``SynthesisMixin`` is mixed into ``StrategyLabOrchestrator``
-(``class StrategyLabOrchestrator(DesignMixin, SynthesisMixin):``); its
-methods expect the attributes ``StrategyLabOrchestrator.__init__`` sets on
-``self`` (``self.strategy_validator``, ``self.code_safety_checker``,
+``SynthesisMixin`` is mixed into ``StrategyLabOrchestrator`` — see the class
+statement in ``orchestrator.py`` for the current base order (more mixins
+have since joined it); its methods expect the attributes
+``StrategyLabOrchestrator.__init__`` sets on ``self`` (``self.strategy_validator``, ``self.code_safety_checker``,
 ``self.code_conformance_gate``, ``self.predicate_conformance_gate``,
 ``self.spec_readiness_gate``, ``self.target_symbol_coverage_gate``,
 ``self.predicate_reachability_probe``, ``self.zero_trade_repairer``,
@@ -67,7 +67,7 @@ from .agents._llm_budget import DesignBudgetExhausted
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
-from .quality_gates.models import QualityGateResult
+from .quality_gates.models import QualityGateResult, join_gate_details
 from .quality_gates.universe_injection import inject_universe_and_guard
 
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
@@ -149,7 +149,7 @@ class SynthesisMixin:
             short_circuit_status="failed: spec_validation",
             short_circuit_reason=(
                 "Spec validation failed before code synthesis: "
-                + "; ".join(g.details for g in criticals)
+                + join_gate_details(criticals)
             ),
             emit=emit,
             design_context=design_context,

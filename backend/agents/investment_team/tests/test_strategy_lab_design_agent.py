@@ -1650,13 +1650,51 @@ def test_run_threads_resolved_mode_into_mix_hint(
         "investment_team.strategy_lab.agents.design.format_prior_results", lambda _r: "PR"
     )
     monkeypatch.setattr(
-        "investment_team.strategy_lab.agents.design.format_prior_attribution", lambda _r: "PA"
+        "investment_team.strategy_lab.agents.design.format_prior_attribution",
+        lambda _r, **_kwargs: "PA",
     )
     monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "explore")
 
     DesignAgent().run(prior_records=[object()])
 
     assert seen["mode"] == "explore"
+
+
+def test_run_shares_one_prior_results_cache_across_both_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run`` independently calls ``format_prior_attribution`` and
+    ``asset_class_mix_hint`` over the same ``prior_records`` list; both
+    internally windowed-aggregate via ``strategy_lab_context._executed_records``.
+    A single cache dict must be created per ``run()`` call and passed to both,
+    so they share its memoized sort/filter pass instead of each recomputing
+    it."""
+    _patch_design(monkeypatch, _good_payload())
+    seen: Dict[str, Any] = {}
+
+    def _spy_attribution(records: Any, **kwargs: Any) -> str:
+        seen["attribution_cache"] = kwargs.get("cache")
+        return "PA"
+
+    def _spy_hint(records: Any, **kwargs: Any) -> str:
+        seen["hint_cache"] = kwargs.get("cache")
+        return "MIX-HINT"
+
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.format_prior_attribution", _spy_attribution
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.asset_class_mix_hint", _spy_hint
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.format_prior_results", lambda _r: "PR"
+    )
+
+    DesignAgent().run(prior_records=[object()])
+
+    assert seen["attribution_cache"] is not None
+    assert isinstance(seen["attribution_cache"], dict)
+    assert seen["attribution_cache"] is seen["hint_cache"]
 
 
 # ---------------------------------------------------------------------------

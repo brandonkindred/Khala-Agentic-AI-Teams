@@ -8,6 +8,7 @@ the job store via ``update_job``).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
 
 import pytest
@@ -52,7 +53,7 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
 
 
 def test_run_orchestrator_activity_failure_captured(
-    monkeypatch, tmp_path, patched_job_store
+    monkeypatch, tmp_path, patched_job_store, caplog
 ) -> None:
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
@@ -63,12 +64,17 @@ def test_run_orchestrator_activity_failure_captured(
         raise RuntimeError("orchestrator crashed")
 
     monkeypatch.setattr("software_engineering_team.orchestrator.run_orchestrator", boom)
+    caplog.set_level(logging.ERROR)
     with pytest.raises(RuntimeError, match="orchestrator crashed"):
-        activities.run_orchestrator_activity("job-x", str(tmp_path))
+        activities.run_orchestrator_activity("job-x", str(tmp_path), trace_id="fixed-trace-id")
     job = js.get_job("job-x")
     assert job is not None
     assert job["status"] == js.JOB_STATUS_FAILED
     assert "orchestrator crashed" in (job.get("error") or "")
+
+    failure_records = [r for r in caplog.records if "Orchestrator activity failed" in r.message]
+    assert failure_records, "expected the failure log to be emitted"
+    assert failure_records[-1].trace_id == "fixed-trace-id"
 
 
 def test_retry_failed_activity_success(monkeypatch) -> None:
@@ -195,18 +201,25 @@ def test_run_product_analysis_activity_happy(monkeypatch, tmp_path, patched_job_
     assert called["job_id"] == "pa-ok"
 
 
-def test_parse_spec_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:
+def test_parse_spec_activity_exception_path(
+    monkeypatch, tmp_path, patched_job_store, caplog
+) -> None:
     """No spec file in repo → spec parser raises FileNotFoundError, which the
     outer except in parse_spec_activity captures and re-raises after marking
-    the job FAILED."""
+    the job FAILED. The failure log carries the trace id bound for this activity."""
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
     js.create_job("ps-j", repo_path=str(tmp_path))
+    caplog.set_level(logging.ERROR)
     with pytest.raises(Exception):
-        activities.parse_spec_activity("ps-j", str(tmp_path))
+        activities.parse_spec_activity("ps-j", str(tmp_path), trace_id="parse-spec-trace-id")
     job = js.get_job("ps-j")
     assert job["status"] == js.JOB_STATUS_FAILED
+
+    failure_records = [r for r in caplog.records if "parse_spec_activity failed" in r.message]
+    assert failure_records, "expected the failure log to be emitted"
+    assert failure_records[-1].trace_id == "parse-spec-trace-id"
 
 
 def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:
