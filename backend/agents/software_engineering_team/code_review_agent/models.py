@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 from software_engineering_team.shared.models import SystemArchitecture
 
@@ -378,6 +378,17 @@ class ChunkReviewIssueLLM(BaseModel):
     ``complete_validated``'s one correction retry, rather than being
     silently rewritten to "high"/"general" as today's hand-rolled parsing
     does in ``chunking._issues_from_chunk_output``.
+
+    ``pre_existing`` is ``StrictBool``, not plain ``bool``: Pydantic's
+    default lax coercion would accept a numeric ``1``/``0`` (or "yes"/"no",
+    etc.) and silently turn it into a real ``True``/``False`` at validation
+    time. That would erase the distinction ``chunking._coerce_bool``
+    deliberately preserves downstream — only a real bool or a recognized
+    truthy string counts there, and a bare number is always false, to stop
+    a stray numeric value from being misread as an affirmative flag.
+    ``StrictBool`` keeps that policy intact by rejecting non-bool input
+    outright (driving ``complete_validated``'s corrective retry) instead of
+    silently coercing it before it ever reaches that downstream check.
     """
 
     severity: _ChunkReviewIssueSeverity = Field(
@@ -414,7 +425,7 @@ class ChunkReviewIssueLLM(BaseModel):
         default="",
         description="Concrete suggestion for how to fix the issue",
     )
-    pre_existing: bool = Field(
+    pre_existing: StrictBool = Field(
         default=False,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "

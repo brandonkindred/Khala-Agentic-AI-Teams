@@ -151,6 +151,18 @@ def test_out_of_set_severity_is_rejected_by_the_stricter_schema() -> None:
         ChunkReviewIssueLLM.model_validate({"description": "d", "severity": "blocker"})
 
 
+def test_numeric_pre_existing_is_rejected_by_strict_bool() -> None:
+    """``pre_existing`` is ``StrictBool``: Pydantic's default lax ``bool``
+    coercion would silently accept a numeric ``1`` and turn it into a real
+    ``True``, erasing the distinction ``chunking._coerce_bool`` deliberately
+    preserves downstream -- its policy is that a bare number is always
+    false, precisely so a stray numeric value is never misread as an
+    affirmative flag. Strict typing rejects the numeric value outright
+    instead of silently coercing it before it ever reaches that check."""
+    with pytest.raises(ValidationError):
+        ChunkReviewIssueLLM.model_validate({"description": "d", "pre_existing": 1})
+
+
 def test_empty_top_level_response_is_rejected() -> None:
     """An empty top-level response (a fully truncated reply) is rejected: all
     four fields are required, so this is a schema-validation failure rather
