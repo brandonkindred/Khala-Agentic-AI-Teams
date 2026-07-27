@@ -611,15 +611,20 @@ and `4`), the effective width is unchanged from the previous fixed-`4`
 behavior; raise `LLM_MAX_CONCURRENCY` (and this var, if a higher value is
 desired) together to let large-PR reviews fan out wider.
 
-**Applies only to the in-process thread-mode fallback** (`coordinator.run_coordinator`,
-via `mapping.py`'s parallel-map helper) — used only when Temporal is disabled or
-unavailable. It has **no effect** on the default Temporal-dispatch path (code
-review runs Temporal by default; see `TEMPORAL_ADDRESS (code review agent
-default)` above): there, each chunk is reviewed by its own durable
-`review_chunk_activity`, and fan-out concurrency is governed instead by the
-Temporal worker's own activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`
-(below) — raising `CODE_REVIEW_MAP_PARALLELISM` does nothing to speed up a large
-PR review running in the (default) Temporal mode.
+The map-phase fan-out governed by this knob **applies only to the in-process
+thread-mode fallback** (`coordinator.run_coordinator`, via `mapping.py`'s
+parallel-map helper) — used only when Temporal is disabled or unavailable. It
+has **no effect** on the default Temporal-dispatch *map phase* (code review
+runs Temporal by default; see `TEMPORAL_ADDRESS (code review agent default)`
+above): there, each chunk is reviewed by its own durable `review_chunk_activity`,
+and fan-out concurrency is governed instead by the Temporal worker's own
+activity-slot ceiling, `CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES` (below) —
+raising `CODE_REVIEW_MAP_PARALLELISM` does nothing to speed up a large PR
+review's map phase running in the (default) Temporal mode. The
+false-positive verification phase, however, always runs its per-file calls
+via an in-process `ThreadPoolExecutor` (even under Temporal, inside the
+single verify activity — see `CODE_REVIEW_VERIFY_TIMEOUT_SECONDS` below), so
+this ceiling still bounds *verification* concurrency in all dispatch modes.
 
 ### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
 Int (default `60`, floor `1`). Per-group timeout for the false-positive

@@ -786,6 +786,25 @@ def test_cap_review_chunk_headerless_segment_falls_back_to_raw_split() -> None:
     assert "".join(pieces) == line  # raw split, no header injected
 
 
+def test_cap_review_chunk_drops_header_when_header_alone_exceeds_cap() -> None:
+    """When the ### path ### header itself is >= max_chars, attaching it to
+    every piece would blow the budget it's meant to enforce. In that case the
+    header must be dropped (raw split of the whole rendered content, header
+    included at most once) rather than every piece exceeding max_chars."""
+    long_path = "pkg/" + ("d" * 50) + "/module.py"
+    header = f"### {long_path} ###\n"
+    line = "y" * 25_000
+    chunk = ReviewChunk(segments=[FileSegment(path=long_path, content=line, total_lines=1)])
+    max_chars = len(header)  # header alone already meets the cap
+    pieces = cap_review_chunk(chunk, max_chars)
+    assert all(len(p) <= max_chars for p in pieces)
+    # Raw split of chunk.content (header + line, header appearing once) --
+    # not the per-piece-header behavior, which would repeat the header in
+    # every piece and push each piece's length past max_chars.
+    assert "".join(pieces) == chunk.content
+    assert chunk.content.count(header) == 1
+
+
 def test_cap_review_chunk_rejects_nonpositive_cap() -> None:
     chunk = ReviewChunk(segments=[FileSegment(path="a.py", content="x = 1", total_lines=1)])
     with pytest.raises(AssertionError):
