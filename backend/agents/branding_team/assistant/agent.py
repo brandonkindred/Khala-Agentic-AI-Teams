@@ -397,13 +397,12 @@ class BrandingAssistantAgent:
                     system_prompt=SYSTEM_PROMPT,
                 )
             if extraction_llm is None:
-                from strands import Agent
+                from branding_team.graphs.shared import build_agent
 
-                from llm_service import get_strands_model
-
-                # Extractor emits strict JSON — keep the default JSON mode.
-                extraction_llm = Agent(
-                    model=get_strands_model("branding_assistant"),
+                # output_mode="json" (default): the extractor emits strict JSON.
+                extraction_llm = build_agent(
+                    name="extraction",
+                    agent_key="branding_assistant",
                     system_prompt=EXTRACTION_SYSTEM_PROMPT,
                 )
 
