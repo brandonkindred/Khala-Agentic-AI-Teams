@@ -46,7 +46,9 @@ _LINES_SUFFIX_RE = re.compile(r"\s*\(lines \d+-\d+ of \d+\)\s*$")
 # Both knobs are env-overridable (see docs/ENV_VARS.md).
 MIN_SPLIT_SEGMENT_CHARS = 8_000  # CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS, floor 1_000
 MAX_CHUNK_BISECT_DEPTH = 3  # CODE_REVIEW_MAX_BISECT_DEPTH, floor 0
-DEFAULT_MAP_PARALLELISM = 4  # CODE_REVIEW_MAP_PARALLELISM, floor 1
+DEFAULT_MAP_PARALLELISM = (
+    16  # CODE_REVIEW_MAP_PARALLELISM ceiling, floor 1; clamped by LLM_MAX_CONCURRENCY
+)
 
 _BLOCK_JOINER_CHARS = 2  # "\n\n" between rendered blocks in a chunk
 
@@ -82,7 +84,18 @@ def _max_bisect_depth() -> int:
 
 
 def _map_parallelism() -> int:
-    return parse_env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
+    """Configured map-phase fan-out ceiling, clamped by the process-global LLM gate.
+
+    Postconditions:
+        - Returns ``min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY)``, floored
+          at 1, so raising this ceiling for a large review can never request more
+          concurrent LLM calls than the process-wide semaphore allows regardless of
+          what else is in flight.
+    """
+    from llm_service.concurrency import get_llm_max_concurrency
+
+    ceiling = parse_env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
+    return max(1, min(ceiling, get_llm_max_concurrency()))
 
 
 def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:
@@ -369,23 +382,30 @@ def cap_review_chunk(chunk: ReviewChunk, max_chars: int) -> List[str]:
         - ``chunk.content`` ≤ ``max_chars`` yields ``[chunk.content]`` (the common
           path).
         - An over-budget chunk (one segment whose rendered content exceeds the cap
-          — a line longer than the cap) yields multiple pieces, each ≤ ``max_chars``
-          and each prefixed with the segment's ``### path ###`` header so a finding
-          in any piece stays attributable. The header counts against the budget.
+          — a line longer than the cap) yields multiple pieces, each ≤ ``max_chars``.
+          When the segment's ``### path ###`` header itself fits under the cap,
+          each piece is prefixed with it (header counts against the budget) so a
+          finding in any piece stays attributable; when the header alone would
+          meet or exceed the cap, headers are dropped and the raw content is
+          split instead — every piece staying ≤ ``max_chars`` always wins over
+          preserving attribution.
     """
     assert max_chars > 0, "max_chars must be positive"
     content = chunk.content
     if len(content) <= max_chars:
         return [content]
     # build_review_chunks places an oversized segment alone, so an over-budget
-    # chunk holds exactly one segment; re-attach its header to every body piece.
+    # chunk holds exactly one segment; re-attach its header to every body piece,
+    # unless the header itself would already blow the budget.
     if len(chunk.segments) == 1 and chunk.segments[0].path:
         seg = chunk.segments[0]
         header = f"### {seg.path} ###\n"
-        body_budget = max(1, max_chars - len(header))
-        return [header + piece for piece in cap_chunk_content(seg.prompt_content, body_budget)]
-    # Headerless (path == "") or, defensively, multi-segment: fall back to a raw
-    # character split — there is no per-piece header to preserve.
+        if len(header) < max_chars:
+            body_budget = max_chars - len(header)
+            return [header + piece for piece in cap_chunk_content(seg.prompt_content, body_budget)]
+    # Headerless (path == ""), header alone ≥ max_chars, or, defensively,
+    # multi-segment: fall back to a raw character split — there is no
+    # per-piece header that can fit within the budget.
     return cap_chunk_content(content, max_chars)
 
 
