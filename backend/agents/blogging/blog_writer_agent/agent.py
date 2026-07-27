@@ -1531,9 +1531,10 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
                 if fallback:
                     current_draft = fallback
-            except (LLMRateLimitError, LLMTemporaryError):
-                raise
             except Exception as e:
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    raise cause
                 logger.warning(
                     "User-feedback JSON fallback failed after retries; keeping original draft: %s",
                     e,
