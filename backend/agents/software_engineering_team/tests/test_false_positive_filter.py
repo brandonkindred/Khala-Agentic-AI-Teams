@@ -28,6 +28,7 @@ from code_review_agent.false_positive_filter import (
     _code_fence_for,
     _coerce_verdict,
     _parse_verdicts,
+    _render_finding_block,
     _strip_numbered_prefixes,
     filter_false_positives,
 )
@@ -597,6 +598,20 @@ def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:
 
 
 # --------------------------------------------------------------------------- prompt
+
+
+def test_render_finding_block_collapses_embedded_newlines() -> None:
+    """Multiline ``description``/``suggestion`` fields collapse to one prompt line each."""
+    issue = _issue(
+        description="line one\nline two\n  extra   spaces",
+        suggestion="fix step one\nfix step two",
+    )
+    block = _render_finding_block(0, issue)
+    assert len(block) == 4  # anchor, metadata, description, suggestion
+    for line in block:
+        assert "\n" not in line
+    assert block[2] == "description: line one line two extra spaces"
+    assert block[3] == "suggestion: fix step one fix step two"
 
 
 def test_group_prompt_has_anchor_indices_and_truncation_note() -> None:

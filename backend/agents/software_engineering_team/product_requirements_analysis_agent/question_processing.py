@@ -198,7 +198,10 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     open_questions = []
     if isinstance(raw_questions, list):
         for i, q in enumerate(raw_questions):
-            open_questions.append(parse_open_question(q, i))
+            try:
+                open_questions.append(parse_open_question(q, i))
+            except (ValueError, TypeError) as exc:
+                logger.warning("Skipping malformed open question at index %d: %s", i, exc)
 
     return SpecReviewResult(
         issues=issues,
@@ -261,6 +264,13 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
         else:
             depends_on = None
 
+        raw_section_impact = q_data.get("section_impact", [])
+        section_impact = (
+            list(raw_section_impact) if isinstance(raw_section_impact, (list, tuple)) else []
+        )
+        raw_asked_via = q_data.get("asked_via", [])
+        asked_via = list(raw_asked_via) if isinstance(raw_asked_via, (list, tuple)) else []
+
         return OpenQuestion(
             id=_str_or_default(q_data.get("id"), f"q{index}"),
             question_text=_str_or_default(q_data.get("question_text")),
@@ -276,10 +286,10 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             depends_on=depends_on,
             blocking=bool(q_data.get("blocking", True)),
             owner=_str_or_default(q_data.get("owner"), "user"),
-            section_impact=list(q_data.get("section_impact", [])),
+            section_impact=section_impact,
             due_date=_str_or_default(q_data.get("due_date")),
             status=_str_or_default(q_data.get("status"), "open"),
-            asked_via=list(q_data.get("asked_via", [])),
+            asked_via=asked_via,
         )
 
     return OpenQuestion(
@@ -641,9 +651,13 @@ def add_recommendations(
         return list(open_questions)
     try:
         rec_by_id = {
-            r.get("id"): str(r.get("recommendation", ""))
+            r.get("id"): str(r["recommendation"])
             for r in recs
-            if isinstance(r, dict) and "id" in r and isinstance(r.get("id"), str)
+            if (
+                isinstance(r, dict)
+                and isinstance(r.get("id"), str)
+                and r.get("recommendation") is not None
+            )
         }
         result = []
         for q in open_questions:
