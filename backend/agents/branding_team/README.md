@@ -129,7 +129,7 @@ flowchart LR
 
 Where `diverge_swarm` is itself an inner Swarm: `CreativeDirector` dispatches to three style-variant `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents and each hands back to `CreativeDirector` when done.
 
-Per-phase participating nodes. For the two `Graph`-based phases and the outer Phase 3 graph, node identifiers are the explicit `node_id` values passed to `builder.add_node(...)`. For the `Swarm`-based nodes (all of Phase 2, and Phase 3's inner `diverge_swarm`), Strands has no `node_id` concept — agents are identified by their own `Agent.name`, which the factories in `agents.py` set in PascalCase; those are listed below rather than a normalized/snake_case alias:
+Per-phase participating nodes. For the Graph-based phases (1, 4, and 5) and the outer Phase 3 graph, node identifiers are the explicit `node_id` values passed to `builder.add_node(...)`. For the `Swarm`-based nodes (all of Phase 2, and Phase 3's inner `diverge_swarm`), Strands has no `node_id` concept — agents are identified by their own `Agent.name`, which the factories in `agents.py` set in PascalCase; those are listed below rather than a normalized/snake_case alias:
 
 | Phase | Construct | Nodes |
 |---|---|---|
