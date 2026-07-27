@@ -337,6 +337,13 @@ def test_validate_finding_line_drops_when_file_unresolved() -> None:
     assert _validate_finding_line(index, "does/not/exist.py", 1) is None
 
 
+def test_validate_finding_line_survives_file_content_starting_with_error() -> None:
+    """A real file whose content starts with "Error:" must not be treated as an unreadable file."""
+    index = CodebaseIndex.from_input(_input(files={"a.py": "Error: not a real failure\ntwo\n"}))
+    assert _validate_finding_line(index, "a.py", 2) == 2
+    assert _validate_finding_line(index, "a.py", 9999) is None
+
+
 def test_validate_finding_line_trusts_pre_numbered_citation_as_is() -> None:
     index = CodebaseIndex.from_input(
         CodeReviewInput(
