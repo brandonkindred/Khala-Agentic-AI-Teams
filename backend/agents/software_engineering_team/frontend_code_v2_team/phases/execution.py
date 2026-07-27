@@ -303,6 +303,7 @@ GATE_CONFIG = GatedExecutionConfig(
     status_code_review=MicrotaskStatus.IN_REVIEW,
     status_qa=MicrotaskStatus.IN_REVIEW,
     status_security=MicrotaskStatus.IN_REVIEW,
+    status_qa_security=MicrotaskStatus.IN_QA_SECURITY_TESTING,
     max_total_cycles=lambda config: config.max_retries * 3,
     code_review_retry_cap=lambda config: config.max_retries,
     max_cycles_requires_failing_gate=False,
