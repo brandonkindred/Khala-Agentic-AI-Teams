@@ -154,18 +154,23 @@ def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
 
 
 def _extract_json_array_from_text(text: str) -> Optional[list]:
-    """Parse a JSON array from ``text``, including when prefixed by prose.
+    """Parse a JSON array of objects from ``text``, including when prefixed by prose.
 
     Preconditions:
         - ``text`` is a string (may be empty).
     Postconditions:
-        - Returns the first value successfully decoded as a JSON array by scanning
-          for ``[`` and using ``json.JSONDecoder.raw_decode``, or ``None``.
-        - Does not use first-``[`` / last-``]`` slicing, so Markdown links such as
-          ``[label](url)`` are skipped when they are not valid JSON arrays.
+        - Returns the first decoded JSON array whose elements are all dicts, found
+          by scanning for ``[`` and using ``json.JSONDecoder.raw_decode``.
+        - A syntactically valid but schema-mismatched array (e.g. a numeric
+          citation like ``[1]``, or ``[]`` from an empty Markdown link
+          ``[label]()``) does not short-circuit the scan; scanning continues past
+          it toward the real payload.
+        - If no array of dicts is found, returns the first genuinely empty ``[]``
+          match (a real "no items" response), or ``None`` if no array matched at all.
     """
     decoder = json.JSONDecoder()
     search_from = 0
+    empty_fallback = None
     while True:
         i = text.find("[", search_from)
         if i == -1:
@@ -176,9 +181,12 @@ def _extract_json_array_from_text(text: str) -> Optional[list]:
             search_from = i + 1
             continue
         if isinstance(value, list):
-            return value
+            if value and all(isinstance(el, dict) for el in value):
+                return value
+            if not value and empty_fallback is None:
+                empty_fallback = value
         search_from = i + 1
-    return None
+    return empty_fallback
 
 
 def _looks_like_top_level_json_object(text: str) -> bool:
