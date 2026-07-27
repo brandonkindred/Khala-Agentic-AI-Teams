@@ -115,6 +115,7 @@ def test_acceptance_verifier_marks_unmet_criterion_from_tagged_issue() -> None:
                 }
             ],
             "summary": "One criterion unmet",
+            "spec_compliance_notes": "",
         }
     )
     agent = AcceptanceVerifierAgent(stub)
@@ -149,6 +150,7 @@ def test_acceptance_two_unmet_criteria_same_file_both_reported() -> None:
                 },
             ],
             "summary": "Both criteria unmet",
+            "spec_compliance_notes": "",
         }
     )
     result = AcceptanceVerifierAgent(stub).run(_input())
@@ -171,6 +173,7 @@ def test_acceptance_unattributed_finding_blocks() -> None:
                 }
             ],
             "summary": "vague",
+            "spec_compliance_notes": "",
         }
     )
     result = AcceptanceVerifierAgent(stub).run(_input())
@@ -308,8 +311,12 @@ def test_derive_per_criterion_distinct_prefixes_for_same_reason() -> None:
     """Two criteria whose findings share a reason but differ by criterion prefix
     are both attributed (distinct descriptions survive dedupe; P2 regression)."""
     issues = [
-        CodeReviewIssue(severity="high", category="spec-compliance", description="c1 :: no evidence"),
-        CodeReviewIssue(severity="high", category="spec-compliance", description="c2 :: no evidence"),
+        CodeReviewIssue(
+            severity="high", category="spec-compliance", description="c1 :: no evidence"
+        ),
+        CodeReviewIssue(
+            severity="high", category="spec-compliance", description="c2 :: no evidence"
+        ),
     ]
     out = derive_per_criterion(["c1", "c2"], issues)
     assert all(not c.satisfied for c in out)
@@ -318,7 +325,9 @@ def test_derive_per_criterion_distinct_prefixes_for_same_reason() -> None:
 def test_derive_per_criterion_prefix_match_ignores_whitespace_and_case() -> None:
     """Criterion attribution is whitespace-collapsed and case-insensitive."""
     issues = [
-        CodeReviewIssue(severity="high", category="spec-compliance", description="  Returns  ZERO  :: d")
+        CodeReviewIssue(
+            severity="high", category="spec-compliance", description="  Returns  ZERO  :: d"
+        )
     ]
     out = derive_per_criterion(["returns zero"], issues)
     assert out[0].satisfied is False

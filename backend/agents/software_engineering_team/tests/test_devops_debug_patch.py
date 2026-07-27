@@ -463,7 +463,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
@@ -548,7 +548,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                     "fixable": False,
                 },
                 {"approved": True, "summary": "ok", "findings": []},
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 {"quality_gates": {}, "summary": "ok"},
                 {"files": {}, "summary": "doc ok"},
             ],
@@ -642,7 +642,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
@@ -762,7 +762,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook

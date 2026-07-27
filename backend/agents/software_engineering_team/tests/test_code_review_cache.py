@@ -120,7 +120,7 @@ class _FailOnMarkerClient(DummyLLMClient):
         return dict(_APPROVED)
 
 
-_APPROVED = {"approved": True, "issues": [], "summary": "OK"}
+_APPROVED = {"approved": True, "issues": [], "summary": "OK", "spec_compliance_notes": ""}
 
 
 def _one_file_input(content: str = "def f():\n    return 1\n", **overrides: Any) -> CodeReviewInput:
@@ -227,6 +227,7 @@ def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
             }
         ],
         "summary": "Needs work",
+        "spec_compliance_notes": "",
     }
     # Second (and later) responses differ — a hit must never surface them.
     client = _SwitchingClient([high_issue, _APPROVED])
@@ -685,13 +686,14 @@ _REJECTED = {
     "issues": [
         {
             "severity": "high",
-            "category": "correctness",
+            "category": "logic",
             "file_path": "app/a.py",
             "description": "Missing input validation",
             "suggestion": "Validate inputs",
         }
     ],
     "summary": "Rejected",
+    "spec_compliance_notes": "",
 }
 
 
