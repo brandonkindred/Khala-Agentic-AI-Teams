@@ -336,6 +336,16 @@ def test_dedup_issues_removes_repeats():
     assert sh_review_cycle._dedup_issues([c], seen) == []
 
 
+def test_dedup_issues_tolerates_shapeless_elements():
+    """Elements missing file_path/description dedup on an empty-string key instead of raising."""
+    seen: set = set()
+    shapeless_a = object()
+    shapeless_b = object()
+    result = sh_review_cycle._dedup_issues([shapeless_a, shapeless_b], seen)
+    assert result == [shapeless_a]  # shapeless_b dedups against the ("", "") key
+    assert seen == {("", "")}
+
+
 def test_run_execution_impl_filters_and_handles_failure():
     """Run execution impl filters and handles failure."""
 
