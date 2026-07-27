@@ -395,6 +395,13 @@ def test_choose_event_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert choose_event([_Issue(severity="critical")], author="a", reviewer="b") == "APPROVE"
 
 
+def test_choose_event_comment_when_authorship_unknown() -> None:
+    issues = [_Issue(severity="critical")]
+    # author/reviewer both omitted (default ""): authorship is unknown, so this
+    # must not assume the reviewer isn't the author and risk a GitHub 422.
+    assert choose_event(issues) == "COMMENT"
+
+
 # ---------------------------------------------------------------------------
 # group_similar_findings
 # ---------------------------------------------------------------------------

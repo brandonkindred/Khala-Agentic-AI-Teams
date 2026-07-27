@@ -1466,7 +1466,12 @@ class TestReviewEndpoint:
         # exception text is never surfaced on the PR.
         gh = review_app["github"]["client"]
         assert any("could not complete and did not post findings" in b for _n, b in gh.comments)
-        assert not any(("llm down" in b or "RuntimeError" in b) for _n, b in gh.comments)
+        all_bodies = (
+            [b for _n, b in gh.comments]
+            + [r.get("body", "") for r in gh.reviews]
+            + [c.get("body", "") for c in gh.review_comments]
+        )
+        assert not any(("llm down" in b or "RuntimeError" in b) for b in all_bodies)
 
     def test_no_changed_files_completes(self, review_app) -> None:
         review_app["github"]["client"].files = []
@@ -3026,7 +3031,7 @@ class TestWholeFileReview:
 
         out = _fetch_head_files(_C(), "o", "r", files, "sha1")
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
-        assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
+        assert len(seen_threads) > 1, "fetches were distributed across more than one worker thread"
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
         from software_engineering_team.github_source import GitHubRepoReader
@@ -3286,18 +3291,14 @@ class TestParallelReviewReads:
 
     def test_fetch_pr_metadata_concurrent_fetches_do_not_corrupt_results(self, review_app) -> None:
         import threading
-        import time
 
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        seen_threads: set[int] = set()
-        lock = threading.Lock()
+        barrier = threading.Barrier(3)
 
         class _C:
             def get_pull_request(self, o, r, n):
-                with lock:
-                    seen_threads.add(threading.get_ident())
-                time.sleep(0.01)
+                barrier.wait()
                 return PullRequestDetail(
                     number=n,
                     html_url=f"https://example/pull/{n}",
@@ -3314,22 +3315,18 @@ class TestParallelReviewReads:
                 )
 
             def get_pull_request_files(self, o, r, n):
-                with lock:
-                    seen_threads.add(threading.get_ident())
-                time.sleep(0.01)
+                barrier.wait()
                 return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
 
             def get_authenticated_login(self):
-                with lock:
-                    seen_threads.add(threading.get_ident())
-                time.sleep(0.01)
+                barrier.wait()
                 return "khala-bot"
 
         pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
         assert pr.number == 7
         assert [f.filename for f in files] == ["a.py"]
         assert reviewer_login == "khala-bot"
-        assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
+        assert barrier.n_waiting == 0  # confirms the fetches actually ran concurrently
 
     def test_fetch_pr_metadata_get_pull_request_failure_propagates(self, review_app) -> None:
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
@@ -3451,37 +3448,29 @@ class TestParallelReviewReads:
         self, review_app
     ) -> None:
         import threading
-        import time
 
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        seen_threads: set[int] = set()
-        lock = threading.Lock()
+        barrier = threading.Barrier(3)
         review_comment = ReviewComment(
             id=1, path="a.py", line=2, body="desc", html_url="https://example/comment/1"
         )
 
         class _C:
             def list_review_comments(self, o, r, n):
-                with lock:
-                    seen_threads.add(threading.get_ident())
-                time.sleep(0.01)
+                barrier.wait()
                 return [review_comment]
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
-                with lock:
-                    seen_threads.add(threading.get_ident())
-                time.sleep(0.01)
+                barrier.wait()
                 return {1}
 
             def list_issue_comments(self, o, r, n):
-                with lock:
-                    seen_threads.add(threading.get_ident())
-                time.sleep(0.01)
+                barrier.wait()
                 return []
 
         out = _fetch_existing_comments(_C(), "o", "r", 7)
-        assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
+        assert barrier.n_waiting == 0  # confirms the fetches actually ran concurrently
         assert len(out) == 1
         assert out[0].path == "a.py" and out[0].line == 2
         assert out[0].resolved is True  # id 1 is in resolved_ids
