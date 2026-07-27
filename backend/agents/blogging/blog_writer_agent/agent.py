@@ -291,7 +291,8 @@ class BlogWriterAgent(_BlogAgentBase):
               ``EventLoopException``, propagate unwrapped from
               ``call_json_with_retry`` so the draft-stage retry funnel can catch them.
         """
-        assert isinstance(prompt, str) and prompt.strip(), "prompt must be a non-empty string"
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
 
         soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
         strict_json_suffix = (
