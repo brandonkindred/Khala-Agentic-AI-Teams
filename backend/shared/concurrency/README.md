@@ -102,11 +102,30 @@ Parameters cover the axes the original copies differed on:
 - `on_first_exception` — optional zero-arg callback fired exactly once, on the
   first worker exception, **before** pending tasks are cancelled and the
   exception re-raises.
+- `timeout` / `on_timeout` — optional per-item wall-clock budget in seconds,
+  measured from when that item's `fn` actually starts running (not from
+  submission, so queued-behind-a-busy-worker time is never charged). A task
+  that exceeds it is **degraded, not aborted**: its result becomes `None`
+  (`on_timeout(item)` is invoked first, if given) while the rest of the batch
+  keeps running unaffected. Default `None` disables timeouts entirely and
+  runs the original code path unchanged.
 
 Error policy is a single, documented **fast-fail**: the first worker exception is
 observed in completion order (never delayed behind a slower earlier task),
 pending tasks are cancelled (`cancel_futures=True`), and the exception propagates
 with its original traceback while already-running tasks finish in the background.
+A per-item `timeout` is independent of this: it degrades just that one item and
+never trips the fast-fail path — unless a *different* item also raises a real
+exception, in which case fast-fail still wins.
+
+```python
+# Per-item timeout: a hung item degrades to None instead of blocking the batch,
+# with a hook to log/record which item timed out:
+results = parallel_map(
+    groups, verify_one, max_workers=4, skip_none=False,
+    timeout=60.0, on_timeout=lambda item: logger.warning("verify timed out: %s", item),
+)
+```
 
 Migrated callers: the sales pod's per-prospect / decision-maker / dossier
 fan-outs (`sales_team/orchestrator.py`), the blog research agent's document

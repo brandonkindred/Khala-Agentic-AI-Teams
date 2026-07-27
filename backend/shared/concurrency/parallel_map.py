@@ -23,7 +23,8 @@ from __future__ import annotations
 import contextvars
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Callable, Optional, Sequence, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,8 @@ def parallel_map(
     propagate_context: bool = True,
     on_first_exception: Optional[Callable[[], None]] = None,
     wait_for_stragglers: bool = False,
+    timeout: Optional[float] = None,
+    on_timeout: Optional[Callable[[T], None]] = None,
 ) -> list[Optional[R]]:
     """Run ``fn(item)`` concurrently across *items* in a bounded thread pool.
 
@@ -94,6 +97,20 @@ def parallel_map(
             Opt in when a worker's side effects (provider fetches, cache
             writes, subprocess calls) must not outlive the caller's failure
             handling.
+        timeout: Optional per-item wall-clock budget in seconds, measured
+            from when that item's ``fn`` call actually **starts running**
+            in its worker thread (not from submission — so an item still
+            queued behind a busy worker isn't charged for its wait). When a
+            task exceeds its own budget, only that task is degraded to a
+            ``None`` result (subject to ``skip_none`` like any other
+            ``None``); the rest of the batch continues unaffected. Default
+            ``None`` disables timeouts entirely — the loop is byte-for-byte
+            the pre-existing implementation in that case.
+        on_timeout: Optional one-arg callback invoked with the timed-out
+            *item* (not the result) when a per-item timeout fires. Mirrors
+            ``on_first_exception``'s hook contract: a raising callback is
+            logged and discarded rather than replacing/masking the
+            degrade, so one bad hook can't take down the batch.
 
     Returns:
         ``list[Optional[R]]`` — results in input (or completion) order. With the
@@ -116,6 +133,9 @@ def parallel_map(
           the helper only needs to size and iterate the input.
         - ``on_first_exception``, when not ``None``, is callable (else
           ``TypeError``).
+        - ``timeout``, when not ``None``, is an ``int``/``float`` (else
+          ``TypeError``) and > 0 (else ``ValueError``).
+        - ``on_timeout``, when not ``None``, is callable (else ``TypeError``).
         - When ``propagate_context`` is True, this function is called on the
           thread whose context should be snapshotted into the workers.
 
@@ -137,6 +157,21 @@ def parallel_map(
           propagates.
         - On success with ``preserve_order`` True, ``result[i]`` corresponds to
           ``items[i]`` (before any ``skip_none`` filtering).
+        - When ``timeout`` is set, a task that exceeds it is **degraded, not
+          aborted**: its result becomes ``None`` (``on_timeout`` is invoked
+          with the original item first, if provided), the rest of the batch
+          keeps running unaffected, and this does *not* trip the fast-fail
+          ``abort`` flag — a timeout is not a worker exception. A degraded
+          task's future is still running in the background at that point
+          (it cannot be cancelled once started); the final
+          ``ThreadPoolExecutor.shutdown`` call blocks on it exactly when
+          ``wait_for_stragglers`` is True, same as an already-running task
+          left behind by the fast-fail path. If a *different* item raises a
+          genuine exception, the existing fast-fail policy still applies on
+          top of any timeout bookkeeping already done.
+        - With ``timeout=None`` (the default), behavior is identical to the
+          version of this function without timeout support — the code path
+          taken is the same, not merely equivalent.
 
     Invariants:
         - Each task receives its own ``copy_context()`` (a single ``Context``
@@ -160,6 +195,13 @@ def parallel_map(
         # surface inside the failure handler, where it's caught and logged, hiding
         # the misconfiguration behind whatever worker error happened to occur.
         raise TypeError("on_first_exception must be callable")
+    if timeout is not None:
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+            raise TypeError("timeout must be an int or float")
+        if timeout <= 0:
+            raise ValueError("timeout must be > 0")
+    if on_timeout is not None and not callable(on_timeout):
+        raise TypeError("on_timeout must be callable")
 
     n = len(items)
     if n == 0:
@@ -172,32 +214,77 @@ def parallel_map(
     # Postconditions above; a task that already passed the check is treated
     # as legitimately "already running".
     abort = threading.Event()
+    # Only populated (and only consulted) when ``timeout`` is set — each cell
+    # is written exactly once, by that item's own worker thread, so no lock
+    # is needed. ``None`` means "not started yet" (queued behind a busy
+    # worker), which must never count against the item's own budget.
+    start_times: list[Optional[float]] = [None] * n
 
-    def _guarded(item: T) -> Optional[R]:
+    def _guarded(i: int, item: T) -> Optional[R]:
         if abort.is_set():
             return None
+        if timeout is not None:
+            start_times[i] = time.monotonic()
         return fn(item)
 
-    def _submit(pool: ThreadPoolExecutor, item: T):
+    def _submit(pool: ThreadPoolExecutor, i: int, item: T):
         # A fresh context copy per task: a single Context can't be entered
         # concurrently, and each worker must see the parent's attribution.
         if propagate_context:
-            return pool.submit(contextvars.copy_context().run, _guarded, item)
-        return pool.submit(_guarded, item)
+            return pool.submit(contextvars.copy_context().run, _guarded, i, item)
+        return pool.submit(_guarded, i, item)
 
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = [_submit(pool, item) for item in items]
+        futures = [_submit(pool, i, item) for i, item in enumerate(items)]
         index_of = {fut: i for i, fut in enumerate(futures)}
         ordered: list = [None] * n
         completion: list = []
-        # Drain in completion order so the first failure surfaces as it happens —
-        # never delayed behind a slower earlier task — while ``ordered`` records
-        # each result at its submission index for the preserve-order return.
-        for fut in as_completed(futures):
-            value = fut.result()  # re-raises the worker's exception with its traceback
-            ordered[index_of[fut]] = value
-            completion.append(value)
+        timed_out = False
+        if timeout is None:
+            # Drain in completion order so the first failure surfaces as it happens
+            # — never delayed behind a slower earlier task — while ``ordered``
+            # records each result at its submission index for preserve-order.
+            for fut in as_completed(futures):
+                value = fut.result()  # re-raises the worker's exception with its traceback
+                ordered[index_of[fut]] = value
+                completion.append(value)
+        else:
+            # Same completion-order draining as above, interleaved with a
+            # per-item deadline check on whatever's still pending: a short
+            # poll bounds how late a timeout is noticed without busy-looping.
+            pending = set(futures)
+            poll_interval = min(timeout, 0.05)
+            while pending:
+                done, pending = wait(pending, timeout=poll_interval, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    value = fut.result()  # re-raises the worker's exception with its traceback
+                    ordered[index_of[fut]] = value
+                    completion.append(value)
+                if not pending:
+                    break
+                now = time.monotonic()
+                for fut in list(pending):
+                    i = index_of[fut]
+                    started_at = start_times[i]
+                    if started_at is not None and now - started_at >= timeout:
+                        # Degrade, don't abort: this item alone becomes None;
+                        # its future is left running in the background (it
+                        # already started, so it can't be cancelled) and the
+                        # rest of the batch is unaffected. This never touches
+                        # ``abort`` — a timeout is not a worker exception.
+                        pending.discard(fut)
+                        timed_out = True
+                        if on_timeout is not None:
+                            try:
+                                on_timeout(items[i])
+                            except Exception:
+                                logger.exception(
+                                    "on_timeout hook raised for a degraded item; "
+                                    "the item's result remains None"
+                                )
+                        ordered[i] = None
+                        completion.append(None)
     except BaseException as exc:
         # Set before anything else below (including the hook, which is
         # caller-supplied and may be slow) to give not-yet-started tasks the
@@ -226,7 +313,12 @@ def parallel_map(
         finally:
             pool.shutdown(wait=wait_for_stragglers, cancel_futures=True)
         raise
-    pool.shutdown(wait=True)
+    # A degraded (timed-out) item's future may still be running in the
+    # background — mirror the fast-fail path's ``wait_for_stragglers``
+    # contract instead of always blocking, so the "degrade, don't abort"
+    # promise holds for the success path too. With no timeouts, this is
+    # exactly the original unconditional ``wait=True``.
+    pool.shutdown(wait=wait_for_stragglers if timed_out else True)
 
     results = ordered if preserve_order else completion
     if skip_none:
