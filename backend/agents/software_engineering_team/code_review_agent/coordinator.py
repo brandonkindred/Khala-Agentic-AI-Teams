@@ -88,7 +88,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import OrderedDict
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
 from shared.env_config import env_bool
@@ -398,6 +398,92 @@ def _merge_narrative(
     return concatenated_summary, concatenated_notes
 
 
+def _run_tail_passes(
+    *,
+    llm: LLMClient,
+    input_data: CodeReviewInput,
+    genuine_issues: List[CodeReviewIssue],
+    repo_reader: Optional[RepoReader],
+    shared_index: CodebaseIndex,
+) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue], List[CodeReviewIssue]]:
+    """Run the false-positive / architecture / side-effect tail passes.
+
+    All three are once-per-submission, additive-only, read-only checks over
+    the same shared ``CodebaseIndex`` (built once by the caller): false-positive
+    verification re-checks each genuine chunk finding against the whole
+    submission and drops confirmed false positives; the architecture-consistency
+    pass flags architecture contradictions and cross-codebase redundancy the
+    per-chunk view cannot see; the side-effect pass flags a changed function's
+    blast radius on callers elsewhere in the codebase. None of the three reads
+    another's output, so they are independent of call order.
+
+    Preconditions:
+        - ``genuine_issues`` is the deduped set of genuine chunk findings
+          (coverage/safety findings excluded, per ``filter_false_positives``'s
+          own precondition).
+        - ``shared_index`` was built from the same ``input_data``/``repo_reader``.
+
+    Postconditions:
+        - Returns ``(verified, architecture_findings, side_effect_findings)``:
+          ``verified`` is ``genuine_issues`` unchanged when
+          ``input_data.skip_false_positive_filter`` is set (the filter call is
+          skipped entirely), else the false-positive filter's result; the other
+          two are each pass's raw findings list (possibly empty), for the caller
+          to fold into ``verified`` itself.
+        - When ``llm`` is (or wraps) a ``DummyLLMClient`` (see
+          ``_tail_passes_run_sequentially`` — such doubles use a shared
+          non-thread-safe scripted response index) or fewer than two passes are
+          scheduled, the passes run sequentially in the order below, exactly as
+          before this fan-out existed. Otherwise they run concurrently via
+          ``parallel_map`` against the same shared, read-only index/repo_reader,
+          producing byte-identical results to the sequential path since none of
+          the three passes has a cross-pass dependency.
+    """
+    calls: List[Tuple[str, Callable[[], List[CodeReviewIssue]]]] = []
+    if not input_data.skip_false_positive_filter:
+        calls.append(
+            (
+                "filter",
+                lambda: filter_false_positives(
+                    llm, input_data, genuine_issues, repo_reader=repo_reader, index=shared_index
+                ),
+            )
+        )
+    calls.append(
+        (
+            "architecture",
+            lambda: find_architecture_and_redundancy_issues(
+                llm, input_data, repo_reader=repo_reader, index=shared_index
+            ),
+        )
+    )
+    calls.append(
+        (
+            "side_effect",
+            lambda: find_side_effect_impact_issues(
+                llm, input_data, repo_reader=repo_reader, index=shared_index
+            ),
+        )
+    )
+
+    if _tail_passes_run_sequentially(llm) or len(calls) <= 1:
+        results = {name: fn() for name, fn in calls}
+    else:
+        # Imported lazily, matching shared/v2_review.py's and
+        # shared/phases/review_cycle.py's identical parallel_map import — keeps
+        # the module import light for callers that never hit the concurrent
+        # branch (e.g. every DummyLLMClient-backed test).
+        from shared.concurrency import parallel_map
+
+        outputs = parallel_map(
+            [fn for _, fn in calls], lambda fn: fn(), max_workers=len(calls), skip_none=False
+        )
+        results = {name: output for (name, _), output in zip(calls, outputs)}
+
+    verified = results.get("filter", genuine_issues)
+    return verified, results["architecture"], results["side_effect"]
+
+
 def run_coordinator(
     llm: LLMClient,
     input_data: CodeReviewInput,
@@ -605,44 +691,31 @@ def run_coordinator(
     # same submission/repo_reader, so a single index avoids parsing the submission twice.
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
-    if input_data.skip_false_positive_filter:
-        # The calling gate opted out of the whole-codebase re-check and stands
-        # behind its per-chunk findings as-is (e.g. a gate whose findings must
-        # never be silently dropped). Skipping is purely a removal of the
-        # drop-false-positives step, so it can only ever keep more findings.
-        verified = genuine_issues
-    else:
-        verified = filter_false_positives(
-            llm, input_data, genuine_issues, repo_reader=repo_reader, index=shared_index
-        )
-
-    # Architecture-consistency / cross-codebase-redundancy pass: a separate, additive,
-    # once-per-submission check for two things the map phase structurally cannot see —
-    # whether the change contradicts the architecture document, and whether it duplicates a
-    # capability that already exists elsewhere in the repository. Runs after the false-positive
-    # filter (its findings are already tool-grounded, so they are not subjected to that filter
-    # again) and folds straight into the same dedupe/severity-gate/merge machinery below.
-    # (Restricted internally to the default CODE_REVIEW profile -- see that function's
-    # own docstring for why the other profiles must never receive these findings.)
-    architecture_findings = find_architecture_and_redundancy_issues(
-        llm, input_data, repo_reader=repo_reader, index=shared_index
+    # False-positive verification (skipped when the calling gate opted out via
+    # ``skip_false_positive_filter`` -- e.g. a gate whose findings must never be
+    # silently dropped; skipping only removes the drop-false-positives step, so
+    # it can only ever keep more findings), the architecture-consistency /
+    # cross-codebase-redundancy pass (whether the change contradicts the
+    # architecture document, or duplicates a capability that already exists
+    # elsewhere in the repository), and the side-effect / blast-radius pass
+    # (whether a changed function/method breaks a caller elsewhere in the
+    # codebase, or leaves a docstring/comment that no longer matches the
+    # implementation) are three separate, additive, once-per-submission checks
+    # the per-chunk map phase structurally cannot see. None reads another's
+    # output, so they run concurrently when safe (see ``_run_tail_passes``) and
+    # fold straight into the same dedupe/severity-gate/merge machinery below.
+    # (The latter two are restricted internally to the default CODE_REVIEW
+    # profile -- see their own docstrings for why the other profiles must never
+    # receive these findings.)
+    verified, architecture_findings, side_effect_findings = _run_tail_passes(
+        llm=llm,
+        input_data=input_data,
+        genuine_issues=genuine_issues,
+        repo_reader=repo_reader,
+        shared_index=shared_index,
     )
     if architecture_findings:
         verified = [*verified, *architecture_findings]
-
-    # Side-effect / blast-radius pass: a separate, additive, once-per-submission check
-    # for whether a changed function/method's new behavior produces an unintended logical
-    # consequence -- a genuine side effect that breaks a caller elsewhere in the codebase
-    # (category "side-effects") -- and, separately, whether a docstring/comment no longer
-    # matches the implementation (category "documentation", not a side effect). Both are
-    # something the per-chunk map phase cannot verify (it has no tools to find callers) and
-    # neither the false-positive filter nor the architecture pass checks. Runs after the
-    # architecture pass and folds into the same dedupe/severity-gate/merge machinery below.
-    # (Restricted internally to the default CODE_REVIEW profile -- see that function's own
-    # docstring for why.)
-    side_effect_findings = find_side_effect_impact_issues(
-        llm, input_data, repo_reader=repo_reader, index=shared_index
-    )
     if side_effect_findings:
         verified = [*verified, *side_effect_findings]
 
