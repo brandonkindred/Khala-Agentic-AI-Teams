@@ -439,10 +439,11 @@ class DesignAgent:
         contract. This method's own contract — inputs, outputs, exceptions
         — is unchanged by the split, but under the hood
         ``_structured_preflight`` now issues two sequential LLM calls
-        (reasoning then formatting) charged/timed as a single unit via
-        :func:`so.invoke_structured_with_schema`, and degrades to
-        ``_legacy_parse_retry_loop`` (a single-call path) on either pass's
-        ``schema_forced`` semantic exhaustion.
+        (reasoning then formatting) via :func:`so.invoke_structured_with_schema`,
+        which charges the active design-phase budget twice up front — one
+        unit per call — and runs both under a single timeout/retry envelope.
+        It degrades to ``_legacy_parse_retry_loop`` (a single-call path) on
+        either pass's ``schema_forced`` semantic exhaustion.
         """
         structured_available = so.structured_output_available()
         prompt = user_prompt
@@ -456,7 +457,9 @@ class DesignAgent:
     def _structured_preflight(
         self, system_prompt: str, user_prompt: str
     ) -> Tuple[Optional[Tuple[Dict[str, Any], str]], str]:
-        """Attempt one provider-enforced schema-constrained design call.
+        """Attempt one provider-enforced schema-constrained design call —
+        a reasoning pass followed by a formatting pass, via
+        :func:`so.invoke_structured_with_schema`.
 
         Pre: :func:`so.structured_output_available` is True (checked by the
         caller, :meth:`_invoke_and_parse`); ``system_prompt`` / ``user_prompt``
@@ -734,9 +737,12 @@ class DesignAgent:
 
         Pre: ``strategy_dict`` is a parsed, DSL-valid spec dict (no
         ``strategy_code`` key).
-        Post: returns a :class:`SpecCritique`. Best-effort — any LLM
-        transport or JSON parse failure raises and the caller falls back
-        to the original spec.
+        Post: returns a :class:`SpecCritique`. Best-effort — JSON parse
+        failures and most LLM transport failures raise and the caller falls
+        back to the original spec. When structured output is enabled, a
+        reasoning-pass ``LLMSemanticExhaustionError`` with
+        ``schema_forced=True`` does not raise: it degrades to the legacy
+        single-shot call instead, which only then raises if it also fails.
         """
         spec_json = json.dumps(strategy_dict, indent=2, sort_keys=True)
         user_prompt = (

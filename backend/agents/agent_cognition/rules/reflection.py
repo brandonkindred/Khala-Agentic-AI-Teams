@@ -242,8 +242,11 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
           bug.
     Postconditions:
         * Reads the agent's recent summaries, active rules, and pending
-          proposals. When the agent has no summaries yet, returns a
-          zero-``llm_calls`` report having made **no LLM call and no write**.
+          proposals. Stale-evidence pending proposals are superseded (a
+          durable write) even when there are no fresh summaries. When the
+          agent has no summaries yet, returns a zero-``llm_calls`` report
+          having made **no LLM call and no new proposal** after that
+          cleanup.
         * Every proposal written has ``status='pending'`` with
           ``proposed_rule.source='derived'`` and ``(summary_id, version)``
           evidence refs spanning the reflection window; **no rule is created or

@@ -90,6 +90,11 @@ def test_direct_answer(root_spec, mock_llm):
     assert result.answer == "42"
     assert result.child_results == []
     mock_llm.complete_json.assert_called_once()
+    # The reasoning pass that now precedes formatting also ran.
+    mock_llm.complete.assert_called_once()
+    assert mock_llm.complete.call_args.kwargs.get("objective", "").startswith(
+        "analyze specialist question"
+    )
 
 
 # ------------------------------------------------------------------
@@ -112,6 +117,9 @@ def test_structural_confidence_direct(root_spec, mock_llm):
 
     # 0.4 + 0.6 * min(0.9, 0.95) = 0.4 + 0.54 = 0.94
     assert result.confidence == 0.94
+    # Both the reasoning pass and the formatting pass ran exactly once.
+    assert mock_llm.complete.call_count == 1
+    assert mock_llm.complete_json.call_count == 1
 
 
 # ------------------------------------------------------------------
@@ -143,7 +151,10 @@ def test_depth_limit_forces_direct(mock_llm):
             }
         ],
     }
-    mock_llm.complete.return_value = "Forced direct answer"
+    # The reasoning pass (routed by objective) gets a placeholder distinct
+    # from the actual forced-direct-answer call, so the two can't be
+    # conflated by sharing one return value.
+    mock_llm.complete.side_effect = _complete_side_effect("Forced direct answer")
 
     agent = _make_agent(spec, mock_llm)
     result = agent.execute(max_depth=5)
@@ -151,6 +162,8 @@ def test_depth_limit_forces_direct(mock_llm):
     assert not result.was_decomposed
     assert result.answer == "Forced direct answer"
     assert result.child_results == []
+    assert mock_llm.complete.call_count == 2
+    assert mock_llm.complete_json.call_count == 1
 
 
 # ------------------------------------------------------------------
@@ -386,13 +399,14 @@ def test_original_query_threaded_to_children(root_spec, mock_llm):
     system_prompt = first_complete_call.kwargs.get("system_prompt", "")
     assert original_msg in system_prompt
 
-    # The formatting call sees only the reasoning pass's prose, never the
-    # raw original_query text.
-    format_call = mock_llm.complete_json.call_args
-    format_input = (format_call.kwargs.get("system_prompt") or "") + str(
-        format_call.args[0] if format_call.args else ""
-    )
-    assert original_msg not in format_input
+    # Every formatting call (root analysis and child analysis both make one)
+    # sees only its own reasoning pass's prose, never the raw original_query
+    # text.
+    for format_call in mock_llm.complete_json.call_args_list:
+        format_input = (format_call.kwargs.get("system_prompt") or "") + str(
+            format_call.args[0] if format_call.args else ""
+        )
+        assert original_msg not in format_input
 
 
 # ------------------------------------------------------------------
@@ -505,7 +519,11 @@ def test_max_children_capped(root_spec, mock_llm):
         )
 
     mock_llm.complete_json.side_effect = analysis_responses
-    mock_llm.complete.side_effect = ["deliberation notes", "Synthesised"]
+    # One reasoning-pass placeholder per analysis (root + each spawned child)
+    # is consumed by objective via _complete_side_effect; "deliberation
+    # notes" and "Synthesised" are consumed positionally by the two
+    # non-reasoning calls that follow decomposition.
+    mock_llm.complete.side_effect = _complete_side_effect("deliberation notes", "Synthesised")
 
     spawned = []
 
@@ -517,8 +535,9 @@ def test_max_children_capped(root_spec, mock_llm):
     result = agent.execute(max_depth=10)
 
     assert result.was_decomposed
-    assert len(result.child_results) <= MAX_CHILDREN_PER_AGENT
-    assert len(spawned) <= MAX_CHILDREN_PER_AGENT
+    assert len(result.child_results) == MAX_CHILDREN_PER_AGENT
+    assert len(spawned) == MAX_CHILDREN_PER_AGENT
+    assert result.answer == "Synthesised"
 
 
 # ------------------------------------------------------------------
@@ -526,16 +545,28 @@ def test_max_children_capped(root_spec, mock_llm):
 # ------------------------------------------------------------------
 
 
-def test_analysis_llm_error_fallback(root_spec, mock_llm):
-    """If the analysis LLM call raises, agent falls back to a direct answer."""
-    mock_llm.complete_json.side_effect = RuntimeError("LLM unavailable")
-    mock_llm.complete.return_value = "Fallback answer"
+@pytest.mark.parametrize("failing_call", ["reasoning", "formatting"])
+def test_analysis_llm_error_fallback(root_spec, mock_llm, failing_call):
+    """If either analysis LLM call raises, agent falls back to a direct answer."""
+    if failing_call == "reasoning":
+        mock_llm.complete.side_effect = RuntimeError("LLM unavailable")
+    else:
+        mock_llm.complete_json.side_effect = RuntimeError("LLM unavailable")
+        mock_llm.complete.return_value = "Fallback answer"
 
     agent = _make_agent(root_spec, mock_llm)
     result = agent.execute(max_depth=10)
 
     assert not result.was_decomposed
-    assert result.answer == "Fallback answer"
+    if failing_call == "formatting":
+        # The formatting call fails, but the reasoning call's answer is
+        # still recoverable via _force_direct_answer's own .complete() call.
+        assert result.answer == "Fallback answer"
+    else:
+        # Both the analysis reasoning call and the force-direct fallback's
+        # own .complete() call fail, so the agent falls back to its final,
+        # LLM-free placeholder.
+        assert result.answer == f"Unable to provide analysis for: {root_spec.focus_question}"
 
 
 # ------------------------------------------------------------------

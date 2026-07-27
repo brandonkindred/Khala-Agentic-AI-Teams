@@ -257,8 +257,9 @@ class ReportWriterAgent:
               calls: a reasoning prose pass (``think=True``) followed by a
               JSON formatting pass (``think=False``).
             - In the compliance-report branch, any finding that fails to
-              deserialize back into ``TSCFinding`` is logged and dropped from
-              ``findings_by_tsc`` rather than failing the whole report.
+              deserialize back into ``TSCFinding`` is logged, and its whole
+              category is omitted from the returned report's
+              ``findings_by_tsc`` field, rather than failing the report.
         """
         has_findings = any(
             not r.compliant
