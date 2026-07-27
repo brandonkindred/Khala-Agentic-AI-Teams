@@ -7,6 +7,12 @@ from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this mod
 from ...models import ToolAgentPhaseInput
 from .._plan_base import PlanGeneratorToolAgent
 
+# Cap on the spec content inlined into the single architecture-planning prompt.
+# This is a one-shot LLM call with no tool the model can call to read the rest
+# of an oversized spec, so an unbounded spec risks a context-length failure
+# that degrades the whole call to the generic "planning failed" fallback.
+MAX_SPEC_CHARS = 6_000
+
 FRONTEND_ARCHITECT_PROMPT = """You are an expert Frontend Architect Agent. Your job is to define app architecture and long-term maintainability. You stop the codebase from turning into a spaghetti museum.
 
 **Your expertise:**
@@ -88,10 +94,10 @@ class ArchitectureToolAgent(PlanGeneratorToolAgent):
 
         Postconditions:
             Returns ``FRONTEND_ARCHITECT_PROMPT`` formatted with the task description
-            (falling back to ``task_title``, then a default) and the full spec
-            content (falling back to a placeholder when blank).
+            (falling back to ``task_title``, then a default) and the spec content,
+            capped at ``MAX_SPEC_CHARS`` (falling back to a placeholder when blank).
         """
-        spec_text = inp.spec_context or ""
+        spec_text = (inp.spec_context or "")[:MAX_SPEC_CHARS]
         task_desc = inp.task_description or inp.task_title or "Frontend application"
         return FRONTEND_ARCHITECT_PROMPT.format(
             task_description=task_desc,
