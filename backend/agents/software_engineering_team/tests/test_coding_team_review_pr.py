@@ -2934,7 +2934,7 @@ class TestWholeFileReview:
 
         out = _fetch_head_files(_C(), "o", "r", files, "sha1")
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
-        assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
+        assert len(seen_threads) > 1, "fetches were distributed across more than one worker thread"
 
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
         from software_engineering_team.github_source import GitHubRepoReader

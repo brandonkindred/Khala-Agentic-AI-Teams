@@ -413,10 +413,12 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
     """Non-transient LLM failure still returns a fallback string."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
+    from llm_service import LLMJsonParseError
+
     a = _make_agent()
 
     def boom(self, p, system_prompt=""):
-        raise RuntimeError("nope")
+        raise LLMJsonParseError("nope")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     out = a.generate_escalation_summary(
@@ -426,6 +428,25 @@ def test_generate_escalation_summary_handles_error(monkeypatch) -> None:
     )
     # Returns a fallback string (non-empty) or empty
     assert isinstance(out, str)
+
+
+def test_generate_escalation_summary_reraises_non_llm_error(monkeypatch) -> None:
+    """A programming error (not an LLM failure) must propagate, not be swallowed."""
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+
+    def boom(self, p, system_prompt=""):
+        raise TypeError("bad internal state")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(TypeError, match="bad internal state"):
+        a.generate_escalation_summary(
+            revision_count=10,
+            latest_feedback_items=[],
+            persistent_issues=[],
+        )
 
 
 def test_generate_escalation_summary_rate_limit_reraises(monkeypatch) -> None:
