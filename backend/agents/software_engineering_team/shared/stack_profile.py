@@ -97,12 +97,8 @@ class StackProfile:
     build_verify_label: str
     """Label passed to ``build_verifier(repo_path, label, task_id)`` in the
     review phase's build-verification step (e.g. ``"backend_code_v2"`` /
-    ``"frontend_code_v2"``).
-
-    Mirrors ``ReviewConfig.build_verify_label`` in ``shared/v2_review.py``
-    (same value, set alongside it in each team's ``_profile.py``) until the
-    ``review.py`` consolidation (tracked separately) settles which of the two
-    objects the shared review body reads from."""
+    ``"frontend_code_v2"``). The single source of truth for this label —
+    each team's ``_run_build_verification`` reads it off ``PROFILE``."""
 
     detect_language: Callable[[Path, Task], str]
     """Infer the project's language/stack from the repo and task."""
