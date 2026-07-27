@@ -16,7 +16,11 @@ backend/agents/branding_team/
 ├── models.py                # All Pydantic models (mission, phase outputs, TeamOutput, Client, Brand)
 ├── store.py                 # BrandingStore — Postgres-backed client/brand CRUD with version history
 ├── api/
-│   └── main.py              # FastAPI app, request models, session store, route handlers
+│   ├── main.py              # FastAPI app-assembly hub + re-exports
+│   ├── models.py            # Request/response models
+│   ├── state.py             # BrandingSessionStore + mission/question helpers
+│   └── routes/              # Per-concern routers: clients, brands, runs, integrations,
+│                             # sessions, conversations, health
 ├── assistant/
 │   ├── __init__.py          # Lazy init for BrandingConversationStore singleton
 │   ├── agent.py             # BrandingAssistantAgent (LLM-backed conversational flow)
@@ -129,9 +133,8 @@ classDiagram
     TeamOutput "1" --> "*" PhaseGate : phase_gates
 ```
 
-**Defined in** `models.py:514-528` (Brand), `models.py:23-31` (Client),
-`models.py:76-91` (BrandingMission), `models.py:471-498` (TeamOutput),
-`models.py:506-511` (BrandVersionSummary), `models.py:370-375` (PhaseGate).
+**Defined in** `models.py`: `Brand`, `Client`, `BrandingMission`, `TeamOutput`,
+`BrandVersionSummary`, `PhaseGate` (class names only, to avoid line-number drift).
 
 Each phase has its own structured output model with rich nested types —
 see `models.py:100-362` for the full set of `StrategicCoreOutput`,
@@ -200,51 +203,51 @@ In the current code path, `_build_phase_gates()` directly emits
 
 ## API surface
 
-All endpoints live in `api/main.py` and mount under `/api/branding` on
-the unified API. Three sets of endpoints coexist:
+Endpoints live in `api/routes/*.py` (mounted by `api/main.py`) under
+`/api/branding` on the unified API. Three sets of endpoints coexist:
 
 ### Agency API — clients, brands, runs, adapters
 
-| Method | Path | Handler (`api/main.py`) | Purpose |
+| Method | Path | Handler | Purpose |
 |---|---|---|---|
-| POST | `/clients` | `create_client` (L445) | Create client (201) |
-| GET | `/clients` | `list_clients` (L454) | List all clients |
-| GET | `/clients/{client_id}` | `get_client` (L459) | Get one client (404 if missing) |
-| GET | `/clients/{client_id}/brands` | `list_brands` (L472) | List brands for a client |
-| POST | `/clients/{client_id}/brands` | `create_brand` (L479) | Create brand; auto-attach or create conversation |
-| GET | `/clients/{client_id}/brands/{brand_id}` | `get_brand` (L515) | Get brand incl. `latest_output` and `history` |
-| PUT | `/clients/{client_id}/brands/{brand_id}` | `update_brand` (L523) | Partial mission update or status change |
-| GET | `/clients/{client_id}/brands/{brand_id}/conversation` | `get_brand_conversation` (L577) | Get the single conversation linked to a brand |
-| POST | `/clients/{client_id}/brands/{brand_id}/run` | `run_brand` (L597) | Run orchestrator; append new version |
-| POST | `/clients/{client_id}/brands/{brand_id}/run/{phase}` | `run_brand_phase` (L617) | Run up to a specific `BrandPhase` |
-| POST | `/clients/{client_id}/brands/{brand_id}/request-market-research` | `request_market_research_for_brand` (L647) | Call Market Research adapter; 503 if unavailable |
-| POST | `/clients/{client_id}/brands/{brand_id}/request-design-assets` | `request_design_assets_for_brand` (L666) | Call design adapter (stub today) |
+| POST | `/clients` | `create_client` (`routes/clients.py`) | Create client (201) |
+| GET | `/clients` | `list_clients` (`routes/clients.py`) | List all clients |
+| GET | `/clients/{client_id}` | `get_client` (`routes/clients.py`) | Get one client (404 if missing) |
+| GET | `/clients/{client_id}/brands` | `list_brands` (`routes/brands.py`) | List brands for a client |
+| POST | `/clients/{client_id}/brands` | `create_brand` (`routes/brands.py`) | Create brand; auto-attach or create conversation |
+| GET | `/clients/{client_id}/brands/{brand_id}` | `get_brand` (`routes/brands.py`) | Get brand incl. `latest_output` and `history` |
+| PUT | `/clients/{client_id}/brands/{brand_id}` | `update_brand` (`routes/brands.py`) | Partial mission update or status change |
+| GET | `/clients/{client_id}/brands/{brand_id}/conversation` | `get_brand_conversation` (`routes/brands.py`) | Get the single conversation linked to a brand |
+| POST | `/clients/{client_id}/brands/{brand_id}/run` | `run_brand` (`routes/runs.py`) | Run orchestrator; append new version |
+| POST | `/clients/{client_id}/brands/{brand_id}/run/{phase}` | `run_brand_phase` (`routes/runs.py`) | Run up to a specific `BrandPhase` |
+| POST | `/clients/{client_id}/brands/{brand_id}/request-market-research` | `request_market_research_for_brand` (`routes/integrations.py`) | Call Market Research adapter; 503 if unavailable |
+| POST | `/clients/{client_id}/brands/{brand_id}/request-design-assets` | `request_design_assets_for_brand` (`routes/integrations.py`) | Call design adapter (stub today) |
 
 ### One-shot / session API
 
 | Method | Path | Handler | Purpose |
 |---|---|---|---|
-| POST | `/run` | `run_branding_team` (L685) | Synchronous one-shot; body = `RunBrandingTeamRequest` |
-| POST | `/sessions` | `create_branding_session` (L716) | Create session with initial run (`approved=false`) |
-| GET | `/sessions/{session_id}` | `get_branding_session` (L739) | Full session state |
-| GET | `/sessions/{session_id}/questions` | `get_branding_questions` (L747) | Open questions feed |
-| POST | `/sessions/{session_id}/questions/{question_id}/answer` | `answer_branding_question` (L755) | Answer one question; mutate mission; re-run orchestrator |
+| POST | `/run` | `run_branding_team` (`routes/sessions.py`) | Synchronous one-shot; body = `RunBrandingTeamRequest` |
+| POST | `/sessions` | `create_branding_session` (`routes/sessions.py`) | Create session with initial run (`approved=false`) |
+| GET | `/sessions/{session_id}` | `get_branding_session` (`routes/sessions.py`) | Full session state |
+| GET | `/sessions/{session_id}/questions` | `get_branding_questions` (`routes/sessions.py`) | Open questions feed |
+| POST | `/sessions/{session_id}/questions/{question_id}/answer` | `answer_branding_question` (`routes/sessions.py`) | Answer one question; mutate mission; re-run orchestrator |
 
 ### Conversation (chat) API
 
 | Method | Path | Handler | Purpose |
 |---|---|---|---|
-| POST | `/conversations` | `create_branding_conversation` (L813) | Create conversation; optional initial message + brand_id |
-| POST | `/conversations/{conversation_id}/messages` | `send_branding_conversation_message` (L902) | Send message; assistant extracts mission updates; may re-run orchestrator |
-| GET | `/conversations/{conversation_id}` | `get_branding_conversation` (L949) | Get conversation state |
-| GET | `/conversations` | `list_branding_conversations` (L961) | List conversations, optional `brand_id` filter |
-| POST | `/conversations/{conversation_id}/brand` | `attach_conversation_to_brand` (L983) | Attach an unattached conversation to a brand |
+| POST | `/conversations` | `create_branding_conversation` (`routes/conversations.py`) | Create conversation; optional initial message + brand_id |
+| POST | `/conversations/{conversation_id}/messages` | `send_branding_conversation_message` (`routes/conversations.py`) | Send message; assistant extracts mission updates; may re-run orchestrator |
+| GET | `/conversations/{conversation_id}` | `get_branding_conversation` (`routes/conversations.py`) | Get conversation state |
+| GET | `/conversations` | `list_branding_conversations` (`routes/conversations.py`) | List conversations, optional `brand_id` filter |
+| POST | `/conversations/{conversation_id}/brand` | `attach_conversation_to_brand` (`routes/conversations.py`) | Attach an unattached conversation to a brand |
 
 ### Health
 
 | Method | Path | Handler | Purpose |
 |---|---|---|---|
-| GET | `/health` | `health` (L1005) | Liveness probe |
+| GET | `/health` | `health` (`routes/health.py`) | Liveness probe |
 
 ## Persistence
 
