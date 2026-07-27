@@ -45,6 +45,7 @@ def _run_with_timeout(fn: Callable[[], T], timeout_seconds: float, timeout_messa
           bounds the CALLER's wait (unblocking the request), not the
           in-flight LLM call itself (which is separately bounded by
           ``llm_service``'s own per-request timeout).
+        - Propagates any exception raised by ``fn()`` unchanged.
     """
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="soc2-pipeline-step")
     future = pool.submit(fn)

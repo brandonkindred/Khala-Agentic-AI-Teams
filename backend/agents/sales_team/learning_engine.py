@@ -6,7 +6,9 @@ automatically after every N deal outcomes are recorded. It:
 
 1. Loads all StageOutcome and DealOutcome records from the outcome store.
 2. Passes them to the shared ``llm_service`` with a specialized analysis prompt.
-3. Validates the response directly against :class:`LearningInsights`.
+3. Validates the response against :class:`_LearningInsightsBody`, then
+   assembles a :class:`LearningInsights` from it with persistence stamps
+   (``generated_at``, ``insights_version``).
 4. Persists the result to the outcome store so all agents can read it on the
    next pipeline run.
 """
@@ -265,6 +267,22 @@ class LearningEngine:
         stage_outcomes: List[StageOutcome],
         deal_outcomes: List[DealOutcome],
     ) -> _LearningInsightsBody:
+        """Run the two-pass reasoning/formatting LLM analysis over the outcomes.
+
+        Preconditions:
+            - ``stage_outcomes`` and ``deal_outcomes`` are the loaded outcome
+              records to analyze; the caller has already handled the
+              empty-input case.
+        Postconditions:
+            - Returns a ``_LearningInsightsBody`` validated against the LLM's
+              JSON output, via a ``think=True`` reasoning prose pass
+              (``_LEARNING_SYSTEM_PROMPT_REASONING``) followed by a
+              ``think=False`` JSON-formatting/validation pass
+              (``_LEARNING_SYSTEM_PROMPT``).
+            - Raises if either pass fails (a reasoning-pass failure propagates
+              immediately; the formatting pass retries up to
+              ``correction_attempts`` times on a parse/validation failure).
+        """
         stage_data = [s.model_dump() for s in stage_outcomes]
         deal_data = [d.model_dump() for d in deal_outcomes]
         prompt = (

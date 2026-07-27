@@ -59,9 +59,11 @@ app = create_team_app(
 # The decomposed Temporal pipeline (temporal/workflows.py) can go up to 90
 # minutes between job-row touches while a criterion fan-out or report-writing
 # activity is queued/running (AUDIT_SCHEDULE_TO_CLOSE_TIMEOUT /
-# REPORT_SCHEDULE_TO_CLOSE_TIMEOUT — doubled from the original 1-hour ceiling
-# since each activity now issues two sequential LLM calls instead of one) —
-# Temporal's own per-activity timeouts are the primary "is this stuck"
+# REPORT_SCHEDULE_TO_CLOSE_TIMEOUT — increased from the original 1-hour
+# ceiling to 90 minutes because each activity now issues two sequential LLM
+# calls instead of one; the per-activity AUDIT_TIMEOUT / REPORT_TIMEOUT
+# doubled from 30 to 60 minutes for the same reason) — Temporal's own
+# per-activity timeouts are the primary "is this stuck"
 # detector on that path, feeding a genuine failure into mark_failed_activity.
 # This monitor is a backstop for what Temporal can't self-heal (e.g.
 # thread-mode, or the whole worker process dying), so its threshold must stay

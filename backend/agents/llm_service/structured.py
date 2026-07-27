@@ -310,6 +310,7 @@ def complete_validated_via_reasoning(
     reasoning_prompt: str,
     reasoning_system_prompt: str | None,
     objective: str,
+    formatting_instructions: str | None = None,
     formatting_system_prompt: str | None = None,
     reasoning_temperature: float = 0.3,
     temperature: float = 0.0,
@@ -320,6 +321,14 @@ def complete_validated_via_reasoning(
     """Same reasoning/formatting split as :func:`complete_json_via_reasoning`,
     but the formatting call goes through :func:`complete_validated` (schema
     validation + self-correction retry) instead of a bare ``complete_json``.
+
+    Unlike :func:`complete_json_via_reasoning`, the formatting prompt is
+    otherwise hardcoded to a generic "transcribe into JSON matching the
+    schema" instruction — ``schema`` only reaches the model via
+    :func:`complete_validated`'s corrective retry prompts (after a first-pass
+    parse/validation failure), not the first attempt. Pass
+    ``formatting_instructions`` when the caller has specific JSON-shape
+    guidance (keys/types) it wants the first attempt to see.
 
     Preconditions/Postconditions/failure semantics: see
     :func:`complete_json_via_reasoning`; the formatting call additionally
@@ -336,7 +345,8 @@ def complete_validated_via_reasoning(
     format_prompt = (
         "Convert the following analysis into a single JSON object matching "
         "the required schema. Return JSON only — no markdown fences, no "
-        f"prose outside the object.\n\n--- ANALYSIS ---\n{prose}\n--- END ANALYSIS ---"
+        f"prose outside the object.\n\n{formatting_instructions or ''}"
+        f"\n\n--- ANALYSIS ---\n{prose}\n--- END ANALYSIS ---"
     )
     return complete_validated(
         client,

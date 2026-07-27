@@ -63,10 +63,12 @@ class _StubClient:
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
         # invoke_structured_with_schema's think=True reasoning pass, run
         # before the schema-conformant complete_json call below.
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
         return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
@@ -144,9 +146,15 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     call = stub_client.calls[0]
     assert call["schema"] == mod.REFINEMENT_SCHEMA
     assert call["system_prompt"] == mod._SYSTEM_PROMPT
+    assert call["think"] is False
     assert "Fix the following trading strategy code" in call["prompt"]
     # The original task prompt was sent, not a correction re-prompt.
     assert "could not be parsed as a single JSON object" not in call["prompt"]
+
+    assert len(stub_client.reasoning_calls) == 1
+    reasoning_call = stub_client.reasoning_calls[0]
+    assert reasoning_call["think"] is True
+    assert reasoning_call["system_prompt"] == mod._SYSTEM_PROMPT + so_mod.REASONING_MODE_SUFFIX
 
 
 def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) -> None:

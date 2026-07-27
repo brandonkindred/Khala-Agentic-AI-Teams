@@ -12,11 +12,19 @@ class ScriptedLLM:
 
     ``handler(prompt, system_prompt)`` returns the dict that ``complete_json``
     should yield, letting each test script deterministic model output.
+
+    ``complete`` supports the ranker's think=True reasoning pass
+    (``complete_json_via_reasoning``): it echoes the prompt back as "prose" so
+    any content the formatting-call handler keys off (e.g. a company name)
+    survives into the embedded analysis text. Both calls are recorded —
+    ``calls`` for the formatting pass, ``reasoning_calls`` for the reasoning
+    pass — so tests can verify the reasoning pass actually ran.
     """
 
     def __init__(self, handler: Callable[[str, str], Dict[str, Any]]) -> None:
         self._handler = handler
         self.calls: list[tuple[str, str]] = []
+        self.reasoning_calls: list[tuple[str, str]] = []
 
     def complete_json(
         self, prompt: str, *, temperature: float = 0.0, system_prompt: str = "", **kwargs: Any
@@ -24,10 +32,8 @@ class ScriptedLLM:
         self.calls.append((prompt, system_prompt or ""))
         return self._handler(prompt, system_prompt or "")
 
-    def complete(self, prompt: str, **kwargs: Any) -> str:
-        # Used by the ranker's think=True reasoning pass (complete_json_via_reasoning).
-        # Echo the prompt back as "prose" so any content the formatting-call handler
-        # keys off (e.g. a company name) survives into the embedded analysis text.
+    def complete(self, prompt: str, *, system_prompt: str = "", **kwargs: Any) -> str:
+        self.reasoning_calls.append((prompt, system_prompt or ""))
         return prompt
 
 

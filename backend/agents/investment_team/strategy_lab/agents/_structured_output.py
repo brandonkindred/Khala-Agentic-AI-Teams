@@ -51,6 +51,8 @@ here (rather than duplicated per caller) since all four call sites
 (``design.py`` x2, ``design_review.py``, ``refinement.py``) need the same
 override."""
 
+_MIN_TIMEOUT_S = 0.001  # smallest usable per-attempt timeout; guards against a zero/negative env override
+
 _REASONING_USER_PROMPT_SUFFIX = (
     "\n\n---\n"
     "OVERRIDE FOR THIS PASS ONLY: ignore every instruction above that tells "
@@ -234,7 +236,9 @@ def invoke_structured_with_schema(
     # budget sized for one. Mirrors _resolve_config's own resolution order
     # (explicit -> STRATEGY_LAB_LLM_TIMEOUT -> per-model default) so this
     # stays in sync with an operator override of either env var.
-    single_call_timeout_s = max(0.001, env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key)))
+    single_call_timeout_s = max(
+        _MIN_TIMEOUT_S, env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key))
+    )
     timeout_s = single_call_timeout_s * 2
 
     # total_budget_s is left unset (None) so _resolve_config's own default

@@ -99,12 +99,13 @@ def test_one_level_decomposition_with_deliberation():
             "skill_requirements": [],
         },
     ]
-    # strategy classification, then deliberation, then synthesis
-    llm.complete.side_effect = [
+    # strategy classification, then synthesis — deliberation is skipped with a
+    # single child (< 2), so it never calls .complete(). Reasoning-pass
+    # .complete() calls (root + child analyse) are routed separately by objective.
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "by_discipline", "reasoning": "factual"}',
-        "Deliberation: no contradictions, all good",
         "Synthesised: A says yes",
-    ]
+    )
 
     orch = _make_orchestrator(llm)
     req = DeepthoughtRequest(message="Complex question")
@@ -113,7 +114,8 @@ def test_one_level_decomposition_with_deliberation():
     assert resp.total_agents_spawned == 2
     assert resp.max_depth_reached == 1
     assert resp.agent_tree.was_decomposed
-    assert resp.agent_tree.deliberation_notes is not None
+    assert resp.agent_tree.deliberation_notes == ""
+    assert resp.answer.startswith("Synthesised: A says yes")
     assert "Specialists consulted" in resp.answer
 
 
@@ -158,11 +160,11 @@ def test_agent_budget_limits_spawning():
             "skill_requirements": [],
         },
     ]
-    llm.complete.side_effect = [
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "auto", "reasoning": "general"}',
         "deliberation",
         "Synthesised with budget limits",
-    ]
+    )
 
     orch = _make_orchestrator(llm, budget=2)
     req = DeepthoughtRequest(message="Big question")
@@ -221,13 +223,13 @@ def test_max_depth_tracking():
             "skill_requirements": [],
         },
     ]
-    llm.complete.side_effect = [
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "auto", "reasoning": "complex"}',
         "deliberation depth 1",  # depth-1 deliberation (skipped, <2 children)
         "Mid synthesis",  # depth 1 synthesis
         "deliberation depth 0",
         "Root synthesis",  # depth 0 synthesis
-    ]
+    )
 
     orch = _make_orchestrator(llm)
     req = DeepthoughtRequest(message="Deep question", max_depth=10)
@@ -346,15 +348,17 @@ def test_specialists_footer_format():
             "skill_requirements": [],
         },
     ]
-    llm.complete.side_effect = [
+    # Single child → deliberation is skipped (< 2 children), so only
+    # classification and synthesis call .complete() non-reasoning.
+    llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "by_discipline", "reasoning": "physics"}',
-        "deliberation",
         "Force equals mass times acceleration.",
-    ]
+    )
 
     orch = _make_orchestrator(llm)
     resp = orch.process_message(DeepthoughtRequest(message="Explain force"))
 
+    assert resp.answer.startswith("Force equals mass times acceleration.")
     assert "Specialists consulted" in resp.answer
     assert "physics_expert" in resp.answer
 

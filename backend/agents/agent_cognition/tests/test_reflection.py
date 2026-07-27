@@ -60,7 +60,7 @@ class CannedLLM(LLMClient):
     def __init__(self, proposals: list[dict[str, Any]] | None = None) -> None:
         self._proposals = proposals if proposals is not None else []
         self.json_calls: list[dict[str, Any]] = []
-        self.text_calls: list[str] = []
+        self.text_calls: list[dict[str, Any]] = []
 
     def complete_json(
         self,
@@ -89,8 +89,17 @@ class CannedLLM(LLMClient):
         objective: str,
         **kwargs: object,
     ) -> str:
-        # Used only by compact_text when the input is over budget.
-        self.text_calls.append(prompt)
+        # Used by compact_text when the input is over budget, and by
+        # _propose's think=True reasoning pass before JSON formatting.
+        self.text_calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "objective": objective,
+                "temperature": temperature,
+            }
+        )
         return "COMPACTED"
 
 
@@ -271,7 +280,7 @@ def test_add_proposal_is_materialized_pending_derived_with_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     summaries = [_summary(sid="s1", version=2), _summary(sid="s2", version=1, scale=Scale.DAY)]
-    _canned, created = _wire(
+    canned, created = _wire(
         monkeypatch,
         proposals=[
             {"action": "add", "text": "run tests before merge", "rationale": "task-7 broke twice"}
@@ -280,8 +289,11 @@ def test_add_proposal_is_materialized_pending_derived_with_evidence(
     )
     report = reflection.reflect("a", _NOW)
     # The proposal call is now a reasoning pass (.complete) + a formatting
-    # pass (.complete_json), both counted by _CallCountingClient.
+    # pass (.complete_json), both counted by _CallCountingClient — verify the
+    # count actually reflects one of each, not two calls to the same method.
     assert report.proposed == 1 and report.llm_calls == 2
+    assert len(canned.text_calls) == 1
+    assert len(canned.json_calls) == 1
     (proposal,) = created
     assert proposal.action == ProposalAction.ADD
     assert proposal.target_rule_id is None

@@ -137,10 +137,12 @@ class _StubClient:
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
         # invoke_structured_with_schema's think=True reasoning pass, run
         # before the schema-conformant complete_json call below.
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
         return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
@@ -175,10 +177,12 @@ class _SchemaRoutedClient:
         self._design_result = design_result
         self._critique_result_or_exc = critique_result_or_exc
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
         # invoke_structured_with_schema's think=True reasoning pass, run
         # before the schema-conformant complete_json call below.
+        self.reasoning_calls.append({"prompt": prompt, **kwargs})
         return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
@@ -230,6 +234,7 @@ def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.Monk
     assert rationale == "scripted"
     assert parsed["asset_class"] == "stocks"
     assert len(stub_client.calls) == 1
+    assert len(stub_client.reasoning_calls) == 1
 
 
 def test_structured_success_logs_outcome_succeeded(

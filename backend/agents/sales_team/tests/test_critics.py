@@ -253,7 +253,9 @@ class TestOutreachCriticAgent:
         assert report.status == "PASS"
         assert report.approved is True
         assert report.violations == []
-        assert llm.calls and "Outreach Reviewer" in (llm.calls[0]["system_prompt"] or "")
+        assert llm.reasoning_calls and "Outreach Reviewer" in (
+            llm.reasoning_calls[0]["system_prompt"] or ""
+        )
 
     def test_fail_with_fabricated_citation(
         self,
@@ -374,7 +376,7 @@ class TestProposalCriticAgent:
 
         assert report.status == "PASS"
         assert report.approved is True
-        assert "Proposal Reviewer" in (llm.calls[0]["system_prompt"] or "")
+        assert "Proposal Reviewer" in (llm.reasoning_calls[0]["system_prompt"] or "")
 
     def test_fail_with_broken_roi_math(
         self,
