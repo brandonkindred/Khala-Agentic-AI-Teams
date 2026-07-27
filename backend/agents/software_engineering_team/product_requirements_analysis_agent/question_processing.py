@@ -40,9 +40,11 @@ def filter_duplicate_questions(
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Uses normalized word stems (e.g. token/tokens, store/stored). Only filters as
-    duplicate when match to qa_history is >= 90%; 50–90% similar questions are kept
-    and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
+    Filters out questions whose keyword stems (plus simple plural/past-tense
+    variants) appear verbatim in the Q&A history. A question is considered a
+    duplicate when at least 90% of its keyword stems are found in the history.
+    50-90% coverage is kept for possible consolidation elsewhere. This is
+    keyword coverage, not a similarity ratio between the question and history.
 
     Returns:
         Tuple of (filtered_questions, duplicate_questions).
