@@ -1451,7 +1451,7 @@ class BlogWriterAgent(_BlogAgentBase):
         )
 
         prompt_parts = [
-            USER_FEEDBACK_REVISION_INSTRUCTIONS.format(user_feedback=user_feedback),
+            USER_FEEDBACK_REVISION_INSTRUCTIONS.replace("{user_feedback}", user_feedback),
             "",
             "---",
             "BRAND AND STYLE (mandatory for every sentence):",
