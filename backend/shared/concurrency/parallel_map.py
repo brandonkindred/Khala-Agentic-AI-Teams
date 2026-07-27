@@ -25,7 +25,7 @@ import logging
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from typing import Callable, Optional, Sequence, TypeVar
+from typing import Callable, Collection, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,23 @@ __all__ = ["parallel_map"]
 T = TypeVar("T")
 R = TypeVar("R")
 
+# How often the timeout loop wakes to re-check pending futures' deadlines —
+# bounds how late a timeout is noticed without busy-looping.
+_TIMEOUT_POLL_INTERVAL_SECONDS = 0.05
+
+
+def _is_int_not_bool(value: object) -> bool:
+    # ``bool`` is a subclass of ``int`` in Python, so an ``isinstance(x, int)``
+    # check alone would silently accept ``True``/``False`` as valid integers.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number_not_bool(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
 
 def parallel_map(
-    items: Sequence[T],
+    items: Collection[T],
     fn: Callable[[T], R],
     *,
     max_workers: int,
@@ -197,7 +211,7 @@ def parallel_map(
     # from ``ThreadPoolExecutor`` or from calling a non-callable.
     if not callable(fn):
         raise TypeError("fn must be callable")
-    if not isinstance(max_workers, int) or isinstance(max_workers, bool):
+    if not _is_int_not_bool(max_workers):
         raise TypeError("max_workers must be an int")
     if max_workers < 1:
         raise ValueError("max_workers must be >= 1")
@@ -209,7 +223,7 @@ def parallel_map(
         # the misconfiguration behind whatever worker error happened to occur.
         raise TypeError("on_first_exception must be callable")
     if timeout is not None:
-        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        if not _is_number_not_bool(timeout):
             raise TypeError("timeout must be an int or float")
         # ``not (timeout > 0)`` (rather than ``timeout <= 0``) also rejects NaN:
         # every comparison with NaN is False, so ``NaN <= 0`` would silently pass
@@ -257,10 +271,10 @@ def parallel_map(
         # ``items`` — which only has to support ``__len__``/``__iter__`` per
         # the precondition above, not ``__getitem__`` (e.g. a ``set`` is a
         # valid sized iterable but isn't subscriptable).
-        submitted_items: list[T] = [None] * n  # type: ignore[list-item]
+        submitted_items: list[T] = []
         futures = []
         for i, item in enumerate(items):
-            submitted_items[i] = item
+            submitted_items.append(item)
             futures.append(_submit(pool, i, item))
         index_of = {fut: i for i, fut in enumerate(futures)}
         ordered: list = [None] * n
@@ -279,7 +293,7 @@ def parallel_map(
             # per-item deadline check on whatever's still pending: a short
             # poll bounds how late a timeout is noticed without busy-looping.
             pending = set(futures)
-            poll_interval = min(timeout, 0.05)
+            poll_interval = min(timeout, _TIMEOUT_POLL_INTERVAL_SECONDS)
             # Count of items degraded-and-abandoned so far: once a straggler is
             # discarded from ``pending`` its worker thread is never watched
             # again, so if it never returns that thread is gone for good.
