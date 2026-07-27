@@ -3218,7 +3218,7 @@ class TestParallelReviewReads:
 
         class _C:
             def get_pull_request(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return PullRequestDetail(
                     number=n,
                     html_url=f"https://example/pull/{n}",
@@ -3235,14 +3235,17 @@ class TestParallelReviewReads:
                 )
 
             def get_pull_request_files(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
 
             def get_authenticated_login(self):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return "khala-bot"
 
-        pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        try:
+            pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        except threading.BrokenBarrierError:
+            pytest.fail("fetches did not run concurrently: barrier timed out waiting for 3 parties")
         assert pr.number == 7
         assert [f.filename for f in files] == ["a.py"]
         assert reviewer_login == "khala-bot"
@@ -3378,18 +3381,21 @@ class TestParallelReviewReads:
 
         class _C:
             def list_review_comments(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return [review_comment]
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return {1}
 
             def list_issue_comments(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return []
 
-        out = _fetch_existing_comments(_C(), "o", "r", 7)
+        try:
+            out = _fetch_existing_comments(_C(), "o", "r", 7)
+        except threading.BrokenBarrierError:
+            pytest.fail("fetches did not run concurrently: barrier timed out waiting for 3 parties")
         assert barrier.n_waiting == 0  # confirms the fetches actually ran concurrently
         assert len(out) == 1
         assert out[0].path == "a.py" and out[0].line == 2
