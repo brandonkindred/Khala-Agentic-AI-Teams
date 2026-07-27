@@ -479,17 +479,24 @@ class BrandingTeamOrchestrator:
         """Best-effort extraction of a phase output from graph results.
 
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
-        objects. When the node's agent was built with ``structured_output=``,
-        Strands forces a tool call to produce the payload and populates
-        ``AgentResult.structured_output`` instead of the message's text
-        blocks — so that's checked first. Agents without structured output
-        fall back to parsing the last text block. If neither yields a value,
-        return a default instance.
+        objects. Phase 1 wraps six agents as a single top-level node, so
+        ``_merge_phase1_fragments`` is tried first — it merges every fan-out
+        specialist's ``structured_output``, not just the synthesizer's, and
+        returns None for every other phase (different node ids), falling
+        through unchanged. Otherwise, when the node's agent was built with
+        ``structured_output=``, Strands forces a tool call to produce the
+        payload and populates ``AgentResult.structured_output`` instead of
+        the message's text blocks — so that's checked next. Agents without
+        structured output fall back to parsing the last text block. If
+        nothing yields a value, return a default instance.
         """
         try:
             if hasattr(result, "result") and hasattr(result.result, "get"):
                 node_result = result.result.get(node_id)
                 if node_result and hasattr(node_result, "result"):
+                    merged = _merge_phase1_fragments(node_result, model_class)
+                    if merged is not None:
+                        return merged
                     agent_results = node_result.get_agent_results()
                     if agent_results:
                         last = agent_results[-1]
@@ -550,6 +557,75 @@ def _merge_structured_output(
     """
     try:
         return model_class.model_validate(structured.model_dump())
+    except ValidationError:
+        return None
+
+
+# Phase 1 fan-out node id -> the StrategicCoreOutput key its structured_output
+# nests under, or None to merge its fields in flat. Every value except
+# discovery_auditor's matches a StrategicCoreOutput field name 1:1 (see
+# agents.py/models.py); BrandDiscoveryAuditOutput's fields only exist on
+# StrategicCoreOutput nested under "brand_discovery", so that one alone nests.
+_PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
+    "discovery_auditor": "brand_discovery",
+    "purpose_vision_writer": None,
+    "values_articulator": None,
+    "audience_segmenter": None,
+    "differentiation_mapper": None,
+    "positioning_synthesizer": None,
+}
+
+
+def _merge_phase1_fragments(node_result, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 1 fan-out node's ``structured_output`` into one phase output.
+
+    Phase 1 wraps six agents (five parallel specialists + a synthesizer) as a
+    single top-level ``"phase1_strategic_core"`` node (see
+    ``graphs/top_level.py``); the specialists' fragments are just as real as
+    the synthesizer's, but a flat ``get_agent_results()[-1]`` only ever sees
+    the last (synthesizer) result. This walks the nested ``MultiAgentResult``
+    directly — keyed by node id, per ``strands.multiagent.base.MultiAgentResult``
+    — to recover each specialist's own typed output.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every recognized
+        Phase 1 node's ``structured_output`` when at least one was found;
+        returns None when ``node_result`` doesn't wrap a nested multi-agent
+        result, none of ``_PHASE1_NODE_MERGE``'s node ids are present (e.g.
+        every other phase, which uses different node ids), or the merged
+        data fails validation — in every None case the caller falls back to
+        its existing single-agent-result logic unchanged.
+    """
+    nested_results = getattr(getattr(node_result, "result", None), "results", None)
+    if not isinstance(nested_results, dict):
+        return None
+
+    merged: dict[str, Any] = {}
+    found_any = False
+    for child_node_id, nest_under in _PHASE1_NODE_MERGE.items():
+        child = nested_results.get(child_node_id)
+        if child is None or not hasattr(child, "get_agent_results"):
+            continue
+        child_agent_results = child.get_agent_results()
+        if not child_agent_results:
+            continue
+        structured = getattr(child_agent_results[-1], "structured_output", None)
+        if not isinstance(structured, BaseModel):
+            continue
+        found_any = True
+        data = structured.model_dump()
+        if nest_under:
+            merged[nest_under] = data
+        else:
+            merged.update(data)
+
+    if not found_any:
+        return None
+    try:
+        return model_class.model_validate(merged)
     except ValidationError:
         return None
 

@@ -767,12 +767,30 @@ class DummyLLMClient(LLMClient, Model):
         # rather than the user prompt: every Phase 1 agent receives the same
         # serialized BrandingMission as its user message, so only the
         # agent-specific system_prompt (each agent's required output field
-        # names) can distinguish which one is asking. These five all have
-        # required fields with no defaults, so the generic fallback below
-        # would fail Strands' structured-output validation and exhaust its
-        # forced retry.
+        # names) can distinguish which one is asking. All six have required
+        # fields with no defaults, so the generic fallback below would fail
+        # Strands' structured-output validation and exhaust its forced retry.
         system_lowered = (system_prompt or "").lower()
-        if "brand_purpose" in system_lowered and "vision_statement" in system_lowered:
+        if (
+            "current_brand_perception" in system_lowered
+            and "stakeholder_insights" in system_lowered
+        ):
+            return {
+                "current_brand_perception": "Seen as a capable but generic vendor (dummy).",
+                "market_position": "Mid-market challenger without a distinct point of view (dummy).",
+                "strengths": ["Responsive delivery", "Deep domain expertise"],
+                "weaknesses": ["Inconsistent messaging", "Low brand recall"],
+                "opportunities": [
+                    "Category is consolidating",
+                    "Buyers want a clear category leader",
+                ],
+                "threats": ["Larger competitors out-spending on brand"],
+                "stakeholder_insights": [
+                    "Sales wants sharper differentiation",
+                    "Customers want proof points",
+                ],
+            }
+        elif "brand_purpose" in system_lowered and "vision_statement" in system_lowered:
             return {
                 "brand_purpose": "Dummy Co. exists to help teams ship cohesive brand experiences (dummy).",
                 "mission_statement": "We turn brand strategy into consistent day-to-day execution (dummy).",

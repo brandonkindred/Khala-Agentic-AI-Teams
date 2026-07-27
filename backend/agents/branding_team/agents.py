@@ -20,7 +20,7 @@ from .models import (
     AudienceSegmentsOutput,
     BrandCheckRequest,
     BrandCheckResult,
-    BrandDiscoveryAudit,
+    BrandDiscoveryAuditOutput,
     BrandingMission,
     CoreValuesOutput,
     DifferentiationPillarsOutput,
@@ -43,7 +43,7 @@ def make_discovery_auditor() -> Agent:
             "weaknesses, opportunities, threats, and stakeholder_insights. Be specific and grounded "
             "in the company description and target audience provided."
         ),
-        structured_output=BrandDiscoveryAudit,
+        structured_output=BrandDiscoveryAuditOutput,
     )
 
 

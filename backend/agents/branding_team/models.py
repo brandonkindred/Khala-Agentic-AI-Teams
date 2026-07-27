@@ -181,7 +181,13 @@ class DifferentiationPillar(BaseModel):
 
 
 class BrandDiscoveryAudit(BaseModel):
-    """Brand discovery and audit findings."""
+    """Brand discovery and audit findings.
+
+    Fields default to empty rather than being required: this model also
+    backs ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
+    must construct successfully with no arguments. ``discovery_auditor``'s own
+    agent-facing schema is the stricter ``BrandDiscoveryAuditOutput`` below.
+    """
 
     current_brand_perception: str = ""
     market_position: str = ""
@@ -190,6 +196,23 @@ class BrandDiscoveryAudit(BaseModel):
     opportunities: List[str] = Field(default_factory=list)
     threats: List[str] = Field(default_factory=list)
     stakeholder_insights: List[str] = Field(default_factory=list)
+
+
+class BrandDiscoveryAuditOutput(BaseModel):
+    """Agent-facing brand discovery schema (see ``PurposeVisionOutput`` on required fields).
+
+    Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
+    model so this one can require real content without breaking
+    ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
+    """
+
+    current_brand_perception: str = Field(min_length=1)
+    market_position: str = Field(min_length=1)
+    strengths: List[str] = Field(min_length=1)
+    weaknesses: List[str] = Field(min_length=1)
+    opportunities: List[str] = Field(min_length=1)
+    threats: List[str] = Field(min_length=1)
+    stakeholder_insights: List[str] = Field(min_length=1)
 
 
 class PurposeVisionOutput(BaseModel):

@@ -1,7 +1,7 @@
 """Validation tests for the Phase 1 structured-output wrapper models.
 
-These agent-facing models (``PurposeVisionOutput``, ``CoreValuesOutput``,
-``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
+These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
+``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
 ``PositioningOutput``) must reject empty/omitted content so Strands'
 structured-output tool retries the LLM instead of silently accepting a blank
 or under-cardinality response (see ``structured_output_tool.py``: a
@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from branding_team.models import (
     AudienceSegment,
     AudienceSegmentsOutput,
+    BrandDiscoveryAuditOutput,
     CoreValue,
     CoreValuesOutput,
     DifferentiationPillar,
@@ -23,6 +24,28 @@ from branding_team.models import (
     PositioningOutput,
     PurposeVisionOutput,
 )
+
+_DISCOVERY_KWARGS = dict(
+    current_brand_perception="Seen as reliable but generic.",
+    market_position="Mid-market challenger.",
+    strengths=["Delivery speed"],
+    weaknesses=["Low brand recall"],
+    opportunities=["Category consolidating"],
+    threats=["Bigger competitors out-spending"],
+    stakeholder_insights=["Sales wants sharper differentiation"],
+)
+
+
+def test_brand_discovery_audit_output_rejects_missing_and_empty_fields() -> None:
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput()
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "current_brand_perception": ""})
+    with pytest.raises(ValidationError):
+        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "strengths": []})
+
+    output = BrandDiscoveryAuditOutput(**_DISCOVERY_KWARGS)
+    assert output.market_position == "Mid-market challenger."
 
 
 def test_purpose_vision_output_rejects_missing_and_empty_fields() -> None:
