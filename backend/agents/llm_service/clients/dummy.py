@@ -293,6 +293,14 @@ class DummyLLMClient(LLMClient, Model):
         # because loose single-word branches (``"pipeline"``, ``"security"``)
         # cross-contaminated other teams' prompts that happened to mention
         # those words in their persona text.
+        #
+        # Exception: the branding Phase 1 branches further down DO anchor on
+        # ``system_prompt`` (see ``system_lowered``) — every Phase 1 agent
+        # receives the same serialized ``BrandingMission`` as its user
+        # message, so only each agent's own system_prompt (its required
+        # output field names) can distinguish which one is asking. Those
+        # anchors are multi-token combinations unique to one agent's prompt,
+        # not the loose single words that caused the earlier revert.
         lowered = prompt.lower()
         DummyLLMClient._call_counter += 1
         self._request_count += 1
