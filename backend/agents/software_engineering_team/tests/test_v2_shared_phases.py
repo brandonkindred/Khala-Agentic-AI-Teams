@@ -789,6 +789,33 @@ def test_run_batch_coding_fixes_impl_skips_non_dict_issues_addressed():
     assert len(result.unresolved_issues) == 2
 
 
+def test_run_batch_coding_fixes_impl_ignores_non_dict_files():
+    """A non-dict ``files`` value from the parser must be ignored, not crash."""
+    parsed = {
+        "files": ["a.py", "not-a-mapping"],
+        "issues_addressed": [],
+        "summary": "did it",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue()],
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("ignored — parse stub returns the parsed dict"),
+    )
+    # No crash on the list; files falls back to {} so the prior version is kept.
+    assert result.files == {"a.py": "orig"}
+
+
 def test_run_batch_coding_fixes_impl_tracks_unresolved_by_index_not_identity():
     """A rejected file's issue stays unresolved by list position, not ``id(issue)``.
 

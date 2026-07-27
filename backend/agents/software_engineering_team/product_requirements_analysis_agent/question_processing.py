@@ -40,9 +40,11 @@ def filter_duplicate_questions(
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Uses normalized word stems (e.g. token/tokens, store/stored). Only filters as
-    duplicate when match to qa_history is >= 90%; 50–90% similar questions are kept
-    and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
+    Filters out questions whose keyword stems (plus simple plural/past-tense
+    variants) appear verbatim in the Q&A history. A question is considered a
+    duplicate when at least 90% of its keyword stems are found in the history.
+    50-90% coverage is kept for possible consolidation elsewhere. This is
+    keyword coverage, not a similarity ratio between the question and history.
 
     Returns:
         Tuple of (filtered_questions, duplicate_questions).
@@ -228,15 +230,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             options.append(parse_question_option(opt, i))
 
         if options and not any(opt.is_default for opt in options):
-            sorted_opts = sorted(options, key=lambda o: o.confidence, reverse=True)
-            sorted_opts[0] = QuestionOption(
-                id=sorted_opts[0].id,
-                label=sorted_opts[0].label,
+            default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
+            options[default_idx] = QuestionOption(
+                id=options[default_idx].id,
+                label=options[default_idx].label,
                 is_default=True,
-                rationale=sorted_opts[0].rationale,
-                confidence=sorted_opts[0].confidence,
+                rationale=options[default_idx].rationale,
+                confidence=options[default_idx].confidence,
             )
-            options = sorted_opts
 
         raw_depends = q_data.get("depends_on")
         if isinstance(raw_depends, (list, tuple)):

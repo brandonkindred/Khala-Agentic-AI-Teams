@@ -1585,6 +1585,8 @@ class BlogWriterAgent(_BlogAgentBase):
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
+            if not isinstance(cause, LLMError):
+                raise
             logger.warning("Escalation summary generation failed: %s", e)
             return (
                 f"The draft has been through {revision_count} automated revision cycles "
