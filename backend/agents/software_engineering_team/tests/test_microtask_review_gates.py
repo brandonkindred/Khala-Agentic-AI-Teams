@@ -506,6 +506,72 @@ class TestFrontendQaSecurityGateToolAgentScoping:
         assert security_tool_agent.review_calls == 1
         assert qa_tool_agent.review_calls == 0
 
+    def test_full_cycle_invokes_each_tool_agent_at_most_once(self, tmp_path):
+        """End-to-end guard for the residual 2x fix (issue #2817): across one
+        full review cycle -- CR gate's full-mapping fan-out plus the QA/Security
+        gates' own dedicated calls -- each wired tool agent's ``.review()`` is
+        invoked exactly once, not twice, because they all share
+        ``deps.tool_agent_cache`` (reset per microtask cycle by
+        ``_run_review_cycles``)."""
+        from frontend_code_v2_team.models import (
+            Microtask,
+            MicrotaskReviewConfig,
+            MicrotaskStatus,
+            PlanningResult,
+            ToolAgentKind,
+        )
+        from frontend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
+        )
+
+        (tmp_path / ".git").mkdir()
+
+        task = _create_test_task("frontend")
+        mt = Microtask(id="mt-1", title="Create App", tool_agent=ToolAgentKind.GENERAL)
+        planning_result = PlanningResult(microtasks=[mt], language="typescript")
+
+        _call_count = [0]
+
+        def _side_effect(prompt: str) -> str:
+            _call_count[0] += 1
+            if _call_count[0] == 1:
+                return (
+                    "\n## FILES ##\n--- src/app.ts ---\n"
+                    "export const app = () => console.log('Hello');\n---\n\n"
+                    "## SUMMARY ##\nCreated app module.\n"
+                )
+            return "\n## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
+
+        mock_llm = _CallableTextClient(_side_effect)
+
+        qa_tool_agent = _FakeToolAgent()
+        security_tool_agent = _FakeToolAgent()
+        config = MicrotaskReviewConfig(max_retries=1)
+        deps = ReviewDependencies(
+            tool_agents={
+                ToolAgentKind.TESTING_QA: qa_tool_agent,
+                ToolAgentKind.SECURITY: security_tool_agent,
+            }
+        )
+
+        result = run_execution_with_review_gates(
+            llm=mock_llm,
+            task=task,
+            planning_result=planning_result,
+            repo_path=tmp_path,
+            review_config=config,
+            review_deps=deps,
+        )
+
+        completed = [m for m in result.microtasks if m.status == MicrotaskStatus.COMPLETED]
+        assert len(completed) == 1
+        # Without the cache, the CR gate's full-mapping fan-out plus each
+        # gate's own dedicated call would make this 2 -- the redundancy this
+        # issue closes.
+        assert qa_tool_agent.review_calls == 1
+        assert security_tool_agent.review_calls == 1
+
 
 class TestFrontendQaSecurityCombinedPhaseSignal:
     """Pins the #2659 phase-tracking fix pattern for frontend's own ``GATE_CONFIG``.

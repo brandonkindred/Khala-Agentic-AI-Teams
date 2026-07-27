@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
@@ -45,6 +46,7 @@ class ReviewDependencies:
         code_review_agent: Any = None,
         linting_tool_agent: Any = None,
         tool_agents: Optional[Dict[Any, Any]] = None,
+        tool_agent_cache: Optional[AgentReviewCache] = None,
     ) -> None:
         self.build_verifier = build_verifier
         self.qa_agent = qa_agent
@@ -52,6 +54,13 @@ class ReviewDependencies:
         self.code_review_agent = code_review_agent
         self.linting_tool_agent = linting_tool_agent
         self.tool_agents = tool_agents or {}
+        # Per-microtask-cycle cache of tool-agent review results, reset by
+        # ``_run_review_cycles`` at the start of each microtask's cycle loop.
+        # Unused (stays ``None``) unless a team's gate functions read it and
+        # thread it into ``run_microtask_review`` — currently only the
+        # frontend team does (see docs/GATE_DEPENDENCY_GRAPH.md's "residual
+        # 2x" caching design); other callers are unaffected.
+        self.tool_agent_cache = tool_agent_cache
 
 
 def _run_general_microtask_impl(

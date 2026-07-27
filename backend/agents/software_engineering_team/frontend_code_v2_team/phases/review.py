@@ -270,6 +270,7 @@ def run_microtask_review(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     cache: Optional[AgentReviewCache] = None,
+    tool_agent_cache: Optional[AgentReviewCache] = None,
 ) -> ReviewResult:
     """Run full review on a single microtask's output files.
 
@@ -281,6 +282,10 @@ def run_microtask_review(
         - ``microtask`` exposes ``.id``/``.title``/``.description``.
         - ``cache``: see ``software_engineering_team.shared.agent_review``;
           forwarded to the QA/security steps only.
+        - ``tool_agent_cache``: forwarded to the tool-agent fan-out step only;
+          lets the CR gate's tool-agent call and the QA/Security gates' own
+          dedicated calls within the same review cycle share one result per
+          tool agent instead of each computing it again.
 
     Postconditions:
         - Delegates to ``_shared_run_microtask_review``, which forwards
@@ -310,6 +315,7 @@ def run_microtask_review(
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
         agent_review_cache=cache,
+        tool_agent_cache=tool_agent_cache,
     )
 
 

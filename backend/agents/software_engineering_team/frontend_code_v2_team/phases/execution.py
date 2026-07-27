@@ -201,6 +201,7 @@ def _code_review_gate(
         detail_callback=detail_callback,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
+        tool_agent_cache=deps.tool_agent_cache,
     )
     return GateOutcome(
         passed=r.passed,
@@ -239,6 +240,7 @@ def _qa_gate(
         tool_agents=_scoped_tool_agents(deps.tool_agents, ToolAgentKind.TESTING_QA),
         detail_callback=detail_callback,
         cache=cache,
+        tool_agent_cache=deps.tool_agent_cache,
     )
     qa_issues = [i for i in r.issues if i.source == "qa"]
     return GateOutcome(passed=not qa_issues, issues=qa_issues, summary=r.summary)
@@ -273,6 +275,7 @@ def _security_gate(
         tool_agents=_scoped_tool_agents(deps.tool_agents, ToolAgentKind.SECURITY),
         detail_callback=detail_callback,
         cache=cache,
+        tool_agent_cache=deps.tool_agent_cache,
     )
     sec_issues = [i for i in r.issues if i.source == "security"]
     return GateOutcome(passed=not sec_issues, issues=sec_issues, summary=r.summary)

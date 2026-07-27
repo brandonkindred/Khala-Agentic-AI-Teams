@@ -44,6 +44,8 @@ Invariants:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -517,6 +519,49 @@ def _run_review_steps(
     return _ReviewStepResult(issues=issues, raw_issue_count=raw_issue_count)
 
 
+def _tool_agent_cache_key(
+    kind_value: str,
+    current_files: Dict[str, str],
+    task_title: str,
+    task_description: str,
+    microtask_id: str,
+) -> str:
+    """Hash of one tool agent's exact review input (kind + files + task + microtask).
+
+    Postconditions:
+        - Two calls collide only when ``kind_value``, ``current_files``,
+          ``task_title``, ``task_description``, and ``microtask_id`` are all
+          identical — mirroring ``_piece_cache_key``'s "exact LLM input, keyed
+          by content" design (``shared/agent_review.py``) — so any file edit
+          between two calls changes the digest and naturally busts a prior
+          entry with no explicit invalidation logic. ``sort_keys=True`` makes
+          the digest independent of ``current_files``' iteration order.
+    """
+    body = json.dumps(
+        [kind_value, current_files, task_title, task_description, microtask_id],
+        sort_keys=True,
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _fold_tool_agent_output(
+    config: ReviewConfig, issues: List[ReviewIssue], kind: Any, out: Any
+) -> None:
+    """Append ``out``'s issues and recommendation-derived issues onto ``issues``."""
+    if out.issues:
+        issues.extend(out.issues)
+    if out.recommendations:
+        for rec in out.recommendations:
+            issues.append(
+                ReviewIssue(
+                    source=_tool_rec_source(config, kind.value),
+                    severity="info",
+                    description=rec,
+                    recommendation=_tool_rec_recommendation(config, rec),
+                )
+            )
+
+
 def _run_tool_agents_review(
     config: ReviewConfig,
     *,
@@ -530,17 +575,30 @@ def _run_tool_agents_review(
     microtask: Any = None,
     failure_context: str = "",
     language: str = "",
+    tool_agent_cache: Optional[AgentReviewCache] = None,
 ) -> None:
     """Run each wired tool agent's ``review`` and fold its output into issues.
 
     Preconditions:
         - ``tool_agents`` is ``None`` or a ``{ToolAgentKind: agent}`` mapping.
         - ``config.tool_phase_input_factory`` accepts the kwargs built here.
+        - ``tool_agent_cache``, when given, is consulted/populated only for
+          agents whose ``kind`` result was already computed for the identical
+          ``(kind, current_files, task.title, task_description, microtask.id)``
+          combination — see ``_tool_agent_cache_key``. Requires ``microtask``
+          to be given (the cache key folds in ``microtask.id``); when
+          ``microtask`` is ``None`` (the non-microtask ``run_review`` path),
+          caching is skipped regardless of ``tool_agent_cache``. ``None`` (the
+          default) preserves today's unconditional-call behavior for every
+          existing caller.
 
     Postconditions:
         - Each agent with a ``review`` method contributes its ``issues`` and a
-          ``ReviewIssue`` per recommendation; a raising agent is logged and
-          skipped (never aborts the review). Mutates ``issues`` in place.
+          ``ReviewIssue`` per recommendation, either from a cache hit or a live
+          ``review()`` call; a raising agent is logged and skipped (never
+          aborts the review). Mutates ``issues`` in place. A live call's
+          result is stored in ``tool_agent_cache`` (when given) before folding
+          it into ``issues``.
     """
     if not tool_agents:
         return
@@ -565,20 +623,23 @@ def _run_tool_agents_review(
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "review"):
             continue
+        cache_key = (
+            _tool_agent_cache_key(
+                kind.value, current_files, task.title or "", task_description, microtask.id
+            )
+            if tool_agent_cache is not None and microtask is not None
+            else None
+        )
+        if cache_key is not None:
+            cached = tool_agent_cache.get(cache_key)
+            if cached is not None:
+                _fold_tool_agent_output(config, issues, kind, cached[0])
+                continue
         try:
             out = agent.review(phase_inp)
-            if out.issues:
-                issues.extend(out.issues)
-            if out.recommendations:
-                for rec in out.recommendations:
-                    issues.append(
-                        ReviewIssue(
-                            source=_tool_rec_source(config, kind.value),
-                            severity="info",
-                            description=rec,
-                            recommendation=_tool_rec_recommendation(config, rec),
-                        )
-                    )
+            if cache_key is not None:
+                tool_agent_cache.put(cache_key, [out])
+            _fold_tool_agent_output(config, issues, kind, out)
         except Exception as exc:
             logger.warning(
                 "[%s] Tool agent %s review() failed%s: %s",
@@ -768,6 +829,7 @@ def run_microtask_review(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     agent_review_cache: Optional[AgentReviewCache] = None,
+    tool_agent_cache: Optional[AgentReviewCache] = None,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
@@ -782,6 +844,8 @@ def run_microtask_review(
         - ``agent_review_cache``, when given, is forwarded to the QA and security
           steps only (not code review, which has its own cache) — see
           ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
+        - ``tool_agent_cache``, when given, is forwarded to the tool-agent fan-out
+          step only — see ``_run_tool_agents_review``.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -916,6 +980,7 @@ def run_microtask_review(
         microtask=microtask,
         failure_context=f" for microtask {microtask_id}",
         language=language,
+        tool_agent_cache=tool_agent_cache,
     )
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]

@@ -173,9 +173,17 @@ Edge classification:
   `ACCESSIBILITY`/`UI_DESIGN` are unaffected (CR-gate-only, no dedicated
   gate to duplicate against).
 
-  **Caching design to close the residual 2x (scoped for the follow-up
-  implementation issue, not implemented here):** thread a new per-tool-agent
-  result cache through `run_microtask_review` → `_run_tool_agents_review`,
+  **Caching design to close the residual 2x — implemented.** A per-tool-agent
+  result cache is threaded through `run_microtask_review` →
+  `_run_tool_agents_review` (`shared/v2_review.py`), stored on
+  `ReviewDependencies.tool_agent_cache` and reset per microtask cycle in
+  `_run_review_cycles` (`shared/phases/review_cycle.py`) alongside
+  `agent_review_cache`. It is consulted/populated only by the frontend team's
+  `_code_review_gate`/`_qa_gate`/`_security_gate`, which each forward
+  `deps.tool_agent_cache` into their `run_microtask_review` call — the backend
+  team never reads this attribute, so it is a no-op there (consistent with the
+  backend never having had this duplication). The design below is what was
+  implemented:
   modeled directly on the existing `AgentReviewCache`
   (`shared/agent_review.py:32-60`) that already prevents this same class of
   duplication for the QA/security *LLM* steps.
@@ -304,9 +312,10 @@ Edge classification:
   the QA/Security gates' own tool-agent fan-out is already scoped per gate
   (`_scoped_tool_agents`, see the dependency-graph note above) as of commit
   `abd5bb5`, matching the backend's `_run_agent_testing_phase` filter — but the
-  CR gate's full-mapping fan-out still calls `TESTING_QA`/`SECURITY` a second
-  time on top of each gate's own dedicated call (the residual 2x duplication
-  documented above). Concurrency is only safe once that residual duplication is
+  CR gate's full-mapping fan-out previously called `TESTING_QA`/`SECURITY` a
+  second time on top of each gate's own dedicated call (the residual 2x
+  duplication documented above); this is now closed by the caching design
+  above (implemented). Concurrency is only safe once that residual duplication is
   closed — the caching design above is the intended seam: a second concurrent
   call for an already-cached key becomes a cache hit instead of a second live
   call into a shared tool-agent instance.

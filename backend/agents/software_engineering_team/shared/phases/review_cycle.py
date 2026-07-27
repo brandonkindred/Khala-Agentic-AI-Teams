@@ -473,6 +473,14 @@ def _run_review_cycles(
     # (code_review_agent.mapping._cached_review_chunk).
     agent_review_cache = AgentReviewCache()
 
+    # Per-tool-agent result cache, same "constructed here, discarded on
+    # return" per-microtask-cycle scope as ``agent_review_cache`` above.
+    # Stored on ``deps`` (rather than threaded as a new gate-call keyword)
+    # so teams whose gate functions don't read it — currently only the
+    # backend team — are completely unaffected; see
+    # docs/GATE_DEPENDENCY_GRAPH.md's "residual 2x" caching design.
+    deps.tool_agent_cache = AgentReviewCache()
+
     # Grounding-failure circuit breaker + issue dedup state, scoped to this
     # microtask's own review lifecycle (see grounding circuit-breaker design doc).
     grounding_failure_streak = 0

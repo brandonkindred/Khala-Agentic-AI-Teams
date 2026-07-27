@@ -705,6 +705,119 @@ def test_microtask_tool_agent_raises_is_skipped(tmp_path: Path) -> None:
     assert result is not None  # did not raise
 
 
+def test_microtask_tool_agent_cache_hit_skips_second_call(tmp_path: Path) -> None:
+    """A second run_microtask_review call with byte-identical inputs and a
+    shared tool_agent_cache reuses the first call's result -- the seam that
+    closes the CR-gate-vs-QA/Security-gate residual 2x duplication."""
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.shared.agent_review import AgentReviewCache
+    from software_engineering_team.shared.v2_models import ReviewIssue as _RI
+
+    calls = {"n": 0}
+
+    class _StubTestingQaAgent:
+        def review(self, phase_inp):
+            calls["n"] += 1
+            return SimpleNamespace(
+                issues=[_RI(source="testing_qa", severity="low", description="from tool")],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    cache = AgentReviewCache()
+    common = dict(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"app.ts": "code"},
+        tool_agents={ToolAgentKind.TESTING_QA: _StubTestingQaAgent()},
+        language="typescript",
+        tool_agent_cache=cache,
+        **_noop_runners(),
+    )
+
+    first = run_microtask_review(**common)
+    second = run_microtask_review(**common)
+
+    assert calls["n"] == 1  # second call was served entirely from cache
+    assert any(i.description == "from tool" for i in first.issues)
+    assert any(i.description == "from tool" for i in second.issues)
+
+
+def test_microtask_tool_agent_cache_misses_on_changed_files(tmp_path: Path) -> None:
+    """Different current_files between two calls busts the cache -- a batch-fix
+    between the CR gate's call and the QA gate's call must recompute for real."""
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.shared.agent_review import AgentReviewCache
+    from software_engineering_team.shared.v2_models import ReviewIssue as _RI
+
+    calls = {"n": 0}
+
+    class _StubSecurityAgent:
+        def review(self, phase_inp):
+            calls["n"] += 1
+            return SimpleNamespace(
+                issues=[_RI(source="security", severity="low", description="from tool")],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    cache = AgentReviewCache()
+    common = dict(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        tool_agents={ToolAgentKind.SECURITY: _StubSecurityAgent()},
+        language="typescript",
+        tool_agent_cache=cache,
+        **_noop_runners(),
+    )
+
+    run_microtask_review(files={"app.ts": "code v1"}, **common)
+    run_microtask_review(files={"app.ts": "code v2"}, **common)
+
+    assert calls["n"] == 2  # changed content -> both calls hit the agent
+
+
+def test_microtask_tool_agent_cache_none_default_is_unchanged_passthrough(tmp_path: Path) -> None:
+    """Omitting tool_agent_cache (the default) preserves today's unconditional-call
+    behavior -- every existing caller that doesn't opt in is unaffected."""
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.shared.v2_models import ReviewIssue as _RI
+
+    calls = {"n": 0}
+
+    class _StubAgent:
+        def review(self, phase_inp):
+            calls["n"] += 1
+            return SimpleNamespace(
+                issues=[_RI(source="security", severity="low", description="from tool")],
+                recommendations=[],
+            )
+
+    config = _build_config()
+    common = dict(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"app.ts": "code"},
+        tool_agents={ToolAgentKind.SECURITY: _StubAgent()},
+        language="typescript",
+        **_noop_runners(),
+    )
+
+    run_microtask_review(**common)
+    run_microtask_review(**common)
+
+    assert calls["n"] == 2  # no cache given -> both calls are live, as before
+
+
 def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
     """The microtask opening INFO line uses the config's ``microtask_intro``."""
     import logging
