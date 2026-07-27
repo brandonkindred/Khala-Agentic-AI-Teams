@@ -262,6 +262,32 @@ class TestWholeFileFocusUnit:
 
 
 # ---------------------------------------------------------------------------
+# _hunk_review_focus
+# ---------------------------------------------------------------------------
+
+
+class TestHunkReviewFocusUnit:
+    def test_blank_body_returns_note_alone(self) -> None:
+        result = pr_review._hunk_review_focus("")
+        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
+        assert "\n\n" not in result[: len(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX) + 1]
+
+    def test_whitespace_only_body_returns_note_alone(self) -> None:
+        result = pr_review._hunk_review_focus("   \n")
+        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
+        assert "   " not in result
+
+    def test_non_blank_body_is_prefixed_to_note(self) -> None:
+        result = pr_review._hunk_review_focus("Fixes the flaky retry loop.")
+        assert result.startswith("Fixes the flaky retry loop.\n\n")
+        assert pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX in result
+
+    def test_note_instructs_pre_existing_field(self) -> None:
+        result = pr_review._hunk_review_focus("body")
+        assert "pre_existing" in result
+
+
+# ---------------------------------------------------------------------------
 # _review_author
 # ---------------------------------------------------------------------------
 
@@ -419,7 +445,10 @@ class TestRunReviewerUnit:
         call = provider.calls[0]
         assert call["pre_numbered"] is True
         assert call["code"] == "### a.py ###\n1: x = 1"
-        assert call["task_requirements"] == "PR body"
+        # Hunk mode now appends the same "tag pre-existing findings" focus note as
+        # whole-file mode (previously it passed the PR body verbatim with no
+        # tagging instruction) -- see _hunk_review_focus.
+        assert call["task_requirements"] == pr_review._hunk_review_focus("PR body")
 
     def test_both_sources_run_two_calls_and_merge(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
@@ -437,7 +466,7 @@ class TestRunReviewerUnit:
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["whole-issue", "hunk-issue"]
 
-    def test_none_body_coerces_to_blank_task_requirements(self, monkeypatch) -> None:
+    def test_none_body_coerces_to_hunk_focus_note_alone(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([_FakeOutput([], "", "")])
         kwargs = _run_reviewer_kwargs(
@@ -446,7 +475,9 @@ class TestRunReviewerUnit:
 
         pr_review._run_reviewer(provider, **kwargs)
 
-        assert provider.calls[0]["task_requirements"] == ""
+        # A blank body still gets the hunk-mode focus note appended (the note
+        # alone, since there is no body to prefix).
+        assert provider.calls[0]["task_requirements"] == pr_review._hunk_review_focus("")
 
     def test_first_attempt_error_records_outage_and_stops(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)

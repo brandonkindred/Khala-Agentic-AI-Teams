@@ -19,6 +19,7 @@ from software_engineering_team.github_source.issue_proposals import (
 from software_engineering_team.github_source.pr_review_mapping import (
     build_review_body,
     choose_event,
+    file_in_diff,
     format_comment_body,
     format_issue_comment,
     inline_comment_to_timeline_body,
@@ -215,6 +216,43 @@ def test_map_mixed_findings_split_three_ways() -> None:
         "body": format_comment_body(off_diff),
     } in comments
     assert len(comments) == 2
+
+
+# ---------------------------------------------------------------------------
+# file_in_diff
+# ---------------------------------------------------------------------------
+
+
+def test_file_in_diff_true_for_file_present_in_diff() -> None:
+    valid = {"app/main.py": {2, 5}}
+    assert file_in_diff("app/main.py", valid) is True
+
+
+def test_file_in_diff_false_for_file_absent_from_diff() -> None:
+    valid = {"app/main.py": {2, 5}}
+    assert file_in_diff("other.py", valid) is False
+
+
+def test_file_in_diff_false_for_empty_file_path() -> None:
+    valid = {"app/main.py": {2}}
+    assert file_in_diff("", valid) is False
+
+
+def test_file_in_diff_normalizes_leading_dot_slash() -> None:
+    valid = {"app/main.py": {3}}
+    assert file_in_diff("./app/main.py", valid) is True
+
+
+def test_file_in_diff_basename_fallback_when_unique() -> None:
+    valid = {"src/app/main.py": {4}}
+    assert file_in_diff("main.py", valid) is True
+
+
+def test_file_in_diff_basename_fallback_ambiguous_returns_false() -> None:
+    # Two files share the same basename: an ambiguous basename match must not
+    # be treated as "in diff" -- this mirrors _normalize_path's refusal to guess.
+    valid = {"a/main.py": {1}, "b/main.py": {1}}
+    assert file_in_diff("main.py", valid) is False
 
 
 # ---------------------------------------------------------------------------

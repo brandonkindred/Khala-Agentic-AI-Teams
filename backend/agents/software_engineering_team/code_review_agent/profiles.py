@@ -112,6 +112,12 @@ _SHARED_OUTPUT_SECTION = (
     '  - "suggestion": string (concrete fix recommendation). If there is nothing to change, do NOT '
     'include the finding in "issues" at all -- a finding whose only "suggestion" would be "no '
     'changes needed" is not an issue.\n'
+    '  - "pre_existing": boolean. true when this issue describes a defect in code this change did '
+    "NOT add or modify -- a pre-existing defect in code outside the scope of this change (e.g. an "
+    "unrelated bug you notice in surrounding, unchanged code you were shown for context). false "
+    "when the defect is in code this change itself added or modified. Default false: when you "
+    "cannot tell whether the code predates this change, treat it as part of the change rather than "
+    "guessing pre-existing.\n"
     '- "summary": string. A brief, high-level overview for the developer. Do NOT restate what the '
     "PR does or is meant to accomplish. When any issue was found, do NOT praise the implementation "
     "(do not call it sound, well-structured, or well-implemented) and do NOT claim it aligns with "

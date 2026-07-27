@@ -28,12 +28,12 @@ from software_engineering_team.api.coding_team_state import (
 from software_engineering_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
-    anchor_to_first_file,
     annotate_duplicate_proposals,
     build_existing_comments,
     build_review_body,
     choose_event,
     duplicate_check_max_open_issues,
+    file_in_diff,
     group_similar_findings,
     inline_comment_to_timeline_body,
     is_within_diff,
@@ -205,13 +205,32 @@ class ReviewCode(NamedTuple):
 # the "is this file removed" check isn't a bare string literal at each call site.
 _FILE_STATUS_REMOVED = "removed"
 
-# Prefix of the whole-file-mode focus note, exposed so callers/tests can detect
-# the note (e.g. in task_requirements) without duplicating its full wording.
+# Prefix of the scope-tagging focus note (whole-file or hunk mode), exposed so
+# callers/tests can detect the note (e.g. in task_requirements) without
+# duplicating its full wording.
 WHOLE_FILE_FOCUS_NOTE_PREFIX = "Review focus:"
+
+# Shared "tag pre-existing findings" instruction body, reused by both the
+# whole-file and hunk-mode focus notes below (only the framing sentence
+# ahead of it differs, since the two modes show the reviewer different
+# content). Kept as one instruction so the tagging contract can never drift
+# between the two modes.
+_PRE_EXISTING_TAG_INSTRUCTIONS = (
+    "For EVERY issue you report, add a boolean field named `pre_existing` to the issue "
+    "object:\n"
+    "- Set `pre_existing: false` for a defect in the code this pull request ADDS or MODIFIES — "
+    "these are the findings that matter for reviewing the PR.\n"
+    "- Set `pre_existing: true` for a genuine bug you notice in PRE-EXISTING, UNCHANGED code "
+    "that this pull request did not touch (an unrelated defect visible in the surrounding "
+    "code). Still report such bugs — do not stay silent about them — but tag them so they are "
+    "recorded separately instead of blamed on this change.\n"
+    "Do not invent pre-existing issues to pad the review; only tag a finding `pre_existing: "
+    "true` when it is a real defect in code outside this PR's change."
+)
 
 
 def _whole_file_focus(body: str) -> str:
-    """Append a "tag pre-existing findings" instruction to ``body``.
+    """Append a "tag pre-existing findings" instruction to ``body`` (whole-file mode).
 
     Whole-file review shows the reviewer complete files (for context and existing-
     code awareness), which also lets it see unchanged code. Rather than silently
@@ -230,16 +249,35 @@ def _whole_file_focus(body: str) -> str:
     """
     note = (
         f"{WHOLE_FILE_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
-        "file contents are provided for context. For EVERY issue you report, add a boolean field "
-        "named `pre_existing` to the issue object:\n"
-        "- Set `pre_existing: false` for a defect in the code this pull request ADDS or MODIFIES — "
-        "these are the findings that matter for reviewing the PR.\n"
-        "- Set `pre_existing: true` for a genuine bug you notice in PRE-EXISTING, UNCHANGED code "
-        "that this pull request did not touch (an unrelated defect visible in the surrounding "
-        "file). Still report such bugs — do not stay silent about them — but tag them so they are "
-        "recorded separately instead of blamed on this change.\n"
-        "Do not invent pre-existing issues to pad the review; only tag a finding `pre_existing: "
-        "true` when it is a real defect in code outside this PR's change."
+        "file contents are provided for context, which also lets you see unchanged code.\n"
+        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
+    )
+    return f"{body}\n\n{note}" if body.strip() else note
+
+
+def _hunk_review_focus(body: str) -> str:
+    """Append the same "tag pre-existing findings" instruction to ``body`` (hunk mode).
+
+    Hunk-mode review shows the reviewer diff hunks — added lines plus some
+    surrounding unchanged context lines — rather than complete files. A context
+    line can still reveal a genuine, unrelated pre-existing bug, so this mode
+    asks for the same ``pre_existing`` tag whole-file mode does (previously this
+    mode carried no tagging instruction at all, so every hunk-mode finding
+    defaulted ``pre_existing=False`` and was posted regardless of relevance).
+
+    Preconditions:
+        - ``body`` is a string (the PR body or "").
+
+    Postconditions:
+        - Returns ``body`` with the focus note appended (or the note alone when
+          ``body`` is blank). The note starts with ``WHOLE_FILE_FOCUS_NOTE_PREFIX``
+          and instructs the reviewer to emit a ``pre_existing`` field per issue.
+    """
+    note = (
+        f"{WHOLE_FILE_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. You are "
+        "shown diff hunks (added lines plus some surrounding unchanged context lines), not "
+        "complete files.\n"
+        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
     )
     return f"{body}\n\n{note}" if body.strip() else note
 
@@ -659,10 +697,11 @@ def _run_reviewer(
     ``_whole_file_focus`` to focus on the change since it now also sees
     unchanged code); a truthy ``code`` drives a diff-hunk attempt
     (``pre_numbered=True``, since ``_build_review_code``'s rendering already
-    carries its own ``"N: "`` line-number prefixes). The two sources can never
-    be mixed into a single call (the underlying engine's ``files``/``code``
-    are mutually exclusive), which is why a partial fetch needs two calls
-    instead of one.
+    carries its own ``"N: "`` line-number prefixes, steered via
+    ``_hunk_review_focus`` for the same reason — a hunk's surrounding context
+    lines are unchanged code too). The two sources can never be mixed into a
+    single call (the underlying engine's ``files``/``code`` are mutually
+    exclusive), which is why a partial fetch needs two calls instead of one.
 
     Preconditions:
         - ``provider`` was resolved before the first GitHub call.
@@ -724,8 +763,17 @@ def _run_reviewer(
     if code:
         # _build_review_code renders every line with its original line-number
         # prefix; declaring pre_numbered here (instead of letting the reviewer
-        # sniff the format) keeps issue lines verbatim.
-        attempts.append(dict(code=code, pre_numbered=True, task_requirements=pr.body or ""))
+        # sniff the format) keeps issue lines verbatim. Diff hunks still carry
+        # unchanged context lines, so steer this attempt the same way the
+        # whole-file attempt is steered — otherwise it would comment on
+        # pre-existing, unchanged code the PR never touched.
+        attempts.append(
+            dict(
+                code=code,
+                pre_numbered=True,
+                task_requirements=_hunk_review_focus(pr.body or ""),
+            )
+        )
     assert attempts, "caller must supply a non-empty head_files and/or non-empty code"
 
     outputs: List[Any] = []
@@ -1114,8 +1162,7 @@ def _partition_review_issues(
     """Split the reviewer's raw findings into PR-scoped issues and pre-existing-bug proposals.
 
     Dedupes the PR-scoped findings against the PR's existing comments, then
-    maps/anchors/splits the survivors into postable line- and file-level
-    comments.
+    maps/splits the survivors into postable line- and file-level comments.
 
     Preconditions:
         - ``output.issues`` is from a successful (non-``None``) call to
@@ -1124,11 +1171,19 @@ def _partition_review_issues(
           :func:`_decide_review_mode` built for the same file set.
         - ``client`` is an open ``GitHubClient``.
     Postconditions:
-        - An issue tagged ``pre_existing=True`` is kept in
+        - An issue whose file does not resolve into ``valid_by_path`` (per
+          :func:`file_in_diff`) is unconditionally routed to
+          ``preexisting_issues`` — it names a file this PR never touched, so
+          it cannot legitimately be about this PR's change regardless of the
+          reviewer's ``pre_existing`` self-report. This check is deterministic,
+          not LLM-dependent, and is the hard guarantee that an out-of-scope
+          finding is never posted as a PR comment.
+        - Otherwise, an issue tagged ``pre_existing=True`` is kept in
           ``preexisting_issues`` unless :func:`is_within_diff` against
           ``changed_by_path`` proves it lies on a line this PR actually
-          ADDED, in which case it is overridden into ``pr_issues`` (hunk-mode
-          reviews, which never tag, are unaffected).
+          ADDED, in which case it is overridden into ``pr_issues``. An issue
+          that omits the tag (or from a caller that never asks for it)
+          defaults ``pre_existing=False`` and is treated as a PR finding.
         - ``proposals`` is :func:`_detect_duplicate_proposals` applied to
           ``proposal_from_findings`` over each :func:`group_similar_findings`
           group of ``preexisting_issues``.
@@ -1139,11 +1194,10 @@ def _partition_review_issues(
           already-RESOLVED existing comment and were dropped). When
           ``pr_issues`` is empty, ``addressed_issues == []`` and no
           existing-comments fetch happens (nothing to de-duplicate).
-        - ``line_comments``/``file_comments`` is
-          :func:`split_review_comments` over :func:`map_issues_to_comments`
-          applied to ``pr_issues``, plus every non-``None``
-          :func:`anchor_to_first_file` result for the leftovers
-          ``map_issues_to_comments`` could not place.
+        - ``line_comments``/``file_comments`` is :func:`split_review_comments`
+          over :func:`map_issues_to_comments` applied to ``pr_issues`` — every
+          entry in ``pr_issues`` already passed :func:`file_in_diff`, so
+          ``map_issues_to_comments`` never returns a leftover here.
         - The existing-comments fetch and duplicate-detection are both
           best-effort and degrade internally (never raise). Any other
           exception (e.g. from ``map_issues_to_comments``) propagates to the
@@ -1151,21 +1205,32 @@ def _partition_review_issues(
     """
     # Split the reviewer's findings by whether they belong to this PR.
     # Defects in the code the PR added or modified drive the review
-    # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
-    # in unchanged code are NOT posted on this PR — they become GitHub-issue
-    # proposals a human approves later on the Code Review page. A finding
-    # without the tag defaults to a PR finding (hunk-mode reviews never
+    # (comments + REQUEST_CHANGES); pre-existing bugs — in a file this PR
+    # never touched, OR in unchanged code the reviewer noticed inside a
+    # touched file — are NOT posted on this PR: they become GitHub-issue
+    # proposals a human approves later on the Code Review page.
+    #
+    # The file-level check is deterministic and applies BEFORE trusting the
+    # LLM's self-report at all: a finding naming a file outside this PR's
+    # diff cannot legitimately be about this PR's change, no matter what
+    # pre_existing says (this closes the leak where such a finding used to
+    # be mis-anchored onto an unrelated changed file and posted anyway).
+    #
+    # For a finding whose file IS in the diff, a finding without the
+    # pre_existing tag defaults to a PR finding (hunk-mode reviews never
     # tag, so they behave exactly as before). The LLM's self-reported tag
-    # is not trusted unconditionally: a finding whose file/line is verified
-    # to be a line this PR actually ADDED (per is_within_diff against
-    # changed_by_path — deliberately narrower than valid_by_path, which
-    # would also match unchanged context lines) cannot legitimately be
+    # is not trusted unconditionally either: a finding whose file/line is
+    # verified to be a line this PR actually ADDED (per is_within_diff
+    # against changed_by_path — deliberately narrower than valid_by_path,
+    # which would also match unchanged context lines) cannot legitimately be
     # "pre-existing, unchanged code", so a mistagged pre_existing=true is
     # overridden back to a PR finding rather than silently skipping review.
     pr_issues: List[Any] = []
     preexisting_issues: List[Any] = []
     for i in output.issues:
-        if getattr(i, "pre_existing", False) and not is_within_diff(i, changed_by_path):
+        if not file_in_diff(getattr(i, "file_path", "") or "", valid_by_path):
+            preexisting_issues.append(i)
+        elif getattr(i, "pre_existing", False) and not is_within_diff(i, changed_by_path):
             preexisting_issues.append(i)
         else:
             pr_issues.append(i)
@@ -1182,12 +1247,11 @@ def _partition_review_issues(
     # repeat comments every time it is re-reviewed. A match against an
     # already-RESOLVED comment is dropped (requirement: already addressed);
     # a match against a still-open comment is kept but cross-referenced (see
-    # map_issues_to_comments/anchor_to_first_file below) instead of posted as
-    # an unexplained duplicate. The fetch is best-effort: any failure yields
-    # [], so this never turns a working review into a failed one. Skipped
-    # entirely on a clean review (no findings): there is nothing to
-    # de-duplicate, so the up-to-three API calls the fetch makes would be
-    # pure waste.
+    # map_issues_to_comments below) instead of posted as an unexplained
+    # duplicate. The fetch is best-effort: any failure yields [], so this
+    # never turns a working review into a failed one. Skipped entirely on a
+    # clean review (no findings): there is nothing to de-duplicate, so the
+    # up-to-three API calls the fetch makes would be pure waste.
     if pr_issues:
         existing_comments = _fetch_existing_comments(client, owner, repo, pr_number)
         pr_issues, addressed_issues, existing_by_issue = partition_issues_by_existing_comments(
@@ -1197,18 +1261,11 @@ def _partition_review_issues(
         addressed_issues, existing_by_issue = [], {}
 
     comments, leftovers = map_issues_to_comments(pr_issues, valid_by_path, existing_by_issue)
-
-    # Re-anchor leftover findings (file not in diff) as file-level
-    # comments on the first changed file in the diff, so they travel as
-    # review comments rather than standalone top-level PR conversation
-    # comments.  anchor_to_first_file returns None only when valid_by_path
-    # is empty — but we already exit early in that case, so the filter is
-    # just a safety net.
-    anchored_leftovers = [
-        anchor_to_first_file(issue, valid_by_path, existing_by_issue.get(id(issue)))
-        for issue in leftovers
-    ]
-    comments = comments + [c for c in anchored_leftovers if c is not None]
+    assert not leftovers, (
+        "map_issues_to_comments returned a leftover although every pr_issues entry "
+        "already passed file_in_diff — an out-of-scope finding must never be posted "
+        "as a PR comment"
+    )
 
     # Two GitHub endpoints, two shapes. Line-anchored comments ride the
     # single review; file-level comments (subject_type="file") go on the
