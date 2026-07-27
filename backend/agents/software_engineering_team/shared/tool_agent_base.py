@@ -193,7 +193,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     build_review_noun: str = "issue(s)"
 
     # --- Static plan output ----------------------------------------------
-    plan_recommendations: List[str] = []
+    plan_recommendations: Tuple[str, ...] = ()
     plan_summary: str = ""
 
     # --- Parser hooks (set by subclass as staticmethods) -----------------
