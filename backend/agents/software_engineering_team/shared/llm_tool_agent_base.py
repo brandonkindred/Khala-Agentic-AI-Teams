@@ -186,7 +186,13 @@ class LlmToolAgentBase:
             return run_strands_agent(self._agent_factory(), model, prompt)
         return str(self._agent_factory()(model=model)(prompt)).strip()
 
-    def _parse_llm_json(self, raw: str) -> Optional[Dict[str, Any]]:
+    def _parse_llm_json(
+        self,
+        raw: str,
+        *,
+        context: Optional[str] = None,
+        on_fail_msg: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Parse model output via the selected JSON-salvage strategy.
 
         When ``json_parse_strategy`` is ``"extract"``, delegates to
@@ -206,7 +212,11 @@ class LlmToolAgentBase:
             failure). Returns ``dict | None`` for extract (``None`` on failure).
             Does not import ``shared.llm_recovery`` or
             ``tool_agent_base.lenient_json_object`` until the corresponding
-            branch runs.
+            branch runs. For the lenient-JSON branch, ``context``/``on_fail_msg``
+            are forwarded to ``lenient_json_object`` when given; otherwise the
+            call falls back to ``self.parse_context``/``self.parse_on_fail_msg``
+            (the class-level defaults), so callers that only rely on those
+            defaults need not pass either kwarg.
         """
         strategy = type(self).json_parse_strategy
         assert strategy in ("lenient", "extract"), strategy
@@ -229,8 +239,8 @@ class LlmToolAgentBase:
         return lenient_json_object(
             raw,
             logger=logging.getLogger(type(self).__module__),
-            context=self.parse_context,
-            on_fail_msg=self.parse_on_fail_msg,
+            context=context if context is not None else self.parse_context,
+            on_fail_msg=on_fail_msg if on_fail_msg is not None else self.parse_on_fail_msg,
         )
 
     # Fallback helpers read class attrs via type(self), not self: that keeps

@@ -126,6 +126,16 @@ def test_writer_agent_deterministic_self_check() -> None:
     assert "Vague citation" in joined or "Reader address" in joined
 
 
+def test_writer_agent_deterministic_self_check_vague_citation_with_https_link() -> None:
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    draft = "Studies show this works, as covered in [this source](https://example.com/report).\n"
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Vague citation" not in joined
+
+
 def test_writer_agent_deterministic_self_check_clean_draft() -> None:
     from .conftest import make_writer_agent
 

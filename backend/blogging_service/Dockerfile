@@ -10,6 +10,8 @@ WORKDIR /app
 COPY blogging_service/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright
+
 # Install Playwright Chromium deps (--with-deps targets Ubuntu; install manually for Debian Trixie)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \

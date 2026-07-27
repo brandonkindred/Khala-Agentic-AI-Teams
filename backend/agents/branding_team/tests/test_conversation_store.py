@@ -132,6 +132,25 @@ def test_get_by_brand_id_single_join(fake_pg: dict) -> None:
     assert store.get_by_brand_id("brand_absent") is None
 
 
+def test_get_by_brand_id_ignores_stale_conversation_for_same_brand(fake_pg: dict) -> None:
+    """When more than one conversation row exists for a brand, get_by_brand_id
+    must return only the most-recently-updated conversation's own messages —
+    never a merge of messages from multiple conversations."""
+    store = BrandingConversationStore()
+    stale_cid = store.create(brand_id="brand_dup", mission=_acme_mission())
+    store.append_message(stale_cid, "user", "stale one")
+    store.append_message(stale_cid, "assistant", "stale two")
+
+    fresh_cid = store.create(brand_id="brand_dup", mission=_acme_mission())
+    store.append_message(fresh_cid, "user", "fresh one")
+
+    result = store.get_by_brand_id("brand_dup")
+    assert result is not None
+    rcid, messages, _, _ = result
+    assert rcid == fresh_cid
+    assert [m.content for m in messages] == ["fresh one"]
+
+
 def test_get_by_brand_id_loads_non_none_latest_output(fake_pg: dict) -> None:
     """get_by_brand_id surfaces a persisted latest_output, covering the
     non-None branch of the single-query load."""
