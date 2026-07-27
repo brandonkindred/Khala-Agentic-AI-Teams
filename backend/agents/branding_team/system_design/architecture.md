@@ -38,9 +38,9 @@ briefed vs. exploratory vs. chat-first) can all reach a consistent
   (`orchestrator.py:302-322`). Anything else returns
   `NEEDS_HUMAN_DECISION`.
 - **Consolidated output shape.** Specialist agents
-  (`BrandCodificationAgent`, `MoodBoardIdeationAgent`,
-  `CreativeRefinementAgent`, `BrandGuidelinesAgent`, `BrandWikiAgent`)
-  contribute to every pipeline execution so the fields on
+  (`VoicePrinciplesDrafter`, the `MoodBoardConceptualist` swarm,
+  `converge_decider`, `design_system_codifier`, `brand_rules_codifier`,
+  `asset_wiki_planner`) contribute to every pipeline execution so the fields on
   `TeamOutput` (`codification`, `mood_boards`, `brand_guidelines`,
   `design_system`, `wiki_backlog`, etc.) stay populated for all
   consumers. See `orchestrator.py:141-145` and `orchestrator.py:196-203`.
@@ -98,11 +98,11 @@ flowchart TB
         P5["Phase 5<br/>GovernanceAgent"]
         Compliance["BrandComplianceAgent"]
         subgraph specialists [Specialist agents]
-            L1["BrandCodificationAgent"]
-            L2["MoodBoardIdeationAgent"]
-            L3["CreativeRefinementAgent"]
-            L4["BrandGuidelinesAgent"]
-            L5["BrandWikiAgent"]
+            L1["VoicePrinciplesDrafter"]
+            L2["MoodBoardConceptualist swarm"]
+            L3["converge_decider"]
+            L4["design_system_codifier / brand_rules_codifier"]
+            L5["asset_wiki_planner"]
         end
     end
 

@@ -193,7 +193,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     build_review_noun: str = "issue(s)"
 
     # --- Static plan output ----------------------------------------------
-    plan_recommendations: List[str] = []
+    plan_recommendations: Tuple[str, ...] = ()
     plan_summary: str = ""
 
     # --- Parser hooks (set by subclass as staticmethods) -----------------
@@ -382,9 +382,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         if status == "error":
             return ToolAgentPhaseOutput(summary=f"{review_label} failed (LLM error).")
         raw = result
-        self.parse_context = review_label
-        self.parse_on_fail_msg = "reporting 0 issues."
-        data = self._parse_llm_json(raw)
+        data = self._parse_llm_json(raw, context=review_label, on_fail_msg="reporting 0 issues.")
         issues: List[ReviewIssue] = []
         for item in (data or {}).get("issues") or []:
             if isinstance(item, dict):
@@ -426,6 +424,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                     **extra,
                 )
                 raw = self._run_agent(self._model, prompt)
+                parsed = self._parse_single_issue(raw)
+                fixed_files = parsed.get("files") or {}
+                if fixed_files:
+                    merged.update(fixed_files)
+                    fixed_count += 1
             except Exception as e:
                 self._logger.warning(
                     "%s fix for issue %s failed: %s",
@@ -434,11 +437,6 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                     e,
                 )
                 continue
-            parsed = self._parse_single_issue(raw)
-            fixed_files = parsed.get("files") or {}
-            if fixed_files:
-                merged.update(fixed_files)
-                fixed_count += 1
         return ToolAgentPhaseOutput(
             files=merged,
             summary=f"{self.name}: fixed {fixed_count} of {len(issues)} issue(s) (one at a time).",

@@ -391,14 +391,24 @@ class BrandingConversationStore(PostgresHelperMixin):
         """Return the single conversation for *brand_id*, or None.
 
         Single ``LEFT JOIN`` load (conversation + messages) — same pattern as
-        :meth:`get_state`, keyed by brand id.
+        :meth:`get_state`, keyed by brand id. A subquery first pins the one
+        canonical conversation for the brand (the most recently updated, per
+        the "single conversation per brand" contract), then the join loads
+        that conversation's full message history. Filtering the join directly
+        by ``brand_id`` (with no per-conversation restriction) would let stray
+        extra conversation rows for the same brand have their messages merged
+        into one corrupted result.
         """
         rows = self._fetch_all(
             "SELECT c.conversation_id, c.mission_json, c.latest_output_json, "
             "m.role, m.content, m.timestamp "
             "FROM branding_conversations c "
             "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
-            "WHERE c.brand_id = %s ORDER BY m.id",
+            "WHERE c.conversation_id = ("
+            "  SELECT conversation_id FROM branding_conversations "
+            "  WHERE brand_id = %s ORDER BY updated_at DESC LIMIT 1"
+            ") "
+            "ORDER BY m.id",
             (brand_id,),
         )
         if not rows:
