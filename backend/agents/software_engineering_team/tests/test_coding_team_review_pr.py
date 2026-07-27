@@ -1108,6 +1108,36 @@ class TestReviewEndpoint:
         # And it preserved the cause in the job store for diagnosis.
         assert "body blew up past its own handler" in (job.get("error") or "")
 
+    def test_body_failure_scrubs_token_from_log_and_outage(
+        self, review_app, monkeypatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Regression for the token-leak bug: when the ``_run_pr_review_body``
+        try block raises with a GitHub token embedded in the exception text
+        (e.g. leaked into git stderr), the scrubbed form — not the raw
+        exception — must be what's logged and what reaches
+        ``_record_review_outage``, matching the "best-effort, token-scrubbed"
+        contract the surrounding comment promises for the whole except block."""
+        import software_engineering_team.api.pr_review as prm
+
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+
+        def _boom(*_a: Any, **_kw: Any) -> None:
+            raise RuntimeError(f"clone failed: {secret_url}")
+
+        monkeypatch.setattr(prm, "_finalize_review_outcome", _boom)
+        with caplog.at_level("ERROR"):
+            resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        # The formatted log message (the %s arg we control) must be scrubbed; the
+        # attached traceback still shows the raw exception (inherent to
+        # ``logger.exception``/``exc_info`` and out of scope for this fix — the bug
+        # is about the message text passed through, not Python's traceback capture).
+        [record] = [r for r in caplog.records if r.getMessage().startswith("PR review hook failed")]
+        assert "ghp_LEAKEDTOKEN" not in record.getMessage()
+        assert "ghp_LEAKEDTOKEN" not in (job.get("error") or "")
+
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         resp = review_app["client"].post(
