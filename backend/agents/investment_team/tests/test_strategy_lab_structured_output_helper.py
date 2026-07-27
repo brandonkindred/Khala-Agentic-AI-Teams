@@ -163,7 +163,7 @@ def test_reasoning_pass_starvation_presents_as_schema_forced_without_breaking_in
     assert raised.content_bytes_seen is True
     assert raised.payload_fingerprint == "fp-123"
     assert raised.finish_reason == "length"
-    assert "'high'" in str(raised)  # the original ladder level stays visible
+    assert raised.cause.retry_thinking_level == "high"  # the original ladder level stays visible
     # The original receipt is left untouched for any other holder of it.
     assert original.schema_forced is False
     assert original.retry_thinking_level == "high"
