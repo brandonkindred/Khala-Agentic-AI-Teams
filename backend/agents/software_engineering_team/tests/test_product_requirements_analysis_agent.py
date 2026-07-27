@@ -32,6 +32,7 @@ from product_requirements_analysis_agent.question_data import (
 )
 from product_requirements_analysis_agent.question_processing import (
     filter_duplicate_questions,
+    parse_question_option,
 )
 from product_requirements_analysis_agent.question_processing import (
     parse_open_question as _real_parse_open_question,
@@ -731,6 +732,27 @@ def test_parse_open_question_treats_explicit_null_option_fields_as_empty() -> No
     assert parsed.options[0].id == "opt0"
     assert parsed.options[0].label == ""
     assert parsed.options[0].rationale == ""
+
+
+def test_parse_question_option_defaults_confidence_when_non_numeric_string() -> None:
+    """A malformed LLM confidence value (non-numeric string) should default to 0.5, not raise."""
+    parsed = parse_question_option({"id": "opt1", "label": "Yes", "confidence": "high"}, index=1)
+
+    assert parsed.confidence == 0.5
+
+
+def test_parse_question_option_defaults_confidence_when_none() -> None:
+    """An explicit JSON null confidence value should default to 0.5, not raise."""
+    parsed = parse_question_option({"id": "opt1", "label": "Yes", "confidence": None}, index=1)
+
+    assert parsed.confidence == 0.5
+
+
+def test_parse_question_option_preserves_valid_numeric_confidence() -> None:
+    """Existing valid-numeric-confidence behavior is unchanged."""
+    parsed = parse_question_option({"id": "opt1", "label": "Yes", "confidence": 0.9}, index=1)
+
+    assert parsed.confidence == 0.9
 
 
 def test_convert_to_pending_questions_includes_extended_metadata() -> None:
