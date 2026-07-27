@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 from llm_service import DummyLLMClient, LLMClient
 from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
 from software_engineering_team.shared.git_utils import (
-    DEVELOPMENT_BRANCH,
     abort_merge,
     checkout_branch,
     commit_working_tree,
@@ -21,11 +20,7 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
 )
 from software_engineering_team.shared.repo_writer import write_agent_output
-from software_engineering_team.shared.team_lead_base import (
-    BaseTeamLead,
-    TeamLeadSharedState,
-    build_team_failure_result,
-)
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -38,14 +33,16 @@ from .models import (
     DevOpsCompletionPackage,
     DevOpsTaskSpec,
     DevOpsTeamResult,
-    GitCommitMetadata,
-    GitMergeMetadata,
-    GitOperationsMetadata,
     HandoffInfo,
     ReleaseReadiness,
     SubtaskContract,
 )
-from .phases import assemble_quality_gates, run_phase1_intake_clarify, run_phase2_design_fanout
+from .phases import (
+    assemble_quality_gates,
+    deliver_and_merge,
+    run_phase1_intake_clarify,
+    run_phase2_design_fanout,
+)
 
 # Commit-message template for the shared deliver helper. ``deliver_inline_merge``
 # calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
@@ -782,67 +779,22 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             # report the actual outcome (real branch, commit SHA, merge status) rather
             # than fabricated placeholders. A model-only run (write_changes=False) does
             # no git work, so the neutral default honestly reports "nothing delivered".
-            git_ops = GitOperationsMetadata()
-            if write_changes and aggregated_artifacts:
-                deliver_result = deliver_inline_merge(
-                    task_id=task_spec.task_id,
-                    repo_path=repo_path,
-                    deliver_files=aggregated_artifacts,
-                    summary=f"implement task [{task_spec.task_id}]",
-                    task_title=task_spec.title,
-                    commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
-                    ops=_git_ops(),
-                    logger=logger,
-                )
-                # deliver_inline_merge leaves development checked out at the merged
-                # commit. merge_branch fast-forwards (development never advanced since
-                # the branch was cut), so this single HEAD SHA is the honest identifier
-                # for both the delivered commit and the merge result.
-                head_ok, head_sha = get_head_sha(repo_path)
-                sha = head_sha if head_ok else ""
-                commit_msg = (
-                    deliver_result.commit_messages[0]
-                    if deliver_result.commit_messages
-                    else f"feat(devops): implement task [{task_spec.task_id}]"
-                )
-                if not deliver_result.merged:
-                    return build_team_failure_result(
-                        DevOpsTeamResult,
-                        deliver_result.summary or "DevOps delivery merge failed",
-                        completion_package=DevOpsCompletionPackage(
-                            task_id=task_spec.task_id,
-                            status="blocked",
-                            files_changed=sorted(aggregated_artifacts.keys()),
-                            quality_gates=quality_gates,
-                            git_operations=GitOperationsMetadata(
-                                branch_created=deliver_result.branch_name,
-                                commits=[GitCommitMetadata(hash="", message=commit_msg)],
-                                merge=GitMergeMetadata(
-                                    target_branch=DEVELOPMENT_BRANCH,
-                                    strategy="merge",
-                                    merge_commit_hash="",
-                                    status="failed",
-                                ),
-                            ),
-                            notes=[deliver_result.summary],
-                        ),
-                    )
-                merge_status = "merged" if head_ok else "merged_sha_unknown"
-                if not head_ok:
-                    completion.notes.append(
-                        "Merge succeeded but HEAD SHA could not be read after merge; commit hash unknown."
-                    )
-                git_ops = GitOperationsMetadata(
-                    branch_created=deliver_result.branch_name,
-                    commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
-                    merge=GitMergeMetadata(
-                        target_branch=DEVELOPMENT_BRANCH,
-                        strategy="merge",
-                        merge_commit_hash=sha,
-                        status=merge_status,
-                    ),
-                )
-            completion.git_operations = git_ops
+            delivery = deliver_and_merge(
+                task_spec=task_spec,
+                repo_path=repo_path,
+                aggregated_artifacts=aggregated_artifacts,
+                write_changes=write_changes,
+                quality_gates=quality_gates,
+                commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
+                ops=_git_ops(),
+                deliver_inline_merge=deliver_inline_merge,
+                get_head_sha=get_head_sha,
+                logger=logger,
+            )
+            if delivery.failure_result is not None:
+                return delivery.failure_result
+            completion.notes.extend(delivery.notes)
+            completion.git_operations = delivery.git_ops
             completion.handoff = HandoffInfo(
                 prod_approval_required="production" in task_spec.platform_scope.environments,
                 runbook_updated=bool(doc.files),
