@@ -289,6 +289,7 @@ def complete_json_via_reasoning(
         raise ValueError("objective must be non-empty")
     if not formatting_instructions:
         raise ValueError("formatting_instructions must be non-empty")
+    kwargs.pop("think", None)
 
     prose = client.complete(
         reasoning_prompt,
@@ -340,6 +341,10 @@ def complete_validated_via_reasoning(
     retries up to ``correction_attempts`` times on a parse/validation
     failure, exactly as :func:`complete_validated` does today.
     """
+    if not objective:
+        raise ValueError("objective must be non-empty")
+    kwargs.pop("think", None)
+
     prose = client.complete(
         reasoning_prompt,
         objective=f"{objective} (reasoning)",

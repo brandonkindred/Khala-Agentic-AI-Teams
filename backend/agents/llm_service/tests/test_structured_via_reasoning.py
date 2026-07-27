@@ -218,6 +218,7 @@ def test_json_via_reasoning_tags_objectives_per_pass() -> None:
     )
 
     assert client.reasoning_calls[0]["objective"] == "rank job candidates (reasoning)"
+    assert client.format_calls[0]["objective"] == "rank job candidates (format)"
 
 
 def test_json_via_reasoning_forwards_kwargs_to_formatting_call_only() -> None:

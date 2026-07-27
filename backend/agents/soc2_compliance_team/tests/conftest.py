@@ -56,12 +56,13 @@ class FakeLLM:
         # ``complete`` serves two callers here: ``compact_text``, which passes
         # ``max_chars`` and wants the text back, and the two-call split's
         # think=True reasoning pass, which always passes ``think=True``.
-        # Gate on the reasoning-only marker (not just max_chars' absence) so a
-        # future compact_text call that also sets max_chars alongside an
-        # incidental ``think`` kwarg can't be misclassified. Record the
-        # reasoning call so tests can assert the criterion's reasoning
-        # temperature actually reaches the pass that does the analysis —
-        # ``self.calls`` only ever sees the think=False formatting call.
+        # Gate compact_text detection on the absence of the reasoning marker
+        # (not just max_chars' presence) so a future reasoning call that also
+        # happens to carry ``max_chars`` alongside ``think=True`` is not
+        # misclassified as compact_text. Record the reasoning call so tests
+        # can assert the criterion's reasoning temperature actually reaches
+        # the pass that does the analysis — ``self.calls`` only ever sees the
+        # think=False formatting call.
         if "max_chars" in kwargs and not kwargs.get("think"):
             return prompt[: kwargs["max_chars"]]
         self.reasoning_calls.append({"prompt": prompt, **kwargs})

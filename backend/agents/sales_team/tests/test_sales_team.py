@@ -104,7 +104,7 @@ class CannedLLMClient(LLMClient):
         # ``self._responses`` keep tracking only the complete_json calls these tests assert on.
         # ``reasoning_calls`` records this pass separately for tests that verify it ran.
         self.reasoning_calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "think": think}
+            {"prompt": prompt, "system_prompt": system_prompt, "think": think, "temperature": temperature}
         )
         return "Reasoning: proceeding as configured by the test fixture."
 
@@ -859,9 +859,12 @@ class TestLearningEngine:
         # stage/deal records, which only the reasoning call receives).
         assert len(client.reasoning_calls) == 1
         assert client.reasoning_calls[0]["think"] is True
+        assert client.reasoning_calls[0]["temperature"] == 0.0
+        assert "Acme" in client.reasoning_calls[0]["prompt"]
         assert len(client.calls) == 1
         assert client.calls[0]["temperature"] == 0.0
         assert "Reasoning: proceeding as configured by the test fixture" in client.calls[0]["prompt"]
+        assert "Acme" not in client.calls[0]["prompt"]
 
 
 # ---------------------------------------------------------------------------

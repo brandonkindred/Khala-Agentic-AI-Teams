@@ -76,7 +76,8 @@ class _ScriptedAgent:
 
 
 class _StubClient:
-    """Backing ``LLMClient`` stand-in that records every ``complete_json`` call."""
+    """Backing ``LLMClient`` stand-in that records every ``complete()``
+    (reasoning pass) and ``complete_json()`` (formatting pass) call."""
 
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result
@@ -183,7 +184,14 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     # formatting call above only re-embeds the same user_prompt alongside the
     # reasoning prose, so pin the prompt-content assertion there too.
     assert len(stub_client.reasoning_calls) == 1
-    assert "Review the strategy specification below" in stub_client.reasoning_calls[0]["prompt"]
+    reasoning_call = stub_client.reasoning_calls[0]
+    assert "Review the strategy specification below" in reasoning_call["prompt"]
+    # The reasoning call gets the prose-only system-prompt variant and a
+    # trailing override that neutralizes the shared template's "Return ONLY
+    # a JSON object" directive — without it the reasoning pass would emit
+    # JSON instead of prose, defeating the two-call split.
+    assert reasoning_call["system_prompt"] == design_review_mod._SYSTEM_PROMPT + so_mod.REASONING_MODE_SUFFIX
+    assert reasoning_call["prompt"].endswith(so_mod._REASONING_USER_PROMPT_SUFFIX)
 
 
 def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) -> None:

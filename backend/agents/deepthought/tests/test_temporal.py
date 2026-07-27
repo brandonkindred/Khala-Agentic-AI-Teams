@@ -304,11 +304,17 @@ class _FakeLLM:
     def __init__(self, *, json_return: dict | None = None, text_return: str = "TXT") -> None:
         self._json = json_return or {}
         self._text = text_return
+        self.complete_calls = 0
+        self.complete_json_calls = 0
+        self.last_format_prompt = ""
 
-    def complete_json(self, *_a, **_k) -> dict:
+    def complete_json(self, prompt="", *_a, **_k) -> dict:
+        self.complete_json_calls += 1
+        self.last_format_prompt = prompt
         return self._json
 
     def complete(self, *_a, **_k) -> str:
+        self.complete_calls += 1
         return self._text
 
 
@@ -399,6 +405,12 @@ def test_analyse_activity_direct_answer():
 
     assert out["can_answer_directly"] is True
     assert out["direct_answer"] == "the answer"
+    # Two-call split: exactly one reasoning pass (.complete) feeding exactly
+    # one formatting pass (.complete_json), and the reasoning output (TXT,
+    # this fake's canned text_return) reaches the formatting prompt.
+    assert fake.complete_calls == 1
+    assert fake.complete_json_calls == 1
+    assert "TXT" in fake.last_format_prompt
 
 
 def test_analyse_activity_injects_knowledge_summary():
@@ -456,6 +468,9 @@ def test_analyse_activity_decomposition():
 
     assert out["can_answer_directly"] is False
     assert len(out["skill_requirements"]) == 1
+    assert fake.complete_calls == 1
+    assert fake.complete_json_calls == 1
+    assert "TXT" in fake.last_format_prompt
 
 
 def test_force_direct_answer_activity_returns_text():

@@ -233,6 +233,7 @@ def invoke_structured_with_schema(
             objective=f"{objective} (format)",
             system_prompt=system_prompt,
             schema=dict(schema),
+            temperature=0.0,
             think=False,
         )
         # invoke_agent unconditionally does str(result) on whatever this

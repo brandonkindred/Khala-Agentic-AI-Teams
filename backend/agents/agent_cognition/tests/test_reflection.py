@@ -72,7 +72,7 @@ class CannedLLM(LLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        self.json_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        self.json_calls.append({"prompt": prompt, "system_prompt": system_prompt, "think": think})
         # Returned verbatim (no per-item ``dict()`` copy) so a non-object item can
         # flow through to exercise reflection's drop-malformed-item path.
         return {"proposals": list(self._proposals)}
@@ -294,6 +294,8 @@ def test_add_proposal_is_materialized_pending_derived_with_evidence(
     assert report.proposed == 1 and report.llm_calls == 2
     assert len(canned.text_calls) == 1
     assert len(canned.json_calls) == 1
+    assert canned.text_calls[0]["think"] is True
+    assert canned.json_calls[0]["think"] is False
     (proposal,) = created
     assert proposal.action == ProposalAction.ADD
     assert proposal.target_rule_id is None

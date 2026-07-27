@@ -376,7 +376,13 @@ class TestProposalCriticAgent:
 
         assert report.status == "PASS"
         assert report.approved is True
-        assert "Proposal Reviewer" in (llm.reasoning_calls[0]["system_prompt"] or "")
+        reasoning_system = llm.reasoning_calls[0]["system_prompt"] or ""
+        assert "Proposal Reviewer" in reasoning_system
+        # Regression guard: the reasoning pass must stay prose-only — a JSON
+        # directive here would outrank its "answer in structured prose"
+        # instruction and collapse the two-call split back to one.
+        assert "Return JSON only" not in reasoning_system
+        assert "No markdown fences" not in reasoning_system
 
     def test_fail_with_broken_roi_math(
         self,
