@@ -703,7 +703,7 @@ def _review_model_fingerprint(llm: LLMClient) -> str:
         # Best-effort: never let a fingerprinting failure abort a review. Log it
         # so an unexpected model-resolution failure (import/config mistake) is
         # visible to operators rather than silently degrading cache keys.
-        logger.debug(
+        logger.warning(
             "CodeReviewCoordinator: model fingerprint resolution failed; "
             "falling back to client type name",
             exc_info=True,

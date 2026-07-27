@@ -31,6 +31,9 @@ from product_requirements_analysis_agent.question_data import (
     _sop_phase1_fallback_questions,
 )
 from product_requirements_analysis_agent.question_processing import (
+    filter_duplicate_questions,
+)
+from product_requirements_analysis_agent.question_processing import (
     parse_open_question as _real_parse_open_question,
 )
 
@@ -647,6 +650,89 @@ def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     assert parsed.constraint_layer == 0
 
 
+def test_parse_open_question_preserves_option_order_when_marking_default() -> None:
+    """_parse_open_question should keep the original option order, not sort by confidence."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-004",
+            "question_text": "Which option should be default?",
+            "options": [
+                {"id": "opt_a", "label": "A", "is_default": False, "confidence": 0.3},
+                {"id": "opt_b", "label": "B", "is_default": False, "confidence": 0.9},
+                {"id": "opt_c", "label": "C", "is_default": False, "confidence": 0.5},
+            ],
+        },
+        index=0,
+    )
+
+    assert [opt.id for opt in parsed.options] == ["opt_a", "opt_b", "opt_c"]
+    assert [opt.is_default for opt in parsed.options] == [False, True, False]
+
+
+def test_parse_open_question_treats_explicit_null_fields_as_empty() -> None:
+    """_parse_open_question should not stringify explicit JSON null fields as the literal 'None'."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": None,
+            "question_text": None,
+            "context": None,
+            "recommendation": None,
+            "source": None,
+            "category": None,
+            "priority": None,
+            "constraint_domain": None,
+            "owner": None,
+            "due_date": None,
+            "status": None,
+        },
+        index=7,
+    )
+
+    assert parsed.id == "q7"
+    assert parsed.question_text == ""
+    assert parsed.context == ""
+    assert parsed.recommendation == ""
+    assert parsed.source == "spec_review"
+    assert parsed.category == "general"
+    assert parsed.priority == "medium"
+    assert parsed.constraint_domain == ""
+    assert parsed.owner == "user"
+    assert parsed.due_date == ""
+    assert parsed.status == "open"
+
+
+def test_parse_open_question_treats_explicit_null_option_fields_as_empty() -> None:
+    """Options with explicit null id/label/rationale should not become the literal 'None'."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "question_text": "Pick one",
+            "options": [
+                {
+                    "id": None,
+                    "label": None,
+                    "rationale": None,
+                    "is_default": True,
+                    "confidence": 0.9,
+                },
+            ],
+        },
+        index=0,
+    )
+
+    assert parsed.options[0].id == "opt0"
+    assert parsed.options[0].label == ""
+    assert parsed.options[0].rationale == ""
+
+
 def test_convert_to_pending_questions_includes_extended_metadata() -> None:
     """Pending question payload should include gate-aware metadata for UI and orchestration."""
     llm = MagicMock()
@@ -986,7 +1072,9 @@ def test_review_question_answer_alignment_restores_original_for_unmatched_malfor
     assert result_by_id["q2"].question_text == "Which platform?"
 
 
-def test_review_question_answer_alignment_restores_original_when_two_items_fail_one_unmatched() -> None:
+def test_review_question_answer_alignment_restores_original_when_two_items_fail_one_unmatched() -> (
+    None
+):
     """Regression for dropping an original question when one failed item matches by id and
     another failed item has an unrecognized id: both originals must survive, not just the
     id-matched fallback."""
@@ -1088,7 +1176,9 @@ def test_review_question_answer_alignment_falls_back_when_all_items_fail() -> No
     assert result == [q1, q2]
 
 
-def test_review_question_answer_alignment_preserves_input_order_when_all_items_fail_but_ids_match() -> None:
+def test_review_question_answer_alignment_preserves_input_order_when_all_items_fail_but_ids_match() -> (
+    None
+):
     """If every item fails to parse but each still carries a recognizable original id, the
     id-matched fallbacks must not be returned in the LLM's (possibly reordered) order —
     since nothing was genuinely realigned, the original input order is preserved instead."""
@@ -2390,3 +2480,27 @@ def test_run_context_discovery_resume_falls_back_to_latest_updated_spec(tmp_path
     )
     assert ok is True
     assert spec == "# v11"  # version 11 sorts above version 3
+
+
+def test_filter_duplicate_questions_strips_punctuation_before_stemming() -> None:
+    """A question token with trailing punctuation (e.g. 'store?') should still match
+    the unpunctuated form of the same word in qa_history, so the question is filtered
+    as a duplicate instead of being re-asked."""
+    questions = [OpenQuestion(id="q1", question_text="Where do we store? the data")]
+    qa_history = "Q: Where should data be stored?\nA: We store data in Postgres."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_keeps_non_duplicate() -> None:
+    """A question with no overlapping stems in qa_history is not filtered out."""
+    questions = [OpenQuestion(id="q1", question_text="Which cloud provider should we use?")]
+    qa_history = "Q: What is the deployment target?\nA: On-premise servers."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == questions
+    assert duplicates == []
