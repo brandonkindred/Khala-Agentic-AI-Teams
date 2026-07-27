@@ -635,6 +635,25 @@ def test_parse_open_question_preserves_extended_metadata() -> None:
     assert parsed.asked_via == ["slack", "web_ui"]
 
 
+def test_parse_open_question_defaults_non_sequence_section_impact_and_asked_via() -> None:
+    """_parse_open_question should ignore string values instead of exploding them into characters."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-004",
+            "question_text": "Which SLO tier should we target?",
+            "section_impact": "Requirements",
+            "asked_via": "slack",
+        },
+        index=0,
+    )
+
+    assert parsed.section_impact == []
+    assert parsed.asked_via == []
+
+
 def test_parse_spec_review_response_skips_malformed_question_without_raising() -> None:
     """parse_spec_review_response must never raise, even when an open question has non-list options."""
     result = parse_spec_review_response(
