@@ -635,8 +635,13 @@ def test_parse_open_question_preserves_extended_metadata() -> None:
     assert parsed.asked_via == ["slack", "web_ui"]
 
 
-def test_parse_open_question_defaults_non_sequence_section_impact_and_asked_via() -> None:
-    """_parse_open_question should ignore string values instead of exploding them into characters."""
+def test_parse_open_question_wraps_non_sequence_section_impact_and_asked_via() -> None:
+    """_parse_open_question should wrap a scalar string into a single-element list.
+
+    A string is not iterated char-by-char (which would explode "Requirements" into
+    ["R", "e", ...]); it is coerced to a single-element list, preserving the value
+    rather than discarding it.
+    """
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
 
@@ -650,12 +655,17 @@ def test_parse_open_question_defaults_non_sequence_section_impact_and_asked_via(
         index=0,
     )
 
-    assert parsed.section_impact == []
-    assert parsed.asked_via == []
+    assert parsed.section_impact == ["Requirements"]
+    assert parsed.asked_via == ["slack"]
 
 
-def test_parse_spec_review_response_skips_malformed_question_without_raising() -> None:
-    """parse_spec_review_response must never raise, even when an open question has non-list options."""
+def test_parse_spec_review_response_coerces_malformed_question_without_raising() -> None:
+    """parse_spec_review_response must never raise, even when an open question has non-list options.
+
+    parse_open_question coerces a non-list 'options' value (e.g. explicit null) to an
+    empty list rather than raising, so the malformed question is kept (with no options)
+    instead of being dropped.
+    """
     result = parse_spec_review_response(
         {
             "issues": ["Missing auth flow"],
@@ -669,7 +679,11 @@ def test_parse_spec_review_response_skips_malformed_question_without_raising() -
     )
 
     assert isinstance(result, SpecReviewResult)
-    assert [q.question_text for q in result.open_questions] == ["Well-formed question"]
+    assert [q.question_text for q in result.open_questions] == [
+        "Malformed question",
+        "Well-formed question",
+    ]
+    assert result.open_questions[0].options == []
 
 
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
@@ -791,6 +805,109 @@ def test_parse_question_option_preserves_valid_numeric_confidence() -> None:
     parsed = parse_question_option({"id": "opt1", "label": "Yes", "confidence": 0.9}, index=1)
 
     assert parsed.confidence == 0.9
+
+
+@pytest.mark.parametrize(
+    "malformed_confidence", [None, "high", float("nan"), -3, 7, 10**400]
+)
+def test_parse_question_option_clamps_or_defaults_confidence(
+    malformed_confidence: Any,
+) -> None:
+    """confidence should always end up in [0.0, 1.0], including out-of-range/overflow values."""
+    parsed = parse_question_option(
+        {"id": "opt1", "label": "Yes", "confidence": malformed_confidence}, index=1
+    )
+
+    assert 0.0 <= parsed.confidence <= 1.0
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed_value", "expected"),
+    [
+        ("section_impact", None, []),
+        ("section_impact", 5, ["5"]),
+        ("section_impact", "Requirements", ["Requirements"]),
+        ("asked_via", None, []),
+        ("asked_via", 5, ["5"]),
+        ("asked_via", "slack", ["slack"]),
+    ],
+)
+def test_parse_open_question_coerces_non_list_fields(
+    field: str, malformed_value: Any, expected: list
+) -> None:
+    """_parse_open_question should coerce non-list LLM output instead of raising."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-011",
+            "question_text": "Which region should we deploy to?",
+            field: malformed_value,
+        },
+        index=0,
+    )
+
+    assert getattr(parsed, field) == expected
+
+
+@pytest.mark.parametrize(
+    ("malformed_value", "expected_count", "expected_label"),
+    [
+        (None, 0, None),
+        (5, 1, "5"),
+        ("us-east", 1, "us-east"),
+    ],
+)
+def test_parse_open_question_coerces_non_list_options(
+    malformed_value: Any, expected_count: int, expected_label: str
+) -> None:
+    """_parse_open_question should coerce a non-list 'options' field instead of raising."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-012",
+            "question_text": "Which region should we deploy to?",
+            "options": malformed_value,
+        },
+        index=0,
+    )
+
+    assert len(parsed.options) == expected_count
+    if expected_label is not None:
+        assert parsed.options[0].label == expected_label
+
+
+@pytest.mark.parametrize("malformed_confidence", [None, "high", float("nan"), -3, 7, 10**400])
+def test_parse_open_question_coerces_scalar_option_with_malformed_confidence(
+    malformed_confidence: Any,
+) -> None:
+    """A single option object with a malformed confidence should not raise.
+
+    Wrapping a scalar 'options' dict into a one-item list (via _coerce_list) now
+    routes it through parse_question_option's dict branch, which previously
+    assumed 'confidence' was always a valid float in [0.0, 1.0].
+    """
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-013",
+            "question_text": "Which region should we deploy to?",
+            "options": {
+                "id": "opt_a",
+                "label": "us-east",
+                "confidence": malformed_confidence,
+            },
+        },
+        index=0,
+    )
+
+    assert len(parsed.options) == 1
+    assert 0.0 <= parsed.options[0].confidence <= 1.0
 
 
 def test_convert_to_pending_questions_includes_extended_metadata() -> None:

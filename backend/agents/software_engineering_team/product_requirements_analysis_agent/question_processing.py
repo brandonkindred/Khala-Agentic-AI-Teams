@@ -233,15 +233,35 @@ def _safe_constraint_layer(value: Any) -> int:
         return 0
 
 
+def _coerce_list(value: Any) -> list:
+    """Coerce LLM-provided list-valued output to a list.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns a list. None -> []; list/tuple -> list(value);
+        any other scalar (str, int, dict, ...) -> [value] (never iterated char-by-char).
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
 def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     """Parse a single open question from LLM output.
 
     Preconditions: ``index`` is a non-negative int; ``q_data`` is the decoded item.
-    Postconditions: returns a valid :class:`OpenQuestion`. When ``q_data`` is a dict
-        with options but no default, the highest-confidence option is marked default.
+    Postconditions: returns a valid :class:`OpenQuestion`; never raises.
+        - ``options``, ``section_impact``, and ``asked_via`` are coerced to lists
+          (``None`` becomes ``[]``, scalars become single-element lists).
+        - ``section_impact`` and ``asked_via`` elements are coerced to ``str``.
+        - Option ``confidence`` values are normalized to ``[0.0, 1.0]``,
+          defaulting to ``0.5`` when missing or malformed.
+        - When ``q_data`` is a dict with options but no default, the
+          highest-confidence option is marked default.
     """
     if isinstance(q_data, dict):
-        raw_options = q_data.get("options", [])
+        raw_options = _coerce_list(q_data.get("options", []))
         options = []
         for i, opt in enumerate(raw_options):
             options.append(parse_question_option(opt, i))
@@ -264,12 +284,8 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
         else:
             depends_on = None
 
-        raw_section_impact = q_data.get("section_impact", [])
-        section_impact = (
-            list(raw_section_impact) if isinstance(raw_section_impact, (list, tuple)) else []
-        )
-        raw_asked_via = q_data.get("asked_via", [])
-        asked_via = list(raw_asked_via) if isinstance(raw_asked_via, (list, tuple)) else []
+        section_impact = [str(v) for v in _coerce_list(q_data.get("section_impact", []))]
+        asked_via = [str(v) for v in _coerce_list(q_data.get("asked_via", []))]
 
         return OpenQuestion(
             id=_str_or_default(q_data.get("id"), f"q{index}"),
@@ -312,25 +328,38 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     )
 
 
+def _safe_confidence(value: Any) -> float:
+    """Coerce LLM-provided confidence output to a valid [0.0, 1.0] float, defaulting to 0.5.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns a float clamped to [0.0, 1.0]; non-numeric or missing input
+        yields 0.5, matching the "no machine-supplied score" default.
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.5
+    if result != result:  # NaN check without importing math
+        return 0.5
+    return max(0.0, min(1.0, result))
+
+
 def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
     """Parse a single question option from LLM output.
 
     Preconditions: ``index`` is a non-negative int; ``opt_data`` is the decoded item.
     Postconditions: returns a valid :class:`QuestionOption`; a non-dict becomes a
-        label-only option defaulting only at ``index == 0``; a non-numeric or ``None``
-        ``confidence`` value defaults to 0.5 instead of raising.
+        label-only option defaulting only at ``index == 0``; a non-numeric, ``None``,
+        out-of-range, or overflowing ``confidence`` value defaults to 0.5 (or is
+        clamped to ``[0.0, 1.0]``) instead of raising.
     """
     if isinstance(opt_data, dict):
-        try:
-            confidence = float(opt_data.get("confidence", 0.5))
-        except (ValueError, TypeError):
-            confidence = 0.5
         return QuestionOption(
             id=_str_or_default(opt_data.get("id"), f"opt{index}"),
             label=_str_or_default(opt_data.get("label")),
             is_default=bool(opt_data.get("is_default", False)),
             rationale=_str_or_default(opt_data.get("rationale")),
-            confidence=confidence,
+            confidence=_safe_confidence(opt_data.get("confidence", 0.5)),
         )
     return QuestionOption(
         id=f"opt{index}",
@@ -347,10 +376,10 @@ def dedupe_questions_by_answer_similarity(
 ) -> List[OpenQuestion]:
     """Drop open questions whose answer we already have.
 
-    Compares answers (selected_answer from answered_questions) to the option labels
-    of each open question. If any option of an open question is semantically the same
-    as an answer we already have, we do not ask that question again. Preserves order
-    of open_questions.
+    Compares answers (selected_answer and other_text from answered_questions) to the
+    option labels of each open question. If any option of an open question is
+    semantically the same as an answer we already have, we do not ask that question
+    again. Preserves order of open_questions.
 
     Preconditions: both arguments are lists of the respective models.
     Postconditions: returns a sublist of ``open_questions`` (order preserved);
