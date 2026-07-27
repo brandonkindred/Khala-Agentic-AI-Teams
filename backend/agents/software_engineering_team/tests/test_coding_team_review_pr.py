@@ -3395,7 +3395,13 @@ class TestParallelReviewReads:
 
         assert _fetch_existing_comments(_C(), "o", "r", 7) == []
 
-    def test_fetch_existing_comments_non_api_error_degrades_whole_result(self, review_app) -> None:
+    @pytest.mark.parametrize(
+        "failing_method",
+        ["list_review_comments", "get_resolved_review_thread_comment_ids", "list_issue_comments"],
+    )
+    def test_fetch_existing_comments_non_api_error_degrades_whole_result(
+        self, review_app, failing_method
+    ) -> None:
         """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) from any
         of the three calls must ALSO degrade the whole result to [] — the
         docstring promises "Any failure ... degrades the WHOLE result", not
@@ -3404,12 +3410,18 @@ class TestParallelReviewReads:
 
         class _C:
             def list_review_comments(self, o, r, n):
-                raise RuntimeError("unexpected")
+                if failing_method == "list_review_comments":
+                    raise RuntimeError("unexpected")
+                return []
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
+                if failing_method == "get_resolved_review_thread_comment_ids":
+                    raise RuntimeError("unexpected")
                 return set()
 
             def list_issue_comments(self, o, r, n):
+                if failing_method == "list_issue_comments":
+                    raise RuntimeError("unexpected")
                 return []
 
         assert _fetch_existing_comments(_C(), "o", "r", 7) == []
