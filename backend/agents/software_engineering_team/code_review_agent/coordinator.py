@@ -432,8 +432,14 @@ def _run_tail_passes(
           to fold into ``verified`` itself.
         - When ``llm`` is (or wraps) a ``DummyLLMClient`` (see
           ``_tail_passes_run_sequentially`` — such doubles use a shared
-          non-thread-safe scripted response index) or fewer than two passes are
-          scheduled, the passes run sequentially in the order below, exactly as
+          non-thread-safe scripted response index), fewer than two passes are
+          scheduled, or ``_map_parallelism()`` resolves to <= 1 (the operator
+          set ``CODE_REVIEW_MAP_PARALLELISM=1``, e.g. because the configured
+          provider cannot accept concurrent requests — the false-positive
+          filter's own internal verification workers are sized from this same
+          knob via ``_verify_parallelism()``, so running the filter fanned out
+          alongside the architecture/side-effect passes would silently exceed
+          it), the passes run sequentially in the order below, exactly as
           before this fan-out existed. Otherwise they run concurrently via
           ``parallel_map`` against the same shared, read-only index/repo_reader,
           producing byte-identical results to the sequential path since none of
@@ -466,7 +472,7 @@ def _run_tail_passes(
         )
     )
 
-    if _tail_passes_run_sequentially(llm) or len(calls) <= 1:
+    if _tail_passes_run_sequentially(llm) or len(calls) <= 1 or _map_parallelism() <= 1:
         results = {name: fn() for name, fn in calls}
     else:
         # Imported lazily, matching shared/v2_review.py's and

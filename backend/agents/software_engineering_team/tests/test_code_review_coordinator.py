@@ -2799,6 +2799,59 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
     assert isinstance(result, CodeReviewOutput)
 
 
+def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch) -> None:
+    """``CODE_REVIEW_MAP_PARALLELISM=1`` must force the tail passes to run one
+    at a time even for a non-``DummyLLMClient`` ``llm`` -- the false-positive
+    filter's own internal verification workers are sized from this same knob
+    (``_verify_parallelism``), so fanning the filter out alongside the
+    architecture/side-effect passes would silently exceed a budget the
+    operator set to 1 specifically because the configured provider cannot
+    accept concurrent requests. Verified by tracking the max number of
+    tail-pass stubs ever in flight at once, rather than a barrier (which
+    would just deadlock/timeout if this regressed)."""
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+
+    lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    def _track() -> None:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+
+    def _filter(llm, input_data, issues, repo_reader=None, index=None):
+        _track()
+        return list(issues)
+
+    def _arch(llm, input_data, repo_reader=None, index=None):
+        _track()
+        return []
+
+    def _side_effect(llm, input_data, repo_reader=None, index=None):
+        _track()
+        return []
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter)
+    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
+    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+
+    stand_in = _NonDummyLLMClient(DummyLLMClient())
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert isinstance(result, CodeReviewOutput)
+    assert max_in_flight == 1, "tail passes must not overlap when the parallelism budget is 1"
+
+
 def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypatch) -> None:
     """The concurrent branch (non-``DummyLLMClient`` ``llm``) and the sequential
     branch (``DummyLLMClient``) must produce a byte-identical merged
