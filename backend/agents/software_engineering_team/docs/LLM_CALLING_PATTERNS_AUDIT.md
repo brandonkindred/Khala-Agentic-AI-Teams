@@ -96,14 +96,23 @@ Two concrete recipes ship on top of it:
   — uncaught by any of this pattern's fallback tiers. So this pattern's
   "never lets a failure propagate" guarantee (below) does not cover every
   model-output shape, only missing/empty/dict-shaped output.
-- **Partial-failure tolerance** — `_call_partial_tolerant` (used by
-  `BaseReviewToolAgent.problem_solve`, which fixes issues one at a time) logs
-  and skips any single item whose `fn(item)` raises, returning only the
-  successes; one bad fix attempt does not abort the batch.
+- **`_call_partial_tolerant` exists but is not actually used by
+  `BaseReviewToolAgent.problem_solve`.** That method (which fixes issues one
+  at a time) has its own hand-rolled per-item loop instead, and that loop's
+  `try`/`except Exception` covers **only** the `self._run_agent(...)` call —
+  `shared/tool_agent_base.py:426-437` — not the subsequent
+  `self._parse_single_issue(raw)` call or the `.get("files")` on its result.
+  So the *LLM call* failing for one issue is correctly tolerated (logged,
+  `continue`s to the next issue), but if the parser hook itself raises (bad
+  model output the parser doesn't expect) or returns a non-dict, that
+  exception is **not caught** and aborts the entire `problem_solve` batch —
+  the opposite of the per-item tolerance the class's sibling helper
+  (`_call_partial_tolerant`) would provide, had it been wired in here.
 - **Net effect:** for the no-model, call-error, and parse-failure tiers this
   pattern degrades to a `ToolAgentOutput`/`ToolAgentPhaseOutput` shape rather
   than propagating, with the tiers distinguishable in the returned payload
-  for callers that care — but, per the gap above, that guarantee is not
+  for callers that care — but, per the two gaps above (non-object JSON in
+  `review()`, and the parse step in `problem_solve()`), that guarantee is not
   exhaustive over every possible model-output shape.
 
 ---
@@ -181,14 +190,24 @@ single-shot JSON devops agents.
 
 **Failure handling.**
 
-- **LLM/parse errors propagate unchanged.** `run()` has no `try`/`except`
-  around the `complete_json_with_continuation` call: any exception raised by
-  that call — including `LLMJsonParseError` when even the fenced/prose
-  recovery in `extract_json_from_response` fails — is raised straight out of
-  `run()` to whatever called the devops agent (the devops orchestrator, which
-  owns its own patch/retry loop — see `orchestrator.py`'s Phase 4.6
-  debug-patch loop, which does wrap its calls in `try`/`except Exception`).
-  This pattern **does not** build a safe fallback output itself.
+- **LLM/parse errors propagate unchanged out of `run()` itself.** There is no
+  `try`/`except` around the `complete_json_with_continuation` call inside
+  `DevOpsSingleShotAgent.run`: any exception raised by that call — including
+  `LLMJsonParseError` when even the fenced/prose recovery in
+  `extract_json_from_response` fails — is raised straight out of `run()`.
+  This pattern **does not** build a safe fallback output itself; that is
+  entirely the caller's job, and different callers handle it differently.
+  For the three Phase 2 design agents (`InfrastructureAsCodeAgent`,
+  `CICDPipelineAgent`, `DeploymentStrategyAgent`), the actual caller is
+  `devops_team/phase2_graph.py`'s `run_phase2_parallel`, which wraps each
+  agent's call in its own `try`/`except Exception`, logs a warning, and
+  substitutes an empty-summary typed default (e.g. `IaCAgentOutput(summary="IaC
+  agent failed during Phase 2")`) — a **single catch, no retry**. (The
+  orchestrator's Phase 4.6 debug-patch loop, which does invoke
+  `InfraDebugAgent`/`InfraPatchAgent` in response to failures, is a separate
+  mechanism for *later* infrastructure-execution failures, not for these
+  Phase 2 design-call failures — citing it here would misattribute which
+  loop actually owns the retry/fallback decision for these three agents.)
 - **No continuation actually happens, despite the name.**
   `complete_json_with_continuation` (`shared/llm.py`) makes exactly **one**
   `agent(prompt, ...)` call; its own docstring says
