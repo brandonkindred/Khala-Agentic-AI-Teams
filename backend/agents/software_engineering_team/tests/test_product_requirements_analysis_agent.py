@@ -672,6 +672,67 @@ def test_parse_open_question_preserves_option_order_when_marking_default() -> No
     assert [opt.is_default for opt in parsed.options] == [False, True, False]
 
 
+def test_parse_open_question_treats_explicit_null_fields_as_empty() -> None:
+    """_parse_open_question should not stringify explicit JSON null fields as the literal 'None'."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": None,
+            "question_text": None,
+            "context": None,
+            "recommendation": None,
+            "source": None,
+            "category": None,
+            "priority": None,
+            "constraint_domain": None,
+            "owner": None,
+            "due_date": None,
+            "status": None,
+        },
+        index=7,
+    )
+
+    assert parsed.id == "q7"
+    assert parsed.question_text == ""
+    assert parsed.context == ""
+    assert parsed.recommendation == ""
+    assert parsed.source == "spec_review"
+    assert parsed.category == "general"
+    assert parsed.priority == "medium"
+    assert parsed.constraint_domain == ""
+    assert parsed.owner == "user"
+    assert parsed.due_date == ""
+    assert parsed.status == "open"
+
+
+def test_parse_open_question_treats_explicit_null_option_fields_as_empty() -> None:
+    """Options with explicit null id/label/rationale should not become the literal 'None'."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "question_text": "Pick one",
+            "options": [
+                {
+                    "id": None,
+                    "label": None,
+                    "rationale": None,
+                    "is_default": True,
+                    "confidence": 0.9,
+                },
+            ],
+        },
+        index=0,
+    )
+
+    assert parsed.options[0].id == "opt0"
+    assert parsed.options[0].label == ""
+    assert parsed.options[0].rationale == ""
+
+
 def test_convert_to_pending_questions_includes_extended_metadata() -> None:
     """Pending question payload should include gate-aware metadata for UI and orchestration."""
     llm = MagicMock()

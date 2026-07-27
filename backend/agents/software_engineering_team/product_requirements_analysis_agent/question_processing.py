@@ -208,6 +208,15 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     )
 
 
+def _str_or_default(value: Any, default: str = "") -> str:
+    """Coerce an LLM-provided field to str, treating an explicit ``None`` as missing.
+
+    Preconditions: none; ``value`` may be any decoded JSON type.
+    Postconditions: returns ``default`` when ``value`` is ``None``, else ``str(value)``.
+    """
+    return default if value is None else str(value)
+
+
 def _safe_constraint_layer(value: Any) -> int:
     """Coerce LLM-provided constraint_layer output to int, defaulting to 0.
 
@@ -253,23 +262,23 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             depends_on = None
 
         return OpenQuestion(
-            id=str(q_data.get("id", f"q{index}")),
-            question_text=str(q_data.get("question_text", "")),
-            context=str(q_data.get("context", "")),
-            recommendation=str(q_data.get("recommendation", "")),
+            id=_str_or_default(q_data.get("id"), f"q{index}"),
+            question_text=_str_or_default(q_data.get("question_text")),
+            context=_str_or_default(q_data.get("context")),
+            recommendation=_str_or_default(q_data.get("recommendation")),
             options=options,
             allow_multiple=bool(q_data.get("allow_multiple", False)),
-            source=str(q_data.get("source", "spec_review")),
-            category=str(q_data.get("category", "general")),
-            priority=str(q_data.get("priority", "medium")),
-            constraint_domain=str(q_data.get("constraint_domain", "")),
+            source=_str_or_default(q_data.get("source"), "spec_review"),
+            category=_str_or_default(q_data.get("category"), "general"),
+            priority=_str_or_default(q_data.get("priority"), "medium"),
+            constraint_domain=_str_or_default(q_data.get("constraint_domain")),
             constraint_layer=_safe_constraint_layer(q_data.get("constraint_layer")),
             depends_on=depends_on,
             blocking=bool(q_data.get("blocking", True)),
-            owner=str(q_data.get("owner", "user")),
+            owner=_str_or_default(q_data.get("owner"), "user"),
             section_impact=list(q_data.get("section_impact", [])),
-            due_date=str(q_data.get("due_date", "")),
-            status=str(q_data.get("status", "open")),
+            due_date=_str_or_default(q_data.get("due_date")),
+            status=_str_or_default(q_data.get("status"), "open"),
             asked_via=list(q_data.get("asked_via", [])),
         )
 
@@ -302,10 +311,10 @@ def parse_question_option(opt_data: Any, index: int) -> QuestionOption:
     """
     if isinstance(opt_data, dict):
         return QuestionOption(
-            id=str(opt_data.get("id", f"opt{index}")),
-            label=str(opt_data.get("label", "")),
+            id=_str_or_default(opt_data.get("id"), f"opt{index}"),
+            label=_str_or_default(opt_data.get("label")),
             is_default=bool(opt_data.get("is_default", False)),
-            rationale=str(opt_data.get("rationale", "")),
+            rationale=_str_or_default(opt_data.get("rationale")),
             confidence=float(opt_data.get("confidence", 0.5)),
         )
     return QuestionOption(
