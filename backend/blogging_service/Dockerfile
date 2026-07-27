@@ -31,9 +31,6 @@ COPY agents/llm_service /app/llm_service
 # Job service HTTP client
 COPY agents/job_service_client.py /app/job_service_client.py
 
-# Integration contracts (used by integrations_store)
-COPY agents/integrations /app/integrations
-
 # Cross-team user profile — blog_job_store records a best-effort artifact
 # association on job creation (`from user_profile import ...`). Depends only on
 # shared.postgres (copied above) + psycopg/pydantic (in requirements.txt).

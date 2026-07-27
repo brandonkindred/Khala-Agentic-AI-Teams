@@ -55,6 +55,7 @@ PROFILE = StackProfile(
     planning_progress_label="language",
     conventions_by_language={"java": JAVA_CONVENTIONS, "_default": PYTHON_CONVENTIONS},
     has_language_conventions=True,
+    build_verify_label="backend_code_v2",
     detect_language=_detect_language,
 )
 
