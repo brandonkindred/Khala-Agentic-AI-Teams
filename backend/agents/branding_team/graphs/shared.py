@@ -169,6 +169,45 @@ def should_advance_past(phase_idx: int, target_phase: Optional[BrandPhase]) -> b
     return phase_index(target_phase) > phase_idx
 
 
+# Human-readable display titles for each pipeline phase, keyed by BrandPhase.
+# These mirror the hand-written phase list in the ``models``/``prompts`` module
+# docstrings — kept as an explicit mapping (not derived mechanically from
+# ``phase.value``) because several titles use "&" and phrasing that a simple
+# ``phase.value.replace("_", " ").title()`` cannot reproduce (e.g. "Narrative &
+# Messaging", not "Narrative Messaging"; "Visual & Expressive Identity", not
+# "Visual Identity").
+PHASE_TITLES: dict[BrandPhase, str] = {
+    BrandPhase.STRATEGIC_CORE: "Strategic Core",
+    BrandPhase.NARRATIVE_MESSAGING: "Narrative & Messaging",
+    BrandPhase.VISUAL_IDENTITY: "Visual & Expressive Identity",
+    BrandPhase.CHANNEL_ACTIVATION: "Experience & Channel Activation",
+    BrandPhase.GOVERNANCE: "Governance & Evolution",
+}
+
+
+def phase_order_text() -> str:
+    """Render the pipeline's phase order as "Phase N — Title" lines.
+
+    Derives the list from ``PHASE_ORDER`` (execution order) and
+    ``PHASE_TITLES`` (display names) instead of literal prose, so the two
+    stay in sync automatically as the pipeline evolves.
+
+    Preconditions:
+        Every phase in ``PHASE_ORDER`` has an entry in ``PHASE_TITLES``.
+    Postconditions:
+        Returns a string with exactly ``len(PHASE_ORDER)`` lines, one per
+        ``PHASE_ORDER`` entry in order, 1-indexed, formatted as
+        ``"Phase {n} — {title}"`` and joined by ``"\n"`` (no trailing
+        newline).
+    """
+    assert all(phase in PHASE_TITLES for phase in PHASE_ORDER), (
+        "PHASE_TITLES must have a display title for every PHASE_ORDER entry"
+    )
+    return "\n".join(
+        f"Phase {i} — {PHASE_TITLES[phase]}" for i, phase in enumerate(PHASE_ORDER, start=1)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Mission serialisation helper
 # ---------------------------------------------------------------------------

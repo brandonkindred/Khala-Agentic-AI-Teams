@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient
+from llm_service import DummyLLMClient, LLMClient
 from software_engineering_team.shared.branch_utils import make_branch_suffix
 from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
 from software_engineering_team.shared.git_utils import (
@@ -36,7 +36,6 @@ from .deployment_strategy_agent import DeploymentStrategyAgent
 from .devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
 from .doc_runbook_agent import DocumentationRunbookAgent, DocumentationRunbookInput
 from .iac_agent import InfrastructureAsCodeAgent
-from .intake_design import run_design_fan_out, run_intake_clarification
 from .models import (
     CriterionTrace,
     DevOpsCompletionPackage,
@@ -49,6 +48,7 @@ from .models import (
     ReleaseReadiness,
     SubtaskContract,
 )
+from .phases import run_phase1_intake_clarify, run_phase2_design_fanout
 
 # Commit-message template for the shared deliver helper. ``deliver_inline_merge``
 # calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
@@ -699,44 +699,58 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             """Phase 1: environment policy + task clarification gates.
 
             Preconditions: ``task_spec`` is the pipeline input for this run.
-            Postconditions: returns the value of
-              :func:`intake_design.run_intake_clarification` — a failed
-              ``DevOpsTeamResult`` on env-policy or clarifier rejection, or
-              ``None`` so later phases run. See that module's docstring for
-              the extracted implementation (subtask-contract construction and
-              logging now live there, not in this wrapper).
+            Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
+              clarifier rejection; otherwise builds subtask contracts, logs their
+              count, and returns ``None`` so later phases run.
+
+            Thin wrapper around the standalone ``run_phase1_intake_clarify``;
+            converts its typed result into this pipeline's gate contract.
             """
-            return run_intake_clarification(self, task_spec)
+            result = run_phase1_intake_clarify(
+                task_spec=task_spec,
+                task_clarifier=self.task_clarifier,
+                enforce_env_policy=self._enforce_env_policy,
+                build_subtask_contracts=self._build_subtask_contracts,
+            )
+            if result.blocked_reason:
+                return DevOpsTeamResult(success=False, failure_reason=result.blocked_reason)
+
+            logger.info(
+                "DevOps team pipeline: %d subtask contracts generated",
+                len(result.subtask_contracts),
+            )
+            return None
 
         def _phase2_parallel_design() -> Optional[DevOpsTeamResult]:
             """Phase 2: change design / implementation (3-way parallel fan-out).
 
             Preconditions: Phase 1 returned ``None``.
-            Postconditions: copies ``iac_result``, ``cicd_result``,
-              ``deploy_result``, and ``aggregated_artifacts`` from the
-              ``DesignFanOutState`` returned by
-              :func:`intake_design.run_design_fan_out` into the pipeline's
-              nonlocal variables; always returns ``None`` (this phase has no
-              early-exit gate today).
-
-            This wrapper is a compatibility shim, not the final design: Phases
-            3-5 below still read ``iac_result`` / ``cicd_result`` /
-            ``deploy_result`` / ``aggregated_artifacts`` as nonlocal closure
-            variables (as they did before this extraction), so the returned
-            ``DesignFanOutState`` is unpacked into those names here rather
-            than threaded through as an explicit object end-to-end. Passing
-            ``DesignFanOutState`` (or a broader pipeline-state object) into
-            Phases 3-5 directly is a further decomposition step, tracked
-            under the parent devops_team orchestrator decomposition issue —
-            out of scope for this extraction, which only moves Phase 1/2
-            logic out of nested closures without changing Phase 3-5 behavior.
+            Postconditions: sets ``iac_result``, ``cicd_result``, ``deploy_result``,
+              and ``aggregated_artifacts`` from the parallel fan-out; always returns
+              ``None`` (this phase has no early-exit gate today).
             """
             nonlocal iac_result, cicd_result, deploy_result, aggregated_artifacts
-            state = run_design_fan_out(self, task_spec, repo_path)
-            iac_result = state.iac_result
-            cicd_result = state.cicd_result
-            deploy_result = state.deploy_result
-            aggregated_artifacts = state.aggregated_artifacts
+            self._report_status(
+                "phase2",
+                detail="DevOps team pipeline: phase 2 - change design (parallel)",
+            )
+            # Enable parallel execution unless the backing LLM client is a
+            # DummyLLMClient (or subclass) — scripted test clients use a shared
+            # sequential response list that breaks under concurrent access.
+            use_parallel = not isinstance(self.llm, DummyLLMClient)
+            phase2 = run_phase2_design_fanout(
+                task_spec=task_spec,
+                repo_path=repo_path,
+                iac_agent=self.iac_agent,
+                cicd_agent=self.cicd_agent,
+                deployment_agent=self.deployment_agent,
+                repo_navigator_tool=self.repo_navigator_tool,
+                parallel=use_parallel,
+            )
+            iac_result = phase2.iac_result
+            cicd_result = phase2.cicd_result
+            deploy_result = phase2.deploy_result
+            aggregated_artifacts = phase2.aggregated_artifacts
             return None
 
         def _phase3_branch_write() -> Optional[DevOpsTeamResult]:

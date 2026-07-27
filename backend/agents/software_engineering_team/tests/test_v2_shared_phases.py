@@ -80,6 +80,7 @@ _BACKEND_PROFILE = StackProfile(
     planning_progress_label="language",
     conventions_by_language={"java": "JAVA", "_default": "PY"},
     has_language_conventions=True,
+    build_verify_label="backend_code_v2",
     detect_language=lambda _p, _t: "python",
 )
 
@@ -90,6 +91,7 @@ _FRONTEND_PROFILE = StackProfile(
     planning_progress_label="stack",
     conventions_by_language={"_default": "TS"},
     has_language_conventions=False,
+    build_verify_label="frontend_code_v2",
     detect_language=lambda _p, _t: "typescript",
 )
 

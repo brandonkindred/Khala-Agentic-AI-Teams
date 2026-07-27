@@ -125,8 +125,9 @@ override applies as for the rollup engine.
 loop and logged to memory.
 
 - **`tools/binding.py`** — `bind_tools(tool_ids, …)` resolves the ids an agent declares
-  (`cognition.tools`) against `agent_git_tools`, the `LlmToolsService` catalog, and the
-  `IntegrationRegistry`, returning OpenAI-style **definitions + handlers** tagged with an
+  (`cognition.tools`) against `agent_git_tools`, the `LlmToolsService` catalog, and an
+  optional caller-supplied integration registry (any object exposing `get_provider(tool_id)`),
+  returning OpenAI-style **definitions + handlers** tagged with an
   **execution site**: `in_process` (the agent runs in the Unified API), `sandbox_local`
   (bundled in the sandbox image — e.g. `git` — the v1 default), or `platform_bound` (needs
   platform secrets/egress, so the proxy drives the loop). An unknown id, a duplicate
