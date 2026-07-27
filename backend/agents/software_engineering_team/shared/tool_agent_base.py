@@ -262,6 +262,8 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         ``pathlib.Path`` and returning a list of :class:`ReviewIssue`).
         Postconditions: returns a :class:`ToolAgentPhaseOutput`; when ``repo_path``
         is unset/missing the issue list is empty and the summary says "skipped".
+        :attr:`build_runner` is called uncaught — any exception it raises is a
+        defect and propagates to the caller.
         """
         from pathlib import Path
 
@@ -336,7 +338,14 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         ``Optional[str] = None`` for subclasses that take one of those other
         two paths, so a subclass using the default one-shot LLM path must
         set it.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput`.
+        Postconditions: returns a :class:`ToolAgentPhaseOutput`. Only the
+        default one-shot LLM path (neither :attr:`build_runner` nor
+        :attr:`review_via_engine` set) never raises — a missing model, empty
+        code, or LLM failure each degrade to a skipped/failed summary with no
+        issues. When :attr:`build_runner` or :attr:`review_via_engine` is
+        set, an unexpected exception from the runner/engine is a defect and
+        propagates uncaught; see :meth:`_build_review` and
+        :meth:`_engine_review`.
         """
         if self.build_runner is not None:
             return self._build_review(inp)
