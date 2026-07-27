@@ -481,14 +481,16 @@ class BrandingTeamOrchestrator:
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
         objects. Phase 1 wraps six agents as a single top-level node, so
         ``_merge_phase1_fragments`` is tried first — it merges every fan-out
-        specialist's ``structured_output``, not just the synthesizer's, and
-        returns None for every other phase (different node ids), falling
-        through unchanged. Otherwise, when the node's agent was built with
+        specialist's ``structured_output``, not just the synthesizer's. For
+        every other phase (different node ids), ``_merge_phase1_fragments``
+        itself returns ``None`` (not this method) and execution continues
+        below unchanged. Otherwise, when the node's agent was built with
         ``structured_output=``, Strands forces a tool call to produce the
         payload and populates ``AgentResult.structured_output`` instead of
         the message's text blocks — so that's checked next. Agents without
-        structured output fall back to parsing the last text block. If
-        nothing yields a value, return a default instance.
+        structured output fall back to parsing the last text block. This
+        method itself never returns ``None``: if nothing above yields a
+        value, it returns a default ``model_class()`` instance.
         """
         try:
             if hasattr(result, "result") and hasattr(result.result, "get"):
@@ -564,8 +566,11 @@ def _merge_structured_output(
 # Phase 1 fan-out node id -> the StrategicCoreOutput key its structured_output
 # nests under, or None to merge its fields in flat. Every value except
 # discovery_auditor's matches a StrategicCoreOutput field name 1:1 (see
-# agents.py/models.py); BrandDiscoveryAuditOutput's fields only exist on
-# StrategicCoreOutput nested under "brand_discovery", so that one alone nests.
+# agents.py/models.py). discovery_auditor alone nests: StrategicCoreOutput.
+# brand_discovery is typed BrandDiscoveryAudit, not BrandDiscoveryAuditOutput
+# (discovery_auditor's own structured_output= type) -- but the two are
+# field-for-field identical (see models.py), so BrandDiscoveryAuditOutput's
+# model_dump() validates cleanly as a BrandDiscoveryAudit once nested here.
 _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
     "discovery_auditor": "brand_discovery",
     "purpose_vision_writer": None,
