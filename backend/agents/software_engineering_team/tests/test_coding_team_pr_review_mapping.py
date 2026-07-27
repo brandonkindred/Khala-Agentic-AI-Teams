@@ -159,6 +159,19 @@ def test_map_missing_line_becomes_file_level_comment() -> None:
     ]
 
 
+def test_map_non_numeric_line_becomes_file_level_comment() -> None:
+    # A finding whose line is a non-numeric string (e.g. from a malformed LLM
+    # response) must not raise ValueError -- it falls back to a file-level
+    # comment, same as a missing line.
+    valid = {"app/main.py": {2}}
+    issues = [_Issue(file_path="app/main.py", line="N/A")]  # type: ignore[arg-type]
+    comments, leftover = map_issues_to_comments(issues, valid)
+    assert leftover == []
+    assert comments == [
+        {"path": "app/main.py", "subject_type": "file", "body": format_comment_body(issues[0])}
+    ]
+
+
 def test_map_normalizes_leading_dot_slash() -> None:
     valid = {"app/main.py": {3}}
     issues = [_Issue(file_path="./app/main.py", line=3)]

@@ -218,23 +218,28 @@ def map_issues_to_comments(
         reference = existing_by_issue.get(id(issue))
         if path is None:
             leftover.append(issue)
-        elif line is not None and int(line) in valid_by_path[path]:
-            review_comments.append(
-                {
-                    "path": path,
-                    "line": int(line),
-                    "side": "RIGHT",
-                    "body": format_comment_body(issue, reference),
-                }
-            )
         else:
-            review_comments.append(
-                {
-                    "path": path,
-                    "subject_type": "file",
-                    "body": format_comment_body(issue, reference),
-                }
-            )
+            try:
+                line_num = int(line) if line is not None else None
+            except (TypeError, ValueError):
+                line_num = None
+            if line_num is not None and line_num in valid_by_path[path]:
+                review_comments.append(
+                    {
+                        "path": path,
+                        "line": line_num,
+                        "side": "RIGHT",
+                        "body": format_comment_body(issue, reference),
+                    }
+                )
+            else:
+                review_comments.append(
+                    {
+                        "path": path,
+                        "subject_type": "file",
+                        "body": format_comment_body(issue, reference),
+                    }
+                )
     return review_comments, leftover
 
 

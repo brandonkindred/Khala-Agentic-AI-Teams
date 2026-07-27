@@ -1650,13 +1650,14 @@ def _run_pr_review_body(
         # The hook runs in a daemon thread; if we let an exception escape, the thread
         # dies and the job is stuck in "running" forever. Mark it failed (mirroring
         # post_run) and post a best-effort, token-scrubbed PR comment.
-        logger.exception("PR review hook failed: %s", review_exc)
+        safe_err = scrub_token_from_text(str(review_exc))
+        logger.exception("PR review hook failed: %s", safe_err)
         try:
             with _main.GitHubClient(token=token) as client:
                 # Same graceful-degradation contract as the reviewer paths: record
                 # the detail in the store, keep the raw exception off the PR.
                 _main._record_review_outage(
-                    client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}"
+                    client, owner, repo, pr_number, job_id, f"code review failed: {safe_err}"
                 )
         except Exception:  # noqa: BLE001 - the status update below is the last resort
             # Safety net: ``_record_review_outage`` above may already have marked
@@ -1670,7 +1671,6 @@ def _run_pr_review_body(
             # last resort) cannot escape and kill the daemon thread — the outer
             # ``_run_pr_review`` guard would catch it, but keeping the body
             # self-consistent means it never depends on that.
-            safe_err = scrub_token_from_text(str(review_exc))
             try:
                 _finalize_review(job_id, JobStatus.FAILED, phase="completed", error=safe_err)
             except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do

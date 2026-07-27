@@ -42,8 +42,10 @@ from code_review_agent.models import (
     is_no_op_suggestion,
 )
 from pydantic import ValidationError
+from strands.models.model import Model
 
 from llm_service import (
+    LLMClient,
     LLMJsonParseError,
     LLMRateLimitError,
     LLMSemanticExhaustionError,
@@ -931,7 +933,8 @@ def _bisecting_failure(msg: str = "no content") -> LLMTruncatedError:
 class _SelectiveRaiser(DummyLLMClient):
     """Raises for prompts containing a marker; otherwise delegates to Dummy.
 
-    Records every prompt so tests can count map calls.
+    Records every prompt so tests can count map calls. Thread-safe for use
+    with concurrent tail-pass execution.
     """
 
     def __init__(self, marker: str, exc: Optional[Exception] = None) -> None:
@@ -939,11 +942,13 @@ class _SelectiveRaiser(DummyLLMClient):
         self.marker = marker
         self.exc = exc or _bisecting_failure("LLM output truncated")
         self.prompts: List[str] = []
+        self._lock = threading.Lock()
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.prompts.append(prompt)
-        if self.marker in prompt:
-            raise self.exc
+        with self._lock:
+            self.prompts.append(prompt)
+            if self.marker in prompt:
+                raise self.exc
         return super().complete_json(prompt, **kwargs)
 
 
@@ -1580,6 +1585,7 @@ def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
     degrades to a not-reviewed outcome rather than raising."""
     from code_review_agent import mapping
 
+    monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
     reviewer = _ThinkAwareReviewer(
         LLMSemanticExhaustionError("still nothing"), recover_on_think_off=False
@@ -2690,6 +2696,22 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
     assert captured["reader"] is reader
 
 
+def test_coordinator_runs_with_submission_cache_disabled(monkeypatch) -> None:
+    """``run_coordinator`` must not crash when the submission cache is disabled
+    (``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` resolves to 0). Guards the explicit
+    ``cached = None`` initialization: without it, any future refactor that reads
+    ``cached`` outside the cache-enabled branch would raise ``UnboundLocalError``
+    for this codepath."""
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.setattr(coord, "_submission_cache_size", lambda: 0)
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+    assert result.approved is True
+
+
 def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
     """The submission is parsed into a ``CodebaseIndex`` exactly once per
     ``run_coordinator`` call, and the same instance is forwarded to both the
@@ -2827,3 +2849,215 @@ def test_tail_passes_run_sequentially_for_wrapped_dummy_llm() -> None:
 
     assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(DummyLLMClient())) is True
     assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(MagicMock())) is False
+
+
+class _NonDummyLLMClient(LLMClient, Model):
+    """A strands ``Model`` + ``LLMClient`` that is not a ``DummyLLMClient``
+    instance, forwarding every call to an inner scripted ``DummyLLMClient`` by
+    composition (never inheritance). ``code_review_agent.model_resolution
+    .resolve_code_review_model`` only honors an injected client verbatim when
+    it already implements the strands ``Model`` interface (otherwise it
+    silently substitutes the default production model), so this must
+    implement ``Model`` too, not just ``LLMClient``. ``isinstance(self,
+    DummyLLMClient)`` is False and ``getattr(self, "client", None)`` finds
+    nothing, so ``_tail_passes_run_sequentially`` treats it like a production
+    client (e.g. an ``LLMClientModel`` wrapping ``OllamaLLMClient``) and takes
+    the concurrent branch, while chunk-review responses stay the
+    deterministic canned ones from the inner scripted client."""
+
+    def __init__(self, inner: DummyLLMClient) -> None:
+        self._inner = inner
+
+    def update_config(self, **model_config: Any) -> None:
+        self._inner.update_config(**model_config)
+
+    def get_config(self) -> Dict[str, Any]:
+        return self._inner.get_config()
+
+    def structured_output(self, *args: Any, **kwargs: Any) -> Any:
+        return self._inner.structured_output(*args, **kwargs)
+
+    async def stream(self, *args: Any, **kwargs: Any):
+        async for event in self._inner.stream(*args, **kwargs):
+            yield event
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        return self._inner.complete_json(prompt, **kwargs)
+
+    def chat(self, messages: list, **kwargs: Any) -> Any:
+        return self._inner.chat(messages, **kwargs)
+
+    def get_max_context_tokens(self) -> int:
+        return self._inner.get_max_context_tokens()
+
+
+def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None:
+    """With a non-``DummyLLMClient`` ``llm``, the three tail passes run at once:
+    each stub records its arrival then blocks on a 3-party barrier, so the call
+    only completes if all three are in flight together -- a fallback to
+    sequential execution would deadlock the first stub and the test would fail
+    on the barrier timeout. The recorded arrivals additionally prove, without
+    relying on that implicit timeout/exception behavior, that all three stubs
+    actually ran."""
+    import code_review_agent.coordinator as coord
+
+    arrivals: list[str] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(3, timeout=5)
+
+    def _record(name: str) -> None:
+        with lock:
+            arrivals.append(name)
+
+    def _filter(llm, input_data, issues, repo_reader=None, index=None):
+        _record("filter")
+        barrier.wait()
+        return list(issues)
+
+    def _arch(llm, input_data, repo_reader=None, index=None):
+        _record("architecture")
+        barrier.wait()
+        return []
+
+    def _side_effect(llm, input_data, repo_reader=None, index=None):
+        _record("side_effect")
+        barrier.wait()
+        return []
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter)
+    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
+    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+
+    stand_in = _NonDummyLLMClient(DummyLLMClient())
+    try:
+        result = run_coordinator(
+            stand_in,
+            CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+        )
+    finally:
+        # Leaves no party waiting on the barrier even if run_coordinator raises
+        # before all three stubs reach it, so a failure here can't wedge a
+        # later test sharing the same worker process.
+        barrier.abort()
+
+    assert isinstance(result, CodeReviewOutput)
+    assert sorted(arrivals) == ["architecture", "filter", "side_effect"]
+
+
+def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch) -> None:
+    """``CODE_REVIEW_MAP_PARALLELISM=1`` must force the tail passes to run one
+    at a time even for a non-``DummyLLMClient`` ``llm`` -- the false-positive
+    filter's own internal verification workers are sized from this same knob
+    (``_verify_parallelism``), so fanning the filter out alongside the
+    architecture/side-effect passes would silently exceed a budget the
+    operator set to 1 specifically because the configured provider cannot
+    accept concurrent requests. Verified by tracking the max number of
+    tail-pass stubs ever in flight at once, rather than a barrier (which
+    would just deadlock/timeout if this regressed)."""
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+
+    lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    def _track() -> None:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+
+    def _filter(llm, input_data, issues, repo_reader=None, index=None):
+        _track()
+        return list(issues)
+
+    def _arch(llm, input_data, repo_reader=None, index=None):
+        _track()
+        return []
+
+    def _side_effect(llm, input_data, repo_reader=None, index=None):
+        _track()
+        return []
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter)
+    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
+    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+
+    stand_in = _NonDummyLLMClient(DummyLLMClient())
+    result = run_coordinator(
+        stand_in,
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert isinstance(result, CodeReviewOutput)
+    assert max_in_flight == 1, "tail passes must not overlap when the parallelism budget is 1"
+
+
+def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypatch) -> None:
+    """The concurrent branch (non-``DummyLLMClient`` ``llm``) and the sequential
+    branch (``DummyLLMClient``) must produce a byte-identical merged
+    ``CodeReviewOutput`` for the same input -- the tail passes are independent
+    and additive, so fanning them out must not change the result, only the
+    wall-clock order in which they run."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.models import CodeReviewIssue
+
+    arch_issue = CodeReviewIssue(
+        severity="medium",
+        category="architecture",
+        file_path="a.py",
+        description="Duplicates the existing `Widget` service.",
+    )
+    side_effect_issue = CodeReviewIssue(
+        severity="medium",
+        category="side-effects",
+        file_path="a.py",
+        description="bar() no longer raises ValueError; app/caller.py still catches it.",
+    )
+
+    def _filter(llm, input_data, issues, repo_reader=None, index=None):
+        return list(issues)
+
+    def _arch(llm, input_data, repo_reader=None, index=None):
+        return [arch_issue]
+
+    def _side_effect(llm, input_data, repo_reader=None, index=None):
+        return [side_effect_issue]
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter)
+    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
+    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+
+    script = [
+        {
+            "approved": False,
+            "issues": [
+                {
+                    "severity": "high",
+                    "category": "logic",
+                    "file_path": "a.py",
+                    "line": 1,
+                    "description": "Off-by-one error",
+                    "suggestion": "Use range(n) not range(n + 1)",
+                }
+            ],
+            "summary": "One issue found.",
+        }
+    ]
+    input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t")
+
+    # Two independent scripted clients (fresh response cursors) so the
+    # map-phase chunk review returns the exact same canned findings on both
+    # runs -- only the tail-pass fan-out (Dummy-wrapped vs. not) differs.
+    concurrent_result = run_coordinator(_NonDummyLLMClient(_ScriptedClient(script)), input_data)
+    sequential_result = run_coordinator(_ScriptedClient(script), input_data)
+
+    assert concurrent_result == sequential_result
+    descriptions = {i.description for i in concurrent_result.issues}
+    assert "Off-by-one error" in descriptions
+    assert arch_issue.description in descriptions
+    assert side_effect_issue.description in descriptions
