@@ -595,10 +595,15 @@ def _run_tool_agents_review(
     Postconditions:
         - Each agent with a ``review`` method contributes its ``issues`` and a
           ``ReviewIssue`` per recommendation, either from a cache hit or a live
-          ``review()`` call; a raising agent is logged and skipped (never
-          aborts the review). Mutates ``issues`` in place. A live call's
-          result is stored in ``tool_agent_cache`` (when given) before folding
-          it into ``issues``.
+          ``review()`` call; a raising agent (or a cache hit whose stored
+          output fails to fold, e.g. a malformed/``None`` result) is logged
+          and skipped (never aborts the review) -- folding a cache hit is
+          contained by the same ``try`` as a live call. Mutates ``issues`` in
+          place. A live call's result is folded into ``issues`` *before* being
+          stored in ``tool_agent_cache`` (when given), so an output that fails
+          to fold is never cached -- it is retried as a live call next time,
+          mirroring ``AgentReviewCache``'s existing "failed piece is not
+          cached" behavior for the QA/security steps.
     """
     if not tool_agents:
         return
@@ -630,16 +635,16 @@ def _run_tool_agents_review(
             if tool_agent_cache is not None and microtask is not None
             else None
         )
-        if cache_key is not None:
-            cached = tool_agent_cache.get(cache_key)
-            if cached is not None:
-                _fold_tool_agent_output(config, issues, kind, cached[0])
-                continue
         try:
+            if cache_key is not None:
+                cached = tool_agent_cache.get(cache_key)
+                if cached is not None:
+                    _fold_tool_agent_output(config, issues, kind, cached[0])
+                    continue
             out = agent.review(phase_inp)
+            _fold_tool_agent_output(config, issues, kind, out)
             if cache_key is not None:
                 tool_agent_cache.put(cache_key, [out])
-            _fold_tool_agent_output(config, issues, kind, out)
         except Exception as exc:
             logger.warning(
                 "[%s] Tool agent %s review() failed%s: %s",

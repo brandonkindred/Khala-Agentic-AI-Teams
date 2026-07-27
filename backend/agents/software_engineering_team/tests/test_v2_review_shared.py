@@ -818,6 +818,44 @@ def test_microtask_tool_agent_cache_none_default_is_unchanged_passthrough(tmp_pa
     assert calls["n"] == 2  # no cache given -> both calls are live, as before
 
 
+def test_microtask_tool_agent_malformed_output_is_never_cached_and_stays_contained(
+    tmp_path: Path,
+) -> None:
+    """A tool agent returning a malformed (unfoldable) output must not raise on
+    either the first call or a later cache-hit -- and must not be cached, so
+    every call retries live instead of replaying the same failure forever."""
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.shared.agent_review import AgentReviewCache
+
+    calls = {"n": 0}
+
+    class _MalformedAgent:
+        def review(self, phase_inp):
+            calls["n"] += 1
+            return None  # no .issues/.recommendations -> AttributeError when folded
+
+    config = _build_config()
+    cache = AgentReviewCache()
+    common = dict(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"app.ts": "code"},
+        tool_agents={ToolAgentKind.SECURITY: _MalformedAgent()},
+        language="typescript",
+        tool_agent_cache=cache,
+        **_noop_runners(),
+    )
+
+    first = run_microtask_review(**common)
+    second = run_microtask_review(**common)
+
+    assert first is not None and second is not None  # neither call raised
+    assert calls["n"] == 2  # the bad output was never cached -> both calls were live
+
+
 def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
     """The microtask opening INFO line uses the config's ``microtask_intro``."""
     import logging
