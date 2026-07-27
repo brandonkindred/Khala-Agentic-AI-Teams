@@ -26,6 +26,7 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 from investment_team.strategy_lab_context import (
     _edge_exploitation_steer,
+    _executed_records,
     asset_class_mix_hint,
 )
 
@@ -362,3 +363,23 @@ def test_edge_steer_falls_back_to_raw_stats_when_nothing_is_publishable() -> Non
     out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
     assert "crypto scores best so far" in out, out
     assert "publishable" not in out.lower(), out
+
+
+def test_edge_steer_shares_a_cache_with_a_prior_executed_records_call() -> None:
+    """A shared ``cache`` dict lets ``_edge_exploitation_steer`` reuse the
+    sort/filter pass a caller already ran via ``_executed_records`` with the
+    same ``tail`` window — the exact duplication ``asset_class_mix_hint``
+    exhibits internally in exploit mode — instead of recomputing it, while
+    still returning the same result as the uncached call."""
+    records = [_record("crypto", annual=25.0, win=53.0), _record("stocks", annual=10.0, win=62.0)]
+    cache: dict = {}
+    _executed_records(records, max_records=24, cache=cache)
+    assert len(cache) == 1
+    out = _edge_exploitation_steer(
+        records, ["stocks", "crypto"], "stocks, or crypto", tail=24, cache=cache
+    )
+    # No new cache entry — the tail=24 call reused the existing one.
+    assert len(cache) == 1
+    assert out == _edge_exploitation_steer(
+        records, ["stocks", "crypto"], "stocks, or crypto", tail=24
+    )

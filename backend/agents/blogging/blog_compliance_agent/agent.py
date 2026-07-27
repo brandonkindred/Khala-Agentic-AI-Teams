@@ -15,18 +15,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
 from agents.blogging.shared.agent_base import _BlogAgentBase
+from agents.blogging.shared.artifacts import read_artifact, read_latest_draft, write_artifact
+from agents.blogging.shared.brand_spec import load_brand_spec_prompt
 from agents.blogging.shared.json_retry import call_json_with_retry
 from strands import Agent
 
 from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT
-
-try:
-    from agents.blogging.shared.artifacts import write_artifact
-    from agents.blogging.shared.brand_spec import load_brand_spec_prompt
-except ImportError:  # pragma: no cover - defensive ImportError fallback for missing shared modules; not exercised because conftest guarantees the import path resolves.
-    write_artifact = None
-    load_brand_spec_prompt = None
 
 try:
     from agents.blogging.shared.errors import ComplianceError
@@ -212,17 +207,8 @@ def run_compliance_from_work_dir(
     Returns:
         ``ComplianceReport`` from ``BlogComplianceAgent.run``.
     """
-    try:
-        from agents.blogging.shared.artifacts import read_artifact
-    except ImportError:  # pragma: no cover - defensive ImportError fallback; not exercised because conftest guarantees the import path resolves.
-        raise ImportError("shared.artifacts required")
-
     work_path = Path(work_dir).resolve()
-    draft = read_artifact(work_dir, draft_artifact, default="")
-    if not draft:
-        draft = read_artifact(work_dir, "draft_v2.md", default="") or read_artifact(
-            work_dir, "draft_v1.md", default=""
-        )
+    draft = read_latest_draft(work_dir, draft_artifact)
 
     validator_report = read_artifact(work_dir, "validator_report.json", default=None)
 
@@ -230,8 +216,6 @@ def run_compliance_from_work_dir(
     if not Path(brand_path).exists():
         _blogging_root = Path(__file__).resolve().parent.parent
         brand_path = _blogging_root / "docs" / "brand_spec_prompt.md"
-    if not load_brand_spec_prompt:  # pragma: no cover - defensive guard for missing shared.brand_spec; not exercised because conftest guarantees the import path resolves.
-        raise ImportError("shared.brand_spec required")
     brand_spec_prompt = load_brand_spec_prompt(brand_path)
 
     agent = BlogComplianceAgent(llm_client=llm_client)

@@ -23,6 +23,8 @@ class WorkflowStatus(str, Enum):
     Intentionally team-local (not in ``shared.hitl``): includes ``DRAFT`` and
     terminal ``READY_FOR_EXECUTION``, which are not shared with branding's
     ``READY_FOR_ROLLOUT``. Only ``needs_human_decision`` overlaps as a string.
+    See ``backend/shared/hitl/README.md`` ("Non-shared: team WorkflowStatus")
+    for the full cross-team decision record.
     """
 
     DRAFT = "draft"

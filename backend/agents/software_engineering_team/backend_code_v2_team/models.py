@@ -72,6 +72,7 @@ class MicrotaskStatus(str, Enum):
     IN_CODE_REVIEW = "in_code_review"
     IN_QA_TESTING = "in_qa_testing"
     IN_SECURITY_TESTING = "in_security_testing"
+    IN_QA_SECURITY_TESTING = "in_qa_security_testing"
     IN_REVIEW = "in_review"
     IN_DOCUMENTATION = "in_documentation"
     COMPLETED = "completed"
