@@ -29,6 +29,7 @@ from branding_team.models import (
     GovernanceOutput,
     MoodBoardConcept,
     NarrativeMessagingOutput,
+    PositioningOutput,
     StrategicCoreOutput,
     TypographySpec,
     VisualIdentityOutput,
@@ -482,6 +483,35 @@ def test_phase_absorbed_fields_populated() -> None:
     # Wiki backlog absorbed into governance
     assert result.governance.wiki_backlog
     assert result.governance.wiki_backlog[0].title
+
+
+def test_extract_phase_output_uses_structured_output_when_present() -> None:
+    """Agents built with ``structured_output=`` populate ``AgentResult.structured_output``
+    rather than the message's text blocks; extraction must check that field before
+    falling back to text or it silently discards the agent's real output."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = PositioningOutput(
+        positioning_statement=(
+            "For enterprise product leaders who need cohesive digital experiences, "
+            "Northstar Labs is the hands-on partner that delivers clarity."
+        ),
+        brand_promise="Every customer touchpoint will feel cohesive, useful, and unmistakably aligned.",
+    )
+
+    node_result = MagicMock()
+    node_result.get_agent_results.return_value = [agent_result]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.positioning_statement == agent_result.structured_output.positioning_statement
+    assert output.brand_promise == agent_result.structured_output.brand_promise
 
 
 def test_gather_integrations_market_research_failure_returns_none() -> None:

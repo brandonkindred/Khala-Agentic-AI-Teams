@@ -479,8 +479,12 @@ class BrandingTeamOrchestrator:
         """Best-effort extraction of a phase output from graph results.
 
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
-        objects.  We attempt to parse the agent's last text output as the
-        structured model.  If parsing fails, return a default instance.
+        objects. When the node's agent was built with ``structured_output=``,
+        Strands forces a tool call to produce the payload and populates
+        ``AgentResult.structured_output`` instead of the message's text
+        blocks — so that's checked first. Agents without structured output
+        fall back to parsing the last text block. If neither yields a value,
+        return a default instance.
         """
         try:
             if hasattr(result, "result") and hasattr(result.result, "get"):
@@ -489,6 +493,11 @@ class BrandingTeamOrchestrator:
                     agent_results = node_result.get_agent_results()
                     if agent_results:
                         last = agent_results[-1]
+                        structured = getattr(last, "structured_output", None)
+                        if isinstance(structured, BaseModel):
+                            parsed = _merge_structured_output(structured, model_class)
+                            if parsed is not None:
+                                return parsed
                         if hasattr(last, "message") and last.message:
                             text = _collect_message_text(last.message)
                             parsed = _parse_model_from_text(text, model_class)
@@ -526,6 +535,23 @@ def _collect_message_text(message: dict) -> str:
         elif getattr(block, "text", None):
             parts.append(block.text)
     return "".join(parts)
+
+
+def _merge_structured_output(
+    structured: BaseModel, model_class: type[BaseModel]
+) -> Optional[BaseModel]:
+    """Validate an agent's typed ``structured_output`` against a phase's output model.
+
+    ``structured`` is often a strict subset of ``model_class`` — e.g. the
+    positioning synthesizer only emits ``positioning_statement``/``brand_promise``
+    out of the full ``StrategicCoreOutput`` schema — which validates fine since
+    every field on the phase output models has a default. Returns None on a
+    genuine schema mismatch, same failure contract as ``_parse_model_from_text``.
+    """
+    try:
+        return model_class.model_validate(structured.model_dump())
+    except ValidationError:
+        return None
 
 
 def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
