@@ -598,6 +598,25 @@ class BrandComplianceAgent:
     def evaluate(
         self, checks: List[BrandCheckRequest], mission: BrandingMission
     ) -> List[BrandCheckResult]:
+        """Evaluate each asset check against brand signals derived from the mission.
+
+        Preconditions:
+            - ``checks`` is an iterable of ``BrandCheckRequest`` instances, each
+              providing ``asset_name`` and ``asset_description``.
+            - ``mission`` provides ``values``, ``differentiators``, ``company_name``,
+              and ``target_audience``.
+
+        Postconditions:
+            - Returns one ``BrandCheckResult`` per input check, in the same order
+              as ``checks``.
+            - ``is_on_brand`` is True iff at least two distinct brand keywords are
+              matched (case-insensitive, word-boundary) in the asset's name and
+              description.
+            - ``confidence`` is ``min(0.95, 0.45 + 0.1 * len(matched))``, rounded
+              to 2 decimal places.
+            - ``revision_suggestions`` is empty when ``is_on_brand`` is True,
+              otherwise the fixed set of revision suggestions.
+        """
         keywords = [
             *mission.values,
             *mission.differentiators,
