@@ -151,6 +151,13 @@ def run_execution(
 # ``backend_code_v2_team``'s per-gate scoping and removing the shared-instance
 # race that previously blocked enabling ``parallelize_qa_security`` for this
 # team -- ``GATE_CONFIG`` below now sets it to ``True``, matching backend.
+# Independently of that scoping, the CR gate's full ``deps.tool_agents`` fan-out
+# still runs ``testing_qa``/``security`` a second time on top of each gate's own
+# scoped call; all three gates read ``deps.tool_agent_cache`` (a per-microtask-
+# cycle ``AgentReviewCache``, reset in ``_run_review_cycles``) and forward it
+# into ``run_microtask_review`` so the second call within a cycle is served
+# from cache instead of re-invoking the tool agent -- see the caching design in
+# docs/GATE_DEPENDENCY_GRAPH.md.
 # ``.review`` is imported lazily to keep the module import free of the circular
 # ``review`` <-> ``execution`` dependency.
 
@@ -184,7 +191,7 @@ def _code_review_gate(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> GateOutcome:
-    """Run the frontend code-review gate (build + lint + code review agents only)."""
+    """Run the frontend code-review gate (build + lint + code review + all wired tool agents)."""
     from .review import run_microtask_review
 
     r = run_microtask_review(

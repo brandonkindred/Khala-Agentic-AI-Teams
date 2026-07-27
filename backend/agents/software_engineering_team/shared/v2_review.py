@@ -585,12 +585,16 @@ def _run_tool_agents_review(
         - ``tool_agent_cache``, when given, is consulted/populated only for
           agents whose ``kind`` result was already computed for the identical
           ``(kind, current_files, task.title, task_description, microtask.id)``
-          combination — see ``_tool_agent_cache_key``. Requires ``microtask``
-          to be given (the cache key folds in ``microtask.id``); when
-          ``microtask`` is ``None`` (the non-microtask ``run_review`` path),
-          caching is skipped regardless of ``tool_agent_cache``. ``None`` (the
-          default) preserves today's unconditional-call behavior for every
-          existing caller.
+          combination, computed by ``_tool_agent_cache_key(kind.value,
+          current_files, task.title or "", task_description, microtask.id)``.
+          ``current_files`` is content-addressed (path + file content, via
+          ``json.dumps(..., sort_keys=True)``), so any file edit busts the
+          cache with no explicit invalidation logic needed. Requires
+          ``microtask`` to be given (the cache key folds in ``microtask.id``);
+          when ``microtask`` is ``None`` (the non-microtask ``run_review``
+          path), caching is skipped regardless of ``tool_agent_cache``. ``None``
+          (the default) preserves today's unconditional-call behavior for
+          every existing caller.
 
     Postconditions:
         - Each agent with a ``review`` method contributes its ``issues`` and a
@@ -600,8 +604,10 @@ def _run_tool_agents_review(
           and skipped (never aborts the review) -- folding a cache hit is
           contained by the same ``try`` as a live call. Mutates ``issues`` in
           place. A live call's result is folded into ``issues`` *before* being
-          stored in ``tool_agent_cache`` (when given), so an output that fails
-          to fold is never cached -- it is retried as a live call next time,
+          stored in ``tool_agent_cache`` as a single-element list (``[out]``),
+          matching ``AgentReviewCache.get``/``put``'s existing ``List[Any]``
+          shape so it can be reused unmodified, so an output that fails to
+          fold is never cached -- it is retried as a live call next time,
           mirroring ``AgentReviewCache``'s existing "failed piece is not
           cached" behavior for the QA/security steps.
     """
@@ -628,13 +634,11 @@ def _run_tool_agents_review(
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "review"):
             continue
-        cache_key = (
-            _tool_agent_cache_key(
+        cache_key = None
+        if tool_agent_cache is not None and microtask is not None:
+            cache_key = _tool_agent_cache_key(
                 kind.value, current_files, task.title or "", task_description, microtask.id
             )
-            if tool_agent_cache is not None and microtask is not None
-            else None
-        )
         try:
             if cache_key is not None:
                 cached = tool_agent_cache.get(cache_key)

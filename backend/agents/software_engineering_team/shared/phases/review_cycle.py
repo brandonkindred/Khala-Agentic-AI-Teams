@@ -454,6 +454,13 @@ def _run_review_cycles(
         max cycles, when a still-failing security gate has
         ``security_failure_always_stops``), matching
         :func:`_apply_cr_section_exit`'s and the max-cycles check's raise paths.
+    Invariants:
+        ``deps.tool_agent_cache`` is reset to a fresh :class:`AgentReviewCache`
+        at the start of this call, scoped to this microtask's own cycle loop
+        the same way ``agent_review_cache`` is (constructed here, discarded on
+        return) — a team's gate callables that read it off ``deps`` (currently
+        only the frontend team) always see a cache fresh for this microtask,
+        never one left over from a prior microtask.
     """
     phase_failed = False
     total_cycles = 0

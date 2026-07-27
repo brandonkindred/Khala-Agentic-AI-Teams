@@ -317,7 +317,13 @@ class GatedExecutionConfig:
     # ``GateOutcome``. ``run_qa_gate``/``run_security_gate`` additionally
     # receive a ``cache: AgentReviewCache`` keyword (see ``_run_review_cycles``)
     # — ``run_code_review_gate`` does not, since code review already has its
-    # own cross-cycle cache.
+    # own cross-cycle cache. This ``cache`` keyword is a separate, pre-existing
+    # mechanism from ``deps.tool_agent_cache`` (see ``ReviewDependencies``
+    # above): it caches the QA/security *LLM* steps, while ``tool_agent_cache``
+    # caches tool-agent ``.review()`` results and travels via ``deps`` — a
+    # team's gate callables read it off ``deps`` themselves (see the frontend
+    # gates in ``frontend_code_v2_team/phases/execution.py``) rather than
+    # receiving it as a keyword here, so this callable signature is unchanged.
     run_code_review_gate: Callable[..., GateOutcome]
     run_qa_gate: Callable[..., GateOutcome]
     run_security_gate: Callable[..., GateOutcome]
