@@ -1100,6 +1100,60 @@ def test_consolidate_open_questions_parses_llm_output_into_open_questions() -> N
     assert result[0].options[1].id == "opt_sso"
 
 
+def test_consolidate_open_questions_sends_full_orchestration_metadata_to_llm() -> None:
+    """The consolidation prompt must include orchestration metadata (id, constraint_domain,
+    constraint_layer, depends_on, blocking, owner, section_impact, due_date, status,
+    asked_via), matching what CONSOLIDATE_QUESTIONS_PROMPT instructs the LLM to preserve.
+    Otherwise the LLM never sees these fields and can't echo them back, and
+    parse_open_question silently resets them to defaults."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(
+        id="q1",
+        question_text="Which region?",
+        constraint_domain="infrastructure",
+        constraint_layer=2,
+        depends_on="q0",
+        blocking=False,
+        owner="stakeholder",
+        section_impact=["Technical Approach"],
+        due_date="2026-04-01",
+        status="asked",
+        asked_via=["slack"],
+        options=[
+            QuestionOption(id="o1", label="us-east", is_default=True, rationale="", confidence=0.5)
+        ],
+    )
+    q2 = OpenQuestion(
+        id="q2",
+        question_text="Which zone?",
+        options=[
+            QuestionOption(id="o2", label="zone-a", is_default=True, rationale="", confidence=0.5)
+        ],
+    )
+
+    with patch(
+        "product_requirements_analysis_agent.question_processing.call_llm_json"
+    ) as mock_call:
+        mock_call.return_value = {"consolidated_questions": []}
+        agent._consolidate_open_questions([q1, q2])
+
+    sent_prompt = mock_call.call_args[0][1]
+    for field in [
+        '"id": "q1"',
+        '"constraint_domain": "infrastructure"',
+        '"constraint_layer": 2',
+        '"depends_on": "q0"',
+        '"blocking": false',
+        '"owner": "stakeholder"',
+        '"section_impact"',
+        '"due_date": "2026-04-01"',
+        '"status": "asked"',
+        '"asked_via"',
+    ]:
+        assert field in sent_prompt, f"expected {field!r} in consolidation prompt"
+
+
 def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() -> None:
     """_review_question_answer_alignment should return List[OpenQuestion] with same ids when LLM returns valid aligned_questions."""
     llm = _StubClient(

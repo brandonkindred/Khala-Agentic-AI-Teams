@@ -44,7 +44,7 @@ def filter_duplicate_questions(
     Filters out questions whose keyword stems (plus simple plural/past-tense
     variants) appear verbatim in the Q&A history. A question is considered a
     duplicate when at least 90% of its keyword stems are found in the history.
-    50-90% coverage is kept for possible consolidation elsewhere. This is
+    Below-90% coverage is kept for possible consolidation elsewhere. This is
     keyword coverage, not a similarity ratio between the question and history.
 
     Returns:
@@ -94,7 +94,7 @@ def filter_duplicate_questions(
         )
         match_ratio = matches / len(key_stems)
         # Only treat as duplicate of an answered question when match >= 90%.
-        # Lower similarity (50–90%) may be consolidated but should not be filtered out.
+        # Below-90% coverage may be consolidated but should not be filtered out.
         if match_ratio >= 0.90:
             logger.info(
                 "Filtering duplicate question (%.0f%% match): %s",
@@ -499,11 +499,21 @@ def consolidate_open_questions(
     questions_json = json.dumps(
         [
             {
+                "id": q.id,
                 "question_text": q.question_text,
                 "context": q.context,
                 "category": q.category,
                 "priority": q.priority,
                 "allow_multiple": q.allow_multiple,
+                "constraint_domain": q.constraint_domain,
+                "constraint_layer": q.constraint_layer,
+                "depends_on": q.depends_on,
+                "blocking": q.blocking,
+                "owner": q.owner,
+                "section_impact": q.section_impact,
+                "due_date": q.due_date,
+                "status": q.status,
+                "asked_via": q.asked_via,
                 "options": [
                     {
                         "id": o.id,
@@ -547,17 +557,19 @@ def review_question_answer_alignment(
     Postconditions: returns the aligned list, or the unmodified list (in its
         original order) on empty input or when no item in the batch parses
         successfully; never raises. This is a per-question review (ids are
-        preserved), so an item that individually fails to parse, that carries
-        an id not present in ``open_questions`` (a hallucinated/unrecognized
-        id), or that repeats an id already placed in the result (a
-        duplicate), falls back to its original (unaligned) question by id —
-        unless that original id is already in the result, in which case the
-        item is dropped outright. Any original question whose id never
-        appears in the result is appended at the end. If no item in the batch
-        parses successfully, the LLM-provided order carries no meaning, so
-        the original list is returned unchanged rather than in fallback
-        (LLM-provided) order. The result therefore contains exactly one entry
-        per original id: no question is ever dropped, added, or duplicated.
+        preserved): an item that individually fails to parse or that repeats
+        an id already placed in the result (a duplicate) falls back to its
+        original (unaligned) question by id, when that original id is not
+        already in the result; an item carrying an id not present in
+        ``open_questions`` (a hallucinated/unrecognized id) has no original to
+        fall back to and is dropped outright. Any original question whose id
+        never appears in the result (whether dropped as a duplicate/
+        hallucination or simply omitted by the LLM) is appended at the end.
+        If no item in the batch parses successfully, the LLM-provided order
+        carries no meaning, so the original list is returned unchanged rather
+        than in fallback (LLM-provided) order. The result therefore contains
+        exactly one entry per original id: no question is ever dropped,
+        added, or duplicated.
     """
     if len(open_questions) == 0:
         return []
