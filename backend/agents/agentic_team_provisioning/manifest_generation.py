@@ -100,7 +100,7 @@ def default_cognition_block() -> CognitionSpec:
 
     ``tools`` is deliberately empty: a roster agent's ``tools`` are free-text
     labels ("Git", "Slack API") that do not resolve against the cognition tool
-    registries (``LlmToolsService`` + ``IntegrationRegistry`` + ``agent_git_tools``),
+    registries (``LlmToolsService`` + a caller-supplied integration registry + ``agent_git_tools``),
     so they are never stamped here — that would only break later tool resolution.
     """
     return CognitionSpec(rule_packs=["default_guardrails"])
