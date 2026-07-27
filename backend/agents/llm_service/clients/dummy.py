@@ -762,6 +762,84 @@ class DummyLLMClient(LLMClient, Model):
                 },
                 "plan_version": 1,
             }
+        # Branding team — Phase 1 "Strategic Core" agents (built with
+        # structured_output=, see agents.py). Anchored on system_prompt
+        # rather than the user prompt: every Phase 1 agent receives the same
+        # serialized BrandingMission as its user message, so only the
+        # agent-specific system_prompt (each agent's required output field
+        # names) can distinguish which one is asking. These five all have
+        # required fields with no defaults, so the generic fallback below
+        # would fail Strands' structured-output validation and exhaust its
+        # forced retry.
+        system_lowered = (system_prompt or "").lower()
+        if "brand_purpose" in system_lowered and "vision_statement" in system_lowered:
+            return {
+                "brand_purpose": "Dummy Co. exists to help teams ship cohesive brand experiences (dummy).",
+                "mission_statement": "We turn brand strategy into consistent day-to-day execution (dummy).",
+                "vision_statement": "A world where every customer touchpoint feels intentional (dummy).",
+            }
+        elif "behavioral_definition" in system_lowered and "observable_behaviors" in system_lowered:
+            return {
+                "core_values": [
+                    {
+                        "value": "Clarity",
+                        "behavioral_definition": "We communicate plainly and avoid jargon (dummy).",
+                        "observable_behaviors": ["Write short docs", "Avoid buzzwords"],
+                    },
+                    {
+                        "value": "Trust",
+                        "behavioral_definition": "We keep commitments and are transparent (dummy).",
+                        "observable_behaviors": [
+                            "Disclose tradeoffs",
+                            "Follow through on promises",
+                        ],
+                    },
+                    {
+                        "value": "Momentum",
+                        "behavioral_definition": "We execute with discipline and speed (dummy).",
+                        "observable_behaviors": ["Ship in small increments", "Unblock quickly"],
+                    },
+                ]
+            }
+        elif "decision_drivers" in system_lowered and "pain_points" in system_lowered:
+            return {
+                "target_audience_segments": [
+                    {
+                        "name": "Enterprise product leaders",
+                        "description": "Leaders responsible for cohesive digital experiences (dummy).",
+                        "pain_points": ["Inconsistent branding", "Slow execution"],
+                        "goals": ["Ship cohesive experiences", "Move faster"],
+                        "decision_drivers": ["Proven track record", "Clear communication"],
+                    }
+                ]
+            }
+        elif "competitive_context" in system_lowered and "proof_points" in system_lowered:
+            return {
+                "differentiation_pillars": [
+                    {
+                        "pillar": "Execution speed",
+                        "proof_points": ["Ships weekly", "Small dedicated team"],
+                        "competitive_context": "Competitors rely on slow agency handoffs (dummy).",
+                    },
+                    {
+                        "pillar": "Hands-on partnership",
+                        "proof_points": [
+                            "Direct access to strategists",
+                            "No account-manager layer",
+                        ],
+                        "competitive_context": "Competitors route through account managers (dummy).",
+                    },
+                ]
+            }
+        elif "positioning_statement" in system_lowered and "brand_promise" in system_lowered:
+            return {
+                "positioning_statement": (
+                    "For enterprise product leaders who need cohesive digital experiences, Dummy Co. "
+                    "is the hands-on partner that delivers clarity because execution speed sets us "
+                    "apart (dummy)."
+                ),
+                "brand_promise": "Every customer touchpoint will feel cohesive and intentional (dummy).",
+            }
         return {"output": "Dummy response", "status": "ok"}
 
     def chat(
