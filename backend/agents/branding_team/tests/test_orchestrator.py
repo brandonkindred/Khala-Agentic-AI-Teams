@@ -490,7 +490,7 @@ def test_phase_absorbed_fields_populated() -> None:
     assert result.governance.wiki_backlog[0].title
 
 
-def test_unparseable_phase_output_marks_phase_degraded() -> None:
+def test_unparseable_phase_output_marks_phase_degraded(caplog) -> None:
     """A phase whose agent text isn't valid JSON gets a default output and is
     recorded in ``TeamOutput.degraded_phases`` instead of failing silently."""
     mock_result = _mock_graph_result(ALL_PHASES)
@@ -501,9 +501,12 @@ def test_unparseable_phase_output_marks_phase_degraded() -> None:
     async def mock_invoke_async(task, **kwargs):
         return mock_result
 
-    with patch(
-        "branding_team.orchestrator.build_branding_graph",
-        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    with (
+        patch(
+            "branding_team.orchestrator.build_branding_graph",
+            return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        ),
+        caplog.at_level("WARNING", logger="branding_team.orchestrator"),
     ):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(
@@ -515,6 +518,7 @@ def test_unparseable_phase_output_marks_phase_degraded() -> None:
         )
 
     assert result.degraded_phases == [BrandPhase.NARRATIVE_MESSAGING]
+    assert any("phase2_narrative" in r.message and r.levelname == "WARNING" for r in caplog.records)
     assert result.narrative_messaging is not None
     assert result.narrative_messaging.tagline == ""
     # Unaffected phases still parse normally and are not marked degraded.

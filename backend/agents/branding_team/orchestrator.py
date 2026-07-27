@@ -337,9 +337,11 @@ class BrandingTeamOrchestrator:
               phase not reached for this ``stop_idx``); ``checks`` is the compliance
               result list; ``competitive_snapshot``/``design_asset_result`` are the
               integration results (or ``None`` when disabled); ``degraded_phases``
-              lists the phases whose output could not be parsed and was
-              default-constructed by ``_extract_phase_output`` (or ``None``/empty
-              when every reached phase parsed successfully).
+              lists only phases actually reached this run whose output could not
+              be parsed and was default-constructed by ``_extract_phase_output``
+              (or ``None``/empty when every reached phase parsed successfully) —
+              the caller owns de-duplication and ordering, this method passes
+              the list through as-is.
         Postconditions:
             - Returns a fully-populated ``TeamOutput`` whose ``degraded_phases``
               reflects the caller-supplied list; performs no I/O and no
