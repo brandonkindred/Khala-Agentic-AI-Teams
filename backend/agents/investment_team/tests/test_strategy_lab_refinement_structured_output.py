@@ -254,6 +254,45 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
     assert "failure_phase=execution" in starvation_warnings[0].message
 
 
+def test_reasoning_pass_starvation_also_degrades_to_legacy_loop(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-schema_forced LLMSemanticExhaustionError from the *reasoning*
+    pass (complete()) is re-raised by invoke_structured_with_schema as a new
+    schema_forced=True receipt, so it degrades identically to a
+    formatting-pass starvation — and the formatting call (complete_json) is
+    never invoked, matching "a step-1 failure propagates immediately"."""
+
+    class _ReasoningStarvingClient:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            raise LLMSemanticExhaustionError(
+                "reasoning starved", schema_forced=False, attempts_used=1
+            )
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise AssertionError("formatting call must not run after a reasoning-pass failure")
+
+    starved_client = _ReasoningStarvingClient()
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client))
+    monkeypatch.setattr(
+        _agent_runner, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
+    )
+    agent = _ScriptedAgent([_GOOD])
+    monkeypatch.setattr(_agent_runner, "Agent", lambda **_k: agent)
+
+    logger_name = "investment_team.strategy_lab.agents.refinement"
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        updates, new_code = RefinementAgent().run(
+            spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+        )
+
+    assert new_code == "# fixed"
+    assert updates == {"changes_made": "tightened guard"}
+    starvation_warnings = [r for r in caplog.records if "schema_forced" in r.message]
+    assert len(starvation_warnings) == 1
+
+
 # ---------------------------------------------------------------------------
 # No degrade: a non-schema_forced fatal failure propagates unchanged
 # ---------------------------------------------------------------------------

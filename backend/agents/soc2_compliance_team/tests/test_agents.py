@@ -312,6 +312,11 @@ def test_report_writer_returns_next_steps_when_no_findings() -> None:
     # String steps get coerced into a dict stub
     assert any(s.get("description") == "" for s in next_steps.steps)
     assert next_steps.recommended_timeline == "6 months"
+    # The two-pass split: a think=True reasoning call followed by a
+    # think=False formatting call, not a single call to either method.
+    assert llm.reasoning_calls[0]["think"] is True
+    assert llm.calls[0]["think"] is False
+    assert llm.calls[0]["temperature"] == 0.0
 
 
 def test_report_writer_next_steps_handles_non_list_steps() -> None:
@@ -365,6 +370,11 @@ def test_report_writer_returns_compliance_report_when_findings_exist() -> None:
     assert report.recommendations_summary == ["fix X", "fix Y"]
     assert TSCCategory.SECURITY.value in report.findings_by_tsc
     assert len(report.findings_by_tsc[TSCCategory.SECURITY.value]) == 1
+    # The two-pass split: a think=True reasoning call followed by a
+    # think=False formatting call, not a single call to either method.
+    assert llm.reasoning_calls[0]["think"] is True
+    assert llm.calls[0]["think"] is False
+    assert llm.calls[0]["temperature"] == 0.0
 
 
 def test_report_writer_prompt_serializes_findings_as_json() -> None:
