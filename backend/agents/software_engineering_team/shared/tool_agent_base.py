@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
@@ -181,12 +182,12 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # ``language_conventions``. Empty → no injection (e.g. frontend agents whose
     # single-issue prompt has no ``{language_conventions}`` slot). Backend agents
     # set ``{"java": JAVA_CONVENTIONS, "_default": PYTHON_CONVENTIONS}``.
-    conventions_by_language: Dict[str, str] = {}
+    conventions_by_language: Optional[Dict[str, str]] = None
 
     # When set (as a ``staticmethod``), ``review`` runs this build runner over the
     # resolved ``repo_path`` instead of the LLM review path. The runner takes a
     # ``pathlib.Path`` and returns a list of :class:`ReviewIssue`.
-    build_runner: Optional[Callable[[Any], List["ReviewIssue"]]] = None
+    build_runner: Optional[Callable[[Path], List["ReviewIssue"]]] = None
     # Noun used in the build-review summary, e.g. "build/test issue(s)" (backend)
     # vs "build issue(s)" (frontend).
     build_review_noun: str = "issue(s)"
@@ -237,7 +238,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         language names (plus optional ``"_default"``) to convention strings.
         Postconditions: returns ``{}`` or ``{"language_conventions": <str>}``.
         """
-        conv = self.conventions_by_language
+        conv = self.conventions_by_language or {}
         if not conv:
             return {}
         lang = (getattr(inp, "language", None) or "").strip().lower()
@@ -414,16 +415,16 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         fixed_count = 0
         for issue in issues:
             relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
-            prompt = self.problem_solving_prompt.format(
-                source=issue.source or self.issue_source,
-                severity=issue.severity or self.default_severity,
-                description=issue.description or "",
-                file_path=issue.file_path or "N/A",
-                recommendation=issue.recommendation or self.default_recommendation,
-                current_code=relevant_code,
-                **extra,
-            )
             try:
+                prompt = self.problem_solving_prompt.format(
+                    source=issue.source or self.issue_source,
+                    severity=issue.severity or self.default_severity,
+                    description=issue.description or "",
+                    file_path=issue.file_path or "N/A",
+                    recommendation=issue.recommendation or self.default_recommendation,
+                    current_code=relevant_code.replace("{", "{{").replace("}", "}}"),
+                    **extra,
+                )
                 raw = self._run_agent(self._model, prompt)
             except Exception as e:
                 self._logger.warning(

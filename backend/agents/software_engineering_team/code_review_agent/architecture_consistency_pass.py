@@ -245,8 +245,8 @@ def _validate_finding_line(
         - Under ``pre_numbered``, returns ``line`` unchanged (or None if
           ``line`` is None) without reading the file at all.
         - Returns None when ``line`` is None, ``file_path`` does not resolve to
-          a readable file, or the file's content cannot be read (an
-          ``"Error: ..."`` sentinel from ``index.read_file``).
+          a readable file, or the file's content cannot be read (per
+          ``index.read_file_or_none``).
         - Returns ``line`` unchanged when it falls within ``[1, total_lines]``
           of the resolved file's content; otherwise returns None. Never raises.
     """
@@ -257,10 +257,12 @@ def _validate_finding_line(
     resolved = index.resolve_path(file_path)
     if resolved is None:
         return None
-    content = index.read_file(resolved)
-    if content.startswith("Error:"):
+    content = index.read_file_or_none(resolved)
+    if content is None:
         return None
-    total_lines = len(content.splitlines()) or 1
+    total_lines = len(content.splitlines())
+    if total_lines == 0:
+        return None
     return line if 1 <= line <= total_lines else None
 
 
