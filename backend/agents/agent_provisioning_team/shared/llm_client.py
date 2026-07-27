@@ -89,7 +89,7 @@ class LLMClient:
 
     @property
     def is_configured(self) -> bool:
-        """True once a real LLM endpoint has been wired in."""
+        """Temporary stub: always ``False`` until ``llm_service`` is wired in."""
         # NOTE: flip this to a real readiness check when llm_service lands.
         return False
 

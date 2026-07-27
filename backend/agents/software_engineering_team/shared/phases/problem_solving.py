@@ -327,6 +327,10 @@ def _fix_issues_one_at_a_time_impl(
         resolution -- even if the LLM's response claimed ``resolved`` -- and
         the loop retries up to ``MAX_ITERATIONS_PER_ISSUE``.
     """
+    assert has_language_conventions == ("{language_conventions}" in single_issue_prompt), (
+        "single_issue_prompt must contain {language_conventions} iff has_language_conventions"
+    )
+
     merged = dict(current_files)
     fixes_applied: List[Dict[str, Any]] = []
     unresolved_issues: List[Any] = []
@@ -367,9 +371,6 @@ def _fix_issues_one_at_a_time_impl(
             )
             if has_language_conventions:
                 fmt["language_conventions"] = lang_conv
-            assert has_language_conventions == ("{language_conventions}" in single_issue_prompt), (
-                "single_issue_prompt must contain {language_conventions} iff has_language_conventions"
-            )
             prompt = single_issue_prompt.format(**fmt)
             try:
                 raw = runner.run(llm, prompt)
