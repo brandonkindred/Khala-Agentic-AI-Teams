@@ -20,6 +20,7 @@ from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
 from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
     _issues_from_chunk_output,
+    _map_parallelism,
     _render_architecture_context,
     _segment_range_label,
     _tail_passes_run_sequentially,
@@ -785,6 +786,25 @@ def test_cap_review_chunk_headerless_segment_falls_back_to_raw_split() -> None:
     assert len(pieces) > 1
     assert all(len(p) <= 10_000 for p in pieces)
     assert "".join(pieces) == line  # raw split, no header injected
+
+
+def test_cap_review_chunk_drops_header_when_header_alone_exceeds_cap() -> None:
+    """When the ### path ### header itself is >= max_chars, attaching it to
+    every piece would blow the budget it's meant to enforce. In that case the
+    header must be dropped (raw split of the whole rendered content, header
+    included at most once) rather than every piece exceeding max_chars."""
+    long_path = "pkg/" + ("d" * 50) + "/module.py"
+    header = f"### {long_path} ###\n"
+    line = "y" * 25_000
+    chunk = ReviewChunk(segments=[FileSegment(path=long_path, content=line, total_lines=1)])
+    max_chars = len(header)  # header alone already meets the cap
+    pieces = cap_review_chunk(chunk, max_chars)
+    assert all(len(p) <= max_chars for p in pieces)
+    # Raw split of chunk.content (header + line, header appearing once) --
+    # not the per-piece-header behavior, which would repeat the header in
+    # every piece and push each piece's length past max_chars.
+    assert "".join(pieces) == chunk.content
+    assert chunk.content.count(header) == 1
 
 
 def test_cap_review_chunk_rejects_nonpositive_cap() -> None:
@@ -1896,6 +1916,92 @@ def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
             CodeReviewInput(files=files, task_description="t", language="python"),
         )
     assert client.saw_second is False, "later chunk must not be reviewed after fail-fast"
+
+
+def test_map_parallelism_clamped_by_llm_max_concurrency(monkeypatch) -> None:
+    """The configured CODE_REVIEW_MAP_PARALLELISM ceiling is clamped by
+    LLM_MAX_CONCURRENCY, so a wide ceiling never yields a width above the
+    process-global gate."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "20")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "2")
+    assert _map_parallelism() == 2
+
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "3")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "10")
+    assert _map_parallelism() == 3
+
+    monkeypatch.delenv("CODE_REVIEW_MAP_PARALLELISM", raising=False)
+    monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)
+    assert (
+        _map_parallelism() == 4
+    )  # default ceiling (16) clamped by default LLM_MAX_CONCURRENCY (4)
+
+
+def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) -> None:
+    """End-to-end: with a high CODE_REVIEW_MAP_PARALLELISM ceiling but a low
+    LLM_MAX_CONCURRENCY, the map phase never runs more concurrent chunk
+    reviews than the global gate allows, even with more chunks available
+    than that gate."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "20")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "2")
+
+    lock = threading.Lock()
+    state = {"current": 0, "peak": 0}
+    release = threading.Event()
+
+    class _ConcurrencyProbe(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            with lock:
+                state["current"] += 1
+                state["peak"] = max(state["peak"], state["current"])
+            release.wait(timeout=5)
+            with lock:
+                state["current"] -= 1
+            return super().complete_json(prompt, **kwargs)
+
+    def _release_soon() -> None:
+        time.sleep(0.2)
+        release.set()
+
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(5)}
+    client = _ConcurrencyProbe()
+    threading.Thread(target=_release_soon, daemon=True).start()
+    try:
+        run_coordinator(
+            client, CodeReviewInput(files=files, task_description="t", language="python")
+        )
+    finally:
+        release.set()
+    assert state["peak"] <= 2
+
+
+def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
+    """With a high ceiling and high LLM_MAX_CONCURRENCY, a diff with fewer
+    chunks than either limit still uses no more workers than it has chunks."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "16")
+    monkeypatch.setenv("LLM_MAX_CONCURRENCY", "16")
+
+    lock = threading.Lock()
+    state = {"current": 0, "peak": 0}
+
+    class _ConcurrencyProbe(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            with lock:
+                state["current"] += 1
+                state["peak"] = max(state["peak"], state["current"])
+            time.sleep(0.05)
+            with lock:
+                state["current"] -= 1
+            return super().complete_json(prompt, **kwargs)
+
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(3)}
+    client = _ConcurrencyProbe()
+    run_coordinator(client, CodeReviewInput(files=files, task_description="t", language="python"))
+    assert 2 <= state["peak"] <= 3
 
 
 def test_headerless_code_reviews_as_single_unnamed_block() -> None:
