@@ -79,6 +79,7 @@ PROFILE = StackProfile(
     planning_progress_label="stack",
     conventions_by_language={"_default": TYPESCRIPT_CONVENTIONS},
     has_language_conventions=False,
+    build_verify_label="frontend_code_v2",
     detect_language=_detect_language,
 )
 
