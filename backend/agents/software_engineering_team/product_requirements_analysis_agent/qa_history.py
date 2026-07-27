@@ -145,15 +145,26 @@ def extract_answer_from_qa_history(
         match_ratio = matches / len(key_words) if key_words else 0
 
         if match_ratio > 0.5:  # Good enough match
-            # Extract answer from block
-            answer = ""
-            rationale = ""
+            # Extract answer from block, buffering continuation lines until the next
+            # known marker so multi-line answers/rationales survive the round trip.
+            answer_lines: List[str] = []
+            rationale_lines: List[str] = []
+            current_field: Optional[List[str]] = None
 
             for line in lines[1:]:
                 if line.startswith("**Answer:**"):
-                    answer = line.replace("**Answer:**", "").strip()
+                    answer_lines = [line.replace("**Answer:**", "").strip()]
+                    current_field = answer_lines
                 elif line.startswith("**Rationale:**"):
-                    rationale = line.replace("**Rationale:**", "").strip()
+                    rationale_lines = [line.replace("**Rationale:**", "").strip()]
+                    current_field = rationale_lines
+                elif line.startswith("*") or line.startswith("###") or line.startswith("##"):
+                    current_field = None
+                elif current_field is not None:
+                    current_field.append(line)
+
+            answer = "\n".join(answer_lines).strip()
+            rationale = "\n".join(rationale_lines).strip()
 
             if answer and (best_match is None or match_ratio > best_match[0]):
                 best_match = (match_ratio, recorded_question, answer, rationale)
@@ -205,7 +216,8 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
         block_match = re.match(r"^###\s+(.*)$", line)
         if block_match:
             question_text = block_match.group(1).strip()
-            answer = ""
+            answer_lines: List[str] = []
+            current_field: Optional[List[str]] = None
             block_lines = [line]
             i += 1
             while i < len(lines):
@@ -215,9 +227,18 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
                 ):
                     break
                 block_lines.append(next_line)
-                if next_line.strip().startswith("**Answer:**"):
-                    answer = next_line.replace("**Answer:**", "").strip()
+                stripped = next_line.strip()
+                if stripped.startswith("**Answer:**"):
+                    answer_lines = [next_line.replace("**Answer:**", "").strip()]
+                    current_field = answer_lines
+                elif stripped.startswith(
+                    ("**Rationale:**", "*Auto-answered", "*Custom text:*", "*(Default applied)*")
+                ):
+                    current_field = None
+                elif current_field is not None:
+                    current_field.append(next_line)
                 i += 1
+            answer = "\n".join(answer_lines).strip()
             full_block_text = "\n".join(block_lines)
             if question_text or answer:
                 blocks_out.append((current_iteration, question_text, answer, full_block_text))
