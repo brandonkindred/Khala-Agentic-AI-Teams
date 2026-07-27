@@ -204,7 +204,7 @@ def run_review(
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> ReviewResult:
@@ -256,7 +256,7 @@ def run_microtask_review(
     linting_tool_agent: Any = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     cache: Optional[AgentReviewCache] = None,
@@ -314,7 +314,7 @@ def run_code_review_phase(
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> PhaseReviewResult:
@@ -362,7 +362,7 @@ def run_qa_testing_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
@@ -404,7 +404,7 @@ def run_security_testing_phase(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     repo_path: Optional[Path] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
-    language: str = "python",
+    language: str = PROFILE.default_language,
     cache: Optional[AgentReviewCache] = None,
 ) -> PhaseReviewResult:
     """
