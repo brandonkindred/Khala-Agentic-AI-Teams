@@ -3,7 +3,7 @@
 - **Status**: Proposed
 - **Date**: 2026-04-17
 - **Owner**: Nutrition & Meal Planning team (+ Integrations team for calendar)
-- **Related**: ADR-002 (canonical ingredients), ADR-003 (nutrient rollup + swap), ADR-004 (learned preferences), `backend/agents/nutrition_meal_planning_team/`, `backend/agents/integrations/`
+- **Related**: ADR-002 (canonical ingredients), ADR-003 (nutrient rollup + swap), ADR-004 (learned preferences), `backend/agents/nutrition_meal_planning_team/`, `backend/unified_api/` (Google browser-login infrastructure; there is no separate `agents/integrations` package)
 
 ## Context
 
