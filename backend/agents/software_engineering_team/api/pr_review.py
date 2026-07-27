@@ -208,7 +208,7 @@ _FILE_STATUS_REMOVED = "removed"
 # Prefix of the scope-tagging focus note (whole-file or hunk mode), exposed so
 # callers/tests can detect the note (e.g. in task_requirements) without
 # duplicating its full wording.
-WHOLE_FILE_FOCUS_NOTE_PREFIX = "Review focus:"
+REVIEW_FOCUS_NOTE_PREFIX = "Review focus:"
 
 # Shared "tag pre-existing findings" instruction body, reused by both the
 # whole-file and hunk-mode focus notes below (only the framing sentence
@@ -244,11 +244,11 @@ def _whole_file_focus(body: str) -> str:
 
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``WHOLE_FILE_FOCUS_NOTE_PREFIX``
+          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
           and instructs the reviewer to emit a ``pre_existing`` field per issue.
     """
     note = (
-        f"{WHOLE_FILE_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
+        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
         "file contents are provided for context, which also lets you see unchanged code.\n"
         f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
     )
@@ -270,11 +270,11 @@ def _hunk_review_focus(body: str) -> str:
 
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``WHOLE_FILE_FOCUS_NOTE_PREFIX``
+          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
           and instructs the reviewer to emit a ``pre_existing`` field per issue.
     """
     note = (
-        f"{WHOLE_FILE_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. You are "
+        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. You are "
         "shown diff hunks (added lines plus some surrounding unchanged context lines), not "
         "complete files.\n"
         f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
@@ -451,12 +451,17 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         - On success the job is ``completed`` with ``github_pr_url`` set and one PR
           review submitted (REQUEST_CHANGES on critical/high findings from a PR the
           bot did not author, else COMMENT) whose body carries only the summary.
-          Only findings about the code this PR added or modified are posted; a
-          finding the reviewer tagged ``pre_existing`` (a bug in unchanged code the
-          PR did not touch) is NOT commented — instead it is serialized into
-          ``review_summary["pending_issue_proposals"]`` for a human to optionally
-          file as a GitHub issue, and it drives neither the review event nor the
-          "no issues" reaction.
+          A finding the reviewer tagged ``pre_existing`` (a bug in unchanged code
+          the PR did not touch, per its own line/file — see
+          :func:`_partition_review_issues`) is NOT commented — instead it is
+          serialized into ``review_summary["pending_issue_proposals"]`` for a
+          human to optionally file as a GitHub issue, and it drives neither the
+          review event nor the "no issues" reaction. Every other finding IS
+          posted, including one naming a file this PR never touched at all (see
+          below) — such a finding is not necessarily pre-existing (it is often
+          "this PR should have added/modified file X but didn't"), so only the
+          reviewer's own tag, never file/diff membership alone, withholds a
+          finding from the PR.
           Every posted finding produces exactly one comment and no comment lists
           more than one finding: a finding tied to a changed line becomes an individual
           line-anchored inline comment carried in the single review (a stray

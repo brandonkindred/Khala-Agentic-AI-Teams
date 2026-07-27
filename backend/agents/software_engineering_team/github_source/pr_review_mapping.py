@@ -266,16 +266,16 @@ def split_review_comments(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Partition mapped comments into line-anchored and file-level groups.
 
-    The two shapes produced by ``map_issues_to_comments``/``anchor_to_first_file``
-    travel on different GitHub endpoints: line-anchored comments ride the single
-    review (``POST /pulls/{n}/reviews``), while file-level comments
+    The two shapes produced by ``map_issues_to_comments`` travel on different
+    GitHub endpoints: line-anchored comments ride the single review
+    (``POST /pulls/{n}/reviews``), while file-level comments
     (``subject_type="file"``) must go on the dedicated comments endpoint
     (``POST /pulls/{n}/comments``) — the reviews array rejects ``subject_type``.
 
     Preconditions:
-        - ``comments`` is a list of entries produced by ``map_issues_to_comments``
-          or ``anchor_to_first_file``: each is line-anchored (carries ``line``) or
-          file-level (carries ``subject_type == "file"``).
+        - ``comments`` is a list of entries produced by ``map_issues_to_comments``:
+          each is line-anchored (carries ``line``) or file-level (carries
+          ``subject_type == "file"``).
     Postconditions:
         - Returns ``(line_anchored, file_level)`` where ``line_anchored`` is every
           entry carrying a ``line`` key and ``file_level`` is every other entry.

@@ -243,18 +243,18 @@ class TestInferReviewLanguageUnit:
 class TestWholeFileFocusUnit:
     def test_blank_body_returns_note_alone(self) -> None:
         result = pr_review._whole_file_focus("")
-        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
-        assert "\n\n" not in result[: len(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX) + 1]
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
+        assert "\n\n" not in result[: len(pr_review.REVIEW_FOCUS_NOTE_PREFIX) + 1]
 
     def test_whitespace_only_body_returns_note_alone(self) -> None:
         result = pr_review._whole_file_focus("   \n")
-        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
         assert "   " not in result
 
     def test_non_blank_body_is_prefixed_to_note(self) -> None:
         result = pr_review._whole_file_focus("Fixes the flaky retry loop.")
         assert result.startswith("Fixes the flaky retry loop.\n\n")
-        assert pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX in result
+        assert pr_review.REVIEW_FOCUS_NOTE_PREFIX in result
 
     def test_note_instructs_pre_existing_field(self) -> None:
         result = pr_review._whole_file_focus("body")
@@ -269,22 +269,35 @@ class TestWholeFileFocusUnit:
 class TestHunkReviewFocusUnit:
     def test_blank_body_returns_note_alone(self) -> None:
         result = pr_review._hunk_review_focus("")
-        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
-        assert "\n\n" not in result[: len(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX) + 1]
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
+        assert "\n\n" not in result[: len(pr_review.REVIEW_FOCUS_NOTE_PREFIX) + 1]
 
     def test_whitespace_only_body_returns_note_alone(self) -> None:
         result = pr_review._hunk_review_focus("   \n")
-        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
         assert "   " not in result
 
     def test_non_blank_body_is_prefixed_to_note(self) -> None:
         result = pr_review._hunk_review_focus("Fixes the flaky retry loop.")
         assert result.startswith("Fixes the flaky retry loop.\n\n")
-        assert pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX in result
+        assert pr_review.REVIEW_FOCUS_NOTE_PREFIX in result
 
     def test_note_instructs_pre_existing_field(self) -> None:
         result = pr_review._hunk_review_focus("body")
         assert "pre_existing" in result
+
+    def test_differs_from_whole_file_focus_with_hunk_specific_wording(self) -> None:
+        # Guards against _hunk_review_focus regressing into a plain alias of
+        # _whole_file_focus: the two must produce different text, and the hunk
+        # note must mention hunks specifically (not just the shared
+        # "pre_existing" tagging instructions the two modes share).
+        hunk_result = pr_review._hunk_review_focus("body")
+        whole_result = pr_review._whole_file_focus("body")
+        assert hunk_result != whole_result
+        assert "hunk" in hunk_result.lower()
+        assert "diff hunks" in hunk_result
+        assert "complete files" in hunk_result
+        assert "hunk" not in whole_result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +462,13 @@ class TestRunReviewerUnit:
         # whole-file mode (previously it passed the PR body verbatim with no
         # tagging instruction) -- see _hunk_review_focus.
         assert call["task_requirements"] == pr_review._hunk_review_focus("PR body")
+        # Content assertions (not just equality with _hunk_review_focus's own
+        # output): guard against _run_reviewer regressing to pass the body
+        # verbatim, which would make the equality check above vacuously true
+        # only if _hunk_review_focus also regressed in lockstep.
+        assert "PR body" in call["task_requirements"]
+        assert "pre_existing" in call["task_requirements"]
+        assert "diff hunks" in call["task_requirements"]
 
     def test_both_sources_run_two_calls_and_merge(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
@@ -478,6 +498,11 @@ class TestRunReviewerUnit:
         # A blank body still gets the hunk-mode focus note appended (the note
         # alone, since there is no body to prefix).
         assert provider.calls[0]["task_requirements"] == pr_review._hunk_review_focus("")
+        # Content assertions alongside the equality check above, so a
+        # simultaneous regression in _hunk_review_focus (e.g. back to
+        # returning the body verbatim) can't hide behind both sides matching.
+        assert "pre_existing" in provider.calls[0]["task_requirements"]
+        assert "diff hunks" in provider.calls[0]["task_requirements"]
 
     def test_first_attempt_error_records_outage_and_stops(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)
