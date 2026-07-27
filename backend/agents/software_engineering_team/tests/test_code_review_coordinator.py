@@ -13,6 +13,7 @@ import json
 import threading
 import time
 from typing import Any, Dict, List, Optional
+from unittest.mock import MagicMock
 
 import pytest
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE
@@ -21,6 +22,7 @@ from code_review_agent.coordinator import (
     _issues_from_chunk_output,
     _render_architecture_context,
     _segment_range_label,
+    _tail_passes_run_sequentially,
     _validate_line,
     build_review_chunks,
     cap_chunk_content,
@@ -2700,3 +2702,22 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
 
     assert synth_calls, "synthesis must run so the narrative reflects the side-effect finding"
     assert any(i.description == side_effect_issue.description for i in result.issues)
+
+
+def test_tail_passes_run_sequentially_for_dummy_llm() -> None:
+    assert _tail_passes_run_sequentially(DummyLLMClient()) is True
+    assert _tail_passes_run_sequentially(MagicMock()) is False
+
+
+def test_tail_passes_run_sequentially_for_wrapped_dummy_llm() -> None:
+    """The coding team's default llm_getter wraps clients in a Strands LLMClientModel
+    (exposing the backing client via a `.client` property) before they reach the
+    coordinator -- a DummyLLMClient reached only through that wrapper must still
+    force sequential execution."""
+
+    class _FakeStrandsModelWrapper:
+        def __init__(self, client):
+            self.client = client
+
+    assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(DummyLLMClient())) is True
+    assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(MagicMock())) is False
