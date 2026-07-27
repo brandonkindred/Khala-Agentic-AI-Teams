@@ -326,9 +326,12 @@ GATE_CONFIG = GatedExecutionConfig(
     # QA and Security are independent analysis calls over the same
     # post-Code-Review snapshot on the frontend too (each gate scopes its
     # tool-agent call to its own kind via ``_scoped_tool_agents`` above) --
-    # matching backend_code_v2_team's existing concurrent behavior. See
-    # docs/GATE_DEPENDENCY_GRAPH.md for the residual CR-gate tool-agent
-    # duplication this does not (yet) resolve.
+    # matching backend_code_v2_team's existing concurrent behavior. The CR
+    # gate's full ``deps.tool_agents`` fan-out still calls ``testing_qa``/
+    # ``security`` a second time, but all three gates share
+    # ``deps.tool_agent_cache`` (see the gate-adapter comment above), so the
+    # second call within a cycle is served from cache instead of re-invoking
+    # the tool agent -- see docs/GATE_DEPENDENCY_GRAPH.md.
     parallelize_qa_security=True,
 )
 

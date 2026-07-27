@@ -747,8 +747,9 @@ def test_microtask_tool_agent_cache_hit_skips_second_call(tmp_path: Path) -> Non
 
 
 def test_microtask_tool_agent_cache_misses_on_changed_files(tmp_path: Path) -> None:
-    """Different current_files between two calls busts the cache -- a batch-fix
-    between the CR gate's call and the QA gate's call must recompute for real."""
+    """Different ``files`` (the ``current_files`` the cache key is hashed
+    from) between two calls busts the cache -- a batch-fix between the CR
+    gate's call and the QA gate's call must recompute for real."""
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.shared.agent_review import AgentReviewCache
     from software_engineering_team.shared.v2_models import ReviewIssue as _RI
@@ -822,8 +823,9 @@ def test_microtask_tool_agent_malformed_output_is_never_cached_and_stays_contain
     tmp_path: Path,
 ) -> None:
     """A tool agent returning a malformed (unfoldable) output must not raise on
-    either the first call or a later cache-hit -- and must not be cached, so
-    every call retries live instead of replaying the same failure forever."""
+    the first call or the retry -- and must not be cached (so the second call
+    is a live retry, not a cache-hit), meaning every call retries live instead
+    of replaying the same failure forever."""
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.shared.agent_review import AgentReviewCache
 

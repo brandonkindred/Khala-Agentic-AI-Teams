@@ -456,11 +456,14 @@ def _run_review_cycles(
         :func:`_apply_cr_section_exit`'s and the max-cycles check's raise paths.
     Invariants:
         ``deps.tool_agent_cache`` is reset to a fresh :class:`AgentReviewCache`
-        at the start of this call, scoped to this microtask's own cycle loop
-        the same way ``agent_review_cache`` is (constructed here, discarded on
-        return) — a team's gate callables that read it off ``deps`` (currently
-        only the frontend team) always see a cache fresh for this microtask,
-        never one left over from a prior microtask.
+        at the start of this call. Unlike the local ``agent_review_cache``
+        (truly discarded on return), it is assigned onto the shared ``deps``
+        object, so it persists there after this call returns — but the next
+        microtask's call to this function overwrites it with another fresh
+        instance before that microtask's gates run, so no gate ever sees an
+        entry left over from a prior microtask. A team's gate callables that
+        read it off ``deps`` (currently only the frontend team) therefore
+        always see a cache scoped to the microtask currently in progress.
     """
     phase_failed = False
     total_cycles = 0
@@ -655,12 +658,21 @@ def _run_review_cycles(
 
         # ── QA + Security Testing Phase ────────────────────────────────────
         if gate_config.parallelize_qa_security and not _qa_security_run_sequentially(llm):
-            # Concurrent path (backend only): QA and Security are independent
-            # analysis calls over the same immutable post-Code-Review snapshot
-            # (see docs/GATE_DEPENDENCY_GRAPH.md), so they run at once via
-            # parallel_map and their issues are collected and batch-fixed
-            # together in a single restart-from-Code-Review, rather than
-            # fixing QA and Security one gate at a time.
+            # Concurrent path (any team with parallelize_qa_security=True --
+            # currently both backend and frontend): QA and Security are
+            # independent analysis calls over the same immutable
+            # post-Code-Review snapshot (see docs/GATE_DEPENDENCY_GRAPH.md),
+            # so they run at once via parallel_map and their issues are
+            # collected and batch-fixed together in a single
+            # restart-from-Code-Review, rather than fixing QA and Security one
+            # gate at a time. Both gate calls below share the same
+            # ``agent_review_cache`` and (via ``deps``) the same
+            # ``tool_agent_cache`` instance; this is safe because each gate
+            # only ever reads/writes entries keyed by its own kind
+            # ("qa"/"testing_qa" vs "security") -- disjoint keys, so
+            # concurrent dict access never contends on the same entry, and
+            # this mirrors ``agent_review_cache``'s pre-existing sharing
+            # pattern in this same branch.
             mt.status = gate_config.status_qa_security or gate_config.status_qa
             logger.info(
                 "[%s] Microtask %s: Cycle %d - Running QA + security testing phases concurrently",

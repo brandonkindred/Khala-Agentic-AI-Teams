@@ -37,8 +37,13 @@ Preconditions:
       ``_run_build_verification``).
 
 Invariants:
-    - This module holds no mutable state; every function is pure with respect to
-      its inputs (the only side effects are logging and the injected runners).
+    - This module holds no mutable state of its own; every function is pure
+      with respect to its inputs, with two documented exceptions: logging and
+      the injected runners' own side effects, and an optional caller-supplied
+      cache (``agent_review_cache`` / ``tool_agent_cache``) that a function
+      may read from and write to when given one — the cache object, not this
+      module, owns that mutable state, and passing ``None`` (the default)
+      restores pure behavior.
     - ``ReviewConfig`` is frozen after construction.
 """
 

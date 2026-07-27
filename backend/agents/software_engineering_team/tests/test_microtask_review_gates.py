@@ -173,15 +173,20 @@ class TestFrontendReviewDependencies:
         assert deps.build_verifier is None
         assert deps.qa_agent is None
         assert deps.tool_agents == {}
+        assert deps.tool_agent_cache is None
 
     def test_review_deps_with_agents(self):
         from frontend_code_v2_team.phases.execution import ReviewDependencies
 
+        from software_engineering_team.shared.agent_review import AgentReviewCache
+
         mock_qa = MagicMock()
         mock_sec = MagicMock()
-        deps = ReviewDependencies(qa_agent=mock_qa, security_agent=mock_sec)
+        cache = AgentReviewCache()
+        deps = ReviewDependencies(qa_agent=mock_qa, security_agent=mock_sec, tool_agent_cache=cache)
         assert deps.qa_agent == mock_qa
         assert deps.security_agent == mock_sec
+        assert deps.tool_agent_cache is cache
 
 
 class TestFrontendRunMicrotaskReview:
