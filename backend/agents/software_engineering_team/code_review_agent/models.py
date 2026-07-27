@@ -2,9 +2,9 @@
 
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 from software_engineering_team.shared.models import SystemArchitecture
 
@@ -339,6 +339,184 @@ class CodeReviewIssue(BaseModel):
         "Pre-existing findings are never posted as PR review comments — they are collected and "
         "offered to a human as GitHub-issue proposals. Default False.",
     )
+
+
+_ChunkReviewIssueSeverity = Literal["critical", "high", "medium", "low", "info"]
+_ChunkReviewIssueCategory = Literal[
+    "naming",
+    "structure",
+    "logic",
+    "spec-compliance",
+    "standards",
+    "integration",
+    "testing",
+    "architecture",
+    "refactor",
+    "maintainability",
+    "side-effects",
+    "documentation",
+    "general",
+]
+
+
+class ChunkReviewIssueLLM(BaseModel):
+    """Narrow LLM-authored shape for one issue in a chunk-review response.
+
+    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
+    ``generate_structured`` (see ``llm_service``'s README, "When to use which
+    entrypoint"). This is the raw per-issue shape the model is asked to
+    emit — distinct from the persisted :class:`CodeReviewIssue`, which
+    additionally range-validates ``line``/``start_line`` against the cited
+    file segment and resolves ``file_path`` against the chunk. That
+    normalization stays downstream, in ``chunking._issues_from_chunk_output``,
+    unaffected by this schema.
+
+    ``severity``/``category`` are typed as the exact enumerated sets the
+    review prompt asks for (mirrors ``chunking._VALID_SEVERITIES``/
+    ``_VALID_CATEGORIES``) instead of a free string with silent fallback
+    coercion: an out-of-set value now fails schema validation and drives
+    ``complete_validated``'s one correction retry, rather than being
+    silently rewritten to "high"/"general" as today's hand-rolled parsing
+    does in ``chunking._issues_from_chunk_output``.
+
+    ``pre_existing`` is ``StrictBool``, not plain ``bool``: Pydantic's
+    default lax coercion would accept a numeric ``1``/``0`` (or "yes"/"no",
+    etc.) and silently turn it into a real ``True``/``False`` at validation
+    time. That would erase the distinction ``chunking._coerce_bool``
+    deliberately preserves downstream — only a real bool or a recognized
+    truthy string counts there, and a bare number is always false, to stop
+    a stray numeric value from being misread as an affirmative flag.
+    ``StrictBool`` keeps that policy intact by rejecting non-bool input
+    outright (driving ``complete_validated``'s corrective retry) instead of
+    silently coercing it before it ever reaches that downstream check.
+    """
+
+    severity: _ChunkReviewIssueSeverity = Field(
+        default="high",
+        description="Severity: critical, high, medium, low, or info",
+    )
+    category: _ChunkReviewIssueCategory = Field(
+        default="general",
+        description=(
+            "Category: naming, structure, logic, spec-compliance, standards, integration, "
+            "testing, architecture, refactor, maintainability, side-effects, documentation, or "
+            "general (no specific category)"
+        ),
+    )
+    file_path: str = Field(
+        default="",
+        description="File path where the issue was found. Blank when the chunk has a single "
+        "segment or the issue is not tied to one specific file.",
+    )
+    line: Optional[int] = Field(
+        default=None,
+        description="1-based line number in the NEW version of file_path where the issue occurs, "
+        "when the issue is tied to a specific line. None for file-wide/structural issues.",
+    )
+    start_line: Optional[int] = Field(
+        default=None,
+        description="Optional start line for a multi-line issue; `line` is then the end line.",
+    )
+    description: str = Field(
+        default="",
+        description="Clear description of the issue",
+    )
+    suggestion: str = Field(
+        default="",
+        description="Concrete suggestion for how to fix the issue",
+    )
+    pre_existing: StrictBool = Field(
+        default=False,
+        description="True when this issue is a bug in code the change under review did NOT add or "
+        "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
+        "change introduced. Default False.",
+    )
+
+
+class ChunkReviewLLMResponse(BaseModel):
+    """Narrow LLM-authored shape for one chunk-review call's response.
+
+    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
+    ``generate_structured``. Today that function hand-parses this exact
+    shape out of a ``complete_json_with_continuation`` reply via bare
+    ``.get()``/``str()``/``bool()`` coercions (chunk_reviewer.py). This model
+    documents and validates that contract; wiring it into an actual
+    ``generate_structured`` call is a separate, follow-up change.
+
+    All four fields are required, not defaulted: the chunk-review prompt's
+    own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in
+    chunk_reviewer.py) explicitly tells the model to always emit exactly
+    these four keys, so a reply missing one is a truncated/malformed
+    response, not a legitimately empty field. Defaulting them here would
+    reproduce the hand-parser's permissive ``.get(..., default)`` fallbacks
+    in the one place meant to demonstrate the opposite — a missing field
+    must fail validation and drive ``complete_validated``'s corrective
+    retry, not silently look like a clean, empty-issue approval.
+
+    ``approved`` must agree with whether the issues list carries an
+    actionable critical/high finding, in both directions -- exactly the
+    consistency check ``coordinator._reconcile_approval`` applies downstream
+    (its own ``critical_or_high`` computation): a rejection with no such
+    issue and an approval that carries one are both malformed per the
+    review prompt's contract (``profiles.py``: "APPROVE... No critical or
+    high issues... REJECT... Any critical or high issue present"). Today
+    the coordinator's gate silently repairs either case (flipping a
+    baseless rejection to an approval, or a contradictory approval to a
+    rejection) rather than letting a malformed LLM reply be a schema
+    failure. Enforcing the same rule here means that reply instead fails
+    validation and drives ``complete_validated``'s corrective retry — giving
+    the model a chance to correct itself — rather than always being
+    silently absorbed by the coordinator's safety net.
+    """
+
+    approved: bool = Field(
+        description="True if chunk has no critical/high issues",
+    )
+    issues: List[ChunkReviewIssueLLM] = Field(
+        description="Issues found in this chunk",
+    )
+    summary: str = Field(
+        description="Review summary for this chunk",
+    )
+    spec_compliance_notes: str = Field(
+        description="Notes on how well the chunk meets the spec and acceptance criteria",
+    )
+
+    @model_validator(mode="after")
+    def _require_approval_consistent_with_issues(self) -> "ChunkReviewLLMResponse":
+        """Reject a verdict that contradicts its own issues list.
+
+        Computes the same "actionable critical/high issue" predicate
+        ``coordinator._reconcile_approval`` derives from its ``issues``
+        parameter (severity in critical/high), narrowed by the two
+        conditions ``chunking._issues_from_chunk_output`` uses to drop an
+        issue before it ever reaches that gate: a blank description, or a
+        suggestion that is, in its entirety, a no-op admission
+        (``is_no_op_suggestion``, e.g. "No changes needed."). An issue
+        matching either is not "populated" no matter its severity, so it
+        never counts on either side of this check -- matching what
+        ``_reconcile_approval`` actually sees once that filtering has run.
+
+        ``approved`` must then agree: ``True`` requires no actionable
+        critical/high issue, ``False`` requires at least one.
+        """
+        has_actionable_critical_or_high = any(
+            issue.severity in ("critical", "high")
+            and issue.description.strip()
+            and not is_no_op_suggestion(issue.suggestion)
+            for issue in self.issues
+        )
+        if self.approved and has_actionable_critical_or_high:
+            raise ValueError(
+                "approved=True is invalid when the issues list contains an actionable "
+                "critical/high issue (non-blank description, non-no-op suggestion)"
+            )
+        if not self.approved and not has_actionable_critical_or_high:
+            raise ValueError(
+                "approved=False requires at least one issue with severity 'critical' or "
+                "'high', a non-blank description, and a non-no-op suggestion"
+            )
+        return self
 
 
 class CodeReviewInput(BaseModel):
