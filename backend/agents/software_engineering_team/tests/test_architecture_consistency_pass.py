@@ -179,6 +179,13 @@ def test_validate_finding_line_passes_through_none() -> None:
     assert _validate_finding_line(index, "a.py", None) is None
 
 
+def test_validate_finding_line_survives_file_content_starting_with_error() -> None:
+    """A real file whose content starts with "Error:" must not be treated as an unreadable file."""
+    index = CodebaseIndex.from_input(_input(files={"a.py": "Error: not a real failure\ntwo\n"}))
+    assert _validate_finding_line(index, "a.py", 2) == 2
+    assert _validate_finding_line(index, "a.py", 9999) is None
+
+
 def test_validate_finding_line_drops_any_line_for_empty_file() -> None:
     """An empty file has zero real lines, so no citation -- not even line 1 --
     can be bounded against its actual content."""

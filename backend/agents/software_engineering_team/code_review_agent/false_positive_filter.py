@@ -332,6 +332,41 @@ class CodebaseIndex:
             return key
         return None
 
+    def _read(self, path: str) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve and read ``path``, returning ``(content, error_message)``.
+
+        Exactly one of the two return values is not None. Shared by
+        ``read_file`` (tool-facing: forwards ``error_message`` as the
+        returned string) and ``read_file_or_none`` (internal-facing: collapses
+        ``error_message`` to ``None`` so a real file's content can never be
+        mistaken for a sentinel string, however it happens to start).
+        """
+        key = (path or "").strip()
+        if not key:
+            return None, "Error: no path provided."
+        resolved, hits = self._resolve(key)
+        if resolved == self.EXISTING_CODEBASE_PATH:
+            return self.existing_codebase, None
+        if resolved is not None:
+            return self.files[resolved], None
+        # Not in the submission — fall through to the repo reader so an
+        # existing-but-unchanged file (absent from the diff) is still readable.
+        # This is what lets the verifier confirm a file a finding calls "missing"
+        # actually exists in the repository.
+        reader_content = self._reader_read(key)
+        if reader_content is not None:
+            return reader_content, None
+        # Resolution failed — give the tool a message that distinguishes an
+        # ambiguous citation from an absent one (and a missing excerpt).
+        if key == self.EXISTING_CODEBASE_PATH:
+            return None, "Error: no existing-codebase excerpt available."
+        if len(hits) > 1:
+            return None, (
+                f"Error: path '{path}' is ambiguous; it matches "
+                f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
+            )
+        return None, f"Error: file not found: {path}. Use list_files() to see available paths."
+
     def read_file(self, path: str) -> str:
         """Return the full content of ``path``, resolving near-misses.
 
@@ -345,31 +380,20 @@ class CodebaseIndex:
               raises) so a bad tool argument degrades to a message rather than
               aborting the verification.
         """
-        key = (path or "").strip()
-        if not key:
-            return "Error: no path provided."
-        resolved, hits = self._resolve(key)
-        if resolved == self.EXISTING_CODEBASE_PATH:
-            return self.existing_codebase
-        if resolved is not None:
-            return self.files[resolved]
-        # Not in the submission — fall through to the repo reader so an
-        # existing-but-unchanged file (absent from the diff) is still readable.
-        # This is what lets the verifier confirm a file a finding calls "missing"
-        # actually exists in the repository.
-        reader_content = self._reader_read(key)
-        if reader_content is not None:
-            return reader_content
-        # Resolution failed — give the tool a message that distinguishes an
-        # ambiguous citation from an absent one (and a missing excerpt).
-        if key == self.EXISTING_CODEBASE_PATH:
-            return "Error: no existing-codebase excerpt available."
-        if len(hits) > 1:
-            return (
-                f"Error: path '{path}' is ambiguous; it matches "
-                f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
-            )
-        return f"Error: file not found: {path}. Use list_files() to see available paths."
+        content, error = self._read(path)
+        return error if content is None else content
+
+    def read_file_or_none(self, path: str) -> Optional[str]:
+        """Return the full content of ``path``, or None if it can't be read.
+
+        Same resolution as ``read_file`` (exact match, existing-codebase
+        pseudo-path, suffix match, repo-reader fallback), but for internal
+        callers that must tell "unreadable" apart from file content — unlike
+        ``read_file``, whose ``Error: ...`` return is a sentinel string that a
+        real file's own content could coincidentally start with. Never raises.
+        """
+        content, _ = self._read(path)
+        return content
 
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
