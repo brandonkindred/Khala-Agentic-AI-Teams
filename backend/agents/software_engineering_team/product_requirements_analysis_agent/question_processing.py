@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from difflib import SequenceMatcher
 from typing import Any, List
 
@@ -40,9 +41,11 @@ def filter_duplicate_questions(
 ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
     """Filter out questions that appear to be duplicates of answered ones.
 
-    Uses normalized word stems (e.g. token/tokens, store/stored). Only filters as
-    duplicate when match to qa_history is >= 90%; 50–90% similar questions are kept
-    and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
+    Filters out questions whose keyword stems (plus simple plural/past-tense
+    variants) appear verbatim in the Q&A history. A question is considered a
+    duplicate when at least 90% of its keyword stems are found in the history.
+    50-90% coverage is kept for possible consolidation elsewhere. This is
+    keyword coverage, not a similarity ratio between the question and history.
 
     Returns:
         Tuple of (filtered_questions, duplicate_questions).
@@ -58,6 +61,10 @@ def filter_duplicate_questions(
     filtered = []
     duplicates = []
 
+    def _clean_token(w: str) -> str:
+        """Strip punctuation so tokens like 'store?' match their bare form."""
+        return re.sub(r"[^a-z0-9]", "", w.strip())
+
     def _stem(w: str) -> str:
         """Normalize word for matching (e.g. tokens->token, stored->store)."""
         w = w.strip()
@@ -72,8 +79,8 @@ def filter_duplicate_questions(
     for q in new_questions:
         q_text_lower = q.question_text.lower()
         # Key words: length > 3, normalized to stems for plural/tense
-        words = [w for w in q_text_lower.split() if len(w) > 3]
-        key_stems = set(_stem(w) for w in words)
+        words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
+        key_stems = set(_stem(_clean_token(w)) for w in words)
         if not key_stems:
             filtered.append(q)
             continue
@@ -237,15 +244,14 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
             options.append(parse_question_option(opt, i))
 
         if options and not any(opt.is_default for opt in options):
-            sorted_opts = sorted(options, key=lambda o: o.confidence, reverse=True)
-            sorted_opts[0] = QuestionOption(
-                id=sorted_opts[0].id,
-                label=sorted_opts[0].label,
+            default_idx = max(range(len(options)), key=lambda i: options[i].confidence)
+            options[default_idx] = QuestionOption(
+                id=options[default_idx].id,
+                label=options[default_idx].label,
                 is_default=True,
-                rationale=sorted_opts[0].rationale,
-                confidence=sorted_opts[0].confidence,
+                rationale=options[default_idx].rationale,
+                confidence=options[default_idx].confidence,
             )
-            options = sorted_opts
 
         raw_depends = q_data.get("depends_on")
         if isinstance(raw_depends, (list, tuple)):
@@ -557,7 +563,9 @@ def review_question_answer_alignment(
             try:
                 parsed = parse_open_question(q_data, i)
                 if parsed.id not in original_by_id:
-                    raise ValueError(f"aligned question id {parsed.id!r} does not match any original question")
+                    raise ValueError(
+                        f"aligned question id {parsed.id!r} does not match any original question"
+                    )
                 if parsed.id in seen_ids:
                     raise ValueError(f"aligned question id {parsed.id!r} is a duplicate")
                 result.append(parsed)
@@ -616,7 +624,7 @@ def add_recommendations(
         for q in open_questions
     ]
     questions_json = json.dumps(questions_payload, indent=2)
-    spec_excerpt = (spec_content or "")
+    spec_excerpt = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
         spec_excerpt=spec_excerpt,
         questions_json=questions_json,
