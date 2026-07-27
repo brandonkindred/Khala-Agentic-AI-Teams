@@ -181,7 +181,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # ``language_conventions``. Empty → no injection (e.g. frontend agents whose
     # single-issue prompt has no ``{language_conventions}`` slot). Backend agents
     # set ``{"java": JAVA_CONVENTIONS, "_default": PYTHON_CONVENTIONS}``.
-    conventions_by_language: Dict[str, str] = {}
+    conventions_by_language: Optional[Dict[str, str]] = None
 
     # When set (as a ``staticmethod``), ``review`` runs this build runner over the
     # resolved ``repo_path`` instead of the LLM review path. The runner takes a
@@ -237,7 +237,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         language names (plus optional ``"_default"``) to convention strings.
         Postconditions: returns ``{}`` or ``{"language_conventions": <str>}``.
         """
-        conv = self.conventions_by_language
+        conv = self.conventions_by_language or {}
         if not conv:
             return {}
         lang = (getattr(inp, "language", None) or "").strip().lower()
