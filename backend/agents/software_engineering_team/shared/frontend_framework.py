@@ -26,7 +26,7 @@ _REACT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _VUE_PATTERN = re.compile(
-    r"\b(?:vue(?:\s*(?:\.?\s*js|3)?|(?:app|application|frontend|framework))?|use\s+vue)\b",
+    r"\b(?:vue(?:\s*(?:\.?\s*js|3)?|\s+(?:app|application|frontend|framework))?|use\s+vue)\b",
     re.IGNORECASE,
 )
 _ANGULAR_PATTERN = re.compile(

@@ -27,7 +27,7 @@ def test_design_module_import_does_not_read_prompt_files() -> None:
     ``agents/`` on ``PYTHONPATH``.
     Postconditions: the child process exits 0; ``design_system.md`` and
     ``design_self_review_system.md`` are not read during import; the design
-    module's stop-order cache sentinel remains ``None``.
+    module's prompt caches remain empty (unwarmed).
     Runs in a subprocess so the check does not pollute this session's
     ``sys.modules``.
     """
@@ -60,11 +60,11 @@ Path.read_text = tracking_read_text
 mod = importlib.import_module("investment_team.strategy_lab.agents.design")
 if reads:
     raise SystemExit(f"import read design prompt files: {{reads!r}}")
-if mod._STOP_ORDER_SEMANTICS is not None:
+if mod._get_stop_order_semantics.cache_info().currsize != 0:
     raise SystemExit("stop-order cache warmed at import")
-if mod._DESIGN_SYSTEM_PROMPT is not None:
+if mod._get_design_system_prompt.cache_info().currsize != 0:
     raise SystemExit("design system prompt cache warmed at import")
-if mod._SELF_REVIEW_SYSTEM_PROMPT is not None:
+if mod._get_self_review_system_prompt.cache_info().currsize != 0:
     raise SystemExit("self-review prompt cache warmed at import")
 """
 
