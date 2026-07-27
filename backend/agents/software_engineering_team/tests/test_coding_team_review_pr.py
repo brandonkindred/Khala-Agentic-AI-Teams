@@ -2716,7 +2716,9 @@ class TestPreservationProperties:
 
         Property: when findings include both in-diff (file_path in valid_by_path)
         and out-of-diff paths, the routing of the in-diff finding is byte-for-byte
-        identical to routing it in isolation.
+        identical to routing it in isolation, and no extra comment is created on
+        the in-diff path (guarding against an out-of-diff finding being
+        re-anchored onto it).
 
         Concretely:
           1. Submit ONLY the in-diff finding → capture its review comment shape.
@@ -2737,9 +2739,8 @@ class TestPreservationProperties:
         _r1, gh1, _j1 = self._post_review(review_app, solo_issues)
 
         # A finding is routed to either the review (line-anchored) or the dedicated
-        # file-comment endpoint (file-level); aggregate both to see its routing.
-        # Line-anchored (review) comments come first so a line match wins over a
-        # same-path file-level re-anchor of an unrelated finding.
+        # file-comment endpoint (file-level); aggregate both so we can locate its
+        # comment regardless of which endpoint was used.
         all_comments_solo: list = []
         for rev in gh1.reviews:
             all_comments_solo.extend(rev.get("comments", []))
@@ -2796,6 +2797,15 @@ class TestPreservationProperties:
             f"[{description}] Mixed run: expected exactly 1 comment for in-diff finding "
             f"(path={in_path!r}, line={in_line}), got {len(in_diff_mixed)}. "
             f"all_comments={all_comments_mixed}"
+        )
+        # No extra comment on the in-diff path either -- guards against an
+        # out-of-diff finding being re-anchored onto in_path under a different
+        # line/shape that the filter above wouldn't otherwise catch.
+        mixed_on_path = [c for c in all_comments_mixed if c.get("path") == in_path]
+        solo_on_path = [c for c in all_comments_solo if c.get("path") == in_path]
+        assert len(mixed_on_path) == len(solo_on_path), (
+            f"[{description}] Mixed run created extra comments on in-diff path {in_path!r}: "
+            f"solo={solo_on_path}, mixed={mixed_on_path}"
         )
         mixed_shape = {
             "path": in_diff_mixed[0].get("path"),
@@ -2863,6 +2873,12 @@ class TestFixedRunPrReview:
             f"Expected 0 file-level review comments for the out-of-diff finding, "
             f"got {len(file_level)}. review_comments = {gh.review_comments}"
         )
+        # Nor mis-anchored as a line comment on the unrelated changed file.
+        assert not any(
+            "leftover finding" in c.get("body", "")
+            for review in gh.reviews
+            for c in review.get("comments", [])
+        ), f"Out-of-diff finding was mis-anchored as a line comment: {gh.reviews}"
 
         # Instead it is posted as its own standalone conversation comment.
         assert len(gh.comments) == 1, (
@@ -2910,7 +2926,7 @@ class TestFixedRunPrReview:
 
         gh = review_app["github"]["client"]
 
-        assert len(gh.reviews) >= 1
+        assert len(gh.reviews) == 1
         line_comments = [c for c in gh.reviews[0].get("comments", []) if c.get("side") == "RIGHT"]
         file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
 
@@ -3815,6 +3831,11 @@ class TestPreExistingFindings:
         title = resp.json()["created"][0]["title"]
         assert "secrettoken" not in title
         assert "https://***@" in title
+        # The scrub must happen before the GitHub API call itself, not only in
+        # the HTTP response -- check what was actually sent to the fake client.
+        gh = review_app["github"]["client"]
+        assert "secrettoken" not in gh.created_issues[0]["title"]
+        assert "https://***@" in gh.created_issues[0]["title"]
 
     def test_create_issues_is_idempotent(self, review_app) -> None:
         """Filing the same proposal twice opens exactly one GitHub issue."""

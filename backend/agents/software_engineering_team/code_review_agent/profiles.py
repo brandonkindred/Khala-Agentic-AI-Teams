@@ -142,7 +142,7 @@ _SHARED_OUTPUT_SECTION = (
     "**CRITICAL RULES FOR REJECTION:**\n"
     '- If approved=false, the "issues" list MUST contain at least one critical or high issue. An '
     "empty issues list with approved=false is INVALID and will be treated as an automatic approval.\n"
-    "- Every issue MUST have ALL of these fields populated:\n"
+    "- Every issue MUST have ALL of the following fields populated:\n"
     '  - "file_path": The exact file path where the problem exists (e.g., '
     '"src/app/components/user-list/user-list.component.ts")\n'
     '  - "description": A specific, actionable description that explains WHAT is wrong and WHY. Do '
@@ -155,6 +155,9 @@ _SHARED_OUTPUT_SECTION = (
     'snippets when possible. Example: "Add page and pageSize parameters to the loadUsers() method: '
     "`this.userService.getUsers(this.page, this.pageSize).subscribe(...)` and bind MatPaginator "
     'events to update these values."\n'
+    '  - "pre_existing": boolean. true when the defect is in unchanged, pre-existing code outside '
+    "this change; false when the defect is in code this change added or modified. Default false "
+    "when uncertain.\n"
     "- The coding agent that receives these issues will use them as instructions, so each issue "
     "must be detailed enough to be acted upon WITHOUT additional context.\n\n"
     "**THOROUGHNESS REQUIREMENTS:**\n"
