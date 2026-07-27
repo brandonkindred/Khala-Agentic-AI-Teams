@@ -11,7 +11,11 @@ loop skeleton (``run_gated_execution_impl``) are shared across the code-v2 teams
 models/prompt/profile and its review-gate architecture (one unified
 ``run_microtask_review`` called three times, filtering issues by ``source``) via
 the gate adapters and ``GATE_CONFIG`` below, keeping
-``run_execution_with_review_gates`` as a thin per-team wrapper.
+``run_execution_with_review_gates`` as a thin per-team wrapper. The QA and
+security gates each scope the ``tool_agents`` mapping down to their own kind
+(``testing_qa`` / ``security``) before calling ``run_microtask_review``, so
+their tool-agent fan-out no longer runs every wired tool agent on every gate
+call (matching ``backend_code_v2_team``'s per-gate scoping).
 """
 
 from __future__ import annotations
@@ -137,10 +141,34 @@ def run_execution(
 #
 # The shared ``run_gated_execution_impl`` calls these to normalise the frontend
 # team's single review function into a ``GateOutcome``. The code-review gate
-# enables only the code-review agents; the QA/security gates enable only their
-# agent and then filter the returned issues by ``source`` (matching the previous
-# inline loop). ``.review`` is imported lazily to keep the module import free of
-# the circular ``review`` <-> ``execution`` dependency.
+# enables the code-review agents plus every wired tool agent (it's the only gate
+# that surfaces the non-QA/non-security tool-agent kinds, e.g. accessibility,
+# ui_design). The QA/security gates enable only their own agent and scope
+# ``tool_agents`` down to their own kind (``testing_qa`` / ``security``) before
+# calling ``run_microtask_review``, then filter the returned issues by
+# ``source`` (matching the previous inline loop) -- so each gate's tool-agent
+# fan-out invokes exactly one tool agent instead of every wired kind, mirroring
+# ``backend_code_v2_team``'s per-gate scoping and removing the shared-instance
+# race that blocked enabling ``parallelize_qa_security`` for this team.
+# ``.review`` is imported lazily to keep the module import free of the circular
+# ``review`` <-> ``execution`` dependency.
+
+
+def _scoped_tool_agents(
+    tool_agents: Optional[Dict[ToolAgentKind, Any]], kind: ToolAgentKind
+) -> Optional[Dict[ToolAgentKind, Any]]:
+    """Filter a tool-agent mapping down to a single kind.
+
+    Used by the QA/security gates so their tool-agent fan-out invokes only the
+    one tool agent that matches the gate, not every wired kind.
+
+    Preconditions: none -- ``tool_agents`` may be ``None`` or empty.
+    Postconditions: returns ``{kind: tool_agents[kind]}`` when ``kind`` is wired
+    in ``tool_agents``, else ``None``.
+    """
+    if not tool_agents or kind not in tool_agents:
+        return None
+    return {kind: tool_agents[kind]}
 
 
 def _code_review_gate(
@@ -193,7 +221,8 @@ def _qa_gate(
     detail_callback: Callable[[str], None],
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
-    """Run the frontend QA gate (QA agent only), keeping only ``source == "qa"`` issues."""
+    """Run the frontend QA gate (QA agent + ``testing_qa`` tool agent only),
+    keeping only ``source == "qa"`` issues."""
     from .review import run_microtask_review
 
     r = run_microtask_review(
@@ -207,7 +236,7 @@ def _qa_gate(
         security_agent=None,
         code_review_agent=None,
         linting_tool_agent=None,
-        tool_agents=deps.tool_agents,
+        tool_agents=_scoped_tool_agents(deps.tool_agents, ToolAgentKind.TESTING_QA),
         detail_callback=detail_callback,
         cache=cache,
     )
@@ -226,7 +255,8 @@ def _security_gate(
     detail_callback: Callable[[str], None],
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
-    """Run the frontend security gate (security agent only), keeping only ``source == "security"``."""
+    """Run the frontend security gate (security agent + ``security`` tool agent only),
+    keeping only ``source == "security"`` issues."""
     from .review import run_microtask_review
 
     r = run_microtask_review(
@@ -240,7 +270,7 @@ def _security_gate(
         security_agent=deps.security_agent,
         code_review_agent=None,
         linting_tool_agent=None,
-        tool_agents=deps.tool_agents,
+        tool_agents=_scoped_tool_agents(deps.tool_agents, ToolAgentKind.SECURITY),
         detail_callback=detail_callback,
         cache=cache,
     )
