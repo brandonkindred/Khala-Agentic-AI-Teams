@@ -19,6 +19,7 @@ Invariants:
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -99,11 +100,7 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # stop). Appended to the designer's system prompts so a trailing stop's
 # above-entry ratchet is understood as intended gain-locking behavior, and so
 # the designer does not author exits that contradict the engine's mechanics.
-_STOP_ORDER_SEMANTICS: str | None = None
-_DESIGN_SYSTEM_PROMPT: str | None = None
-_SELF_REVIEW_SYSTEM_PROMPT: str | None = None
-
-
+@functools.lru_cache(maxsize=None)
 def _get_stop_order_semantics() -> str:
     """Load and cache shared stop-order semantics markdown.
 
@@ -113,14 +110,12 @@ def _get_stop_order_semantics() -> str:
     same cached value without re-reading the file.
     Invariants: module import does not invoke this helper.
     """
-    global _STOP_ORDER_SEMANTICS
-    if _STOP_ORDER_SEMANTICS is None:
-        text = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
-        assert text, "_stop_order_semantics.md must be non-empty"
-        _STOP_ORDER_SEMANTICS = text
-    return _STOP_ORDER_SEMANTICS
+    text = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
+    assert text, "_stop_order_semantics.md must be non-empty"
+    return text
 
 
+@functools.lru_cache(maxsize=None)
 def _get_design_system_prompt() -> str:
     """Build and cache the designer system prompt (body + stop-order block).
 
@@ -131,14 +126,12 @@ def _get_design_system_prompt() -> str:
     return the same cached composed prompt without re-reading either file.
     Invariants: module import does not invoke this helper.
     """
-    global _DESIGN_SYSTEM_PROMPT
-    if _DESIGN_SYSTEM_PROMPT is None:
-        body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
-        assert body, "design_system.md must be non-empty"
-        _DESIGN_SYSTEM_PROMPT = body + "\n\n" + _get_stop_order_semantics()
-    return _DESIGN_SYSTEM_PROMPT
+    body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
+    assert body, "design_system.md must be non-empty"
+    return body + "\n\n" + _get_stop_order_semantics()
 
 
+@functools.lru_cache(maxsize=None)
 def _get_self_review_system_prompt() -> str:
     """Build and cache the self-review system prompt (body + stop-order block).
 
@@ -149,12 +142,9 @@ def _get_self_review_system_prompt() -> str:
     return the same cached composed prompt without re-reading either file.
     Invariants: module import does not invoke this helper.
     """
-    global _SELF_REVIEW_SYSTEM_PROMPT
-    if _SELF_REVIEW_SYSTEM_PROMPT is None:
-        body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
-        assert body, "design_self_review_system.md must be non-empty"
-        _SELF_REVIEW_SYSTEM_PROMPT = body + "\n\n" + _get_stop_order_semantics()
-    return _SELF_REVIEW_SYSTEM_PROMPT
+    body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
+    assert body, "design_self_review_system.md must be non-empty"
+    return body + "\n\n" + _get_stop_order_semantics()
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
