@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import importlib
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from software_engineering_team.shared.v2_models import ToolAgentOutput, ToolAgentPhaseOutput
 
@@ -55,13 +55,13 @@ class StaticPhaseToolAgent:
     """
 
     # Recommendations + summary for each static phase (subclasses override).
-    plan_recommendations: List[str] = []
+    plan_recommendations: Tuple[str, ...] = ()
     plan_summary: str = ""
-    review_recommendations: List[str] = []
+    review_recommendations: Tuple[str, ...] = ()
     review_summary: str = ""
-    problem_solve_recommendations: List[str] = []
+    problem_solve_recommendations: Tuple[str, ...] = ()
     problem_solve_summary: str = ""
-    deliver_recommendations: List[str] = []
+    deliver_recommendations: Tuple[str, ...] = ()
     deliver_summary: str = ""
 
     @property
@@ -180,7 +180,7 @@ class StubToolAgent(StaticPhaseToolAgent):
     """
 
     label: str = "Stub"
-    execute_recommendations: List[str] = []
+    execute_recommendations: Tuple[str, ...] = ()
     execute_summary: Optional[str] = None
 
     def execute(self, inp) -> ToolAgentOutput:

@@ -28,6 +28,7 @@ from code_review_agent.false_positive_filter import (
     _code_fence_for,
     _coerce_verdict,
     _parse_verdicts,
+    _render_finding_block,
     _strip_numbered_prefixes,
     filter_false_positives,
 )
@@ -201,6 +202,27 @@ def test_read_file_ambiguous_suffix() -> None:
     assert "a/main.py" in msg and "b/main.py" in msg
 
 
+def test_read_file_or_none_matches_read_file_on_success() -> None:
+    """``read_file_or_none`` returns the same content as ``read_file`` on every hit path."""
+    idx = CodebaseIndex(files={"app/services/main.py": "Error: this is real code, not a failure"})
+    # A real file whose content happens to start with "Error:" is still returned in full —
+    # unlike sniffing read_file's return value, read_file_or_none never mistakes it for a
+    # failure sentinel.
+    assert (
+        idx.read_file_or_none("app/services/main.py") == "Error: this is real code, not a failure"
+    )
+    assert idx.read_file_or_none("main.py") == "Error: this is real code, not a failure"
+
+
+def test_read_file_or_none_returns_none_on_failure() -> None:
+    """``read_file_or_none`` returns None (not an error string) for blank, missing, and ambiguous paths."""
+    idx = CodebaseIndex(files={"a/main.py": "A", "b/main.py": "B"})
+    assert idx.read_file_or_none("  ") is None
+    assert idx.read_file_or_none("does/not/exist.py") is None
+    assert idx.read_file_or_none("main.py") is None  # ambiguous suffix
+    assert idx.read_file_or_none(CodebaseIndex.EXISTING_CODEBASE_PATH) is None  # no excerpt
+
+
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
     """``list_files`` appends the existing-codebase pseudo-path only when an excerpt is present."""
     assert CodebaseIndex(files={"a.py": "x"}).list_files() == ["a.py"]
@@ -330,6 +352,15 @@ def test_find_function_at_line_unknown_path() -> None:
     assert result.startswith("Error")
 
 
+def test_find_function_at_line_content_literally_starting_with_error() -> None:
+    """A readable file whose content starts with 'Error:' is not mistaken for a failure."""
+    code = '"""Error: this is a docstring, not a read failure."""\ndef alpha():\n    pass\n'
+    idx = CodebaseIndex(files={"fixtures/log_sample.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("fixtures/log_sample.py", 2)
+    assert "alpha" in result
+
+
 def test_find_function_at_line_python_syntax_error() -> None:
     """Tool returns a parse-error message for a Python file with invalid syntax."""
     code = "def foo(:\n    pass\n"  # SyntaxError: missing closing paren
@@ -369,6 +400,27 @@ def test_find_function_at_line_non_python_no_construct() -> None:
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("snippet.ts", 1)
     assert "Could not identify" in result
+
+
+def test_find_function_at_line_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unexpected internal error is caught and returned as an error string.
+
+    Regression test: ``find_function_at_line`` documents (and ``_build_tools``
+    relies on) a "never raises" postcondition, but the body used to call
+    ``index.resolve_path`` with no exception handling, so an internal error
+    there would propagate out of the ``@tool`` and abort the verifier's
+    tool-calling loop instead of surfacing as an ordinary tool result.
+    """
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+
+    def _boom(path: str) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(idx, "resolve_path", _boom)
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("app/main.py", 1)
+    assert result.startswith("Error")
+    assert "boom" in result
 
 
 # --------------------------------------------------------------------------- pre-numbered content
@@ -546,6 +598,20 @@ def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:
 
 
 # --------------------------------------------------------------------------- prompt
+
+
+def test_render_finding_block_collapses_embedded_newlines() -> None:
+    """Multiline ``description``/``suggestion`` fields collapse to one prompt line each."""
+    issue = _issue(
+        description="line one\nline two\n  extra   spaces",
+        suggestion="fix step one\nfix step two",
+    )
+    block = _render_finding_block(0, issue)
+    assert len(block) == 4  # anchor, metadata, description, suggestion
+    for line in block:
+        assert "\n" not in line
+    assert block[2] == "description: line one line two extra spaces"
+    assert block[3] == "suggestion: fix step one fix step two"
 
 
 def test_group_prompt_has_anchor_indices_and_truncation_note() -> None:
