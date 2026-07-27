@@ -7,13 +7,11 @@ Entry point used by the main orchestrator and by the frontend-code-v2 API.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
-from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.deliver import make_run_deliver
@@ -27,6 +25,7 @@ from .models import (
     MicrotaskReviewConfig,
     ToolAgentKind,
 )
+from .phases._profile import PROFILE
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .phases.planning import run_planning
 from .phases.setup import configure_quality_tooling, run_setup
@@ -39,19 +38,6 @@ run_deliver = make_run_deliver(
     commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
     logger=logger,
 )
-
-# Frontend repo-briefing filter contract: the extensions read into the development
-# agent's context and the directories pruned from the walk. Single-sourced here so
-# the fresh-walk ``_read_repo_code`` and the incremental ``RepoContextCache`` the
-# team lead threads in cannot drift apart (the cache's byte-identical invariant
-# depends on them matching).
-_FRONTEND_REPO_EXTENSIONS = frozenset(
-    {".ts", ".tsx", ".js", ".jsx", ".html", ".css", ".scss", ".json", ".yaml", ".yml"}
-)
-_FRONTEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "dist", "build", ".angular"})
-# Character budget for the repo briefing (whole files only; the next chunk that
-# would exceed it stops the briefing).
-_FRONTEND_REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
@@ -115,75 +101,22 @@ class FrontendDevelopmentAgent(BaseV2DevelopmentAgent):
     Execution → Documentation → Deliver) with per-microtask review gates embedded
     in the Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
 
-    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_existing_code`` /
-    ``_run_preflight`` / ``_run_planning_and_branch_setup`` /
-    ``_run_execution_phase`` / ``_record_execution_bookkeeping`` /
-    ``_run_documentation_phase`` / ``_run_deliver_and_finalize`` /
-    ``_run_development_workflow`` from :class:`BaseV2DevelopmentAgent`
-    (the job-update closure itself comes from the shared
-    ``team_lead_base.make_job_updater``); supplies the frontend tooling
-    detection, repo-briefing sets, and a thin ``run_workflow`` that forwards
-    this module's own tool-agent builder, planning/execution/deliver
-    functions, and review classes into ``_run_development_workflow``.
+    Inherits ``__init__`` / ``_build_tool_runners`` / ``_read_repo_code`` /
+    ``_detect_tooling`` / ``_read_existing_code`` / ``_run_preflight`` /
+    ``_run_planning_and_branch_setup`` / ``_run_execution_phase`` /
+    ``_record_execution_bookkeeping`` / ``_run_documentation_phase`` /
+    ``_run_deliver_and_finalize`` / ``_run_development_workflow`` from
+    :class:`BaseV2DevelopmentAgent` (the job-update closure itself comes from
+    the shared ``team_lead_base.make_job_updater``); supplies its ``PROFILE``
+    (frontend tooling detection + repo-briefing sets) and a thin
+    ``run_workflow`` that forwards this module's own tool-agent builder,
+    planning/execution/deliver functions, and review classes into
+    ``_run_development_workflow``.
     """
 
     _TEAM_LABEL = "Frontend"
     _DELIVER_IN_PROGRESS_STATUS = "Committing changes and preparing delivery..."
-
-    @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = _FRONTEND_REPO_BRIEFING_MAX_CHARS) -> str:
-        """Read frontend source files from repo into a single string.
-
-        Delegates to the shared budgeted scanner so every per-domain reader shares
-        one implementation; the frontend extension/exclude sets are the contract.
-        """
-        return read_repo_code_budgeted(
-            repo_path,
-            extensions=_FRONTEND_REPO_EXTENSIONS,
-            exclude_dirs=_FRONTEND_REPO_EXCLUDE_DIRS,
-            max_chars=max_chars,
-        )
-
-    @staticmethod
-    def _detect_tooling(repo_path: Path) -> Tuple[bool, bool]:
-        """Return ``(has_lint, has_test)`` for the configured frontend tooling.
-
-        Detects ESLint/Angular configs as lint, and Vitest/Jest/Karma or a real
-        ``npm test`` script as testing. Best-effort: an unparseable ``package.json``
-        just means no test script was found.
-
-        Preconditions: ``repo_path`` is a directory.
-        Postconditions: returns two booleans. Raises ``AssertionError`` if the
-          precondition is violated (a non-directory ``repo_path`` is a caller
-          bug, not a runtime failure mode this method recovers from).
-        """
-        assert repo_path.is_dir(), "repo_path must be a directory"
-        has_lint = (
-            next(repo_path.glob("eslint.config.*"), None) is not None
-            or next(repo_path.glob(".eslintrc*"), None) is not None
-            or (repo_path / "angular.json").exists()
-        )
-        has_test = False
-        if (
-            next(repo_path.glob("vitest.config.*"), None) is not None
-            or next(repo_path.glob("jest.config.*"), None) is not None
-            or (repo_path / "karma.conf.js").exists()
-        ):
-            has_test = True
-        else:
-            pkg_json = repo_path / "package.json"
-            if pkg_json.exists():
-                try:
-                    pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
-                    test_script = pkg.get("scripts", {}).get("test", "")
-                    if test_script and "no test" not in test_script and "exit 1" not in test_script:
-                        has_test = True
-                except Exception as exc:
-                    # A malformed package.json means no test script was found;
-                    # log at DEBUG so a real config problem is observable during
-                    # debugging without failing the best-effort pre-flight gate.
-                    logger.debug("[%s] failed to parse package.json: %s", repo_path, exc)
-        return has_lint, has_test
+    PROFILE = PROFILE
 
     def run_workflow(
         self,
@@ -260,9 +193,9 @@ class FrontendCodeV2TeamLead(BaseTeamLead):
     def __init__(self, llm_client: LLMClient) -> None:
         super().__init__(
             llm_client,
-            extensions=_FRONTEND_REPO_EXTENSIONS,
-            exclude_dirs=_FRONTEND_REPO_EXCLUDE_DIRS,
-            max_chars=_FRONTEND_REPO_BRIEFING_MAX_CHARS,
+            extensions=PROFILE.repo_extensions,
+            exclude_dirs=PROFILE.repo_exclude_dirs,
+            max_chars=PROFILE.repo_max_chars,
         )
 
     def run_workflow(
