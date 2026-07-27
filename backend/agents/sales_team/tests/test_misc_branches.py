@@ -3,8 +3,7 @@
 * ``EmailTouch`` citation validator with non-None context but no
   ``dossier_source_urls`` key.
 * ``agents._with_insights`` whitespace-only fallback branch.
-* Outreach / proposal critic prompts when dossier exceeds the char cap
-  (truncation marker appears).
+* Outreach / proposal critic prompts embed the full dossier JSON, untruncated.
 * ``ProposalCriticAgent`` invariant override (LLM says approved=True but
   must_fix > 0 → critic flips approved to False).
 * ``format_critic_feedback`` notes-appended branch.
@@ -22,7 +21,6 @@ from sales_team.critics import (
     ProposalCriticAgent,
     format_critic_feedback,
 )
-from sales_team.critics.outreach_critic import _DOSSIER_CHAR_CAP
 from sales_team.models import (
     BANTScore,
     CriticViolation,
@@ -102,12 +100,12 @@ def test_with_insights_prepends_when_insights_is_substantive() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Critic _build_prompt — dossier truncation branch.
+# Critic _build_prompt — full, untruncated dossier JSON.
 # ---------------------------------------------------------------------------
 
 
 def _huge_dossier() -> ProspectDossier:
-    """Build a dossier whose JSON exceeds the 12_000-char cap."""
+    """Build a dossier with a large executive summary (~24k chars)."""
     big_text = "lorem ipsum " * 2000  # ~24k chars
     return ProspectDossier(
         prospect_id="prs_big",
@@ -133,12 +131,9 @@ def _sequence(prospect: Prospect, dossier_id: str) -> OutreachSequence:
     )
 
 
-def test_outreach_critic_truncates_oversize_dossier_in_prompt() -> None:
+def test_outreach_critic_embeds_full_dossier_json_untruncated() -> None:
     prospect = Prospect(id="prs_x", company_name="Acme")
     dossier = _huge_dossier()
-    # Sanity: the dossier's raw JSON does exceed the cap, so the critic must
-    # actually truncate (not just pass it through untouched).
-    assert _DOSSIER_CHAR_CAP < len(json.dumps(dossier.model_dump(mode="json")))
     icp = IdealCustomerProfile(industry=["SaaS"])
     seq = _sequence(prospect, dossier.dossier_id or "d_x")
     llm = _CannedLLM(
@@ -147,15 +142,10 @@ def test_outreach_critic_truncates_oversize_dossier_in_prompt() -> None:
     critic = OutreachCriticAgent(llm_client=llm)
     critic.review(seq, dossier, icp)
     prompt = llm.calls[0]["prompt"] or ""
-    # The critic's prompt should contain the truncation marker because the
-    # dossier JSON exceeds the cap.
-    assert "dossier truncated" in prompt
-    # The truncated dossier block itself must still be valid JSON — truncation
-    # must land on a JSON boundary, not an arbitrary character index that can
-    # split a string/number/bracket.
+    assert "dossier truncated" not in prompt
     dossier_block = prompt.split("--- DOSSIER ---\n", 1)[1].split("\n\n--- OUTREACH SEQUENCE", 1)[0]
-    json_part = dossier_block[: -len("\n…(dossier truncated)")]
-    json.loads(json_part)
+    parsed = json.loads(dossier_block)
+    assert parsed["executive_summary"] == dossier.executive_summary
 
 
 def test_outreach_critic_emits_no_dossier_marker_when_dossier_none() -> None:
@@ -172,7 +162,7 @@ def test_outreach_critic_emits_no_dossier_marker_when_dossier_none() -> None:
     assert any("(no dossier supplied)" in (c["prompt"] or "") for c in llm.calls)
 
 
-def test_proposal_critic_truncates_oversize_dossier_in_prompt() -> None:
+def test_proposal_critic_embeds_full_dossier_json_untruncated() -> None:
     prospect = Prospect(id="prs_p", company_name="Acme")
     dossier = _huge_dossier()
     proposal = SalesProposal(
@@ -200,7 +190,11 @@ def test_proposal_critic_truncates_oversize_dossier_in_prompt() -> None:
     )
     critic = ProposalCriticAgent(llm_client=llm)
     critic.review(proposal, dossier, qual)
-    assert any("dossier truncated" in (c["prompt"] or "") for c in llm.calls)
+    prompt = llm.calls[0]["prompt"] or ""
+    assert "dossier truncated" not in prompt
+    dossier_block = prompt.split("--- DOSSIER ---\n", 1)[1].split("\n\n--- QUALIFICATION", 1)[0]
+    parsed = json.loads(dossier_block)
+    assert parsed["executive_summary"] == dossier.executive_summary
 
 
 # ---------------------------------------------------------------------------
