@@ -651,9 +651,13 @@ def add_recommendations(
         return list(open_questions)
     try:
         rec_by_id = {
-            r.get("id"): str(r.get("recommendation", ""))
+            r.get("id"): str(r["recommendation"])
             for r in recs
-            if isinstance(r, dict) and "id" in r and isinstance(r.get("id"), str)
+            if (
+                isinstance(r, dict)
+                and isinstance(r.get("id"), str)
+                and r.get("recommendation") is not None
+            )
         }
         result = []
         for q in open_questions:
