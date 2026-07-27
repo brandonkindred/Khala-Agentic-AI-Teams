@@ -1,19 +1,24 @@
 """RefinementAgent structured-output happy path and degrade behavior.
 
-``RefinementAgent._invoke_and_parse`` requests provider-enforced
-schema-conformant decoding (``REFINEMENT_SCHEMA``) via
-``LLMClient.complete_json(schema=...)`` when the active provider supports it
-(currently Ollama only), eliminating the ``build_json_correction_prompt``
-happy-path resend for this call. These tests lock in: the structured call is
-used and skips the legacy ``strands.Agent`` + correction-prompt machinery on
-success; the real ``provider_supports_structured_output(resolve_provider())``
-wiring degrades to the legacy parse-retry loop for an unsupported provider
-(Bedrock); a ``schema_forced`` semantic-exhaustion starvation signal degrades
-to the legacy loop the same way; and any OTHER fatal failure from the
-structured attempt propagates without degrading (a deliberate scope
-boundary, not a hole). Mirrors the fixture/helper shapes in
-``test_strategy_lab_refinement_parse_retry.py``, which covers the legacy loop
-itself (with the structured seam forced off).
+``RefinementAgent._invoke_and_parse`` uses the two-pass
+``invoke_structured_with_schema`` helper when the active provider supports
+structured output (currently Ollama only): a reasoning ``LLMClient.complete()``
+pass with ``think=True`` and a prose-only system prompt (the caller's
+``_SYSTEM_PROMPT`` plus ``REASONING_MODE_SUFFIX``), followed by a formatting
+``LLMClient.complete_json(schema=REFINEMENT_SCHEMA)`` pass with
+``think=False``, eliminating the ``build_json_correction_prompt`` happy-path
+resend for this call. These tests lock in: both passes run on the structured
+happy path; the per-cycle ``LLMCallBudget`` is charged twice up front
+(``run_structured_agent`` receives ``charge=False``); the real
+``provider_supports_structured_output(resolve_provider())`` wiring degrades
+to the legacy ``strands.Agent`` + correction-prompt loop for an unsupported
+provider (Bedrock); a ``schema_forced`` semantic-exhaustion starvation
+signal — including one raised by the unconstrained reasoning pass and
+re-raised as ``schema_forced=True`` — degrades to the legacy loop the same
+way; and any OTHER fatal failure from the structured attempt propagates
+without degrading (a deliberate scope boundary, not a hole). Mirrors the
+fixture/helper shapes in ``test_strategy_lab_refinement_parse_retry.py``,
+which covers the legacy loop itself (with the structured seam forced off).
 """
 
 from __future__ import annotations
@@ -58,7 +63,8 @@ class _ScriptedAgent:
 
 
 class _StubClient:
-    """Backing ``LLMClient`` stand-in that records every ``complete_json`` call."""
+    """Backing ``LLMClient`` stand-in that records every ``complete()``
+    (reasoning pass) and ``complete_json()`` (formatting pass) call."""
 
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result
@@ -394,13 +400,16 @@ def test_structured_path_issues_fewer_calls_than_fallback(
 
     Replays the SAME simulated failure sequence — one response the strict
     extractor rejects, then a valid one — down both paths and counts LLM
-    calls. On the structured path a schema-conformant decode cannot emit
-    unparseable JSON, so the first (and only) call succeeds and no
-    ``build_json_correction_prompt`` resend fires. On the degraded legacy
-    path the same sequence costs a second, full-context resend. Fewer calls
-    is a direct proxy for the token/latency win (mocked clients have no real
-    latency to measure), and the strict inequality is the acceptance
-    evidence.
+    calls. ``structured_calls`` below counts only the formatting-pass
+    (``complete_json``) calls, not the reasoning pass — after the
+    reasoning+formatting split, the structured path's real total is two
+    provider calls (reasoning then formatting), matching the legacy path's
+    two (initial + one resend). The measurable win is therefore the absence
+    of a ``build_json_correction_prompt`` resend — the formatting call is
+    schema-constrained and cannot emit unparseable JSON, so it never needs
+    one — not a lower total provider-call count. The strict inequality below
+    compares formatting-pass calls only (1 structured vs. 2 legacy) as the
+    proxy for that resend elimination.
     """
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
 

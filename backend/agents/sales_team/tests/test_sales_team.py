@@ -84,6 +84,7 @@ class CannedLLMClient(LLMClient):
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
+        self.reasoning_calls: List[Dict[str, Any]] = []
 
     def complete(
         self,
@@ -101,6 +102,10 @@ class CannedLLMClient(LLMClient):
         # the LLMClient base's default (which would otherwise route through complete_json
         # and consume a queued response) with a harmless placeholder — ``self.calls`` /
         # ``self._responses`` keep tracking only the complete_json calls these tests assert on.
+        # ``reasoning_calls`` records this pass separately for tests that verify it ran.
+        self.reasoning_calls.append(
+            {"prompt": prompt, "system_prompt": system_prompt, "think": think}
+        )
         return "Reasoning: proceeding as configured by the test fixture."
 
     def complete_json(
@@ -847,6 +852,16 @@ class TestLearningEngine:
         assert insights.winning_patterns == ["multi-threaded"]
         assert insights.insights_version == 1
         assert insights.generated_at
+
+        # Two-pass split: a think=True reasoning call ran before the single
+        # programmed think=False formatting call, and the formatting call's
+        # prompt carries the reasoning pass's prose forward (not the raw
+        # stage/deal records, which only the reasoning call receives).
+        assert len(client.reasoning_calls) == 1
+        assert client.reasoning_calls[0]["think"] is True
+        assert len(client.calls) == 1
+        assert client.calls[0]["temperature"] == 0.0
+        assert "Reasoning: proceeding as configured by the test fixture" in client.calls[0]["prompt"]
 
 
 # ---------------------------------------------------------------------------

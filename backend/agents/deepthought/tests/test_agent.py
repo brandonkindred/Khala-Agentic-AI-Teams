@@ -575,6 +575,9 @@ def test_analysis_llm_error_fallback(root_spec, mock_llm, failing_call):
 
 def test_findings_stored_in_knowledge_base(root_spec, mock_llm, knowledge_base):
     """After answering, the agent stores its finding in the knowledge base."""
+    mock_llm.complete.return_value = (
+        "The user asked a direct question that can be answered from general knowledge."
+    )
     mock_llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,

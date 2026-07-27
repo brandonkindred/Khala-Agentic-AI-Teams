@@ -179,6 +179,12 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     assert call["system_prompt"] == design_review_mod._SYSTEM_PROMPT
     assert "Review the strategy specification below" in call["prompt"]
 
+    # The reasoning pass is where this prompt is actually reviewed — the
+    # formatting call above only re-embeds the same user_prompt alongside the
+    # reasoning prose, so pin the prompt-content assertion there too.
+    assert len(stub_client.reasoning_calls) == 1
+    assert "Review the strategy specification below" in stub_client.reasoning_calls[0]["prompt"]
+
 
 def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: Dict[str, Any] = {}
@@ -268,6 +274,49 @@ def test_schema_forced_starvation_degrades_to_legacy_call_and_succeeds(
     # reasoning + formatting calls, then the legacy fallback's single call) —
     # all 3 must be charged against the per-cycle budget, not just the 2
     # pre-charged for the structured attempt.
+    assert budget.calls_made == 3
+
+
+def test_reasoning_pass_starvation_also_degrades_to_legacy_call(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-schema_forced ``LLMSemanticExhaustionError`` from the *reasoning*
+    pass (``complete()``) is re-raised by ``invoke_structured_with_schema`` as
+    a new ``schema_forced=True`` receipt, so it degrades identically to a
+    formatting-pass starvation — and the formatting call (``complete_json``)
+    is never reached."""
+
+    class _ReasoningStarvingClient:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            raise LLMSemanticExhaustionError(
+                "reasoning starved", schema_forced=False, attempts_used=1
+            )
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise AssertionError("formatting call must not run after a reasoning-pass failure")
+
+    starved_client = _ReasoningStarvingClient()
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(
+        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
+    )
+    agent = _ScriptedAgent(['{"ready": true, "rationale": "spec is implementable", "issues": []}'])
+    monkeypatch.setattr(design_review_mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(design_review_mod, "Agent", lambda **_k: agent)
+
+    logger_name = "investment_team.strategy_lab.agents.design_review"
+    budget = LLMCallBudget(limit=10)
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        with use_budget(budget):
+            critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+
+    assert critique.ready is True
+    assert agent.calls == 1
+    starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
+    assert len(starvation_warnings) == 1
+    # Same accounting as the formatting-pass starvation test: 2 pre-charged
+    # for the structured attempt (reasoning + formatting units, even though
+    # the formatting call itself never ran) plus 1 for the legacy fallback.
     assert budget.calls_made == 3
 
 

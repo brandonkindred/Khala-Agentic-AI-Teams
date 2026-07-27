@@ -126,10 +126,13 @@ def invoke_structured_with_schema(
     likewise charge twice at their own call site.
 
     This helper does **not** run its own parse/validation retry loop and never
-    falls back to legacy Agent decoding for the *formatting* call — callers
-    inspect ``schema_forced`` starvation (raised only by the formatting call's
-    ``complete_json(schema=...)``, exactly as before this split) and decide
-    whether to degrade. Transient *transport* retries still happen inside the
+    falls back to legacy Agent decoding for either call — callers inspect
+    ``schema_forced`` starvation and decide whether to degrade. Before this
+    split, that starvation could only come from the formatting call's
+    ``complete_json(schema=...)``; now the unconstrained reasoning call can
+    also starve, and is re-raised as a **new** ``schema_forced=True`` receipt
+    (see the comment at its catch site) so callers' existing degrade gate
+    still covers it. Transient *transport* retries still happen inside the
     envelope (``invoke_agent``); only parse/validation re-prompts are out of
     scope here.
 
@@ -137,11 +140,18 @@ def invoke_structured_with_schema(
     ``system_prompt`` / ``user_prompt`` / ``phase`` / ``objective`` /
     ``reasoning_system_prompt`` are non-empty strings; ``schema`` is a
     non-empty mapping.
-    Postconditions: returns the parsed JSON dict on success. Raises
-    :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
-    transport retries or hits a fatal LLM error, and ``ValueError`` when
-    :func:`extract_json_object` cannot recover a balanced JSON object from the
-    response.
+    Postconditions: returns the parsed JSON dict on success. Any exception
+    either pass raises propagates out of ``_call`` and is wrapped by
+    :func:`run_structured_agent`'s envelope as
+    :class:`~..exceptions.StrategyLabLLMError` (``.cause`` is the original).
+    When either pass starves with :class:`~llm_service.interface.LLMSemanticExhaustionError`,
+    ``.cause`` carries it with ``schema_forced=True`` — a reasoning-pass
+    starvation is re-raised as a **new** receipt with that flag set (the
+    original preserved as its own ``.cause``) so it degrades identically to a
+    formatting-pass starvation; before this split only the formatting call
+    could produce this signal. ``ValueError`` (also wrapped in
+    ``StrategyLabLLMError``) when :func:`extract_json_object` cannot recover a
+    balanced JSON object from the response.
     """
     assert structured_output_available(), (
         "precondition: caller must verify structured_output_available() before "

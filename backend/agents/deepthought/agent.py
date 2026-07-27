@@ -222,7 +222,17 @@ class DeepthoughtAgent:
     # ------------------------------------------------------------------
 
     def _analyse(self, max_depth: int) -> QueryAnalysis:
-        """Ask the LLM whether we can answer directly or need sub-agents."""
+        """Ask the LLM whether we can answer directly or need sub-agents.
+
+        Two-pass structured-output flow via :func:`complete_json_via_reasoning`:
+        a ``think=True`` reasoning pass (``reasoning_temperature=0.3``) that
+        analyses the question in structured prose against
+        ``ANALYSIS_SYSTEM_PROMPT_REASONING``, followed by a ``think=False``
+        formatting pass that transcribes that prose into the ``QueryAnalysis``
+        JSON shape via ``ANALYSIS_FORMAT_INSTRUCTIONS``. Either pass failing
+        falls back to a forced direct answer at confidence 0.3 rather than
+        raising.
+        """
         strategy_key = self.decomposition_strategy.value
         strategy_instruction = STRATEGY_INSTRUCTIONS.get(
             strategy_key, STRATEGY_INSTRUCTIONS["auto"]

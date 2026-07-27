@@ -579,9 +579,11 @@ class TestOrchestratorCriticRefinement:
             sample_icp,
         )
 
-        # Two outreach emits + one critic call = one bounded refinement.
+        # Two outreach emits + one critic review (reasoning + formatting pass) =
+        # one bounded refinement.
         assert len(outreach_llm.calls) == 2
         assert len(critic_llm.calls) == 1
+        assert len(critic_llm.reasoning_calls) == 1
         assert sequence.variants
         # Refined emit's prompt carries the critic feedback we returned.
         assert "Reviewer feedback to address" in outreach_llm.calls[1]["prompt"]
@@ -608,9 +610,11 @@ class TestOrchestratorCriticRefinement:
             sample_icp,
         )
 
-        # No refinement attempt — only the initial emit + the single critic call.
+        # No refinement attempt — only the initial emit + one critic review
+        # (reasoning + formatting pass).
         assert len(outreach_llm.calls) == 1
         assert len(critic_llm.calls) == 1
+        assert len(critic_llm.reasoning_calls) == 1
 
     def test_outreach_skips_critic_when_icp_missing(
         self, sample_prospect: Prospect, sample_dossier: ProspectDossier
@@ -665,6 +669,7 @@ class TestOrchestratorCriticRefinement:
 
         assert len(proposal_llm.calls) == 2
         assert len(critic_llm.calls) == 1
+        assert len(critic_llm.reasoning_calls) == 1
         assert proposal.executive_summary
         assert "Reviewer feedback to address" in proposal_llm.calls[1]["prompt"]
         assert "proposal.next_steps.concrete" in proposal_llm.calls[1]["prompt"]

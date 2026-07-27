@@ -61,49 +61,17 @@ class _LearningInsightsBody(BaseModel):
     actionable_recommendations: List[str] = Field(default_factory=list)
 
 
-_LEARNING_SYSTEM_PROMPT = """You are a Sales Analytics Expert who analyzes historical sales pipeline data
-to extract patterns that help sales teams improve their win rates and process efficiency.
+# Formatting-pass (think=False) system prompt: the formatting call never sees
+# the source stage/deal records — only the reasoning pass's prose — so this
+# is a transcribe-only instruction, not the analytical-framework persona
+# below. Keeping the framework's example figures (e.g. "3× win rate") in a
+# system prompt the formatting call reads would invite it to echo those as if
+# they were conclusions about the actual dataset, rather than transcribing
+# only what the reasoning pass actually found.
+_LEARNING_SYSTEM_PROMPT = """You are a transcription assistant. You are given a structured prose \
+analysis of sales pipeline data produced by a separate reasoning pass. Convert that analysis into \
+a single JSON object — do not add, remove, or invent any insight not present in the prose.
 
-## Your Analytical Framework
-
-### Win/Loss Pattern Analysis (Gong Labs)
-Identify which behaviors, deal traits, and timing patterns correlate with wins vs. losses:
-- Multi-threading (multiple contacts engaged) → higher win rate
-- Champion present + EB on a call → 3× win rate
-- Proposal sent within 24h of discovery → faster cycle
-- No next step booked → 80% stall rate
-
-### ICP Signal Evaluation (Jeb Blount / Sales Hacker)
-Score which firmographic traits predicted deal success:
-- Industries with win rate > 50% are tier-1 ICP targets
-- ICP match score thresholds that correlated with closed-won deals
-- Trigger events (funding, hiring, leadership change) that predicted faster cycles
-
-### Outreach Effectiveness (Salesfolk / Gong Labs)
-Identify which outreach patterns drove replies and meetings:
-- Which email touch number got the most replies (Gong: #2 or #3 most common)
-- Subject line patterns with high open/reply correlation
-- Channels that drove conversion at each stage
-
-### Qualification Accuracy (Anthony Iannarino / MEDDIC)
-Assess whether the qualification signals were reliable predictors:
-- Did high BANT scores reliably predict wins?
-- Which MEDDIC signals were present in won deals but absent in lost deals?
-- What was the average qualification score for won vs. lost deals?
-
-### Objection Intelligence (Zig Ziglar / Jeb Blount)
-Map objections to outcomes:
-- Which objections were successfully overcome (led to close)?
-- Which objections were consistent loss predictors?
-- Which close techniques had highest win rates?
-
-### Pipeline Velocity (HubSpot)
-Identify velocity bottlenecks:
-- Average stage duration for won vs. lost deals
-- Which stage had the lowest conversion rate (biggest leak in the funnel)?
-- How does sales cycle length correlate with deal size?
-
-## Output Requirements
 Return a JSON object with exactly these keys:
 {
   "total_outcomes_analyzed": <int>,
@@ -121,8 +89,8 @@ Return a JSON object with exactly these keys:
   "actionable_recommendations": [<string>, ...]
 }
 
-Each string in arrays should be a specific, actionable insight — not generic advice.
-Recommendations must reference specific numbers from the data when available.
+Every value must come from the provided analysis. If the analysis is silent on a field, use the
+schema's default (0, empty list/string, or null) rather than inventing a plausible-looking one.
 """
 
 # Reasoning-only variant: same analytical framework, but ends with a prose
@@ -211,7 +179,8 @@ class LearningEngine:
         If stage_outcomes / deal_outcomes are not provided, they are loaded
         from the outcome store automatically.
 
-        The expensive LLM call (``_generate_insights``) runs outside the lock.
+        The expensive LLM calls (``_generate_insights``'s reasoning + formatting
+        pass) run outside the lock.
         ``_REFRESH_LOCK`` serializes only the version read-increment-write so
         concurrent callers don't overwrite each other, without blocking the
         full network round-trip.

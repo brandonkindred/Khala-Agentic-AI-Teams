@@ -262,7 +262,7 @@ def complete_json_via_reasoning(
 
     Preconditions: ``objective`` is non-empty. ``formatting_instructions``
     describes the target JSON shape (keys/types) — it is prepended to the
-    formatting prompt along with the reasoning call's prose output.
+    formatting prompt, ahead of the reasoning call's prose output.
     Postconditions: returns the JSON-decoded dict from the formatting call.
     A step-1 exception propagates immediately (step 2 is never invoked) —
     matching the failure behavior of the single-call form this replaces.
@@ -273,7 +273,7 @@ def complete_json_via_reasoning(
             original system prompt with any "respond with JSON" tail
             replaced by an instruction to answer in structured prose.
         formatting_instructions: The JSON shape/schema instructions,
-            appended after the reasoning call's prose in the formatting
+            prepended before the reasoning call's prose in the formatting
             prompt.
         formatting_system_prompt: Optional system prompt for the formatting
             call (default ``None`` — the formatting prompt is normally
@@ -285,6 +285,11 @@ def complete_json_via_reasoning(
         **kwargs: Forwarded to the formatting ``client.complete_json`` call
             (e.g. ``schema=`` for provider-enforced decoding).
     """
+    if not objective:
+        raise ValueError("objective must be non-empty")
+    if not formatting_instructions:
+        raise ValueError("formatting_instructions must be non-empty")
+
     prose = client.complete(
         reasoning_prompt,
         objective=f"{objective} (reasoning)",
