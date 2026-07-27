@@ -276,7 +276,9 @@ def test_revise_from_user_feedback_happy(monkeypatch, tmp_path) -> None:
         draft_output_path=tmp_path / "out.md",
     )
     assert "Revised by user feedback" in out.draft
-    assert (tmp_path / "out.md").exists()
+    written = (tmp_path / "out.md").read_text()
+    assert "Revised by user feedback" in written
+    assert "Body." in written
 
 
 def test_revise_from_user_feedback_empty_draft() -> None:
