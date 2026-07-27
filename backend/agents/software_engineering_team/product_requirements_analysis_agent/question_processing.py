@@ -57,7 +57,7 @@ def filter_duplicate_questions(
     Postconditions: the two returned lists partition ``new_questions`` (order
         preserved within each); never raises.
     """
-    qa_history_lower = qa_history.lower()
+    qa_history_lower = (qa_history or "").lower()
     filtered = []
     duplicates = []
 
@@ -77,7 +77,7 @@ def filter_duplicate_questions(
         return w
 
     for q in new_questions:
-        q_text_lower = q.question_text.lower()
+        q_text_lower = (q.question_text or "").lower()
         # Key words: length > 3, normalized to stems for plural/tense
         words = [w for w in q_text_lower.split() if len(_clean_token(w)) > 3]
         key_stems = set(_stem(_clean_token(w)) for w in words)

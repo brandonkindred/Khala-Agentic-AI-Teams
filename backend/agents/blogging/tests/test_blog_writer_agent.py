@@ -10,7 +10,7 @@ from agents.blogging.blog_research_agent.models import ResearchReference
 from agents.blogging.blog_writer_agent import WriterInput, WriterOutput
 from agents.blogging.shared.content_plan import ContentPlan, ContentPlanSection, TitleCandidate
 
-from llm_service import DummyLLMClient
+from llm_service import DummyLLMClient, LLMJsonParseError
 
 from ._content_plan_test_utils import make_content_plan
 from .conftest import make_writer_agent
@@ -97,6 +97,21 @@ def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
     h2s = re.findall(r"^## (.+)$", out.draft, re.MULTILINE)
     expected = [s.title for s in sorted(plan.sections, key=lambda x: x.order)]
     assert h2s == expected
+
+
+def test_call_agent_json_raises_on_non_dict_response(monkeypatch) -> None:
+    """Regression: a non-dict parsed JSON response raises LLMJsonParseError.
+
+    ``extract_json_from_response`` can return lists/strings/numbers, and
+    ``_call_agent_json`` is annotated (and relied upon by callers) to
+    return ``dict``. A non-dict response must fail loudly, not surface as
+    an AttributeError/KeyError at a caller's ``.get(...)`` call.
+    """
+    agent = make_writer_agent()
+    monkeypatch.setattr(agent, "_call_json_raw", lambda *a, **kw: "[1, 2, 3]")
+
+    with pytest.raises(LLMJsonParseError):
+        agent._call_agent_json("prompt")
 
 
 def test_blog_writer_agent_run() -> None:

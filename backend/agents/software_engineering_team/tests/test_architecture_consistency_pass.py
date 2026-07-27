@@ -187,6 +187,13 @@ def test_validate_finding_line_survives_file_content_starting_with_error() -> No
     assert _validate_finding_line(index, "a.py", 9999) is None
 
 
+def test_validate_finding_line_drops_any_line_for_empty_file() -> None:
+    """An empty file has zero real lines, so no citation -- not even line 1 --
+    can be bounded against its actual content."""
+    index = CodebaseIndex.from_input(_input(files={"a.py": ""}))
+    assert _validate_finding_line(index, "a.py", 1) is None
+
+
 def test_validate_finding_line_trusts_pre_numbered_citation_as_is() -> None:
     """PR hunk review mode shows only a few hunk lines, each prefixed with its
     ORIGINAL absolute line number as text (e.g. "4242: ..."); the hunk's
