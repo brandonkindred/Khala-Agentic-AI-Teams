@@ -1,5 +1,6 @@
 """
-Shared prompt builders for the code-v2 teams.
+Shared prompt builders for the code-v2 teams, and generalized builders for
+prompt-scaffolding patterns used elsewhere in the software engineering team.
 
 The planning / execution / single-issue problem-solving prompts were ~90% the
 same between the backend and frontend teams; the stack-specific parts are the
@@ -17,6 +18,11 @@ via ``str.replace`` so a value that itself contains braces (frontend's literal
 Each team's ``prompts.py`` calls these builders to define its module-level
 ``PLANNING_PROMPT`` / ``EXECUTION_PROMPT`` / ``PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT``
 constants, so every existing importer keeps working with byte-identical output.
+
+``build_json_output_prompt`` and ``build_document_rewrite_prompt`` (below the
+code-v2 builders) generalize this to the JSON-object-output and
+full-document-rewrite shapes used by prompt modules outside code-v2 (PRD agent,
+tech_lead, qa, security, devops) — see those teams' sibling migration issues.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from software_engineering_team.shared.coding_standards import (
 from software_engineering_team.shared.coding_standards import (
     REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
 )
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 from software_engineering_team.shared.prompts.requirement_citation import (
     REQUIREMENT_CITATION_GUARDRAIL,
 )
@@ -431,6 +438,108 @@ def build_documentation_self_review_prompt(
         "- Only output documentation files that you actually improved.\n"
         "- Do not use JSON. Use only the template above. No explanatory text before or after.\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Context block formatting helper (shared by the generalized builders below)
+# ---------------------------------------------------------------------------
+
+
+def format_context_block(label: str, slot: str) -> str:
+    """Render one fenced context block: ``**{label}:**\\n---\\n{slot}\\n---\\n\\n``.
+
+    Preconditions:
+        ``label`` is a short noun phrase with no trailing colon; ``slot`` is
+        either a ``.format()``-style token (e.g. ``"{spec_content}"``) or
+        literal text to embed verbatim.
+    Postconditions:
+        Returns the fenced block ending in a blank line, ready to concatenate
+        with other blocks. ``slot`` is embedded untouched (no substitution).
+    """
+    return f"**{label}:**\n---\n{slot}\n---\n\n"
+
+
+# ---------------------------------------------------------------------------
+# JSON output prompt (generalized — PRD agent, tech_lead, qa, security, devops)
+# ---------------------------------------------------------------------------
+
+
+def build_json_output_prompt(
+    *,
+    role_sentence: str,
+    rules: str = "",
+    context_blocks: str = "",
+    json_schema: str,
+    trailer: str = JSON_OUTPUT_INSTRUCTION,
+) -> str:
+    """Assemble a JSON-object-output prompt from role/rules/context/schema pieces.
+
+    Generalizes the ``role sentence -> rules -> context -> JSON schema -> JSON
+    trailer`` shape used outside code-v2 (e.g. devops_team's terse "Output
+    JSON: - field: type" prompts, security_agent, tech_lead_agent's inline
+    schemas, and the PRD agent's worked-example JSON prompts). Unlike
+    ``build_planning_prompt``'s ``str.replace`` skeleton, this builder uses
+    plain concatenation of caller-supplied pieces (matching
+    ``build_execution_prompt``'s approach) so that a ``json_schema`` value
+    containing doubled braces (``{{``/``}}``) for a later ``.format()`` call
+    passes through untouched.
+
+    Preconditions:
+        ``role_sentence`` has no trailing newline. ``rules`` and
+        ``context_blocks`` are either ``""`` or pre-formatted blocks ending in
+        a blank line (e.g. built via ``format_context_block``). ``json_schema``
+        is the schema description/worked example (no leading/trailing blank
+        line required).
+    Postconditions:
+        Returns ``role_sentence``, then ``rules``/``context_blocks`` (each
+        omitted entirely when ``""``, so no stray blank blocks appear), then
+        an "Output format (JSON only):" header, ``json_schema``, and
+        ``trailer``. Any ``{slot}`` tokens in the inputs survive untouched.
+    """
+    return (
+        role_sentence
+        + "\n\n"
+        + rules
+        + context_blocks
+        + "**Output format (JSON only):**\n"
+        + json_schema
+        + "\n\n"
+        + trailer
+    )
+
+
+# ---------------------------------------------------------------------------
+# Document rewrite prompt (generalized — PRD agent's full-document rewrites)
+# ---------------------------------------------------------------------------
+
+
+def build_document_rewrite_prompt(
+    *,
+    role_sentence: str,
+    rules: str = "",
+    context_blocks: str = "",
+    output_instruction: str = (
+        "Respond with the FULL updated document as plain text (markdown format). "
+        "Do not wrap in code fences. No explanatory text before or after."
+    ),
+) -> str:
+    """Assemble a full-document-rewrite prompt from role/rules/context pieces.
+
+    Generalizes the PRD agent's ``SPEC_UPDATE_PROMPT``/``SPEC_CLARIFICATION_PROMPT``
+    shape: a plain-text/markdown document rewrite, not a JSON or
+    ``## MARKER ##`` output. Uses the same concatenation approach as
+    ``build_json_output_prompt`` for the same brace-survival reason.
+
+    Preconditions:
+        ``role_sentence`` has no trailing newline. ``rules`` and
+        ``context_blocks`` are either ``""`` or pre-formatted blocks ending in
+        a blank line (e.g. built via ``format_context_block``).
+    Postconditions:
+        Returns ``role_sentence``, then ``rules``/``context_blocks`` (each
+        omitted entirely when ``""``), then ``output_instruction``. Any
+        ``{slot}`` tokens in the inputs survive untouched.
+    """
+    return role_sentence + "\n\n" + rules + context_blocks + output_instruction
 
 
 # ---------------------------------------------------------------------------
