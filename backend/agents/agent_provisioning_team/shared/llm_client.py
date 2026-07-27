@@ -45,7 +45,9 @@ def sanitize_prompt_var(value: object, *, max_len: int = _PROMPT_VAR_MAX_LEN) ->
     - Coerces to str
     - Strips disallowed characters
     - Caps length at ``max_len`` (default 100k chars) to prevent a prompt-bomb
-      / context-blowing input while still allowing large legitimate prompts
+      / context-blowing input while still allowing large legitimate prompts;
+      a truncated value carries a trailing ``"…[truncated]"`` marker, so its
+      final length is ``max_len + len("…[truncated]")``, not exactly ``max_len``
     """
     text = "" if value is None else str(value)
     text = _PROMPT_VAR_ALLOWED.sub("_", text)

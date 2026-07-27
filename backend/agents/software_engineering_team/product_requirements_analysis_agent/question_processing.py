@@ -606,9 +606,9 @@ def add_recommendations(
         for q in open_questions
     ]
     questions_json = json.dumps(questions_payload, indent=2)
-    spec_excerpt = (spec_content or "")
+    spec_content_str = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
-        spec_excerpt=spec_excerpt,
+        spec_content=spec_content_str,
         questions_json=questions_json,
     )
     recs = _fetch_llm_list(

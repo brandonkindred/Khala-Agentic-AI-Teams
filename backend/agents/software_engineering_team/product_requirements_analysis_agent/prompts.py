@@ -463,9 +463,9 @@ For each question:
 2. Explain why in 2-4 sentences.
 3. Briefly note alternatives considered and why they were not chosen.
 
-Specification excerpt (for context):
+Specification (for context):
 ---
-{spec_excerpt}
+{spec_content}
 ---
 
 Questions with options:

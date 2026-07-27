@@ -55,10 +55,12 @@ def relevant_code_for_issue(
     """Return code context for a single issue: prefer issue's file, else all files.
 
     Preconditions: ``current_files`` maps path -> content.
-    Postconditions: returns a non-empty string bounded by ``max_chars``; falls
-        back to ``"(no code)"`` when no content can be included. Truncated
-        context carries an explicit marker so the fix agent does not mistake a
-        prefix for the complete file or submission.
+    Postconditions: returns a non-empty string; when ``max_chars`` is positive
+        and content is available, the returned string is bounded by
+        ``max_chars``; falls back to ``"(no code)"`` when ``max_chars`` is
+        non-positive or no content can be included. Truncated context carries
+        an explicit marker so the fix agent does not mistake a prefix for the
+        complete file or submission.
     """
     if max_chars <= 0:
         return "(no code)"
