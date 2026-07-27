@@ -216,6 +216,20 @@ def test_run_build_verification_failure():
     assert msg == "err"
 
 
+def test_run_build_verification_uses_profile_label():
+    from software_engineering_team.backend_code_v2_team.phases._profile import PROFILE
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_build_verification
+
+    seen = {}
+
+    def _verifier(repo_path, label, task_id):
+        seen["label"] = label
+        return True, ""
+
+    _run_build_verification(Path("/tmp"), _verifier, "t1")
+    assert seen["label"] == PROFILE.build_verify_label
+
+
 # ---------------------------------------------------------------------------
 # run_review
 # ---------------------------------------------------------------------------

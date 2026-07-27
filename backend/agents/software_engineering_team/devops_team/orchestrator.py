@@ -48,7 +48,7 @@ from .models import (
     ReleaseReadiness,
     SubtaskContract,
 )
-from .phase2_graph import run_phase2_parallel
+from .phases import run_phase1_intake_clarify, run_phase2_design_fanout
 
 # Commit-message template for the shared deliver helper. ``deliver_inline_merge``
 # calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
@@ -207,7 +207,7 @@ ENV_POLICY = {
 from . import tool_dispatch  # noqa: E402
 from .infra_debug_agent import IaCDebugInput, InfraDebugAgent  # noqa: E402
 from .infra_patch_agent import IaCPatchInput, InfraPatchAgent  # noqa: E402
-from .task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput  # noqa: E402
+from .task_clarifier import DevOpsTaskClarifierAgent  # noqa: E402
 from .test_validation_agent import (  # noqa: E402
     DevOpsTestValidationAgent,
     DevOpsTestValidationInput,
@@ -220,7 +220,6 @@ from .tool_agents import (  # noqa: E402
     HelmExecutionToolAgent,
     IaCValidationToolAgent,
     PolicyAsCodeToolAgent,
-    RepoNavigatorInput,
     RepoNavigatorToolAgent,
     TerraformExecutionToolAgent,
 )
@@ -703,24 +702,22 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             Postconditions: returns a failed ``DevOpsTeamResult`` on env-policy or
               clarifier rejection; otherwise builds subtask contracts, logs their
               count, and returns ``None`` so later phases run.
+
+            Thin wrapper around the standalone ``run_phase1_intake_clarify``;
+            converts its typed result into this pipeline's gate contract.
             """
-            env_block = self._enforce_env_policy(task_spec)
-            if env_block:
-                return DevOpsTeamResult(
-                    success=False, failure_reason=f"Environment policy violation: {env_block}"
-                )
+            result = run_phase1_intake_clarify(
+                task_spec=task_spec,
+                task_clarifier=self.task_clarifier,
+                enforce_env_policy=self._enforce_env_policy,
+                build_subtask_contracts=self._build_subtask_contracts,
+            )
+            if result.blocked_reason:
+                return DevOpsTeamResult(success=False, failure_reason=result.blocked_reason)
 
-            clarifier = self.task_clarifier.run(DevOpsTaskClarifierInput(task_spec=task_spec))
-            if not clarifier.approved_for_execution:
-                return DevOpsTeamResult(
-                    success=False,
-                    failure_reason="Clarification required: "
-                    + "; ".join(clarifier.clarification_requests[:3]),
-                )
-
-            subtask_contracts = self._build_subtask_contracts(task_spec)
             logger.info(
-                "DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts)
+                "DevOps team pipeline: %d subtask contracts generated",
+                len(result.subtask_contracts),
             )
             return None
 
@@ -737,25 +734,23 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
                 "phase2",
                 detail="DevOps team pipeline: phase 2 - change design (parallel)",
             )
-            repo_summary = self.repo_navigator_tool.run(
-                RepoNavigatorInput(repo_path=str(repo_path))
-            ).summary
             # Enable parallel execution unless the backing LLM client is a
             # DummyLLMClient (or subclass) — scripted test clients use a shared
             # sequential response list that breaks under concurrent access.
             use_parallel = not isinstance(self.llm, DummyLLMClient)
-            phase2 = run_phase2_parallel(
-                self.iac_agent,
-                self.cicd_agent,
-                self.deployment_agent,
-                task_spec,
-                repo_summary=repo_summary,
+            phase2 = run_phase2_design_fanout(
+                task_spec=task_spec,
+                repo_path=repo_path,
+                iac_agent=self.iac_agent,
+                cicd_agent=self.cicd_agent,
+                deployment_agent=self.deployment_agent,
+                repo_navigator_tool=self.repo_navigator_tool,
                 parallel=use_parallel,
             )
-            iac_result = phase2["iac_result"]
-            cicd_result = phase2["cicd_result"]
-            deploy_result = phase2["deploy_result"]
-            aggregated_artifacts = phase2["aggregated_artifacts"]
+            iac_result = phase2.iac_result
+            cicd_result = phase2.cicd_result
+            deploy_result = phase2.deploy_result
+            aggregated_artifacts = phase2.aggregated_artifacts
             return None
 
         def _phase3_branch_write() -> Optional[DevOpsTeamResult]:
