@@ -198,7 +198,10 @@ def parse_spec_review_response(raw: Any) -> SpecReviewResult:
     open_questions = []
     if isinstance(raw_questions, list):
         for i, q in enumerate(raw_questions):
-            open_questions.append(parse_open_question(q, i))
+            try:
+                open_questions.append(parse_open_question(q, i))
+            except (ValueError, TypeError) as exc:
+                logger.warning("Skipping malformed open question at index %d: %s", i, exc)
 
     return SpecReviewResult(
         issues=issues,

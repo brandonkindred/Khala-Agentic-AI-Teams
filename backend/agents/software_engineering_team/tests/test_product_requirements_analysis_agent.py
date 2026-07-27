@@ -33,6 +33,7 @@ from product_requirements_analysis_agent.question_data import (
 from product_requirements_analysis_agent.question_processing import (
     filter_duplicate_questions,
     parse_question_option,
+    parse_spec_review_response,
 )
 from product_requirements_analysis_agent.question_processing import (
     parse_open_question as _real_parse_open_question,
@@ -651,6 +652,24 @@ def test_parse_open_question_defaults_non_sequence_section_impact_and_asked_via(
 
     assert parsed.section_impact == []
     assert parsed.asked_via == []
+
+
+def test_parse_spec_review_response_skips_malformed_question_without_raising() -> None:
+    """parse_spec_review_response must never raise, even when an open question has non-list options."""
+    result = parse_spec_review_response(
+        {
+            "issues": ["Missing auth flow"],
+            "gaps": ["No SLA defined"],
+            "open_questions": [
+                {"question_text": "Malformed question", "options": None},
+                {"question_text": "Well-formed question", "options": []},
+            ],
+            "summary": "Reviewed",
+        }
+    )
+
+    assert isinstance(result, SpecReviewResult)
+    assert [q.question_text for q in result.open_questions] == ["Well-formed question"]
 
 
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
