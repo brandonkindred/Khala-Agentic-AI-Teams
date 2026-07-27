@@ -52,18 +52,18 @@ flowchart TB
 
     subgraph P2 ["Phase 2 · Narrative & Messaging (Swarm, dynamic handoff)"]
         direction LR
-        P2a[storyteller] --> P2b[archetype_analyst]
+        P2a[Storyteller] --> P2b[ArchetypeAnalyst]
         P2b -. revise .-> P2a
-        P2b --> P2rest["tagline_writer → message_mapper →
-        persona_builder → voice_principles_drafter"]
+        P2b --> P2rest["TaglineWriter → MessageMapper →
+        PersonaBuilder → VoicePrinciplesDrafter"]
     end
 
     P2 --> P3
 
     subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph-of-Swarm)"]
         direction TB
-        P3swarm["diverge_swarm: creative_director dispatches
-        moodboard_conceptualist (editorial/minimalist/bold)"] --> P3conv[converge_decider]
+        P3swarm["diverge_swarm: CreativeDirector dispatches
+        MoodBoardConceptualist_Editorial/Minimalist/Bold"] --> P3conv[converge_decider]
         P3conv --> P3fan["logo_specifier, color_system_builder, typography_builder,
         iconography_director, photography_video_director,
         voice_tone_builder, design_system_codifier"]
@@ -98,9 +98,12 @@ flowchart TB
     Integrations --> TeamOutput
     HumanReview[HumanReview] --> TeamOutput
 
-    TeamOutput --> Status{human_review.approved?}
-    Status -->|No| NeedsHuman[status: NEEDS_HUMAN_DECISION]
-    Status -->|Yes| Ready[status: READY_FOR_ROLLOUT]
+    TeamOutput --> Approved{human_review.approved?}
+    Approved -->|No| NeedsHuman[status: NEEDS_HUMAN_DECISION]
+    Approved -->|Yes| Complete{current_phase == COMPLETE?}
+    Complete -->|No, partial run| PhaseApproved["status: NEEDS_HUMAN_DECISION
+    (phase approved, next phase can begin)"]
+    Complete -->|Yes, reached Governance| Ready[status: READY_FOR_ROLLOUT]
 ```
 
 Phase 3 is the most structurally involved phase — an inner `Swarm` nested as a single node inside the outer `Graph` — so it's worth expanding on its own:
@@ -124,15 +127,15 @@ flowchart LR
     design --> compositor
 ```
 
-Where `diverge_swarm` is itself an inner Swarm: `creative_director` dispatches to three style-variant `moodboard_conceptualist` agents (editorial, minimalist, bold) and each hands back to `creative_director` when done.
+Where `diverge_swarm` is itself an inner Swarm: `CreativeDirector` dispatches to three style-variant `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents and each hands back to `CreativeDirector` when done.
 
-Per-phase participating nodes:
+Per-phase participating nodes. For the two `Graph`-based phases and the outer Phase 3 graph, node identifiers are the explicit `node_id` values passed to `builder.add_node(...)`. For the `Swarm`-based nodes (all of Phase 2, and Phase 3's inner `diverge_swarm`), Strands has no `node_id` concept — agents are identified by their own `Agent.name`, which the factories in `agents.py` set in PascalCase; those are listed below rather than a normalized/snake_case alias:
 
 | Phase | Construct | Nodes |
 |---|---|---|
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
-| 2 — Narrative & Messaging | `Swarm`, dynamic handoff | `storyteller` (entry) → `archetype_analyst` (may hand back to `storyteller`) → `tagline_writer` → `message_mapper` → `persona_builder` → `voice_principles_drafter` |
-| 3 — Visual & Expressive Identity | Graph-of-Swarm | inner `Swarm`: `creative_director` + 3 `moodboard_conceptualist` variants → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
+| 2 — Narrative & Messaging | `Swarm`, dynamic handoff | `Storyteller` (entry) → `ArchetypeAnalyst` (may hand back to `Storyteller`) → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` |
+| 3 — Visual & Expressive Identity | Graph-of-Swarm | inner `Swarm` (node id `diverge_swarm`): `CreativeDirector` + 3 `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
 | 4 — Channel Activation | `Graph`, fan-out/fan-in | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` → `channel_compositor` |
 | 5 — Governance & Evolution | `Graph`, fan-out/fan-in | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` → `governance_compositor` |
 
