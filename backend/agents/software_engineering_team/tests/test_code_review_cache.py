@@ -423,6 +423,15 @@ def test_symbol_surface_excludes_indented_python_defs() -> None:
     assert coord._symbol_surface(content) == ["C", "top"]
 
 
+def test_symbol_surface_is_not_capped_at_sixty() -> None:
+    """A file with more than the old 60-symbol cap has every symbol surfaced —
+    there is no hardcoded per-file truncation anymore."""
+    content = "\n".join(f"def fn_{i}():\n    pass" for i in range(75))
+    result = coord._symbol_surface(content)
+    assert len(result) == 75
+    assert "fn_0" in result and "fn_74" in result
+
+
 def test_half_sibling_surface_falls_back_without_map() -> None:
     """With no surface map (a direct caller), a bisected half keeps the parent's surface."""
     from code_review_agent.models import FileSegment, ReviewChunk

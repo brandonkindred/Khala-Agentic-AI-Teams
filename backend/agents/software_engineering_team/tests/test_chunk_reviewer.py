@@ -417,3 +417,38 @@ def test_shared_context_is_passed_through_in_full() -> None:
     assert len(client.prompts) == 1  # exactly one LLM call: the review itself
     assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
     assert "S" * 100 in client.prompts[0]
+
+
+def test_architecture_overview_is_passed_through_in_full() -> None:
+    """An oversized architecture overview is forwarded verbatim — no hard cap
+    re-applied here — so a tail past the old budget still reaches the prompt."""
+    from software_engineering_team.shared.context_sizing import (
+        compute_code_review_arch_overview_chars,
+    )
+
+    client = _RecorderClient()
+    max_arch = compute_code_review_arch_overview_chars(client)
+    oversized_arch = ("A" * max_arch) + "TAIL_BEYOND_BUDGET"
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(_chunk_input(architecture_overview=oversized_arch))
+    assert len(client.prompts) == 1
+    assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
+    assert "A" * 100 in client.prompts[0]
+
+
+def test_existing_codebase_excerpt_is_passed_through_in_full() -> None:
+    """An oversized existing-codebase excerpt is forwarded verbatim — no hard
+    cap re-applied here — so a tail past the old budget still reaches the
+    prompt."""
+    from software_engineering_team.shared.context_sizing import (
+        compute_code_review_existing_codebase_chars,
+    )
+
+    client = _RecorderClient()
+    max_existing = compute_code_review_existing_codebase_chars(client)
+    oversized_existing = ("E" * max_existing) + "TAIL_BEYOND_BUDGET"
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(_chunk_input(existing_codebase_excerpt=oversized_existing))
+    assert len(client.prompts) == 1
+    assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
+    assert "E" * 100 in client.prompts[0]
