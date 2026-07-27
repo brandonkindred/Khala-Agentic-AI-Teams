@@ -444,7 +444,7 @@ def test_half_sibling_surface_falls_back_without_map() -> None:
 
 
 def test_sibling_surface_is_bounded_to_prompt_budget() -> None:
-    """A large sibling surface cannot exceed the bytes reserved in the prompt."""
+    """A large sibling surface cannot exceed the characters reserved in the prompt."""
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
