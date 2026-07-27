@@ -414,16 +414,16 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         fixed_count = 0
         for issue in issues:
             relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
-            prompt = self.problem_solving_prompt.format(
-                source=issue.source or self.issue_source,
-                severity=issue.severity or self.default_severity,
-                description=issue.description or "",
-                file_path=issue.file_path or "N/A",
-                recommendation=issue.recommendation or self.default_recommendation,
-                current_code=relevant_code,
-                **extra,
-            )
             try:
+                prompt = self.problem_solving_prompt.format(
+                    source=issue.source or self.issue_source,
+                    severity=issue.severity or self.default_severity,
+                    description=issue.description or "",
+                    file_path=issue.file_path or "N/A",
+                    recommendation=issue.recommendation or self.default_recommendation,
+                    current_code=relevant_code.replace("{", "{{").replace("}", "}}"),
+                    **extra,
+                )
                 raw = self._run_agent(self._model, prompt)
             except Exception as e:
                 self._logger.warning(
