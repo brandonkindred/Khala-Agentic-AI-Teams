@@ -460,15 +460,16 @@ def run_execution_with_review_gates(
     """
     Execute microtasks with batch-based review cycles.
 
-    After each microtask is coded, it must pass through sequential review phases:
+    After each microtask is coded, it must pass through review phases:
     1. Code Review (build + lint + code review) - batch fix all issues
-    2. QA Testing - batch fix all issues, then restart from Code Review
-    3. Security Testing - batch fix all issues, then restart from Code Review
-    4. Documentation - self-review loop (3-5 iterations, never fails)
+    2. QA Testing + Security Testing - independent, concurrent analysis passes
+       over the same post-Code-Review snapshot (``GATE_CONFIG.parallelize_qa_security``
+       is ``True``); batch fix all issues from either, then restart from Code Review
+    3. Documentation - self-review loop (3-5 iterations, never fails)
 
     Key behavior:
     - Each review phase collects ALL issues and sends them to the coding agent at once
-    - After QA or Security fixes, the flow restarts from Code Review
+    - After QA and/or Security fixes, the flow restarts from Code Review
     - Documentation uses self-review iterations (no failure mode)
 
     ``progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)`` is called during execution.
