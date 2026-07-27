@@ -382,9 +382,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         if status == "error":
             return ToolAgentPhaseOutput(summary=f"{review_label} failed (LLM error).")
         raw = result
-        self.parse_context = review_label
-        self.parse_on_fail_msg = "reporting 0 issues."
-        data = self._parse_llm_json(raw)
+        data = self._parse_llm_json(raw, context=review_label, on_fail_msg="reporting 0 issues.")
         issues: List[ReviewIssue] = []
         for item in (data or {}).get("issues") or []:
             if isinstance(item, dict):
