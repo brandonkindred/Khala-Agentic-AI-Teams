@@ -16,7 +16,6 @@ from typing import Any, Dict, Optional
 
 import pytest
 from code_review_agent.architecture_consistency_pass import (
-    _ARCH_DOC_ABS_CHARS,
     _build_prompt,
     _coerce_finding,
     _is_changed_file,
@@ -65,7 +64,7 @@ def test_build_prompt_includes_architecture_document_and_changed_files() -> None
     changed file's content."""
     arch = _arch(architecture_document="# Arch\nAll writes MUST go through the repository layer.")
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
     assert "All writes MUST go through the repository layer." in prompt
     assert "app/main.py" in prompt
     assert "def bar():" in prompt
@@ -75,7 +74,7 @@ def test_build_prompt_falls_back_to_overview_with_no_document() -> None:
     """With no ``architecture_document``, the overview is inlined instead."""
     arch = _arch(overview="Overview-only architecture.", architecture_document="")
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
     assert "Overview-only architecture." in prompt
 
 
@@ -98,7 +97,7 @@ def test_build_prompt_includes_components_and_decisions_alongside_document() -> 
         ],
     )
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
     assert "General overview doc." in prompt
     assert "billing-service" in prompt
     assert "Owns all billing writes." in prompt
@@ -115,18 +114,19 @@ def test_build_prompt_includes_components_and_decisions_with_no_document() -> No
         components=[ArchitectureComponent(name="auth-service", type="backend")],
     )
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100_000)
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
     assert "auth-service" in prompt
 
 
-def test_build_prompt_caps_architecture_document_and_notes_truncation() -> None:
-    """An oversized architecture document is capped, and the prompt says so."""
+def test_build_prompt_includes_architecture_document_in_full() -> None:
+    """The architecture document is never truncated -- no tool exposes it, so
+    unlike the changed files it is always inlined in its entirety."""
     arch = _arch(architecture_document="X" * 10_000)
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000, max_arch_doc_chars=100)
-    assert "X" * 100 in prompt
-    assert "X" * 101 not in prompt
-    assert "Only the first 100 characters of the architecture document are shown" in prompt
+    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    assert "X" * 10_000 in prompt
+    assert "are shown above" not in prompt
+    assert "was not available to this pass" not in prompt
 
 
 def test_build_prompt_omits_files_beyond_inline_budget() -> None:
@@ -139,9 +139,7 @@ def test_build_prompt_omits_files_beyond_inline_budget() -> None:
     # number that happens to match it) so the second file is fully omitted
     # rather than partially truncated -- see test_build_prompt_notes_mid_file_truncation
     # for that other branch.
-    prompt = _build_prompt(
-        index, arch, max_inline_chars=len(file_a_content), max_arch_doc_chars=1000
-    )
+    prompt = _build_prompt(index, arch, max_inline_chars=len(file_a_content))
     assert file_a_content in prompt  # inlined in full (fits the budget exactly)
     assert "more changed file(s) not shown above" in prompt
     assert "list_files()" in prompt
@@ -153,7 +151,7 @@ def test_build_prompt_notes_mid_file_truncation() -> None:
     arch = _arch()
     files = {"a.py": "x" * 100}
     index = CodebaseIndex.from_input(_input(files=files, architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=30, max_arch_doc_chars=1000)
+    prompt = _build_prompt(index, arch, max_inline_chars=30)
     assert "Only the first 30 characters of `a.py` are shown above" in prompt
 
 
@@ -658,82 +656,32 @@ def test_coordinator_skips_pass_with_no_architecture() -> None:
     assert result.approved
 
 
-def test_run_pass_shrinks_code_budget_by_arch_doc_reserve(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The inline code budget must shrink by however much
-    ``CODE_REVIEW_ARCH_DOC_CHARS`` exceeds what
-    ``compute_code_review_map_chunk_chars`` already reserved for an
-    architecture excerpt, so a generous document budget cannot silently push
-    the combined prompt past the model's context-derived ceiling."""
+def test_run_pass_inlines_full_arch_doc_without_shrinking_code_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The architecture document reaches ``_build_prompt`` in full regardless of
+    its size, and the inline code budget is exactly
+    ``compute_code_review_map_chunk_chars`` -- never reduced by an
+    architecture-document reserve."""
     import code_review_agent.architecture_consistency_pass as pass_mod
 
     captured: Dict[str, Any] = {}
     original_build_prompt = pass_mod._build_prompt
 
-    def _spy(index, architecture, max_inline_chars, max_arch_doc_chars):
+    def _spy(index, architecture, max_inline_chars):
         captured["max_inline_chars"] = max_inline_chars
-        captured["max_arch_doc_chars"] = max_arch_doc_chars
-        return original_build_prompt(index, architecture, max_inline_chars, max_arch_doc_chars)
+        return original_build_prompt(index, architecture, max_inline_chars)
 
     monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
     monkeypatch.setattr(pass_mod, "compute_code_review_map_chunk_chars", lambda llm: 20_000)
-    monkeypatch.setattr(pass_mod, "compute_code_review_arch_overview_chars", lambda llm: 1_000)
-    monkeypatch.setenv("CODE_REVIEW_ARCH_DOC_CHARS", "9000")
+
+    arch = _arch(architecture_document="X" * 100_000)
 
     class _EmptyClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert "X" * 100_000 in prompt
             return {"findings": []}
 
-    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
+    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=arch))
 
-    assert captured["max_arch_doc_chars"] == 9000
-    # 20_000 - max(9_000 - 1_000, 0) == 12_000
-    assert captured["max_inline_chars"] == 12_000
-
-
-def test_run_pass_clamps_arch_doc_when_it_would_still_overflow(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ``CODE_REVIEW_ARCH_DOC_CHARS`` larger than the model's total
-    context-derived budget must not be inlined in full -- on a smaller-context
-    model even a code budget of zero would not save the combined prompt from
-    overflow, so the document itself is clamped to at most half of the total
-    available budget."""
-    import code_review_agent.architecture_consistency_pass as pass_mod
-
-    captured: Dict[str, Any] = {}
-    original_build_prompt = pass_mod._build_prompt
-
-    def _spy(index, architecture, max_inline_chars, max_arch_doc_chars):
-        captured["max_inline_chars"] = max_inline_chars
-        captured["max_arch_doc_chars"] = max_arch_doc_chars
-        return original_build_prompt(index, architecture, max_inline_chars, max_arch_doc_chars)
-
-    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
-    monkeypatch.setattr(pass_mod, "compute_code_review_map_chunk_chars", lambda llm: 6_000)
-    monkeypatch.setattr(pass_mod, "compute_code_review_arch_overview_chars", lambda llm: 2_000)
-    monkeypatch.setenv("CODE_REVIEW_ARCH_DOC_CHARS", "50000")  # far past the 8_000 total
-
-    class _EmptyClient(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            return {"findings": []}
-
-    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
-
-    # available_total = 6_000 + 2_000 == 8_000; clamped to half instead of the full 50_000.
-    assert captured["max_arch_doc_chars"] == 4_000
-    assert captured["max_inline_chars"] == 4_000
-
-
-def test_arch_doc_abs_chars_default_is_generous() -> None:
-    """Sanity check the default cap: generous relative to the per-chunk overview
-    excerpt cap, since this pass pays its cost once per submission, not per chunk.
-
-    Compared against the actual per-chunk cap constant (not an independent magic
-    number) so this test states its real intent and does not silently drift out
-    of sync if either constant is retuned.
-    """
-    from software_engineering_team.shared.context_sizing import (
-        CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS,
-    )
-
-    assert _ARCH_DOC_ABS_CHARS >= CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS * 5
+    assert captured["max_inline_chars"] == 20_000
