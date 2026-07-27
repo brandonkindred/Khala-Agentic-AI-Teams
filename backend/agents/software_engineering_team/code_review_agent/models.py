@@ -441,6 +441,15 @@ class ChunkReviewLLMResponse(BaseModel):
     in the one place meant to demonstrate the opposite — a missing field
     must fail validation and drive ``complete_validated``'s corrective
     retry, not silently look like a clean, empty-issue approval.
+
+    A rejection (``approved=False``) must carry at least one populated
+    critical/high issue: today, ``coordinator._reconcile_approval`` silently
+    flips such a rejection to an approval downstream ("nothing to give the
+    coding agent"), a deterministic safety net for a malformed LLM reply.
+    Enforcing the same rule here means that malformed reply instead fails
+    schema validation and drives ``complete_validated``'s corrective retry —
+    giving the model a chance to supply real feedback — rather than always
+    being silently absorbed by the coordinator's safety net.
     """
 
     approved: bool = Field(
@@ -455,6 +464,29 @@ class ChunkReviewLLMResponse(BaseModel):
     spec_compliance_notes: str = Field(
         description="Notes on how well the chunk meets the spec and acceptance criteria",
     )
+
+    @model_validator(mode="after")
+    def _require_actionable_issue_when_rejected(self) -> "ChunkReviewLLMResponse":
+        """Reject a rejection that carries no actionable feedback.
+
+        Mirrors ``coordinator._reconcile_approval``'s own criteria (severity
+        in critical/high) plus a non-blank description, since
+        ``chunking._issues_from_chunk_output`` drops blank-description issues
+        before they ever reach that gate — an issue with a blank description
+        is not "populated" no matter its severity.
+        """
+        if self.approved:
+            return self
+        has_actionable_issue = any(
+            issue.severity in ("critical", "high") and issue.description.strip()
+            for issue in self.issues
+        )
+        if not has_actionable_issue:
+            raise ValueError(
+                "approved=False requires at least one issue with severity 'critical' or "
+                "'high' and a non-blank description"
+            )
+        return self
 
 
 class CodeReviewInput(BaseModel):

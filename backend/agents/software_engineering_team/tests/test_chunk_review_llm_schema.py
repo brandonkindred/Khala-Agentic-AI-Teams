@@ -82,14 +82,19 @@ def test_issue_missing_file_path_defaults_to_blank() -> None:
 
 def test_multi_issue_payload_matches_test_code_review_coordinator_sample() -> None:
     """The schema accepts a realistic multi-field issue payload matching the
-    one ``test_code_review_coordinator`` scripts for its "critical issue"
-    scenario, except for the out-of-set ``category`` (covered separately
-    below -- that value is deliberately off-list in the source test)."""
+    shape ``test_code_review_coordinator`` scripts for its rejection
+    scenarios (line/pre_existing populated), except severity is bumped to
+    "high" here: the review prompt requires a rejection's issues to include
+    at least one critical/high finding (see
+    ``test_approved_false_requires_a_populated_critical_or_high_issue``), so
+    a medium-only rejection -- the coordinator-level sample this shape is
+    based on -- is itself an example of the malformed reply that invariant
+    now catches, not a valid payload for this top-level schema."""
     payload = {
         "approved": False,
         "issues": [
             {
-                "severity": "medium",
+                "severity": "high",
                 "category": "logic",
                 "file_path": "app/main.py",
                 "line": 12,
@@ -153,6 +158,58 @@ def test_empty_top_level_response_is_rejected() -> None:
     ``summary=""``, ``spec_compliance_notes=""``) it used to silently produce."""
     with pytest.raises(ValidationError):
         ChunkReviewLLMResponse.model_validate({})
+
+
+def test_approved_false_requires_a_populated_critical_or_high_issue() -> None:
+    """The review prompt (``profiles.py``, "CRITICAL RULES FOR REJECTION") is
+    explicit: "If approved=false, the issues list MUST contain at least one
+    critical or high issue. An empty issues list with approved=false is
+    INVALID and will be treated as an automatic approval." Today that
+    fallback lives in ``coordinator._reconcile_approval``, silently
+    downgrading such a rejection to an approval. The pilot schema enforces
+    the same rule at the validation boundary instead, for three ways a
+    reply can fail to be "populated": no issues at all, an issue with no
+    severity/description populated, and issues with only sub-critical
+    severities."""
+    base = {"approved": False, "summary": "Rejected.", "spec_compliance_notes": ""}
+
+    with pytest.raises(ValidationError):
+        ChunkReviewLLMResponse.model_validate({**base, "issues": []})
+
+    with pytest.raises(ValidationError):
+        ChunkReviewLLMResponse.model_validate({**base, "issues": [{}]})
+
+    with pytest.raises(ValidationError):
+        ChunkReviewLLMResponse.model_validate(
+            {**base, "issues": [{"severity": "low", "description": "A minor nit."}]}
+        )
+
+
+def test_approved_false_with_a_populated_high_issue_is_accepted() -> None:
+    """The mirror-image positive case: a rejection with a real critical/high,
+    non-blank-description issue validates cleanly."""
+    payload = {
+        "approved": False,
+        "issues": [{"severity": "critical", "description": "SQL injection risk"}],
+        "summary": "Rejected.",
+        "spec_compliance_notes": "",
+    }
+    parsed = ChunkReviewLLMResponse.model_validate(payload)
+    assert parsed.approved is False
+
+
+def test_approved_true_with_no_issues_is_unaffected() -> None:
+    """The new rejection invariant only applies when ``approved`` is False --
+    a clean approval with no issues at all is still perfectly valid."""
+    payload = {
+        "approved": True,
+        "issues": [],
+        "summary": "Looks good.",
+        "spec_compliance_notes": "",
+    }
+    parsed = ChunkReviewLLMResponse.model_validate(payload)
+    assert parsed.approved is True
+    assert parsed.issues == []
 
 
 def test_issue_defaults_match_current_hand_rolled_fallbacks() -> None:
