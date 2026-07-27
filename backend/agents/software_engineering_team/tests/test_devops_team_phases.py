@@ -1,5 +1,6 @@
 """Tests for the standalone devops_team phase functions (Phase 1 clarification,
-Phase 2 design fan-out) extracted from ``DevOpsTeamLeadAgent._run_pipeline``."""
+Phase 2 design fan-out, Phase 3 branch/write) extracted from
+``DevOpsTeamLeadAgent._run_pipeline``."""
 
 from __future__ import annotations
 
@@ -17,10 +18,13 @@ from software_engineering_team.devops_team.models import DevOpsTaskSpec, Subtask
 from software_engineering_team.devops_team.phases import (
     Phase1ClarifyResult,
     Phase2DesignResult,
+    Phase3BranchWriteResult,
     run_phase1_intake_clarify,
     run_phase2_design_fanout,
+    run_phase3_branch_write,
 )
 from software_engineering_team.devops_team.task_clarifier import DevOpsTaskClarifierOutput
+from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG
 
 
 def _base_task_spec(**overrides) -> DevOpsTaskSpec:
@@ -191,3 +195,69 @@ class TestRunPhase2DesignFanout:
 
         iac_call_input = iac_agent.run.call_args[0][0]
         assert iac_call_input.repo_summary == "repo summary text"
+
+
+class TestRunPhase3BranchWrite:
+    def _call(self, **overrides):
+        defaults = dict(
+            write_changes=True,
+            aggregated_artifacts={"main.tf": "resource {}"},
+            repo_path=Path("/tmp/repo"),
+            task_spec=_base_task_spec(),
+            subdir="",
+            ensure_development_branch=MagicMock(return_value=(True, "")),
+            create_feature_branch=MagicMock(return_value=(True, "")),
+            write_agent_output=MagicMock(return_value=(True, "")),
+        )
+        defaults.update(overrides)
+        return run_phase3_branch_write(**defaults), defaults
+
+    def test_write_changes_false_is_a_noop(self) -> None:
+        result, kwargs = self._call(write_changes=False)
+
+        assert isinstance(result, Phase3BranchWriteResult)
+        assert result.blocked_reason is None
+        kwargs["ensure_development_branch"].assert_not_called()
+        kwargs["create_feature_branch"].assert_not_called()
+        kwargs["write_agent_output"].assert_not_called()
+
+    def test_no_artifacts_is_a_noop(self) -> None:
+        result, kwargs = self._call(aggregated_artifacts={})
+
+        assert result.blocked_reason is None
+        kwargs["ensure_development_branch"].assert_not_called()
+
+    def test_development_branch_failure_blocks(self) -> None:
+        result, kwargs = self._call(
+            ensure_development_branch=MagicMock(return_value=(False, "no base"))
+        )
+
+        assert result.blocked_reason == "Cannot prepare development branch: no base"
+        kwargs["create_feature_branch"].assert_not_called()
+        kwargs["write_agent_output"].assert_not_called()
+
+    def test_feature_branch_failure_blocks(self) -> None:
+        result, kwargs = self._call(create_feature_branch=MagicMock(return_value=(False, "boom")))
+
+        assert result.blocked_reason == "Cannot create feature branch: boom"
+        kwargs["write_agent_output"].assert_not_called()
+
+    def test_write_failure_blocks(self) -> None:
+        result, _ = self._call(write_agent_output=MagicMock(return_value=(False, "disk full")))
+
+        assert result.blocked_reason == "disk full"
+
+    def test_write_failure_with_no_files_message_is_not_blocking(self) -> None:
+        result, _ = self._call(
+            write_agent_output=MagicMock(return_value=(False, NO_FILES_TO_WRITE_MSG))
+        )
+
+        assert result.blocked_reason is None
+
+    def test_success_path_calls_gates_in_order(self) -> None:
+        result, kwargs = self._call()
+
+        assert result.blocked_reason is None
+        kwargs["ensure_development_branch"].assert_called_once()
+        kwargs["create_feature_branch"].assert_called_once()
+        kwargs["write_agent_output"].assert_called_once()
