@@ -176,14 +176,15 @@ def _extract_json_array_from_text(
         - Returns the first decoded JSON array whose elements are all dicts and
           at least one of which contains every key in ``required_keys``, found
           by scanning for ``[`` and using ``json.JSONDecoder.raw_decode``.
-        - A syntactically valid but schema-mismatched array (e.g. a numeric
-          citation like ``[1]``, ``[]`` from an empty Markdown link
-          ``[label]()``, or a dict array none of whose elements have
-          ``required_keys``) does not short-circuit the scan; scanning
+        - A syntactically valid but schema-mismatched non-empty array (e.g. a
+          numeric citation like ``[1]``, or a dict array none of whose elements
+          have ``required_keys``) does not short-circuit the scan; scanning
           continues past it toward the real payload.
-        - If no matching array of dicts is found, returns the first genuinely
-          empty ``[]`` match (a real "no items" response), or ``None`` if no
-          array matched at all.
+        - If no matching array of dicts is found, returns the first syntactically
+          valid empty ``[]`` encountered — this cannot be distinguished from an
+          empty Markdown link such as ``[label]()``, so a response containing
+          only such a link and no real array-of-dicts payload also returns
+          ``[]`` here — or ``None`` if no array matched at all.
     """
     decoder = json.JSONDecoder()
     search_from = 0
@@ -345,7 +346,8 @@ class BlogWriterAgent(_BlogAgentBase):
         ``response_format=json_object`` on the wire.
 
         Raises:
-            ``LLMJsonParseError`` when the response contains no extractable JSON.
+            ``LLMJsonParseError`` when the response contains no extractable JSON,
+            or when the extracted JSON parses to something other than a dict.
         """
         raw = self._call_json_raw(
             prompt + "\n\nRespond with valid JSON only, no markdown fences.",
