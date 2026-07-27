@@ -130,7 +130,9 @@ def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
     """
     Extract draft content from model output that uses the hybrid format:
     first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
-    Falls back to parsing the whole response as JSON with a \"draft\" key.
+    Falls back to scanning the response for extractable JSON (whole-response,
+    fenced, or prose-wrapped, via ``extract_json_from_response``) and returning
+    the value of its \"draft\" key.
     """
     if not raw_response or not isinstance(raw_response, str):
         return ""
@@ -1389,10 +1391,11 @@ class BlogWriterAgent(_BlogAgentBase):
         """Scan a draft for areas of high uncertainty that need user input.
 
         Returns a list of UncertaintyQuestion objects. An empty list means the
-        agent is confident in the draft, the model returned no questions, or a
-        non-transient LLM/parse failure was soft-failed after logging. Transient
-        ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when wrapped in
-        ``EventLoopException``) propagate so Temporal can retry the draft stage.
+        agent is confident in the draft, the model returned no questions, or any
+        other non-transient failure (LLM/parse error or unexpected exception) was
+        soft-failed after logging. Transient ``LLMRateLimitError`` /
+        ``LLMTemporaryError`` (including when wrapped in ``EventLoopException``)
+        propagate so Temporal can retry the draft stage.
         """
         prompt = UNCERTAINTY_DETECTION_PROMPT.format(
             content_plan=content_plan_text,

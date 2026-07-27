@@ -94,10 +94,9 @@ def test_writer_llm_self_review_with_issues(monkeypatch) -> None:
 def test_writer_llm_self_review_with_markdown_fenced_array(monkeypatch) -> None:
     """Issues array wrapped in markdown fences must still be extracted correctly.
 
-    Regression test: the old naive ``find('[')``/``rfind(']')`` slicing would
-    grab the fence markers' surrounding prose incorrectly whenever the array
-    was wrapped in a ```json code block; the shared ``extract_json_from_response``
-    helper strips fences before parsing.
+    Verifies that the shared ``extract_json_from_response`` helper strips
+    fences and parses the enclosed JSON array, so a cleanly fenced review
+    response is handled correctly.
     """
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
@@ -582,8 +581,8 @@ def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) 
     assert any(r.exc_info is not None for r in caplog.records)
 
 
-def test_writer_llm_self_review_malformed_bracket_text_returns_draft(monkeypatch, caplog) -> None:
-    """Malformed bracket text is treated as no issues, not an exception soft-fail."""
+def test_writer_llm_self_review_malformed_json_returns_draft(monkeypatch, caplog) -> None:
+    """Malformed JSON that cannot be parsed as a list is treated as no issues, not an exception soft-fail."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
