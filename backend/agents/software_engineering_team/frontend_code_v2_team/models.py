@@ -15,9 +15,7 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.v2_models import (
-    BaseExecutionResult,
     BaseMicrotaskReviewConfig,
-    BasePlanningResult,
     BatchFixResult,
     DeliverResult,
     DocumentationPhaseResult,
@@ -69,6 +67,7 @@ class MicrotaskStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     IN_REVIEW = "in_review"
+    IN_QA_SECURITY_TESTING = "in_qa_security_testing"
     IN_DOCUMENTATION = "in_documentation"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -130,17 +129,25 @@ class Microtask(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PlanningResult(BasePlanningResult[Microtask]):
+class PlanningResult(BaseModel):
     """Output of the Planning phase."""
 
+    microtasks: List[Microtask] = Field(default_factory=list)
     language: str = Field(
         default="typescript",
         description="Detected frontend stack: e.g. angular, react, typescript, javascript",
     )
+    summary: str = Field(default="")
 
 
-class ExecutionResult(BaseExecutionResult[Microtask]):
+class ExecutionResult(BaseModel):
     """Aggregated output of the Execution phase."""
+
+    files: Dict[str, str] = Field(default_factory=dict, description="All files produced")
+    microtasks: List[Microtask] = Field(
+        default_factory=list, description="Microtasks with updated status"
+    )
+    summary: str = Field(default="")
 
 
 # ---------------------------------------------------------------------------

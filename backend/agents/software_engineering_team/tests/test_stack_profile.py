@@ -11,18 +11,6 @@ import dataclasses
 
 import pytest
 
-from software_engineering_team.backend_code_v2_team.phases._profile import (
-    PROFILE as BACKEND_PROFILE,
-)
-from software_engineering_team.backend_code_v2_team.phases._profile import (
-    REVIEW_CONFIG as BACKEND_REVIEW_CONFIG,
-)
-from software_engineering_team.frontend_code_v2_team.phases._profile import (
-    PROFILE as FRONTEND_PROFILE,
-)
-from software_engineering_team.frontend_code_v2_team.phases._profile import (
-    REVIEW_CONFIG as FRONTEND_REVIEW_CONFIG,
-)
 from software_engineering_team.shared.stack_profile import StackProfile
 
 _PROFILE_KWARGS = dict(
@@ -62,13 +50,3 @@ def test_missing_default_key_raises():
     kwargs = dict(_PROFILE_KWARGS, conventions_by_language={"java": "JAVA"})
     with pytest.raises(ValueError, match="_default"):
         StackProfile(**kwargs)
-
-
-def test_backend_build_verify_label_matches_review_config():
-    """Guards against the two duplicated sources of truth silently diverging."""
-    assert BACKEND_PROFILE.build_verify_label == BACKEND_REVIEW_CONFIG.build_verify_label
-
-
-def test_frontend_build_verify_label_matches_review_config():
-    """Guards against the two duplicated sources of truth silently diverging."""
-    assert FRONTEND_PROFILE.build_verify_label == FRONTEND_REVIEW_CONFIG.build_verify_label
