@@ -11,12 +11,15 @@ from software_engineering_team.shared.prompts.templates import (
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
     build_batch_fix_prompt,
     build_code_review_prompt,
+    build_document_rewrite_prompt,
     build_documentation_self_review_prompt,
     build_execution_prompt,
+    build_json_output_prompt,
     build_planning_prompt,
     build_problem_solving_prompt,
     build_problem_solving_single_issue_prompt,
     build_qa_review_prompt,
+    format_context_block,
 )
 
 __all__ = [
@@ -25,10 +28,13 @@ __all__ = [
     "REQUIREMENT_CITATION_GUARDRAIL",
     "build_batch_fix_prompt",
     "build_code_review_prompt",
+    "build_document_rewrite_prompt",
     "build_documentation_self_review_prompt",
     "build_execution_prompt",
+    "build_json_output_prompt",
     "build_planning_prompt",
     "build_problem_solving_prompt",
     "build_problem_solving_single_issue_prompt",
     "build_qa_review_prompt",
+    "format_context_block",
 ]
