@@ -844,10 +844,10 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     block = [
         f"--- Finding index {i} ---",
         f"severity: {issue.severity} | category: {issue.category} | location: {location}",
-        f"description: {issue.description}",
+        f"description: {' '.join(issue.description.split())}",
     ]
     if issue.suggestion:
-        block.append(f"suggestion: {issue.suggestion}")
+        block.append(f"suggestion: {' '.join(issue.suggestion.split())}")
     return block
 
 
