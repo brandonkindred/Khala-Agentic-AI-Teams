@@ -529,8 +529,9 @@ def run_coordinator(
           concurrent calls from worker threads: the map phase already fans
           chunk reviews out (see ``_map_chunks``), and the false-positive /
           architecture-consistency / side-effect tail passes fan out the same
-          way (see ``_run_tail_passes``) whenever ``_tail_passes_run_sequentially``
-          and the ``CODE_REVIEW_MAP_PARALLELISM`` budget both allow it. The
+          way (see ``_run_tail_passes``) unless ``_tail_passes_run_sequentially(llm)``
+          returns True or the ``CODE_REVIEW_MAP_PARALLELISM`` budget resolves to
+          <= 1, either of which forces the sequential fallback instead. The
           central ``llm_service`` clients already guard their shared state
           internally for this.
         - ``input_data`` carries the code under review via ``files`` or ``code``.
