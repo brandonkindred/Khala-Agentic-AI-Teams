@@ -599,7 +599,8 @@ _REVISION_SUGGESTIONS = (
 
 @dataclass
 class BrandComplianceAgent:
-    """Evaluates whether assets are on-brand using keyword matching against mission values."""
+    """Evaluates whether assets are on-brand via keyword matching against mission-derived
+    brand signals (values, differentiators, company name, and target audience)."""
 
     role: str = "Brand Compliance Reviewer"
 
