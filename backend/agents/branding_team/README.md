@@ -91,11 +91,14 @@ flowchart TB
 
     Mission --> Compliance[BrandComplianceAgent - outside the graph]
     BrandChecks[BrandCheckRequest list] --> Compliance
-    Mission --> Integrations[Market research / design-asset adapters - outside the graph]
+    Mission --> MarketResearch[Market research adapter - outside the graph]
+    Mission --> DesignAssets[Design-asset adapter - outside the graph]
+    GraphResult --> DesignAssets
 
     GraphResult --> TeamOutput[TeamOutput]
     Compliance --> TeamOutput
-    Integrations --> TeamOutput
+    MarketResearch --> TeamOutput
+    DesignAssets --> TeamOutput
     HumanReview[HumanReview] --> TeamOutput
 
     TeamOutput --> Approved{human_review.approved?}
