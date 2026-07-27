@@ -148,7 +148,7 @@ def _phase_section(phase: BrandPhase) -> str:
     Preconditions:
         ``phase`` is present in ``PHASE_ORDER`` and ``_PHASE_ITEMS``.
     Postconditions:
-        Returns ``_phase_header(phase)`` followed by *phase*'s lead-in (from
+        Returns ``_phase_header(phase, n)`` followed by *phase*'s lead-in (from
         ``_PHASE_INTROS`` unconditionally, or from ``_PHASE_DEPENDS_ON_PREV``
         only when *phase* has a predecessor in ``PHASE_ORDER``), its numbered
         items, and — only when *phase* has a successor in ``PHASE_ORDER`` and
