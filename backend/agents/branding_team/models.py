@@ -45,7 +45,9 @@ class WorkflowStatus(str, Enum):
 
     Intentionally team-local (not in ``shared.hitl``): the terminal
     ``READY_FOR_ROLLOUT`` is branding-specific. Only the string value
-    ``needs_human_decision`` overlaps other teams' enums.
+    ``needs_human_decision`` overlaps other teams' enums. See
+    ``backend/shared/hitl/README.md`` ("Non-shared: team WorkflowStatus")
+    for the full cross-team decision record.
     """
 
     NEEDS_HUMAN_DECISION = "needs_human_decision"
