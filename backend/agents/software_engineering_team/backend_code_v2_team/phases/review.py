@@ -326,8 +326,9 @@ def run_code_review_phase(
 
     Thin wrapper over the shared parametrised implementation
     (:func:`software_engineering_team.shared.phases.review.run_code_review_phase_impl`)
-    driven by this team's :data:`REVIEW_CONFIG`. ``_run_llm_review`` is
-    referenced here by bare module-global name (resolved at call time, not
+    that injects this team's LLM-based reviewer via ``llm_review_fn`` and the
+    per-team result class via ``phase_review_result_cls``. ``_run_llm_review``
+    is referenced here by bare module-global name (resolved at call time, not
     captured at import time), so this module stays the test patch surface for
     ``Agent`` / ``resolve_text_mode_strands_model`` -- exactly the technique
     ``run_review`` / ``run_microtask_review`` already use for the same reason.

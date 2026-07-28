@@ -1132,7 +1132,7 @@ def test_fe_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
 
 
 def test_fe_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path):
-    """Empty LLM review → passed with no issues; no build/lint step runs."""
+    """Empty LLM review → passed with no issues."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import (

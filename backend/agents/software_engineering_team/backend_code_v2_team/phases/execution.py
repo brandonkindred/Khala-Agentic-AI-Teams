@@ -360,8 +360,8 @@ GATE_CONFIG = GatedExecutionConfig(
     # QA and Security are independent analysis calls over the same
     # post-Code-Review snapshot on the backend (each scopes its tool-agent call
     # to its own spec.tool_kind) -- see docs/GATE_DEPENDENCY_GRAPH.md. The
-    # frontend keeps the default False until its tool-agent fan-out is scoped
-    # per gate the same way.
+    # frontend also enables this, since it scopes its own QA/security
+    # tool-agent fan-out per gate the same way.
     parallelize_qa_security=True,
 )
 
@@ -409,10 +409,9 @@ def run_execution_with_review_gates(
 
     Preconditions:
       - ``review_deps``, if given, supplies whichever of
-        ``build_verifier``/``code_review_agent``/``linting_tool_agent``/
-        ``qa_agent``/``security_agent``/``tool_agents`` the configured gates
-        need; unset ones mean "not available" to the underlying phase calls,
-        not an error.
+        ``code_review_agent``/``qa_agent``/``security_agent``/``tool_agents``
+        the configured gates need; unset ones mean "not available" to the
+        underlying phase calls, not an error.
     Postconditions:
       - Returns an ``ExecutionResult``; each microtask ends COMPLETED,
         SKIPPED, FAILED or REVIEW_FAILED.
