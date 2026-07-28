@@ -112,6 +112,16 @@ class WorkflowTraceEvent(BaseModel):
 
 
 class AIAgentDevelopmentWorkflowResult(BaseModel):
+    """Result envelope for ``AIAgentDevelopmentTeamLead.run_workflow``.
+
+    ``final_files`` is the last attempted file set after execution and any
+    problem-solving patches — not strictly "files that passed review". On
+    success it matches the reviewed/passing set; on abort or exhausted-retry
+    paths it may include unreviewed partial fixes so callers can inspect
+    progress. Check ``success`` (and ``needs_followup``) before treating
+    ``final_files`` as validated deliverables.
+    """
+
     task_id: str = ""
     success: bool = False
     current_phase: Phase = Phase.INTAKE
@@ -122,7 +132,15 @@ class AIAgentDevelopmentWorkflowResult(BaseModel):
     review_result: Optional[ReviewResult] = None
     problem_solving_result: Optional[ProblemSolvingResult] = None
     deliver_result: Optional[DeliverResult] = None
-    final_files: Dict[str, str] = Field(default_factory=dict)
+    final_files: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Last attempted file set after execution/problem-solving. On "
+            "success this is the reviewed set; on abort/exhausted paths it "
+            "may include unreviewed partial fixes. Gate on success before "
+            "treating these as validated deliverables."
+        ),
+    )
     summary: str = ""
     failure_reason: str = ""
     needs_followup: bool = False

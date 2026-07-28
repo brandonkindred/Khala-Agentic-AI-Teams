@@ -8,6 +8,16 @@ REQUIRED_ARTIFACT_HINTS = ("blueprint", "evaluation", "safety", "runbook", "mcp"
 
 
 def run_review(*, execution_result: ExecutionResult) -> ReviewResult:
+    """Deterministically check generated artifacts against required-category hints.
+
+    Preconditions: ``execution_result.files`` and ``.microtasks`` may be empty.
+      This is a purely deterministic, non-LLM check — no external agent calls.
+    Postconditions: returns a ``ReviewResult`` where ``passed`` is True iff no
+      ``high``/``critical`` severity issues were raised (one ``high`` issue per
+      missing ``REQUIRED_ARTIFACT_HINTS`` entry, plus one per ``FAILED``
+      microtask); ``required_artifacts_ok`` is True iff no ``artifact_gate``-
+      sourced issue was raised. Does not mutate ``execution_result``.
+    """
     issues = []
     file_names = "\n".join(execution_result.files.keys()).lower()
 

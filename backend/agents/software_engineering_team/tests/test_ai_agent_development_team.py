@@ -5,10 +5,13 @@ from pathlib import Path
 import pytest
 
 from llm_service import DummyLLMClient
+from software_engineering_team.ai_agent_development_team import orchestrator
 from software_engineering_team.ai_agent_development_team.models import (
     ExecutionResult,
     IntakeResult,
     Phase,
+    ProblemSolvingResult,
+    ReviewIssue,
     ReviewResult,
     ToolAgentKind,
 )
@@ -138,6 +141,98 @@ def test_ai_agent_development_workflow_problem_solving(tmp_path: Path):
     assert result.problem_solving_result is not None
     assert result.problem_solving_result.resolved is True
     assert result.iterations_used >= 1
+    # final_files must reflect the problem-solving placeholder patches, not
+    # the pre-loop snapshot of execution.files.
+    assert any("_placeholder.md" in path for path in result.final_files)
+
+
+def test_ai_agent_development_workflow_aborts_when_fix_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When problem-solving can't resolve a review failure, the bounded retry
+    loop aborts on the first iteration instead of retrying to exhaustion."""
+    monkeypatch.setattr(
+        orchestrator,
+        "run_execution",
+        lambda **kwargs: ExecutionResult(files={}, microtasks=[], notes=[], summary="executed"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_review",
+        lambda **kwargs: ReviewResult(
+            passed=False,
+            issues=[
+                ReviewIssue(
+                    source="execution",
+                    severity="high",
+                    description="Microtask failed: mt-1",
+                    recommendation="Re-run with clarified acceptance criteria.",
+                )
+            ],
+            required_artifacts_ok=True,
+            summary="Review failed with 1 high/critical issue.",
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_problem_solving",
+        lambda **kwargs: ProblemSolvingResult(
+            resolved=False,
+            fixes_applied=[],
+            files={},
+            summary="No deterministic fixes were available.",
+        ),
+    )
+
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    result = lead.run_workflow(repo_path=tmp_path, task=_build_task(), spec_content="Spec text")
+
+    assert result.success is False
+    assert result.needs_followup is True
+    assert result.failure_reason == "Review failed and no deterministic fix was available."
+    assert result.iterations_used == 1
+
+
+def test_ai_agent_development_workflow_exhausts_max_iterations(tmp_path: Path, monkeypatch) -> None:
+    """When every problem-solving pass resolves something but review never
+    passes, the bounded retry loop runs all iterations then reports failure."""
+    monkeypatch.setattr(
+        orchestrator,
+        "run_execution",
+        lambda **kwargs: ExecutionResult(files={}, microtasks=[], notes=[], summary="executed"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_review",
+        lambda **kwargs: ReviewResult(
+            passed=False,
+            issues=[
+                ReviewIssue(
+                    source="artifact_gate",
+                    severity="high",
+                    description="Missing expected artifact category: blueprint",
+                    recommendation="Add at least one artifact path containing 'blueprint'.",
+                )
+            ],
+            required_artifacts_ok=False,
+            summary="Review failed with 1 high/critical issue.",
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_problem_solving",
+        lambda **kwargs: ProblemSolvingResult(
+            resolved=True, fixes_applied=["placeholder"], files={}, summary="Applied a fix."
+        ),
+    )
+
+    lead = AIAgentDevelopmentTeamLead(FakeLLM())
+    result = lead.run_workflow(repo_path=tmp_path, task=_build_task(), spec_content="Spec text")
+
+    assert result.success is False
+    assert result.needs_followup is True
+    assert result.failure_reason == "Review did not pass after max iterations."
+    assert result.iterations_used == orchestrator.MAX_REVIEW_ITERATIONS
 
 
 def test_run_intake_recovers_fenced_json_response(monkeypatch) -> None:
