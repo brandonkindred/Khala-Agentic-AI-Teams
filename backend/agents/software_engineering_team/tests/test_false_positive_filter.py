@@ -672,7 +672,7 @@ def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
     """``_build_group_prompt`` emits per-finding anchor indices, the task description, and the full file body."""
     idx = CodebaseIndex(files={"app/main.py": "X" * 50}, existing_codebase="old")
     issues = [_issue(description="d0"), _issue(description="d1", line=None)]
-    prompt = _build_group_prompt(idx, "app/main.py", issues, _input(), max_inline_chars=10)
+    prompt = _build_group_prompt(idx, "app/main.py", issues, _input())
     assert "verdicts" in prompt.lower()
     assert "Finding index 0" in prompt and "Finding index 1" in prompt
     assert "wire up foo" in prompt  # task description
@@ -684,7 +684,7 @@ def test_group_prompt_caps_manifest_and_notes_overflow() -> None:
     """A submission with more files than the manifest cap lists only the cap and notes the rest."""
     files = {f"f{i:04d}.py": "x = 1\n" for i in range(305)}
     idx = CodebaseIndex(files=files)
-    prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input(), 1000)
+    prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input())
     assert "f0000.py" in prompt
     assert "f0304.py" not in prompt
     assert "call list_files()" in prompt
@@ -702,7 +702,7 @@ def test_group_prompt_uses_safe_fence_for_backtick_content() -> None:
     """A file body containing a ``` fence is wrapped in a longer fence so it cannot close early."""
     idx = CodebaseIndex(files={"app/doc.md": "before\n```python\nx = 1\n```\nafter\n"})
     prompt = _build_group_prompt(
-        idx, "app/doc.md", [_issue(file_path="app/doc.md")], _input(), 1000
+        idx, "app/doc.md", [_issue(file_path="app/doc.md")], _input()
     )
     # The wrapping fence is four backticks (one longer than the body's run); the
     # body's own ``` survives intact between them.
@@ -849,18 +849,17 @@ def test_filter_keeps_on_verifier_error() -> None:
     assert out == issues
 
 
-def test_filter_keeps_on_setup_exception() -> None:
+def test_filter_keeps_on_setup_exception(monkeypatch) -> None:
     """A failure in the verification *setup* (before the per-group loop) must be
     caught by the fail-safe guard and keep all findings — not crash the review."""
+    import code_review_agent.false_positive_filter as mod
 
-    class BoomCtxStub(DummyLLMClient):
-        # context sizing (compute_code_review_map_chunk_chars) calls this during
-        # setup, after the index is built — a perfect injection point.
-        def get_max_context_tokens(self) -> int:  # type: ignore[override]
-            raise RuntimeError("context sizing boom")
+    def _boom(*_a, **_k):
+        raise RuntimeError("model resolve boom")
 
+    monkeypatch.setattr(mod, "resolve_code_review_model", _boom)
     issues = [_issue()]
-    out = filter_false_positives(BoomCtxStub(), _input(), issues)
+    out = filter_false_positives(DummyLLMClient(), _input(), issues)
     assert out == issues  # kept, no exception propagated
 
 

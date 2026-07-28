@@ -47,10 +47,7 @@ from strands.models.model import Model as _StrandsModel
 from llm_service import LLMClient
 from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_map_chunk_chars,
-    parse_env_int,
-)
+from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .code_boundaries import node_end_line, node_start_line
@@ -76,13 +73,6 @@ _SEARCH_MATCH_LIMIT = 60
 # read_file(), so nothing is actually inaccessible -- only the inline listing
 # is bounded.
 _MANIFEST_LIMIT = 300
-
-# Cap on the task description / each acceptance criterion inlined into the
-# verification prompt. Unlike the cited file body (deliberately kept in full
-# -- see _build_group_prompt), there is no tool the model can call to read the
-# rest of an oversized task field, so an unbounded field has no fallback path
-# at all if it blows the prompt past context.
-_CONTEXT_FIELD_CHARS = 4_000
 
 # Column-0 token prefixes that should NOT be counted as construct start lines
 # by the heuristic fallback used for non-Python files.
@@ -917,14 +907,8 @@ def _build_group_prompt(
     file_path: str,
     issues: List[CodeReviewIssue],
     input_data: CodeReviewInput,
-    max_inline_chars: int,
 ) -> str:
     """Render the user prompt for verifying one file's findings.
-
-    ``max_inline_chars`` is accepted but intentionally unused -- retained only
-    for call-site compatibility with callers still computing it. See the
-    module-level fail-safe rationale for why the primary file body is inlined
-    in full rather than bounded by it.
 
     The prompt inlines the cited file's full content (so the model has the
     primary evidence even without a tool call) and lists up to
@@ -935,12 +919,9 @@ def _build_group_prompt(
 
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order) and never exceeds the inline budget for the
-          primary file body. The task description and each acceptance criterion
-          are not capped so an oversized task field can never dominate the prompt 
-          or overflow the context.
+          matching ``issues`` order) and inlines the cited file's full body.
+          The task description and each acceptance criterion are not capped.
     """
-    _ = max_inline_chars  # retained for call-site compatibility
     parts: List[str] = []
     task = input_data.task_description.strip()
     if task:
@@ -991,7 +972,6 @@ def _verify_group(
     file_path: str,
     issues: List[CodeReviewIssue],
     input_data: CodeReviewInput,
-    max_inline_chars: int,
 ) -> Dict[int, _Verdict]:
     """Run one verification LLM call over all findings for a single file.
 
@@ -1003,7 +983,7 @@ def _verify_group(
           the ``issues``/``group`` list the caller passed in), so callers may
           index back into their own list with it.
     """
-    prompt = _build_group_prompt(index, file_path, issues, input_data, max_inline_chars)
+    prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(
         model=model,
         system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
@@ -1110,7 +1090,6 @@ def _verify_and_filter(
         return list(issues)
 
     model = resolve_code_review_model(llm)
-    max_inline_chars = compute_code_review_map_chunk_chars(llm)
 
     # Group findings by the resolved canonical path of their cited file so each
     # verification call shares one real file's context (and can still read any
@@ -1143,7 +1122,7 @@ def _verify_and_filter(
     def _verify_one(item: Tuple[str, List[CodeReviewIssue]]) -> Dict[int, _Verdict]:
         file_path, group = item
         try:
-            return _verify_group(model, index, file_path, group, input_data, max_inline_chars)
+            return _verify_group(model, index, file_path, group, input_data)
         except Exception as exc:  # noqa: BLE001 - best-effort; a failure must keep findings, not drop them
             logger.warning(
                 "FalsePositiveFilter: verification failed for %s (%s: %s); keeping its findings",
