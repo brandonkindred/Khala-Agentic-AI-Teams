@@ -127,6 +127,9 @@ flowchart LR
 
 **Frontend internal pipeline order:** UX Designer → UI Designer → Design System → Frontend Architect → Feature Implementation → UX Engineer → Performance Engineer → Build/Release
 
+Build verification (lint + build) is a single CI-owned gate that runs once, before
+Code Review; the Code Review phase itself does not re-run lint or build checks.
+
 Data and control-flow dependencies among the build/code-review/security/QA/DbC
 gates specifically (a subset of the full sequences above — it does not cover
 acceptance verification, Tech Lead review, or accessibility), and which of them
@@ -156,7 +159,9 @@ All planning artifacts are written to a `plan/` folder at the project root (work
    - Create feature branch
    - **Per-task planning** – Review codebase, produce implementation plan (feature intent, what to change, algorithms/data structures, tests needed). The plan drives the implementation; code generation must realize the plan's what_changes and tests_needed.
    - Generate code (with clarification loop via Tech Lead if needed)
-   - **Build verification** (pytest for backend, ng build for frontend)
+   - **Build verification** (pytest for backend, ng build for frontend) — the sole
+     lint/build gate, owned by CI; it runs once here and is not repeated by the
+     Code review step below
    - **Code review** (against spec and standards)
    - **Acceptance criteria verification** (optional; per-criterion check)
    - **Security review** (per task for backend; per task for frontend)
