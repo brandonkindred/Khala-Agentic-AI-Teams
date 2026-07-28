@@ -138,7 +138,7 @@ reset and used again. `LLM_FAILOVER_FAST_429` (default **on**; `false`/`0`/`no` 
 non-last failover-chain clients with a **zero** in-place 429-retry budget so the hand-off isn't
 delayed by the slow `LLM_RATE_LIMIT_*` backoff above — the **last** provider in the chain keeps the
 configured backoff (nowhere left to fail over to), so a single-entry list behaves exactly as before.
-`LLM_FAILOVER_RATE_WINDOW_S` (default `3600`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
+`LLM_FAILOVER_RATE_WINDOW_S` (default `300`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
 7 days) are the fallback reset windows used to compute `reset_at` only when the 429 carries no
 `Retry-After`; the weekly window is used when the error matches the Ollama weekly-limit message, the
 rate window otherwise. The provider list is the sole source of LLM resolution: with an empty list (or
