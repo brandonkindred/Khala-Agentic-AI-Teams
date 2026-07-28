@@ -626,13 +626,16 @@ class SideEffectImpactFindingLLM(BaseModel):
 
     Mirrors the fields ``side_effect_impact_pass._coerce_finding`` actually
     populates on ``CodeReviewIssue`` — severity, category, file_path, line,
-    description, suggestion, and ``pre_existing`` (``StrictBool``, matching
-    :class:`ChunkReviewIssueLLM`'s rationale for rejecting a bare numeric/
-    non-bool value rather than silently coercing it). Intentionally omits
-    ``start_line``: that pass's own ``_coerce_finding`` never populates it
-    either (its prompt's output format has no multi-line-anchor field).
-    Design-only: not yet consumed anywhere — see
-    :class:`ArchitectureConsistencyFindingLLM`.
+    description, suggestion, and ``pre_existing``. ``pre_existing`` is
+    ``StrictBool`` here (matching :class:`ChunkReviewIssueLLM`'s rationale),
+    which is stricter than the current pass's ``chunking._coerce_bool``:
+    a bare numeric ``1``/``0`` or a string token is rejected at validation
+    time and drives ``complete_validated``'s corrective retry, rather than
+    being silently coerced to ``False`` (or a truthy string to ``True``) as
+    ``_coerce_bool`` does today. Intentionally omits ``start_line``: that
+    pass's own ``_coerce_finding`` never populates it either (its prompt's
+    output format has no multi-line-anchor field). Design-only: not yet
+    consumed anywhere — see :class:`ArchitectureConsistencyFindingLLM`.
     """
 
     severity: _ChunkReviewIssueSeverity = Field(
