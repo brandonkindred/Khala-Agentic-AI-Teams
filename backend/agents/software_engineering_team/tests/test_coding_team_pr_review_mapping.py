@@ -318,24 +318,29 @@ def test_format_comment_body_falls_back_to_derived_title_when_blank() -> None:
 
 
 def test_format_issue_comment_prefixes_file_location() -> None:
-    body = format_issue_comment(_Issue(file_path="a.py", description="D1"))
+    body = format_issue_comment(_Issue(file_path="a.py", title="Bad import", description="D1"))
     assert body.startswith("`a.py` — ")
     assert "D1" in body
+    assert "Bad import" in body
 
 
 def test_format_issue_comment_without_file_has_no_prefix() -> None:
-    body = format_issue_comment(_Issue(file_path="", description="D2"))
+    body = format_issue_comment(_Issue(file_path="", title="Bad import", description="D2"))
     assert not body.startswith("`")
     assert "D2" in body
+    assert "Bad import" in body
 
 
 def test_format_issue_comment_with_none_file_has_no_prefix() -> None:
     # A finding can carry file_path=None; the `... or ""` guard must treat it like
     # an empty path (no location prefix) rather than rendering `None`.
-    body = format_issue_comment(_Issue(file_path=None, description="D3"))  # type: ignore[arg-type]
+    body = format_issue_comment(
+        _Issue(file_path=None, title="Bad import", description="D3")  # type: ignore[arg-type]
+    )
     assert not body.startswith("`")
     assert "None" not in body
     assert "D3" in body
+    assert "Bad import" in body
 
 
 def test_inline_comment_to_timeline_body_prefixes_path_and_line() -> None:
