@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Collection, Dict, List, Optional, Tuple
 
 from branding_team.models import BrandingMission, ColorPalette
+from branding_team.shared.json_recovery import recover_json_object
 from shared.env_config import env_int
 
 from .prompts import (
@@ -47,42 +47,35 @@ def _coerce_mission(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _loads_lenient(raw: str) -> Optional[Dict[str, Any]]:
+def _loads_lenient(
+    raw: str, required_keys: Optional[Collection[str]] = None
+) -> Optional[Dict[str, Any]]:
     """Parse an LLM JSON object, tolerating markdown fences / surrounding prose.
 
-    Returns the dict, or None when nothing parseable is found. The leading-fence
-    regex only strips a fence at the start of the stripped text; replies that
-    wrap the JSON in prose fall through to the outermost ``{ ... }`` slice below,
-    so both shapes are handled.
+    Delegates to the shared ``recover_json_object`` helper (whole-string parse,
+    then a fenced/prose-wrapped balanced ``{...}`` fallback) rather than
+    re-deriving that logic here. Returns the dict, or ``None`` when nothing
+    parseable is found.
+
+    Preconditions:
+        ``required_keys``, when given, anchors recovery on the object that
+        actually carries at least one of them — see ``recover_json_object``.
     """
-    text = (raw or "").strip()
-    if not text:
-        return None
-    cleaned = re.sub(r"^```(?:json)?\s*", "", text)
-    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-    parsed: Any = None
-    try:
-        parsed = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-            except (json.JSONDecodeError, TypeError):
-                parsed = None
-    return parsed if isinstance(parsed, dict) else None
+    return recover_json_object(raw, required_keys=required_keys)
 
 
-def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
-    """Parse the silent extractor's JSON output → (mission_update, suggested_questions).
+def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str], bool]:
+    """Parse the silent extractor's JSON output → (mission_update, suggested_questions, degraded).
 
     Tolerates markdown fences and stray prose around a JSON object. Returns
-    empty values on any parse failure — the conversation reply is unaffected.
+    empty values and ``degraded=True`` on parse failure so the caller can
+    surface the degradation instead of treating it as an indistinguishable
+    no-op.
     """
-    parsed = _loads_lenient(raw)
+    parsed = _loads_lenient(raw, required_keys=_EXTRACTION_KEYS)
     if parsed is None:
         logger.warning("Branding extractor produced unparseable output; treating as no-op")
-        return {}, []
+        return {}, [], True
 
     mission_update = _coerce_mission(parsed.get("mission_update"))
     # Schema-drift fallback: when the model omits the ``mission_update``
@@ -94,7 +87,7 @@ def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
         if top_level_mission:
             mission_update = top_level_mission
     suggested_questions = _coerce_suggestions(parsed.get("suggested_questions"))
-    return mission_update, suggested_questions
+    return mission_update, suggested_questions, False
 
 
 # Single source of truth for the mission fields the assistant reads/writes,
@@ -121,6 +114,13 @@ _MISSION_STRUCTURED_FIELDS = ("color_palettes", "selected_palette_index")
 _MISSION_FIELD_NAMES = (
     set(_MISSION_STR_FIELDS) | set(_MISSION_LIST_FIELDS) | set(_MISSION_STRUCTURED_FIELDS)
 )
+
+# Top-level keys a well-formed extraction payload may carry (the canonical
+# ``mission_update``/``suggested_questions`` wrapper, or top-level mission
+# fields via the schema-drift fallback below) — anchors JSON recovery on the
+# object that actually carries the extraction schema when a reply contains
+# more than one JSON object.
+_EXTRACTION_KEYS = {"mission_update", "suggested_questions"} | _MISSION_FIELD_NAMES
 
 # Display order for the brief block rendered into the prompt templates.
 _MISSION_BRIEF_ORDER = (
@@ -414,12 +414,18 @@ class BrandingAssistantAgent:
         messages: List[Tuple[str, str]],
         current_mission: BrandingMission,
         user_message: str,
-    ) -> Tuple[str, BrandingMission, List[str]]:
-        """Produce assistant reply, updated mission, and suggested follow-up questions.
+    ) -> Tuple[str, BrandingMission, List[str], bool]:
+        """Produce assistant reply, updated mission, suggested follow-up questions, and a degradation flag.
 
         messages: conversation history as list of (role, content) tuples.
         current_mission: mission state before this turn.
         user_message: latest user message.
+
+        The returned ``degraded`` flag is ``True`` iff this turn's mission
+        extraction was lost — either the extractor call raised, or its output
+        couldn't be parsed (see ``_parse_extraction``) — so the caller can
+        surface that degradation instead of it being indistinguishable from
+        the extractor legitimately having nothing new to report.
         """
         brief_block = _format_brief_block(current_mission)
         history = _format_history(messages)
@@ -447,6 +453,7 @@ class BrandingAssistantAgent:
                 "I'm here to help build your brand. Could you tell me your company name and what you do?",
                 current_mission,
                 list(_DEFAULT_SUGGESTIONS),
+                True,
             )
 
         reply_text = _strip_accidental_json(raw_reply)
@@ -466,14 +473,16 @@ class BrandingAssistantAgent:
 
         mission_update: Dict[str, Any] = {}
         suggested_questions: List[str] = []
+        degraded = False
         try:
             raw_extraction = str(self._extraction_agent(extraction_prompt)).strip()
-            mission_update, suggested_questions = _parse_extraction(raw_extraction)
+            mission_update, suggested_questions, degraded = _parse_extraction(raw_extraction)
         except Exception:
             logger.exception("Branding extraction LLM failed; conversation reply unaffected")
+            degraded = True
 
         if not suggested_questions:
             suggested_questions = list(_DEFAULT_SUGGESTIONS)
 
         updated_mission = _merge_mission_update(current_mission, mission_update)
-        return reply_text, updated_mission, suggested_questions
+        return reply_text, updated_mission, suggested_questions, degraded
