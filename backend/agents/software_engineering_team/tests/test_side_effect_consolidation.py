@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewIssue
 from code_review_agent.side_effect_consolidation import consolidate_side_effect_issues
@@ -40,14 +41,24 @@ def test_two_findings_in_same_python_function_merge() -> None:
     )
     index = _index({"app/foo.py": content})
     issues = [
-        _issue(line=2, description="foo mutates shared state"),
-        _issue(line=4, description="foo's return type changed"),
+        _issue(
+            line=2,
+            description="foo mutates shared state",
+            suggestion="remove global mutation",
+        ),
+        _issue(
+            line=4,
+            description="foo's return type changed",
+            suggestion="restore return type",
+        ),
     ]
     result = consolidate_side_effect_issues(issues, index)
     assert len(result) == 1
     assert result[0].category == "side-effects"
     assert "foo mutates shared state" in result[0].description
     assert "foo's return type changed" in result[0].description
+    assert "remove global mutation" in result[0].suggestion
+    assert "restore return type" in result[0].suggestion
     assert result[0].start_line == 2
     assert result[0].line == 4
 
@@ -185,6 +196,27 @@ def test_severity_elevates_to_highest_in_group() -> None:
     result = consolidate_side_effect_issues(issues, index)
     assert len(result) == 1
     assert result[0].severity == "critical"
+
+
+@pytest.mark.parametrize(
+    ("severities", "expected"),
+    [
+        (["low", "medium"], "medium"),
+        (["medium", "high"], "high"),
+        (["info", "low"], "low"),
+        (["high", "critical"], "critical"),
+    ],
+)
+def test_severity_elevates_across_all_adjacent_ranks(severities, expected) -> None:
+    content = "def foo():\n    x = 1\n    return x\n"
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(line=2, severity=severities[0], description="a"),
+        _issue(line=3, severity=severities[1], description="b"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert result[0].severity == expected
 
 
 def test_pre_existing_true_only_when_all_members_are() -> None:

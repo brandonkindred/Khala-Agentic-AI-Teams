@@ -80,13 +80,6 @@ _SEARCH_MATCH_LIMIT = 60
 # is bounded.
 _MANIFEST_LIMIT = 300
 
-# Cap on the task description / each acceptance criterion inlined into the
-# verification prompt. Unlike the cited file body (deliberately kept in full
-# -- see _build_group_prompt), there is no tool the model can call to read the
-# rest of an oversized task field, so an unbounded field has no fallback path
-# at all if it blows the prompt past context.
-_CONTEXT_FIELD_CHARS = 4_000
-
 # Default per-group verification call timeout (seconds); see
 # ``_verify_timeout_seconds`` below.
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60
@@ -786,10 +779,11 @@ def _build_group_prompt(
 
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order) and never exceeds the inline budget for the
-          primary file body. The task description and each acceptance criterion
-          are not capped so an oversized task field can never dominate the prompt 
-          or overflow the context.
+          matching ``issues`` order). The primary file body is inlined in full,
+          uncapped by ``max_inline_chars`` (see above). The task description and
+          each acceptance criterion are likewise inlined without a cap -- an
+          oversized task field has no fallback truncation and can dominate the
+          prompt or push it past the model's context window.
     """
     _ = max_inline_chars  # retained for call-site compatibility
     parts: List[str] = []

@@ -932,10 +932,10 @@ Python, a column-0 heuristic for other languages). Set to `false`/`0`/`no` to
 disable consolidation (any other value, or unset, leaves it enabled) — this
 only turns off merging, the underlying findings are unaffected.
 
-Any setup or LLM failure is fail-safe: it is logged and yields no additional
-findings, so a broken pass never blocks or changes the rest of the review. Set
-to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
-enabled).
+Any setup failure is fail-safe: it is logged and the original `side-effects`
+findings pass through unchanged, so a broken consolidation step never blocks
+or changes the rest of the review. Set to `false`/`0`/`no` to disable
+consolidation (any other value, or unset, leaves it enabled).
 
 ---
 

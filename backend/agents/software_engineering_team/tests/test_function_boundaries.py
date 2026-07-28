@@ -82,6 +82,16 @@ def test_line_outside_any_construct_returns_none() -> None:
     assert enclosing_construct(content, 4) is None
 
 
+def test_enclosing_construct_maps_pre_numbered_lines() -> None:
+    content = "4240: def foo():\n4241:     return 1\n"
+    stripped, physical, _mapper = strip_numbered_prefixes(content, line_number=4241)
+    result = enclosing_construct(stripped, physical)
+    assert result is not None
+    assert result.name == "foo"
+    assert result.start_line == 1
+    assert result.end_line == 2
+
+
 # --------------------------------------------------------------------------- enclosing_construct_start_heuristic
 
 

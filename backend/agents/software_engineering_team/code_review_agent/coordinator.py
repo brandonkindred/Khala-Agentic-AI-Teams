@@ -11,8 +11,10 @@ and duplicated capabilities the per-chunk view cannot see — see
 ``architecture_consistency_pass``) → side-effect / blast-radius pass (a single
 additive, whole-repository check for behavior changes that break a caller
 elsewhere in the codebase, or ship undocumented — see
-``side_effect_impact_pass``) → deterministic merge (dedupe, severity gate,
-safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
+``side_effect_impact_pass``) → side-effect consolidation (merges related
+``side-effects`` findings that share an enclosing construct or cite one
+another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
+severity gate, safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
 after recovery (retry, bisection, and a last-resort thinking-off retry) degrades
