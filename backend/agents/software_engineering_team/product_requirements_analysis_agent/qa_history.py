@@ -177,10 +177,11 @@ def _format_field_value(marker: str, value: str) -> str:
     corrupting the file on the next :func:`record_answers` write.
 
     Preconditions: ``marker`` is one of this module's field marker constants;
-        ``value`` is a non-empty string (may contain embedded ``\\n``).
+        ``value`` is a string (may be empty; may contain embedded ``\\n``).
     Postconditions: returns a string ending in ``\\n`` whose first line is
-        ``f"{marker} {value's first line}"`` and whose remaining lines are
-        ``value``'s continuation lines, escaped; never raises.
+        ``f"{marker} {value's first line}"`` (``f"{marker} \\n"`` when ``value``
+        is empty) and whose remaining lines are ``value``'s continuation lines,
+        escaped; never raises.
     """
     value_lines = value.split("\n")
     rendered = [value_lines[0], *(_escape_continuation_line(vl) for vl in value_lines[1:])]
