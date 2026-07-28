@@ -37,8 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from shared.concurrency import parallel_map
-from shared.postgres import is_postgres_enabled
-from shared.postgres.client import get_conn
+from shared.postgres import PostgresHelperMixin, is_postgres_enabled
 
 from ..market_data_service import OHLCVBar, compute_adv_from_bars
 from . import paths as _paths
@@ -400,10 +399,11 @@ def _default_workers(symbol_count: int) -> int:
     return max(1, min(symbol_count, 16))
 
 
-class MarketDataCache:
+class MarketDataCache(PostgresHelperMixin):
     """Snapshot-based cache.  See module docstring."""
 
     def __init__(self, *, cache_root: Optional[Path] = None) -> None:
+        super().__init__()
         self._cache_root: Optional[Path] = cache_root
         # In-memory index used when Postgres is disabled.  Each entry is a
         # full ``SnapshotMeta``; lookups iterate (the table is small and
@@ -454,27 +454,23 @@ class MarketDataCache:
     ) -> Optional[SnapshotMeta]:
         if is_postgres_enabled():
             try:
-                from shared.postgres import dict_row  # lazy: optional dep at unit-test time
-
-                with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-                    cur.execute(
-                        """
-                        SELECT symbol, asset_class, frequency, provider, fetch_ts,
-                               start_date, end_date, row_count, sha256,
-                               schema_version, parquet_path
-                          FROM investment_market_data_snapshots
-                         WHERE symbol = %s
-                           AND asset_class = %s
-                           AND frequency = %s
-                           AND fetch_ts <= %s
-                           AND start_date <= %s
-                           AND end_date >= %s
-                         ORDER BY fetch_ts DESC
-                         LIMIT 1
-                        """,
-                        (symbol, asset_class, frequency, as_of_dt, start, end),
-                    )
-                    row = cur.fetchone()
+                row = self._fetch_one(
+                    """
+                    SELECT symbol, asset_class, frequency, provider, fetch_ts,
+                           start_date, end_date, row_count, sha256,
+                           schema_version, parquet_path
+                      FROM investment_market_data_snapshots
+                     WHERE symbol = %s
+                       AND asset_class = %s
+                       AND frequency = %s
+                       AND fetch_ts <= %s
+                       AND start_date <= %s
+                       AND end_date >= %s
+                     ORDER BY fetch_ts DESC
+                     LIMIT 1
+                    """,
+                    (symbol, asset_class, frequency, as_of_dt, start, end),
+                )
                 if row is None:
                     return None
                 return _row_to_meta(row)
@@ -502,29 +498,28 @@ class MarketDataCache:
     def _record_snapshot(self, meta: SnapshotMeta) -> None:
         if is_postgres_enabled():
             try:
-                with get_conn() as conn, conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO investment_market_data_snapshots
-                            (symbol, asset_class, frequency, provider, fetch_ts,
-                             start_date, end_date, row_count, sha256,
-                             schema_version, parquet_path)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            meta.symbol,
-                            meta.asset_class,
-                            meta.frequency,
-                            meta.provider,
-                            meta.fetch_ts,
-                            meta.start_date,
-                            meta.end_date,
-                            meta.row_count,
-                            meta.sha256,
-                            meta.schema_version,
-                            meta.parquet_path,
-                        ),
-                    )
+                self._execute(
+                    """
+                    INSERT INTO investment_market_data_snapshots
+                        (symbol, asset_class, frequency, provider, fetch_ts,
+                         start_date, end_date, row_count, sha256,
+                         schema_version, parquet_path)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        meta.symbol,
+                        meta.asset_class,
+                        meta.frequency,
+                        meta.provider,
+                        meta.fetch_ts,
+                        meta.start_date,
+                        meta.end_date,
+                        meta.row_count,
+                        meta.sha256,
+                        meta.schema_version,
+                        meta.parquet_path,
+                    ),
+                )
                 return
             except Exception:
                 logger.exception(

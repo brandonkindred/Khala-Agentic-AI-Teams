@@ -611,13 +611,15 @@ class TeamOutput(BaseModel):
     """Aggregate output of a branding run: status, phase artifacts, and cross-cutting results.
 
     Invariants:
-        - ``degraded_phases`` is intended to list phases whose structured output
-          could not be parsed from the LLM's response and was defaulted to a bare
-          ``model_class()`` instance. This is currently aspirational: no call site
-          populates it yet — ``orchestrator._extract_phase_output`` silently
-          defaults to ``model_class()`` on parse failure without appending the
-          phase here. Until that's wired up, an empty list carries no
-          guarantee that every phase output reflects a successfully parsed LLM
+        - ``degraded_phases`` lists every reached ``BrandPhase`` whose structured
+          output could not be parsed from the LLM's response and was defaulted to
+          a bare ``model_class()`` instance instead. ``orchestrator._extract_phase_output``
+          is the sole source of the per-phase ``degraded`` flag; ``orchestrator.run``
+          (thread path) and the Temporal finalize activity both fold those flags
+          into this list via ``_assemble_team_output``'s ``degraded_phases`` parameter.
+          A phase absent from this list — including one not reached this run —
+          carries no claim either way; only membership is meaningful. An empty
+          list means every reached phase's output was a successfully parsed LLM
           response.
     """
 

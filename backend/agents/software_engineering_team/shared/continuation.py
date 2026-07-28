@@ -46,11 +46,25 @@ class ContinuationResult:
     """Result of a continuation attempt.
 
     Attributes:
-        success: Whether continuation produced a complete response.
-        content: The concatenated content from all continuation cycles.
-        cycles_used: Number of continuation cycles attempted.
-        partial_responses: List of all partial responses collected.
-        final_done_reason: The done_reason from the last response.
+        success: Whether continuation produced a complete response
+            (``final_done_reason != "length"``).
+        content: The concatenated content from all continuation cycles,
+            deduplicated at cycle boundaries by `ResponseContinuator._merge_responses`.
+        cycles_used: Number of continuation cycles attempted, including a
+            final failed cycle when `success` is False due to a request error.
+        partial_responses: List of all partial responses collected, one per
+            cycle that completed successfully. A cycle that raised an error
+            is NOT appended here, so `len(partial_responses)` can be less
+            than `cycles_used` in the error case.
+        final_done_reason: The `done_reason` from the last successful
+            response, or `"error"` if the last cycle raised, or `"length"`
+            if `max_cycles` was exhausted while still truncated.
+
+    Invariants:
+        * `cycles_used == len(partial_responses)` holds whenever construction
+          came from a normal (non-error) return path; it does NOT hold on the
+          error path, where `cycles_used` counts the failed attempt but
+          `partial_responses` does not include it.
     """
 
     success: bool
@@ -62,6 +76,13 @@ class ContinuationResult:
 
 class LLMContinuationExhaustedError(Exception):
     """Raised when continuation attempts are exhausted without success.
+
+    Note: this exception is defined for callers that prefer an
+    exception-based API, but nothing in this module currently raises it —
+    `ResponseContinuator.attempt_continuation` reports exhaustion by
+    returning `ContinuationResult(success=False, final_done_reason="length")`
+    instead. A caller wanting exception-based signaling must raise this
+    itself from the returned `ContinuationResult`.
 
     Attributes:
         partial_content: The accumulated partial content.
@@ -108,6 +129,22 @@ class ResponseContinuator:
             max_cycles: Maximum number of continuation cycles.
             num_predict: Max tokens to generate per continuation turn. If None, uses
                 LLM_MAX_TOKENS env or DEFAULT_MAX_OUTPUT_TOKENS (32768) to match main LLM client.
+
+        Preconditions:
+            * `base_url` and `model` are expected to be non-empty; neither is
+              validated here, so an empty value is only surfaced later as an
+              HTTP failure from `_send_chat_request`, not at construction time.
+            * `max_cycles` is expected to be `>= 1`; a value of 0 is accepted
+              without error but makes `attempt_continuation`'s loop a no-op,
+              immediately returning `success=False` with `cycles_used=0`.
+        Postconditions:
+            * `self.num_predict` resolves in this order: the explicit
+              `num_predict` argument if not None, else the `LLM_MAX_TOKENS`
+              env var parsed as `int` if set, else `DEFAULT_MAX_OUTPUT_TOKENS`.
+            * If `LLM_MAX_TOKENS` is set but not parseable as `int`, this
+              raises `ValueError` — that env var is not defensively parsed
+              here (unlike the numeric-env-var convention described in the
+              project docs for other settings).
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -146,6 +183,42 @@ class ResponseContinuator:
 
         Returns:
             ContinuationResult with success status and accumulated content.
+
+        Preconditions:
+            * `partial_content` is the truncated content collected so far
+              (may be empty); it is treated as cycle 0 and is always the
+              first entry of the returned `partial_responses`.
+
+        Postconditions (the truncation-handling contract):
+            * Runs at most `self.max_cycles` request cycles. Each cycle
+              sends the accumulated conversation and inspects the response's
+              `done_reason`.
+            * Success path: as soon as a cycle's `done_reason != "length"`,
+              returns immediately with `success=True`, `cycles_used` equal to
+              that cycle's 1-based count, `final_done_reason` set to that
+              cycle's `done_reason`, and `content` equal to all responses
+              merged so far (via `_merge_responses`, which strips duplicate
+              boundary text).
+            * Still-truncated path: if every cycle's `done_reason == "length"`
+              through `max_cycles` cycles, returns `success=False`,
+              `cycles_used == self.max_cycles`, `final_done_reason="length"`,
+              and `content` equal to the full merge of all cycles attempted.
+            * Error path: if `_send_chat_request` raises for any reason, this
+              method does NOT retry or re-raise — it returns immediately with
+              `success=False`, `final_done_reason="error"`, `cycles_used`
+              equal to the failed cycle's 1-based count, and `content`/
+              `partial_responses` reflecting only the cycles that completed
+              *before* the failure (the failed cycle's response is never
+              collected, since none was received).
+            * `task_id`/`project_root`, when provided, cause each cycle's raw
+              response to be appended to a log file as a side effect. A file
+              WRITE failure there is swallowed (see
+              `_log_continuation_response`) and never affects the returned
+              `ContinuationResult`. However, a directory-creation failure in
+              `_log_continuation_response` (e.g. permission denied on the
+              log directory) is NOT wrapped here either, and propagates
+              uncaught out of this method — logging is best-effort for
+              writes only, not for directory setup.
         """
         partial_responses = [partial_content]
         accumulated_content = partial_content
@@ -257,6 +330,20 @@ class ResponseContinuator:
 
         Returns:
             List of message dicts for the chat API.
+
+        Preconditions:
+            * `partial_responses` is non-empty (callers always seed it with
+              at least the initial truncated content).
+        Postconditions:
+            * Returns a flat list alternating `{"role": "assistant", ...}`
+              (one per entry in `partial_responses`) with a following
+              `{"role": "user", ...}` continuation prompt, prefixed by an
+              optional system message and the original user message.
+            * Every entry in `partial_responses`, including the last, is
+              followed by a continuation prompt — the `if`/`else` branching
+              on whether an entry is the last one currently produces the
+              same `_create_continuation_prompt(partial)` call in both
+              branches, so the last entry is not treated differently today.
         """
         messages: List[Dict[str, str]] = []
 
@@ -293,6 +380,16 @@ class ResponseContinuator:
 
         Returns:
             Continuation prompt string.
+
+        Preconditions:
+            * None; `partial_content` may be empty.
+        Postconditions:
+            * Pure function (no side effects, no I/O).
+            * Embeds only the last `CONTINUATION_CONTEXT_CHARS` (150)
+              characters of `partial_content` (or all of it if shorter), with
+              newlines replaced by the literal two-character sequence `\\n`
+              so the quoted excerpt renders on one line in the prompt.
+            * If `partial_content` is empty, embeds an empty quoted excerpt.
         """
         last_chars = partial_content[-CONTINUATION_CONTEXT_CHARS:] if partial_content else ""
         last_chars_escaped = last_chars.replace("\n", "\\n")
@@ -321,6 +418,22 @@ class ResponseContinuator:
 
         Raises:
             Exception: If the request fails.
+
+        Preconditions:
+            * `messages` is non-empty (built by `_build_continuation_messages`).
+        Postconditions:
+            * On an HTTP 200 response, returns `(content, done_reason)` where
+              `content` defaults to `""` and `done_reason` defaults to
+              `"stop"` if either key is absent from the response body.
+            * On any non-200 HTTP response, raises a plain `Exception`
+              (not a specific subclass) carrying the status code and body
+              text — callers distinguish this from other failures only by
+              message content, not exception type.
+            * Any transport-level failure (timeout, connection error, JSON
+              decode error) propagates as whatever `httpx`/stdlib exception
+              it naturally raises; this method adds no additional handling.
+            * `self.timeout` bounds the whole request; `self.num_predict`
+              is sent as `options.num_predict` on every call.
         """
         url = f"{self.base_url}/api/chat"
 
@@ -371,6 +484,18 @@ class ResponseContinuator:
 
         Returns:
             Merged content string.
+
+        Preconditions:
+            * None; `partial_responses` may be empty or contain empty strings.
+        Postconditions:
+            * Returns `""` if `partial_responses` is empty, or the single
+              element unchanged if there is exactly one.
+            * Otherwise, concatenates left-to-right, and before appending
+              each subsequent response, strips a detected overlap (see
+              `_find_overlap`) from the START of that response only — overlap
+              is checked independently at each boundary against the merged
+              result so far, not globally across the whole merged string.
+            * Pure function (no side effects, no I/O).
         """
         if not partial_responses:
             return ""
@@ -401,6 +526,20 @@ class ResponseContinuator:
 
         Returns:
             Length of overlap found, or 0 if no significant overlap.
+
+        Preconditions:
+            * None; either argument may be empty (returns 0 immediately).
+        Postconditions:
+            * Searches candidate overlap lengths from
+              `min(len(text1), len(text2), 500)` down to `min_overlap`,
+              inclusive, and returns the length of the FIRST (i.e. longest)
+              length for which `text1`'s trailing substring exactly equals
+              `text2`'s leading substring of that same length.
+            * Returns 0 if no candidate length in that range matches,
+              including when `max_check < min_overlap` (checked range is
+              empty) — an overlap shorter than `min_overlap` is never
+              reported even if one exists.
+            * Pure function (no side effects, no I/O).
         """
         if not text1 or not text2:
             return 0
@@ -433,6 +572,24 @@ class ResponseContinuator:
             response_content: The response content from this cycle.
             done_reason: The done_reason from the API response.
             project_root: Root directory for the log folder. If None, uses cwd.
+
+        Preconditions:
+            * `task_id` may contain arbitrary characters; only
+              alphanumerics, `-`, and `_` survive into the filename, all
+              others are replaced with `_`.
+        Postconditions:
+            * Best-effort only, but only for the FILE WRITE step: on success,
+              appends a formatted entry to
+              `{project_root or cwd}/continuation_logs/{safe_task_id}_continuation.txt`,
+              creating the directory if needed.
+            * `log_dir.mkdir(...)` runs OUTSIDE the try/except below — if
+              directory creation fails (e.g. permission denied), that
+              exception propagates uncaught to the caller
+              (`attempt_continuation`), unlike the write step.
+            * Only the subsequent `open(...)`/`write(...)` is wrapped: any
+              exception there is caught, logged as a warning, and swallowed
+              — this method returns normally in that case, and its caller
+              cannot detect a swallowed write failure.
         """
         if project_root is None:
             project_root = Path.cwd()
@@ -502,6 +659,16 @@ def attempt_response_continuation(
 
     Returns:
         ContinuationResult with success status and accumulated content.
+
+    Preconditions:
+        * Same as `ResponseContinuator.__init__` and
+          `ResponseContinuator.attempt_continuation` combined, since this is
+          a thin passthrough to both.
+    Postconditions:
+        * Constructs a fresh `ResponseContinuator` (with `num_predict` left
+          at its default resolution — this function has no `num_predict`
+          parameter of its own) and delegates entirely to its
+          `attempt_continuation`; adds no additional behavior of its own.
     """
     continuator = ResponseContinuator(
         base_url=base_url,

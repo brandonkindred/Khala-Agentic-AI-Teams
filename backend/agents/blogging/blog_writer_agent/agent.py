@@ -130,11 +130,13 @@ def _unwrap_llm_cause(exc: BaseException) -> BaseException:
     return exc
 
 
-def _extract_draft_after_marker(raw_response: str) -> str:
+def _extract_draft_after_marker(raw_response: Optional[str]) -> str:
     """
     Extract draft content from model output that uses the hybrid format:
     first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
-    Falls back to parsing the whole response as JSON with a \"draft\" key.
+    Falls back to scanning the response for extractable JSON (whole-response,
+    fenced, or prose-wrapped, via ``extract_json_from_response``) and returning
+    the value of its \"draft\" key.
     """
     if not raw_response or not isinstance(raw_response, str):
         return ""
@@ -153,6 +155,90 @@ def _extract_draft_after_marker(raw_response: str) -> str:
     except LLMJsonParseError:
         pass
     return ""
+
+
+def _extract_json_array_from_text(
+    text: str, *, required_keys: tuple[str, ...] = ()
+) -> Optional[list]:
+    """Parse a JSON array of objects from ``text``, including when prefixed by prose.
+
+    Preconditions:
+        - ``text`` is a string (may be empty).
+        - ``required_keys``, if given, are the keys used to recognize the real
+          payload (e.g. ``("issue",)`` for self-review issues, ``("question",)``
+          for uncertainty questions): at least one element of a candidate array
+          must contain all of them. This rejects an unrelated dict array (e.g. a
+          ``references`` list salvaged from surrounding prose) that would
+          otherwise pass a bare "is it a list of dicts" check, while still
+          tolerating a real payload where some items are individually malformed
+          (the caller's own per-item validation skips those).
+    Postconditions:
+        - Returns the dict elements of the first decoded JSON array containing at
+          least one dict with every key in ``required_keys``, found by scanning
+          for ``[`` and using ``json.JSONDecoder.raw_decode``. Non-dict elements
+          in that array (e.g. a stray string) are dropped rather than rejecting
+          the whole array — callers already tolerate individually malformed dict
+          items via their own per-item validation.
+        - A syntactically valid but schema-mismatched non-empty array (e.g. a
+          numeric citation like ``[1]``, or a dict array none of whose elements
+          have ``required_keys``) does not short-circuit the scan; scanning
+          continues past it toward the real payload.
+        - If no matching array of dicts is found, returns the first syntactically
+          valid empty ``[]`` encountered — this cannot be distinguished from a
+          literally empty Markdown link ``[]()`` (an empty pair of brackets is
+          valid JSON), so a response containing only such a link and no real
+          array-of-dicts payload also returns ``[]`` here. A Markdown link with
+          non-empty text, e.g. ``[label](url)``, is not valid JSON at that
+          ``[`` and is simply skipped like any other non-match. Returns
+          ``None`` if no array matched at all.
+
+    Limitation: the scan looks for a literal ``[`` anywhere in ``text``,
+    including inside a JSON string value (e.g. an object field whose value is
+    the literal text ``"[{...}]"``), so it can extract an array nested inside
+    a string rather than only a true top-level/prose array. This has not been
+    observed in practice for the reviewer/uncertainty response shapes this is
+    used for, but is a known edge case if a future prompt's schema puts
+    JSON-looking text inside a string field.
+    """
+    decoder = json.JSONDecoder()
+    search_from = 0
+    empty_fallback = None
+    while True:
+        i = text.find("[", search_from)
+        if i == -1:
+            break
+        try:
+            value, _end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            search_from = i + 1
+            continue
+        if isinstance(value, list):
+            dict_elements = [el for el in value if isinstance(el, dict)]
+            if dict_elements and any(all(k in el for k in required_keys) for el in dict_elements):
+                return dict_elements
+            if not value and empty_fallback is None:
+                empty_fallback = value
+        search_from = i + 1
+    return empty_fallback
+
+
+def _looks_like_top_level_json_object(text: str) -> bool:
+    """Return True when ``text``'s JSON payload appears to be a top-level object.
+
+    Preconditions:
+        - ``text`` is a string (may be empty).
+    Postconditions:
+        - Returns True only when the entire stripped response is a JSON object;
+          prose and fenced snippets are not treated as top-level objects.
+    """
+    candidate = text.strip()
+    if not candidate.startswith("{"):
+        return False
+    try:
+        value, end = json.JSONDecoder().raw_decode(candidate)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(value, dict) and not candidate[end:].strip()
 
 
 def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
@@ -193,7 +279,12 @@ class BlogWriterAgent(_BlogAgentBase):
         Preconditions:
             - llm_client is not None.
         Callers load writing style and brand spec files before instantiation and pass full contents here.
+
+        Raises:
+            ValueError: if ``llm_client`` is ``None``.
         """
+        if llm_client is None:
+            raise ValueError("llm_client must not be None")
         super().__init__(llm_client)
         # ``_call_text`` produces the ``---DRAFT---`` hybrid format (JSON
         # marker line + Markdown body), which only works when the underlying
@@ -237,7 +328,7 @@ class BlogWriterAgent(_BlogAgentBase):
         return str(agent(prompt)).strip()
 
     def _call_text(self, prompt: str, system_prompt: str = "") -> str:
-        """Call the text-mode Strands Agent and return raw prose.
+        """Call the text-mode Strands Agent and return its stripped text output.
 
         Used for drafting and revision paths that emit the ``---DRAFT---``
         marker + Markdown hybrid format. The text-mode sibling avoids forcing
@@ -246,7 +337,7 @@ class BlogWriterAgent(_BlogAgentBase):
         return self._call_agent(self._text_model, prompt, system_prompt)
 
     def _call_json_raw(self, prompt: str, system_prompt: str = "") -> str:
-        """Invoke the injected model via Strands and return raw assistant text.
+        """Invoke the injected model via Strands and return its stripped assistant text.
 
         Uses ``self._model`` as supplied by the caller (typically already configured
         for structured/JSON-oriented completions). Does not clone or force
@@ -264,6 +355,10 @@ class BlogWriterAgent(_BlogAgentBase):
         as defensive cleanup if the model wraps the object. Relies on ``self._model``
         already being suitable for structured replies; this method does not force
         ``response_format=json_object`` on the wire.
+
+        Raises:
+            ``LLMJsonParseError`` when the response contains no extractable JSON,
+            or when the extracted JSON parses to something other than a dict.
         """
         raw = self._call_json_raw(
             prompt + "\n\nRespond with valid JSON only, no markdown fences.",
@@ -360,6 +455,13 @@ class BlogWriterAgent(_BlogAgentBase):
         on_llm_request: Optional[Callable[[str], None]],
         max_parse_retries: int,
     ) -> tuple[dict[str, Any], int]:
+        """Delegate to ``shared.content_planning_loop.complete_plan_json``, wiring this
+        agent's ``_call_agent_json`` / ``_call_json_raw`` as the JSON and raw-text callers.
+
+        Postconditions:
+            - Returns the parsed plan dict and the number of parse retries consumed,
+              per ``complete_plan_json``'s contract.
+        """
         return complete_plan_json(
             prompt,
             system=system,
@@ -386,6 +488,20 @@ class BlogWriterAgent(_BlogAgentBase):
         terminates only when the planner's self-eval is done AND the critic
         approves. Refine feedback comes from the critic's structured violations
         instead of a generic string. When absent, legacy planner-self-eval only.
+
+        Args:
+            planning_input: Brief/context the planner drafts and refines against.
+            length_policy: Target-length policy passed through to the loop.
+            on_llm_request: Optional progress callback invoked before each LLM call.
+            max_iterations: Cap on generate/refine loop iterations before giving up.
+            max_parse_retries: Cap on JSON-parse retries per LLM call within the loop.
+            plan_critic: Optional critic agent whose approval is required for the
+                loop to terminate; omit for legacy planner-self-eval-only behavior.
+            work_dir: Optional directory to persist intermediate plan artifacts to.
+
+        Returns:
+            The final ``PlanningPhaseResult`` (content plan plus loop metadata),
+            per ``run_content_planning_loop``'s contract.
         """
         return run_content_planning_loop(
             planning_input,
@@ -407,7 +523,13 @@ class BlogWriterAgent(_BlogAgentBase):
     # ------------------------------------------------------------------
 
     def _deterministic_self_check(self, draft: str) -> list[str]:
-        """Scan draft for mechanical violations. Returns list of violation descriptions."""
+        """Scan draft for mechanical violations. Returns list of violation descriptions.
+
+        Checks: em/en dashes, banned phrases (``BANNED_PHRASES``), vague citation
+        patterns not followed by a source/link, reader-address
+        (``you``/``your``/``yours``/``yourself``) count below 3, and staccato
+        prose (3+ consecutive short sentences).
+        """
         violations: list[str] = []
         draft_lower = draft.lower()
         paragraphs = [p.strip() for p in draft.split("\n\n") if p.strip()]
@@ -513,6 +635,13 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``draft`` is a string (may be empty).
         Postconditions:
             - On success, returns the reviewed/fixed draft or the original when no issues.
+            - If the response's JSON parses to a value that is not a list of issue
+              dicts (e.g. a top-level object, or salvaged prose residue with no
+              recoverable issues array), returns the original ``draft`` unchanged.
+            - List elements lacking a truthy ``"issue"`` key are discarded before
+              use (whether the list came directly from ``extract_json_from_response``
+              or from the prose-rescan fallback); if none remain, returns the
+              original ``draft`` unchanged.
             - On soft-fail (``LLMError`` excluding types re-raised below, or
               ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
               logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -525,8 +654,28 @@ class BlogWriterAgent(_BlogAgentBase):
                 f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
             )
             cleaned = raw.strip()
-            issues = extract_json_from_response(cleaned)
-            if not isinstance(issues, list):
+            # Prefer the shared extractor for fenced / whole-response JSON. It can
+            # raise (extraction fails entirely) or, on success, return a non-list
+            # value in two different situations that must be told apart: a
+            # genuine top-level JSON object (the model's real "no issues"
+            # response) vs. a dict salvaged from prose that isn't the actual
+            # top-level structure (e.g. it snagged the one object inside an
+            # issues array). Only the latter is worth rescanning for a real
+            # array; a genuine top-level object must not be rescanned.
+            issues: Optional[list] = None
+            try:
+                parsed = extract_json_from_response(cleaned)
+            except LLMJsonParseError:
+                issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
+            else:
+                if isinstance(parsed, list):
+                    issues = [iss for iss in parsed if isinstance(iss, dict) and iss.get("issue")]
+                elif _looks_like_top_level_json_object(cleaned):
+                    logger.info("LLM self-review: no issues found (response was not a JSON array)")
+                    return draft
+                else:
+                    issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
+            if issues is None:
                 logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft
             if not issues:
@@ -566,7 +715,12 @@ class BlogWriterAgent(_BlogAgentBase):
         return draft
 
     def _self_review(self, draft: str) -> str:
-        """Run deterministic check then LLM self-review. Returns cleaned draft."""
+        """Run deterministic check then LLM self-review. Returns cleaned draft.
+
+        Both sub-steps (``_fix_deterministic_violations``, ``_llm_self_review``)
+        already return the original draft on their own soft-fail paths, so this
+        method has no additional failure handling of its own.
+        """
         # Step 1: Deterministic checks
         violations = self._deterministic_self_check(draft)
         if violations:
@@ -599,7 +753,11 @@ class BlogWriterAgent(_BlogAgentBase):
             - Expected LLM parse failures (``LLMJsonParseError``, including when
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
-            - Unexpected programming errors from the LLM call path propagate.
+            - Any other exception from the LLM call path propagates unchanged —
+              this includes transient transport errors (``LLMRateLimitError`` /
+              ``LLMTemporaryError``, left for Temporal to retry) and
+              non-transient LLM errors (e.g. ``LLMPermanentError``), not only
+              unexpected programming errors.
         Invariants:
             - The agent's configuration, style guide, and brand spec are not mutated.
         """
@@ -772,7 +930,22 @@ class BlogWriterAgent(_BlogAgentBase):
         style_guide_text: str,
         revise_input: ReviseWriterInput,
     ) -> str:
-        """Build one revision prompt that applies every copy-editor feedback item."""
+        """Build one revision prompt that applies every copy-editor feedback item.
+
+        Postconditions:
+            - Returns a prompt string embedding the brand/style sections, the
+              content plan, every feedback item formatted via
+              ``_format_feedback_item_line``, ``revision_plan`` as planning
+              context, and the current draft.
+            - When present on ``revise_input``: ``revise_input.persistent_issues``
+              is inserted before the feedback block; ``previous_feedback_items``
+              (capped at ``MAX_PREVIOUS_FEEDBACK_ITEMS``) is inserted after it;
+              ``selected_title`` and ``elicited_stories`` are each appended as
+              their own labeled section near the end (title before stories);
+              and ``tone_or_purpose`` / ``audience`` are each prepended as a
+              single labeled line at the very front (tone_or_purpose ends up
+              before audience). Absent fields are omitted rather than left blank.
+        """
         brand_section = (
             self._brand_spec_prompt
             if self._brand_spec_prompt
@@ -984,6 +1157,13 @@ class BlogWriterAgent(_BlogAgentBase):
         feedback_items: list[Any],
         revise_input: ReviseWriterInput,
     ) -> RevisionPlan:
+        """Build a structured revision plan, with a plain-text fallback.
+
+        Calls the JSON-oriented LLM path first and converts its response to a
+        ``RevisionPlan``. Any non-transient failure — including an unexpected
+        programming error, not only LLM/structured-call failures — falls back to
+        a plain-text plan; transient LLM errors are unwrapped and re-raised.
+        """
         prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
         try:
             data = self._call_agent_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
@@ -1029,7 +1209,14 @@ class BlogWriterAgent(_BlogAgentBase):
         style_guide_text: str,
         revise_input: ReviseWriterInput,
     ) -> str:
-        """Build a revision prompt for a single feedback item."""
+        """Build a revision prompt for a single feedback item.
+
+        Postconditions:
+            - Returns a prompt string embedding the brand/style sections, the
+              content plan, the single feedback item formatted via
+              ``_format_feedback_item_line``, and the current draft, instructing
+              the model to change only that one issue.
+        """
         brand_section = (
             self._brand_spec_prompt
             if self._brand_spec_prompt
@@ -1127,8 +1314,17 @@ class BlogWriterAgent(_BlogAgentBase):
             # without the transient backoff sleep (covered by test_writer_interactive.py).
             except LLMJsonParseError as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
+                if attempt == 0:
+                    time.sleep(0.5)
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
+                if isinstance(cause, LLMJsonParseError):
+                    logger.warning(
+                        "Revise item %s/%s: %s; retrying.", item_index, total_items, cause
+                    )
+                    if attempt == 0:
+                        time.sleep(0.5)
+                    continue
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
                         "Revise item %s/%s: transient error (attempt %s/2); retrying.",
@@ -1193,15 +1389,18 @@ class BlogWriterAgent(_BlogAgentBase):
             - Otherwise returns a ``WriterOutput`` whose draft is the revised text,
               the stripped draft when feedback is empty, or the stripped draft when
               the text path and JSON fallback both fail to produce a usable draft.
-            - During batch execute retries, only unwrapped ``LLMRateLimitError`` /
-              ``LLMTemporaryError`` (including ``EventLoopException`` wrappers) are
-              retried with backoff; unexpected exceptions propagate immediately.
+            - During batch execute retries, unwrapped ``LLMJsonParseError``
+              (including ``EventLoopException`` wrappers) retries without a
+              backoff sleep, and unwrapped ``LLMRateLimitError`` /
+              ``LLMTemporaryError`` (including wrappers) retry with backoff;
+              unexpected exceptions propagate immediately.
         """
         self._assert_guidelines_present()
-        draft = revise_input.draft.strip()
+        original_draft = revise_input.draft or ""
+        draft = original_draft.strip()
         if not draft:
             logger.warning("Empty draft in revise; returning as-is.")
-            return WriterOutput(draft=revise_input.draft)
+            return WriterOutput(draft=original_draft)
         if not revise_input.feedback_items:
             logger.info("No feedback items; returning draft unchanged.")
             return WriterOutput(draft=draft)
@@ -1280,6 +1479,14 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
+                if isinstance(cause, LLMJsonParseError):
+                    logger.warning(
+                        "Batch revise failed (attempt %s/%s): %s",
+                        attempt + 1,
+                        BATCH_EXECUTE_MAX_RETRIES,
+                        cause,
+                    )
+                    continue
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
                         "Batch revise transient error (attempt %s/%s); retrying.",
@@ -1320,10 +1527,11 @@ class BlogWriterAgent(_BlogAgentBase):
         """Scan a draft for areas of high uncertainty that need user input.
 
         Returns a list of UncertaintyQuestion objects. An empty list means the
-        agent is confident in the draft, the model returned no questions, or a
-        non-transient LLM/parse failure was soft-failed after logging. Transient
-        ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when wrapped in
-        ``EventLoopException``) propagate so Temporal can retry the draft stage.
+        agent is confident in the draft, the model returned no questions, or any
+        other non-transient failure (LLM/parse error or unexpected exception) was
+        soft-failed after logging. Transient ``LLMRateLimitError`` /
+        ``LLMTemporaryError`` (including when wrapped in ``EventLoopException``)
+        propagate so Temporal can retry the draft stage.
         """
         prompt = UNCERTAINTY_DETECTION_PROMPT.format(
             content_plan=content_plan_text,
@@ -1333,17 +1541,14 @@ class BlogWriterAgent(_BlogAgentBase):
             # NOTE: use ``_call_text`` (not ``_call_agent_json``). The prompt asks
             # for a top-level JSON *array*, but JSON-mode adapters constrain
             # output to a single object, so a JSON-mode call can wrap or empty
-            # the array. The slicer below extracts ``[...]`` from prose.
+            # the array. ``_extract_json_array_from_text`` extracts ``[...]``
+            # from prose, skipping Markdown links and other non-array ``[``.
             raw = self._call_text(
                 prompt,
                 system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
             )
             cleaned = raw.strip()
-            start = cleaned.find("[")
-            end = cleaned.rfind("]") + 1
-            if start == -1 or end <= start:
-                return []
-            items = json.loads(cleaned[start:end])
+            items = _extract_json_array_from_text(cleaned, required_keys=("question",))
             if not items:
                 return []
             questions = []
@@ -1380,12 +1585,14 @@ class BlogWriterAgent(_BlogAgentBase):
         concrete guideline updates that can be persisted to the writing style guide.
 
         Returns an empty list when the feedback has no guideline-relevant content,
-        the response is malformed / non-dict, or the model returned unparsable
-        JSON (``LLMJsonParseError``, soft-failed with a logged traceback).
+        the response is malformed / non-dict, or any non-transient ``LLMError``
+        (including ``LLMJsonParseError`` and ``LLMPermanentError``) is soft-failed
+        with a logged traceback — this is an optional analysis step, and a
+        non-transient LLM failure here should not abort the draft stage.
         Transient ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when
         wrapped in ``EventLoopException``) propagate so Temporal can retry the
-        draft stage. Any other exception is an unexpected bug and propagates
-        rather than being swallowed.
+        draft stage. An unexpected programming error (not an ``LLMError``)
+        propagates rather than being swallowed.
         """
         prompt = ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT.format(
             user_feedback=user_feedback,
@@ -1416,7 +1623,7 @@ class BlogWriterAgent(_BlogAgentBase):
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
-            if not isinstance(cause, LLMJsonParseError):
+            if not isinstance(cause, LLMError):
                 raise
             logger.exception("Guideline update analysis failed: %s", cause)
             return []
@@ -1442,6 +1649,17 @@ class BlogWriterAgent(_BlogAgentBase):
         Unlike ``revise()`` which handles structured copy-editor feedback items,
         this method handles free-form user feedback from the interactive review
         cycle where the user acts as the editor.
+
+        Postconditions:
+            - Returns a ``WriterOutput`` whose ``draft`` field is the original
+              ``draft`` unchanged when it is blank.
+            - Otherwise retries the text-completion path up to 3 times: an
+              unwrapped ``LLMJsonParseError`` (including ``EventLoopException``
+              wrappers) retries without a backoff sleep, and an unwrapped
+              ``LLMRateLimitError`` / ``LLMTemporaryError`` (including wrappers)
+              retries with backoff. If all attempts fail, falls back to
+              ``_fallback_draft_via_json``; if both paths fail to produce a
+              usable draft, returns the original ``draft`` unchanged.
         """
         self._assert_guidelines_present()
         if not draft.strip():
@@ -1548,6 +1766,14 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
             except Exception as e:
                 cause = _unwrap_llm_cause(e)
+                if isinstance(cause, LLMJsonParseError):
+                    logger.warning(
+                        "User-feedback revision failed (attempt %s/%s): %s",
+                        attempt + 1,
+                        BATCH_EXECUTE_MAX_RETRIES,
+                        cause,
+                    )
+                    continue
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     logger.warning(
                         "User-feedback revision transient error (attempt %s/%s); retrying.",

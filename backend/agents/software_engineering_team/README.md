@@ -40,6 +40,12 @@ All agents enforce these rules for produced code:
 New agents should follow the canonical LLM-calling pattern documented in
 [`docs/LLM_CALLING_PATTERN_DECISION.md`](docs/LLM_CALLING_PATTERN_DECISION.md).
 
+Prompt modules should reuse the shared builders in
+`backend/shared/prompts/templates.py` rather than hand-writing JSON-output or
+context-formatting scaffolding; see
+[`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
+for the before/after line-count report from that migration.
+
 ## Sub-teams and SDLC
 
 Agents are grouped by **SDLC phase** and **who consumes whose output**. Execution is driven by **task assignee** (`backend`, `frontend`, `devops`, `git_setup`). QA and Security are **not** task assignees; they are invoked **inside** backend and frontend workflows (per task) and in a final full-codebase security pass.
@@ -121,6 +127,9 @@ flowchart LR
 
 **Frontend internal pipeline order:** UX Designer → UI Designer → Design System → Frontend Architect → Feature Implementation → UX Engineer → Performance Engineer → Build/Release
 
+Build verification (lint + build) is a single CI-owned gate that runs once, before
+Code Review; the Code Review phase itself does not re-run lint or build checks.
+
 Data and control-flow dependencies among the build/code-review/security/QA/DbC
 gates specifically (a subset of the full sequences above — it does not cover
 acceptance verification, Tech Lead review, or accessibility), and which of them
@@ -150,7 +159,9 @@ All planning artifacts are written to a `plan/` folder at the project root (work
    - Create feature branch
    - **Per-task planning** – Review codebase, produce implementation plan (feature intent, what to change, algorithms/data structures, tests needed). The plan drives the implementation; code generation must realize the plan's what_changes and tests_needed.
    - Generate code (with clarification loop via Tech Lead if needed)
-   - **Build verification** (pytest for backend, ng build for frontend)
+   - **Build verification** (pytest for backend, ng build for frontend) — the sole
+     lint/build gate, owned by CI; it runs once here and is not repeated by the
+     Code review step below
    - **Code review** (against spec and standards)
    - **Acceptance criteria verification** (optional; per-criterion check)
    - **Security review** (per task for backend; per task for frontend)
