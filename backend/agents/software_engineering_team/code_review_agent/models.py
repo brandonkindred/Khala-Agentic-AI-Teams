@@ -531,10 +531,14 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
     architecture-consistency + side-effect-impact prompt
     (``prompts.MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``).
 
-    Mirrors ``architecture_consistency_pass._coerce_finding``'s fields exactly
-    (that pass never emits ``pre_existing`` — only the side-effect pass does),
-    typed as an enumerated schema in the same style as
-    :class:`ChunkReviewIssueLLM`. Design-only: not yet consumed by
+    Mirrors the fields ``architecture_consistency_pass._coerce_finding``
+    actually populates on ``CodeReviewIssue`` — severity, category,
+    file_path, line, description, suggestion — typed as an enumerated
+    schema in the same style as :class:`ChunkReviewIssueLLM`. Intentionally
+    omits ``start_line`` and ``pre_existing``: that pass's own
+    ``_coerce_finding`` never populates either (its prompt's output format
+    has no multi-line-anchor field, and only the side-effect pass emits
+    ``pre_existing``). Design-only: not yet consumed by
     ``generate_structured``, ``coordinator.py``, or ``temporal/workflows.py`` —
     wiring the merged pass into those call sites is tracked separately from
     this schema design.
@@ -574,11 +578,15 @@ class SideEffectImpactFindingLLM(BaseModel):
     architecture-consistency + side-effect-impact prompt
     (``prompts.MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``).
 
-    Mirrors ``side_effect_impact_pass._coerce_finding``'s fields exactly,
-    including ``pre_existing`` (``StrictBool``, matching
+    Mirrors the fields ``side_effect_impact_pass._coerce_finding`` actually
+    populates on ``CodeReviewIssue`` — severity, category, file_path, line,
+    description, suggestion, and ``pre_existing`` (``StrictBool``, matching
     :class:`ChunkReviewIssueLLM`'s rationale for rejecting a bare numeric/
-    non-bool value rather than silently coercing it). Design-only: not yet
-    consumed anywhere — see :class:`ArchitectureConsistencyFindingLLM`.
+    non-bool value rather than silently coercing it). Intentionally omits
+    ``start_line``: that pass's own ``_coerce_finding`` never populates it
+    either (its prompt's output format has no multi-line-anchor field).
+    Design-only: not yet consumed anywhere — see
+    :class:`ArchitectureConsistencyFindingLLM`.
     """
 
     severity: _ChunkReviewIssueSeverity = Field(
@@ -610,8 +618,11 @@ class SideEffectImpactFindingLLM(BaseModel):
     )
     pre_existing: StrictBool = Field(
         default=False,
-        description="True when the function(s) the finding is about look untouched by this "
-        "submission's actual work, rather than part of what it changed",
+        description="True when this issue is a bug in code the change under review did NOT add "
+        "or modify — a pre-existing defect in unrelated, unchanged code — rather than a defect "
+        "the change introduced (mirrors CodeReviewIssue.pre_existing's canonical wording). Per "
+        "the merged prompt's Part 2 tagging guidance, that means the function(s) the finding is "
+        "about look untouched by this submission's actual work.",
     )
 
 
