@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 # same underlying decision (duplicate-answer lookup and supersede detection).
 _QUESTION_MATCH_THRESHOLD = 0.5
 
+# qa_history.md field/section markers. Shared between the writers
+# (format_answered_questions_for_prompt, record_answers) and the readers
+# (extract_answer_from_qa_history, parse_qa_history_blocks via _consume_block_body)
+# so the read and write formats can't silently drift apart.
+_ANSWER_MARKER = "**Answer:**"
+_RATIONALE_MARKER = "**Rationale:**"
+_AUTO_ANSWERED_MARKER = "*Auto-answered"
+_CUSTOM_TEXT_MARKER = "*Custom text:*"
+_DEFAULT_APPLIED_MARKER = "*(Default applied)*"
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically (write-temp-then-rename).
@@ -67,15 +77,15 @@ def format_answered_questions_for_prompt(answered_questions: List[AnsweredQuesti
     lines: List[str] = []
     for aq in answered_questions:
         lines.append(f"### {aq.question_text}")
-        lines.append(f"**Answer:** {aq.selected_answer}")
+        lines.append(f"{_ANSWER_MARKER} {aq.selected_answer}")
         if aq.rationale:
-            lines.append(f"**Rationale:** {aq.rationale}")
+            lines.append(f"{_RATIONALE_MARKER} {aq.rationale}")
         if aq.was_auto_answered:
-            lines.append(f"*Auto-answered with {aq.confidence:.0%} confidence*")
+            lines.append(f"{_AUTO_ANSWERED_MARKER} with {aq.confidence:.0%} confidence*")
         elif aq.was_default:
-            lines.append("*(Default applied)*")
+            lines.append(_DEFAULT_APPLIED_MARKER)
         if aq.other_text:
-            lines.append(f"*Custom text:* {aq.other_text}")
+            lines.append(f"{_CUSTOM_TEXT_MARKER} {aq.other_text}")
         lines.append("")
     return "\n".join(lines)
 
@@ -96,6 +106,45 @@ def read_qa_history(repo_path: Path) -> str:
     return ""
 
 
+def _consume_block_body(lines: List[str]) -> Tuple[str, str]:
+    """Buffer a Q&A block's answer/rationale continuation lines until the next boundary.
+
+    Shared by :func:`extract_answer_from_qa_history` and :func:`parse_qa_history_blocks`
+    so the two parsers can't drift on what counts as a continuation line versus a new
+    field or section boundary.
+
+    Preconditions: ``lines`` are the lines of a qa_history.md block following its
+        ``### question`` header (may be empty).
+    Postconditions: returns ``(answer, rationale)``; continuation lines for each field
+        are joined with ``\\n`` and the result is stripped. Either string is empty if
+        its marker was never seen; never raises.
+    """
+    answer_lines: List[str] = []
+    rationale_lines: List[str] = []
+    current_field: Optional[List[str]] = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(_ANSWER_MARKER):
+            answer_lines = [stripped.removeprefix(_ANSWER_MARKER).strip()]
+            current_field = answer_lines
+        elif stripped.startswith(_RATIONALE_MARKER):
+            rationale_lines = [stripped.removeprefix(_RATIONALE_MARKER).strip()]
+            current_field = rationale_lines
+        elif (
+            stripped.startswith("###")
+            or stripped.startswith("##")
+            or stripped.startswith(
+                (_AUTO_ANSWERED_MARKER, _CUSTOM_TEXT_MARKER, _DEFAULT_APPLIED_MARKER)
+            )
+        ):
+            current_field = None
+        elif current_field is not None:
+            current_field.append(line)
+
+    return "\n".join(answer_lines).strip(), "\n".join(rationale_lines).strip()
+
+
 def extract_answer_from_qa_history(
     question: OpenQuestion,
     qa_history: str,
@@ -111,10 +160,11 @@ def extract_answer_from_qa_history(
     Returns:
         AnsweredQuestion if a matching answer was found, None otherwise.
 
-    Preconditions: ``question`` is an :class:`OpenQuestion`; ``qa_history`` is a
-        string (possibly empty).
+    Preconditions: ``question`` is an :class:`OpenQuestion` (``question_text`` a
+        string); ``qa_history`` is a string (possibly empty).
     Postconditions: returns the best-matching recorded answer as an
-        :class:`AnsweredQuestion`, or ``None`` when no block matches; never raises.
+        :class:`AnsweredQuestion`, or ``None`` when no block matches; never raises
+        for input satisfying the preconditions above.
     """
     if not qa_history:
         return None
@@ -149,30 +199,7 @@ def extract_answer_from_qa_history(
         match_ratio = matches / len(key_words) if key_words else 0
 
         if match_ratio > _QUESTION_MATCH_THRESHOLD:  # Good enough match
-            # Extract answer from block, buffering continuation lines until the next
-            # known marker so multi-line answers/rationales survive the round trip.
-            answer_lines: List[str] = []
-            rationale_lines: List[str] = []
-            current_field: Optional[List[str]] = None
-
-            for line in lines[1:]:
-                if line.startswith("**Answer:**"):
-                    answer_lines = [line.removeprefix("**Answer:**").strip()]
-                    current_field = answer_lines
-                elif line.startswith("**Rationale:**"):
-                    rationale_lines = [line.removeprefix("**Rationale:**").strip()]
-                    current_field = rationale_lines
-                elif (
-                    line.startswith("###")
-                    or line.startswith("##")
-                    or line.startswith(("*Auto-answered", "*Custom text:*", "*(Default applied)*"))
-                ):
-                    current_field = None
-                elif current_field is not None:
-                    current_field.append(line)
-
-            answer = "\n".join(answer_lines).strip()
-            rationale = "\n".join(rationale_lines).strip()
+            answer, rationale = _consume_block_body(lines[1:])
 
             if answer and (best_match is None or match_ratio > best_match[0]):
                 best_match = (match_ratio, recorded_question, answer, rationale)
@@ -202,7 +229,11 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
     """Parse qa_history.md content into blocks for pruning and rewriting.
 
     Returns:
-        List of (iteration, question_text, answer, full_block_text).
+        List of (iteration, question_text, answer, full_block_text). The rationale is
+        not extracted as its own field here — pruning/rewriting only needs the
+        question text (for :func:`is_same_decision` matching) and the verbatim block
+        text to reproduce; a multi-line rationale is preserved unmodified inside
+        ``full_block_text`` when the block is written back out.
 
     Preconditions: ``qa_history`` is a string (possibly empty).
     Postconditions: returns one tuple per ``### question`` block found, tagged with
@@ -224,8 +255,6 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
         block_match = re.match(r"^###\s+(.*)$", line)
         if block_match:
             question_text = block_match.group(1).strip()
-            answer_lines: List[str] = []
-            current_field: Optional[List[str]] = None
             block_lines = [line]
             i += 1
             while i < len(lines):
@@ -235,18 +264,8 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
                 ):
                     break
                 block_lines.append(next_line)
-                stripped = next_line.strip()
-                if stripped.startswith("**Answer:**"):
-                    answer_lines = [stripped.removeprefix("**Answer:**").strip()]
-                    current_field = answer_lines
-                elif stripped.startswith(
-                    ("**Rationale:**", "*Auto-answered", "*Custom text:*", "*(Default applied)*")
-                ):
-                    current_field = None
-                elif current_field is not None:
-                    current_field.append(next_line)
                 i += 1
-            answer = "\n".join(answer_lines).strip()
+            answer, _rationale = _consume_block_body(block_lines[1:])
             full_block_text = "\n".join(block_lines)
             if question_text or answer:
                 blocks_out.append((current_iteration, question_text, answer, full_block_text))
@@ -308,15 +327,15 @@ def record_answers(
     new_section = f"\n## Iteration {iteration}\n\n"
     for aq in answered_questions:
         new_section += f"### {aq.question_text}\n"
-        new_section += f"**Answer:** {aq.selected_answer}\n"
+        new_section += f"{_ANSWER_MARKER} {aq.selected_answer}\n"
         if aq.rationale:
-            new_section += f"**Rationale:** {aq.rationale}\n"
+            new_section += f"{_RATIONALE_MARKER} {aq.rationale}\n"
         if aq.was_auto_answered:
-            new_section += f"*Auto-answered with {aq.confidence:.0%} confidence*\n"
+            new_section += f"{_AUTO_ANSWERED_MARKER} with {aq.confidence:.0%} confidence*\n"
         elif aq.was_default:
-            new_section += "*(Default applied)*\n"
+            new_section += f"{_DEFAULT_APPLIED_MARKER}\n"
         if aq.other_text:
-            new_section += f"*Custom text:* {aq.other_text}\n"
+            new_section += f"{_CUSTOM_TEXT_MARKER} {aq.other_text}\n"
         new_section += "\n"
 
     if not qa_file.exists():

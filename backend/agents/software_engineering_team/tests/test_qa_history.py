@@ -135,6 +135,30 @@ def test_extract_answer_returns_none_for_no_match() -> None:
     assert extract_answer_from_qa_history(question, qa_history) is None
 
 
+def test_extract_answer_empty_input_returns_none() -> None:
+    question = _open_question("Which logging library should we use for the backend service?")
+
+    assert extract_answer_from_qa_history(question, "") is None
+    assert extract_answer_from_qa_history(question, "   \n  ") is None
+
+
+def test_extract_answer_strips_indented_markers() -> None:
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### Which cache eviction policy should the session store use?\n"
+        "  **Answer:** LRU with a 30 minute TTL.\n"
+        "  **Rationale:** Bounds memory while matching session expectations.\n\n"
+    )
+    question = _open_question("Which cache eviction policy should the session store use?")
+
+    result = extract_answer_from_qa_history(question, qa_history)
+
+    assert result is not None
+    assert result.selected_answer == "LRU with a 30 minute TTL."
+    assert result.rationale == "Bounds memory while matching session expectations."
+
+
 # ---------------------------------------------------------------------------
 # parse_qa_history_blocks
 # ---------------------------------------------------------------------------
@@ -205,6 +229,23 @@ def test_parse_qa_history_blocks_preserves_answer_containing_marker_substring() 
     assert len(blocks) == 1
     _iteration, _question_text, answer, _full_block = blocks[0]
     assert answer == "Prefix every entry with **Answer:** before the decision text."
+
+
+def test_parse_qa_history_blocks_preserves_multiline_rationale_in_full_block() -> None:
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### What retry policy should the payment worker use?\n"
+        "**Answer:** Exponential backoff.\n"
+        "**Rationale:** First line of rationale.\n"
+        "Second line of rationale.\n\n"
+    )
+
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, _question_text, _answer, full_block = blocks[0]
+    assert "First line of rationale.\nSecond line of rationale." in full_block
 
 
 def test_parse_qa_history_blocks_single_line_still_works() -> None:
