@@ -17,6 +17,8 @@ from software_engineering_team.github_source.issue_proposals import (
     proposal_from_findings,
 )
 from software_engineering_team.github_source.pr_review_mapping import (
+    _fallback_title,
+    _location_prefix,
     build_review_body,
     choose_event,
     format_comment_body,
@@ -37,6 +39,7 @@ class _Issue:
     category: str = "logic"
     file_path: str = ""
     line: Optional[int] = None
+    title: str = "Something is wrong"
     description: str = "something is wrong"
     suggestion: str = "fix it"
 
@@ -274,12 +277,18 @@ def test_split_review_comments_unexpected_shape_not_dropped() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_format_comment_body_includes_severity_and_fix() -> None:
+def test_format_comment_body_includes_title_severity_description_and_fix() -> None:
     body = format_comment_body(
-        _Issue(severity="high", category="logic", description="X", suggestion="Y")
+        _Issue(
+            severity="high", category="logic", title="Bug title", description="X", suggestion="Y"
+        )
     )
-    assert "**[HIGH] logic** — X" in body
+    assert "**Bug title**" in body
+    assert "[HIGH] logic" in body
+    assert "X" in body
     assert "**Suggested fix:** Y" in body
+    # Title heading must come before the description, and description before the fix.
+    assert body.index("Bug title") < body.index("X") < body.index("Suggested fix")
 
 
 def test_format_comment_body_no_suggestion() -> None:
@@ -287,31 +296,90 @@ def test_format_comment_body_no_suggestion() -> None:
     assert "Suggested fix" not in body
 
 
+def test_format_comment_body_omits_description_when_it_equals_derived_title() -> None:
+    # A short description becomes its own derived title verbatim; the body must
+    # not then repeat that exact text a second time as the description paragraph.
+    body = format_comment_body(_Issue(title="", description="leftover one"))
+    assert body.count("leftover one") == 1
+
+
+def test_fallback_title_never_exceeds_max_len() -> None:
+    # A first line with no word boundary must still respect the documented "at
+    # most _TITLE_MAX_LEN characters TOTAL" postcondition, ellipsis included.
+    title = _fallback_title("a" * 200)
+    assert len(title) <= 80
+    assert title.endswith("…")
+
+
+def test_format_comment_body_falls_back_to_derived_title_when_blank() -> None:
+    body = format_comment_body(
+        _Issue(title="", description="The UserListComponent does not paginate results.")
+    )
+    assert "**The UserListComponent does not paginate results.**" in body
+
+
+def test_format_comment_body_no_duplicate_severity_tag_when_title_and_description_blank() -> None:
+    # With no title and no description to derive one from, the heading itself
+    # falls back to "[SEVERITY] category" -- the separate tag line must not
+    # repeat that same text a second time.
+    body = format_comment_body(
+        _Issue(severity="info", category="general", title="", description="", suggestion="")
+    )
+    assert body == "**[INFO] general**"
+    assert body.count("general") == 1
+
+
+def test_location_prefix_with_line() -> None:
+    assert _location_prefix("a.py", 5) == "`a.py:5` — "
+
+
+def test_location_prefix_without_line() -> None:
+    assert _location_prefix("a.py") == "`a.py` — "
+
+
+def test_location_prefix_nonpositive_line_omitted() -> None:
+    assert _location_prefix("a.py", 0) == "`a.py` — "
+
+
+def test_location_prefix_empty_path_is_empty() -> None:
+    assert _location_prefix("") == ""
+
+
 def test_format_issue_comment_prefixes_file_location() -> None:
-    body = format_issue_comment(_Issue(file_path="a.py", description="D1"))
+    body = format_issue_comment(_Issue(file_path="a.py", title="Bad import", description="D1"))
     assert body.startswith("`a.py` — ")
     assert "D1" in body
+    assert "Bad import" in body
 
 
 def test_format_issue_comment_without_file_has_no_prefix() -> None:
-    body = format_issue_comment(_Issue(file_path="", description="D2"))
+    body = format_issue_comment(_Issue(file_path="", title="Bad import", description="D2"))
     assert not body.startswith("`")
     assert "D2" in body
+    assert "Bad import" in body
 
 
 def test_format_issue_comment_with_none_file_has_no_prefix() -> None:
     # A finding can carry file_path=None; the `... or ""` guard must treat it like
     # an empty path (no location prefix) rather than rendering `None`.
-    body = format_issue_comment(_Issue(file_path=None, description="D3"))  # type: ignore[arg-type]
+    body = format_issue_comment(
+        _Issue(file_path=None, title="Bad import", description="D3")  # type: ignore[arg-type]
+    )
     assert not body.startswith("`")
     assert "None" not in body
     assert "D3" in body
+    assert "Bad import" in body
 
 
 def test_inline_comment_to_timeline_body_prefixes_path_and_line() -> None:
-    comment = {"path": "a.py", "line": 12, "side": "RIGHT", "body": "**[HIGH] logic** — boom"}
+    # inline_comment_to_timeline_body is deliberately content-agnostic -- it
+    # only prepends a location to whatever body string it's given (the body's
+    # own title/description/fix layout is format_comment_body's concern,
+    # covered by the dedicated format_comment_body tests above).
+    body_text = format_comment_body(_Issue(severity="high", category="logic", title="Bug"))
+    comment = {"path": "a.py", "line": 12, "side": "RIGHT", "body": body_text}
     body = inline_comment_to_timeline_body(comment)
-    assert body == "`a.py:12` — **[HIGH] logic** — boom"
+    assert body == f"`a.py:12` — {body_text}"
 
 
 def test_inline_comment_to_timeline_body_drops_nonpositive_line() -> None:
@@ -350,6 +418,11 @@ def test_build_review_body_omits_spec_section_when_notes_empty() -> None:
     body = build_review_body("Issues cluster in the auth flow.", "", issue_count=2)
     assert body == "Issues cluster in the auth flow."
     assert "Spec compliance" not in body
+
+
+def test_build_review_body_rejects_negative_issue_count() -> None:
+    with pytest.raises(AssertionError):
+        build_review_body("", "", issue_count=-1)
 
 
 def test_build_review_body_zero_issues_is_short_and_affirmational() -> None:

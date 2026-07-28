@@ -40,6 +40,12 @@ All agents enforce these rules for produced code:
 New agents should follow the canonical LLM-calling pattern documented in
 [`docs/LLM_CALLING_PATTERN_DECISION.md`](docs/LLM_CALLING_PATTERN_DECISION.md).
 
+New agents needing a typed/structured LLM response should default to
+`generate_structured`, per
+[`docs/STRUCTURED_OUTPUT_PATTERN.md`](docs/STRUCTURED_OUTPUT_PATTERN.md),
+which also documents the v2 marker-template format as the one justified
+exception.
+
 Prompt modules should reuse the shared builders in
 `backend/shared/prompts/templates.py` rather than hand-writing JSON-output or
 context-formatting scaffolding; see
