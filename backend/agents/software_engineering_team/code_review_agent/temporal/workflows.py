@@ -2,10 +2,13 @@
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
 resumable computation. It orchestrates the review as: prepare → map fan-out →
-three tail passes run concurrently (false-positive verify, architecture-
-consistency / redundancy, side-effect / blast-radius) → deterministic gate →
-(conditional) narrative synthesis — so a worker restart mid-review re-runs only
-the unfinished activities instead of re-reviewing the whole submission.
+three tail passes run concurrently via ``asyncio.gather(..., return_exceptions=True)``
+(false-positive verify, architecture-consistency / redundancy, side-effect /
+blast-radius) → a fixed-order scan re-raises the first exception in that list
+order, reproducing sequential error precedence and ensuring no sibling activity
+is abandoned → deterministic gate → (conditional) narrative synthesis — so a
+worker restart mid-review re-runs only the unfinished activities instead of
+re-reviewing the whole submission.
 
 The tail passes have no cross-pass data dependency (each reads only
 ``review_input`` and/or the map phase's aggregated ``issues``, never another
@@ -31,9 +34,11 @@ a field this workflow's return dict does not populate at all.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
-no I/O, time, or randomness — only ``execute_activity`` calls, ``asyncio.gather``
-for deterministic concurrent fan-out of independent activities (the map-phase
-chunks and the tail passes), and pure list aggregation over JSON-native dicts.
+no I/O, time, or randomness — only ``execute_activity`` calls,
+``asyncio.gather(..., return_exceptions=True)`` for deterministic concurrent
+fan-out of independent activities (the map-phase chunks and the tail passes),
+a fixed-order scan over the gathered results to enforce deterministic error
+precedence, and pure list aggregation over JSON-native dicts.
 """
 
 from __future__ import annotations
