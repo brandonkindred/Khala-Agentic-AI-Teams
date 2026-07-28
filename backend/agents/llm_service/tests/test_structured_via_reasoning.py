@@ -401,7 +401,7 @@ def test_validated_via_reasoning_routes_system_prompts_per_pass() -> None:
     assert client.format_calls[0]["system_prompt"] == "FORMATTING SYSTEM"
 
 
-def test_validated_via_reasoning_forwards_schema_to_formatting_call_only() -> None:
+def test_validated_via_reasoning_does_not_forward_pydantic_schema_as_kwarg() -> None:
     """The Pydantic ``schema`` drives validation on the formatting call only;
     the unconstrained reasoning call never sees it as a kwarg."""
     client = _RecordingClient({"status": "PASS", "score": 1.0})

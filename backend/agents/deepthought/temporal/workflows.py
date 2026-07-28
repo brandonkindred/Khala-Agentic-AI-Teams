@@ -1,9 +1,13 @@
 """``DeepthoughtWorkflow`` — deterministic orchestration of the recursive tree.
 
 The workflow re-expresses ``DeepthoughtAgent.execute`` / ``DeepthoughtOrchestrator``
-as a Temporal workflow: every LLM call is an activity
+as a Temporal workflow: every LLM boundary is an activity
 (:mod:`deepthought.temporal.activities`), and the recursion is driven here as
-deterministic workflow code. Cross-cutting state that thread mode kept in shared
+deterministic workflow code. An activity may bundle more than one sequential
+provider call under a single durable boundary — e.g. ``analyse_activity``
+wraps ``DeepthoughtAgent._analyse``'s two-pass reasoning-then-formatting split
+(:func:`llm_service.complete_json_via_reasoning`) as one activity, not two.
+Cross-cutting state that thread mode kept in shared
 objects — the per-run knowledge base (dedup), the agent budget, and the event
 log — lives as workflow-instance state, mutated between ``await`` points on the
 single-threaded, replay-deterministic workflow event loop (so no locks are

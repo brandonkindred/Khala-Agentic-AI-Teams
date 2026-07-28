@@ -271,11 +271,24 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
 
     DesignAgent().run(prior_records=[])
 
+    assert len(stub_client.reasoning_calls) == 1
     assert len(stub_client.calls) == 1
+    reasoning_call = stub_client.reasoning_calls[0]
     call = stub_client.calls[0]
+
+    # Reasoning pass (think=True, reasoning_temperature): receives the
+    # original design-task prompt directly, not a correction re-prompt.
+    assert reasoning_call["think"] is True
+    assert reasoning_call["temperature"] == so_mod._DEFAULT_REASONING_TEMPERATURE
+    assert "Design ONE novel swing-style strategy" in reasoning_call["prompt"]
+    assert "could not be parsed as a single JSON object" not in reasoning_call["prompt"]
+
+    # Formatting pass (think=False, temperature=0.0): schema-conformant,
+    # original (non-reasoning) system prompt.
+    assert call["think"] is False
+    assert call["temperature"] == 0.0
     assert call["schema"] == DESIGN_SPEC_SCHEMA
     assert call["system_prompt"] == design_mod._get_design_system_prompt()
-    assert "Design ONE novel swing-style strategy" in call["prompt"]
     # The original task prompt was sent, not a correction re-prompt.
     assert "could not be parsed as a single JSON object" not in call["prompt"]
 
@@ -301,9 +314,7 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
         return _good_design_payload()
 
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({}))
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(_StubClient({})))
     monkeypatch.setattr(so_mod, "run_structured_agent", _fake_run_structured_agent)
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
 
@@ -454,9 +465,7 @@ def test_schema_forced_starvation_degrades_to_legacy_loop_and_succeeds(
         LLMSemanticExhaustionError("starved", schema_forced=True, attempts_used=1)
     )
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client)
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(starved_client))
     monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "false")
     agent = _ScriptedAgent([json.dumps(_good_design_payload())])
     monkeypatch.setattr(design_mod, "Agent", lambda **_k: agent)
@@ -504,9 +513,7 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
         )
     )
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client)
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(exhausted_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
     with pytest.raises(design_mod.StrategyLabLLMError):
@@ -593,9 +600,7 @@ def test_self_review_non_schema_forced_failure_propagates_without_degrading(
     only thing that decides how it's handled, not this seam."""
     fatal_client = _FailingClient(LLMPermanentError("nope, fatal"))
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(
-        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client)
-    )
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(fatal_client))
     monkeypatch.setattr(design_mod, "Agent", _raise_if_agent_built)
 
     with pytest.raises(design_mod.StrategyLabLLMError):

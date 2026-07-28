@@ -308,7 +308,10 @@ def test_conversation_history_passed_through():
 def test_knowledge_entries_in_response():
     """Response includes knowledge base entries from all agents."""
     llm = MagicMock()
-    llm.complete.return_value = '{"strategy": "none", "reasoning": "simple"}'
+    # Route by objective so the strategy-classification call and _analyse's
+    # think=True reasoning-pass call don't share a return value (the latter
+    # expects prose, not the classification JSON string).
+    llm.complete.side_effect = _complete_side_effect('{"strategy": "none", "reasoning": "simple"}')
     llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,

@@ -135,7 +135,7 @@ _TASK_INSTRUCTION_REASONING = (
     "- For retire/amend: the id of the EXISTING active rule you're targeting (listed above).\n"
     "- For add/amend: the rule's instruction text.\n"
     '- The mode: "advisory" (prompt guidance) or "enforced" (a hard, machine-checked '
-    'pre/postcondition) — for add, advisory unless you have reason to enforce; for amend, '
+    "pre/postcondition) — for add, advisory unless you have reason to enforce; for amend, "
     "state explicitly only if you're changing the existing rule's mode.\n"
     '- If enforced: the machine-checkable predicate as {"phase": ..., "check": ...} — for an '
     "amend that keeps an enforced rule enforced, state explicitly only if you're changing it.\n"
@@ -409,6 +409,16 @@ def _propose(
     graph_block: str = "",
 ) -> _ReflectionResult:
     """Render the inputs, bound them to budget, and ask the LLM to propose.
+
+    Two-pass structured-output flow via :func:`complete_validated_via_reasoning`:
+    a ``think=True`` reasoning pass (``reasoning_temperature=0.0``, deterministic
+    since this faculty must be conservative) over
+    ``_REFLECTION_SYSTEM_PROMPT_REASONING`` / ``_TASK_INSTRUCTION_REASONING``
+    that answers in structured prose (no JSON), followed by a ``think=False``
+    formatting pass — guided by ``_REFLECTION_SYSTEM_PROMPT`` +
+    ``_TASK_INSTRUCTION`` as its system prompt — that transcribes that prose
+    into the ``_ReflectionResult`` schema, retrying up to
+    ``correction_attempts=1`` time on a schema-validation miss.
 
     Preconditions: ``summaries`` is non-empty.
     Postconditions: returns a validated :class:`_ReflectionResult` (whose

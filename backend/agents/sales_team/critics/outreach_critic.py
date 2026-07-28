@@ -37,15 +37,10 @@ from ..prompts._dossier_render import render_dossier_json_for_prompt
 logger = logging.getLogger(__name__)
 
 
-_OUTREACH_CRITIC_SYSTEM_PROMPT = """\
-You are an independent Sales Outreach Reviewer. You did NOT write the sequence \
-under review; your job is to score it against the rubric below and the \
-authoritative dossier + ICP supplied by the user.
-
-REJECT the sequence (status=FAIL) if ANY must_fix violation is present. For \
-every violation, emit a CriticViolation with a concrete suggested_fix the \
-agent can apply on retry.
-
+# Shared verbatim rubric — used by both the JSON-output prompt and its
+# reasoning-only variant below. Extracted once so the two prompts can never
+# drift apart on rule wording; only their surrounding framing differs.
+_OUTREACH_RUBRIC = """\
 RUBRIC (use these rule_id slugs verbatim):
 
  1. outreach.citation.fabricated — every non-`fallback` variant whose \
@@ -74,7 +69,21 @@ RUBRIC (use these rule_id slugs verbatim):
  6. outreach.personalization.icp_alignment — at least one variant must tie \
     the product to a concrete ICP `pain_point`. Generic value-prop \
     restatement does not qualify.
+"""
 
+_OUTREACH_CRITIC_SYSTEM_PROMPT = (
+    """\
+You are an independent Sales Outreach Reviewer. You did NOT write the sequence \
+under review; your job is to score it against the rubric below and the \
+authoritative dossier + ICP supplied by the user.
+
+REJECT the sequence (status=FAIL) if ANY must_fix violation is present. For \
+every violation, emit a CriticViolation with a concrete suggested_fix the \
+agent can apply on retry.
+
+"""
+    + _OUTREACH_RUBRIC
+    + """
 OUTPUT contract:
  - Output a SINGLE JSON object matching this schema:
    {
@@ -99,12 +108,14 @@ OUTPUT contract:
    equal (status == "PASS").
  - Return JSON only. No markdown fences. No prose outside the object.
 """
+)
 
 # Reasoning-only variant: same role/rubric, but ends with a prose instruction
 # instead of the JSON output contract. Used for the think=True first pass of
 # the two-call split — the formatting pass (think=False) transcribes this
 # prose into the OutreachCriticReport schema.
-_OUTREACH_CRITIC_SYSTEM_PROMPT_REASONING = """\
+_OUTREACH_CRITIC_SYSTEM_PROMPT_REASONING = (
+    """\
 You are an independent Sales Outreach Reviewer. You did NOT write the sequence \
 under review; your job is to score it against the rubric below and the \
 authoritative dossier + ICP supplied by the user.
@@ -112,35 +123,9 @@ authoritative dossier + ICP supplied by the user.
 REJECT the sequence (status=FAIL) if ANY must_fix violation is present. For \
 every violation, identify a concrete suggested_fix the agent can apply on retry.
 
-RUBRIC (use these rule_id slugs verbatim):
-
- 1. outreach.citation.fabricated — every non-`fallback` variant whose \
-    `email_sequence[0]` includes a personalization claim must cite at least \
-    one source URL that appears in the supplied dossier `sources` allowlist. \
-    Cited URLs that aren't in the allowlist FAIL.
-
- 2. outreach.email.contact_address — `prospect.contact_email` should be \
-    `null` unless it appears verbatim in the dossier's `personal_site`, \
-    `executive_summary`, `notes`, or `other_social` fields. Pattern \
-    fabrications like `firstname.lastname@company.com` with no dossier \
-    backing FAIL. The dossier `sources` field is a list of URLs and never \
-    contains an email address — do not check there.
-
- 3. outreach.day1.cta — the first email in every variant's email_sequence \
-    must contain a clear call-to-action: a specific question, a meeting ask, \
-    or a link. "Let me know if interested" alone is not a CTA.
-
- 4. outreach.day1.subject_length — the first email subject line must be \
-    60 characters or fewer.
-
- 5. outreach.forbidden_tokens — no leftover template placeholders. FAIL on \
-    any of: `{first_name}`, `{firstName}`, `[FIRST_NAME]`, `[COMPANY]`, \
-    `[NAME]`, `<NAME>`, `REPLACE_ME`, `TODO`, `XXXX`, `Lorem ipsum`.
-
- 6. outreach.personalization.icp_alignment — at least one variant must tie \
-    the product to a concrete ICP `pain_point`. Generic value-prop \
-    restatement does not qualify.
-
+"""
+    + _OUTREACH_RUBRIC
+    + """
 Think this through rule by rule, then answer in structured prose (not JSON):
  - Your overall status (PASS only when no must_fix violations exist) and approved verdict.
  - For each violation found: the rubric rule_id, severity (must_fix/should_fix/consider), the
@@ -150,6 +135,7 @@ Think this through rule by rule, then answer in structured prose (not JSON):
    applicable.
  - Any other short notes.
 """
+)
 
 
 @dataclass
