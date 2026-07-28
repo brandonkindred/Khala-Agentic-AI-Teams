@@ -1288,11 +1288,11 @@ async def test_workflow_executes_and_replays_without_non_determinism() -> None:
 
 @pytest.mark.asyncio
 async def test_gather_return_exceptions_reproduces_sequential_error_precedence() -> None:
-    """The exact idiom ``CodeReviewWorkflow.run`` uses for its concurrent tail
-    passes -- ``asyncio.gather(*calls, return_exceptions=True)`` followed by a
-    fixed-order scan that surfaces the first exception found -- must always
-    surface the earliest-listed failure (matching sequential execution's
-    verify -> architecture -> side-effect precedence) regardless of which
+    """The exact idiom ``CodeReviewWorkflow.run`` uses for its concurrent map
+    fan-out and concurrent tail passes -- ``asyncio.gather(*calls,
+    return_exceptions=True)`` followed by a fixed-order scan that surfaces the
+    first exception found -- must always surface the earliest-listed failure
+    (matching sequential execution's list-order precedence) regardless of which
     awaitable actually finishes first in real time, and must let every
     awaitable run to completion instead of abandoning the others.
 

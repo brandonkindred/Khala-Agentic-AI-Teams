@@ -1,14 +1,16 @@
 """Durable code review workflow: map-reduce review as a Temporal workflow.
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
-resumable computation. It orchestrates the review as: prepare → map fan-out →
-three tail passes run concurrently via ``asyncio.gather(..., return_exceptions=True)``
-(false-positive verify, architecture-consistency / redundancy, side-effect /
-blast-radius) → a fixed-order scan re-raises the first exception in that list
-order, reproducing sequential error precedence and ensuring no sibling activity
-is abandoned → deterministic gate → (conditional) narrative synthesis — so a
-worker restart mid-review re-runs only the unfinished activities instead of
-re-reviewing the whole submission.
+resumable computation. It orchestrates the review as: prepare → map fan-out
+(chunk activities gathered with ``asyncio.gather(..., return_exceptions=True)``,
+then a fixed-order scan re-raises the earliest-index exception) → three tail
+passes run concurrently via the same idiom (false-positive verify,
+architecture-consistency / redundancy, side-effect / blast-radius; scan order
+is verify → architecture → side-effect) → deterministic gate → (conditional)
+narrative synthesis — so a worker restart mid-review re-runs only the unfinished
+activities instead of re-reviewing the whole submission. Both concurrent
+fan-outs await every sibling and re-raise in list order so completion-order
+races never pick the surfaced exception or abandon an activity.
 
 The tail passes have no cross-pass data dependency (each reads only
 ``review_input`` and/or the map phase's aggregated ``issues``, never another
@@ -36,10 +38,9 @@ Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
 no I/O, time, or randomness — only ``execute_activity`` calls,
 ``asyncio.gather(..., return_exceptions=True)`` for deterministic concurrent
-fan-out of the tail passes, a fixed-order scan over those gathered results to
-enforce deterministic error precedence, and pure list aggregation over
-JSON-native dicts. (Map-phase chunk fan-out still uses default
-``asyncio.gather`` without ``return_exceptions``.)
+fan-out of the map-phase chunks and the tail passes, a fixed-order scan over
+those gathered results to enforce deterministic error precedence, and pure list
+aggregation over JSON-native dicts.
 """
 
 from __future__ import annotations
@@ -249,11 +250,31 @@ class CodeReviewWorkflow:
                 async with semaphore:
                     return await _review_one(chunk)
 
-            outcomes = await asyncio.gather(*[_review_one_bounded(chunk) for chunk in chunks])
+            # Same return_exceptions + fixed-order re-raise idiom as the
+            # concurrent tail-pass gather below: await every chunk activity
+            # (no abandoned siblings) and surface the earliest-index
+            # failure rather than whichever chunk happens to fail first in
+            # completion order.
+            outcomes = await asyncio.gather(
+                *[_review_one_bounded(chunk) for chunk in chunks],
+                return_exceptions=True,
+            )
         else:
             # Pre-migration history: reproduce the original unconstrained
-            # fan-out exactly (see _ADAPTIVE_FANOUT_PATCH).
-            outcomes = await asyncio.gather(*[_review_one(chunk) for chunk in chunks])
+            # fan-out exactly (see _ADAPTIVE_FANOUT_PATCH), still with the
+            # return_exceptions idiom so a mid-map failure does not orphan
+            # sibling chunk activities.
+            outcomes = await asyncio.gather(
+                *[_review_one(chunk) for chunk in chunks],
+                return_exceptions=True,
+            )
+
+        first_chunk_exception = next(
+            (r for r in outcomes if isinstance(r, BaseException)),
+            None,
+        )
+        if first_chunk_exception is not None:
+            raise first_chunk_exception
 
         issues: List[Dict[str, Any]] = []
         not_reviewed: List[Dict[str, Any]] = []
