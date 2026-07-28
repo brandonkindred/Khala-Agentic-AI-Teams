@@ -579,6 +579,10 @@ def test_coerce_verdict_variants() -> None:
     assert _coerce_verdict({"is_real_issue": False, "confidence": "high"}) is None
     assert _coerce_verdict({"index": "x"}) is None
     assert _coerce_verdict("not a dict") is None
+    # bool / float / negative indices are rejected (not coerced)
+    assert _coerce_verdict({"index": True, "is_real_issue": False, "confidence": "high"}) is None
+    assert _coerce_verdict({"index": 1.9, "is_real_issue": False, "confidence": "high"}) is None
+    assert _coerce_verdict({"index": -1, "is_real_issue": False, "confidence": "high"}) is None
 
 
 def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:

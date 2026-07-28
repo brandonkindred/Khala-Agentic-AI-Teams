@@ -766,8 +766,9 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
     """Parse one raw verdict dict into ``(index, _Verdict)``, or None.
 
     Postconditions:
-        - Returns None for any item without a parseable integer ``index`` (a
-          verdict we cannot map back to a finding is ignored, not guessed).
+        - Returns None for any item without a non-negative integer ``index``
+          (bool, float, string, negative, or missing — a verdict we cannot map
+          back to a finding is ignored, not guessed).
         - ``is_false_positive`` is True only for ``is_real_issue is False`` with
           an explicit ``"high"`` or ``"medium"`` confidence; every other shape —
           real, low/blank/missing confidence, OR any unrecognized confidence
@@ -779,10 +780,9 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
     if not isinstance(item, dict):
         return None
     raw_index = item.get("index")
-    try:
-        index = int(raw_index)
-    except (TypeError, ValueError):
+    if isinstance(raw_index, bool) or not isinstance(raw_index, int) or raw_index < 0:
         return None
+    index = raw_index
     confidence = str(item.get("confidence", "") or "").strip().lower()
     is_real = item.get("is_real_issue")
     # Drop ONLY on an explicit, confident "not a real issue". An allowlist (not a
