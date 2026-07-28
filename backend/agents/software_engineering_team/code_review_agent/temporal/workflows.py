@@ -3,9 +3,10 @@
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
 resumable computation. It orchestrates the review as: prepare → map fan-out →
 three tail passes run concurrently (false-positive verify, architecture-
-consistency / redundancy, side-effect / blast-radius) → deterministic gate →
-(conditional) narrative synthesis — so a worker restart mid-review re-runs only
-the unfinished activities instead of re-reviewing the whole submission.
+consistency / redundancy, side-effect / blast-radius) → optional side-effect
+consolidation → deterministic gate → (conditional) narrative synthesis — so a
+worker restart mid-review re-runs only the unfinished activities instead of
+re-reviewing the whole submission.
 
 The tail passes have no cross-pass data dependency (each reads only
 ``review_input`` and/or the map phase's aggregated ``issues``, never another
@@ -18,7 +19,10 @@ verification is ``false_positive_filter.filter_false_positives``, the additive
 architecture pass is
 ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
 additive side-effect pass is
-``side_effect_impact_pass.find_side_effect_impact_issues``, the gate is
+``side_effect_impact_pass.find_side_effect_impact_issues``, optional
+consolidation of related ``side-effects`` findings is
+``side_effect_consolidation.consolidate_side_effect_issues`` (between the
+side-effect pass and finalize), the gate is
 ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
 ``synthesis.synthesize_review_findings`` with the same deterministic-concat
 fallback. The verdict is NOT identical to the default thread-mode
@@ -95,6 +99,17 @@ _ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
 # the Temporal UI), then deprecate the marker with
 # ``workflow.deprecate_patch(_SIDE_EFFECT_PASS_PATCH)`` before deleting it.
 _SIDE_EFFECT_PASS_PATCH = "code-review-side-effect-impact-pass"
+
+# Replay-compatibility gate for inserting the side-effect consolidation activity
+# between the three tail passes and finalization (see ``run``). Same rationale as
+# ``_ARCHITECTURE_PASS_PATCH``: a history recorded before this activity existed has
+# no marker for it, so ``workflow.patched`` returns False on replay and that
+# history's original finalize-next sequence is reproduced exactly.
+# TODO: Remove this gate (and always run consolidation unconditionally) once
+# no pre-migration CodeReviewWorkflow histories remain open (confirm via the
+# Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_SIDE_EFFECT_CONSOLIDATION_PATCH)`` before deleting it.
+_SIDE_EFFECT_CONSOLIDATION_PATCH = "code-review-side-effect-consolidation"
 
 # Replay-compatibility gate for bounding the map-phase fan-out by
 # ``prep["fanout_width"]`` (see ``run``) instead of scheduling every chunk's
@@ -366,6 +381,15 @@ class CodeReviewWorkflow:
                 if side_effect_findings:
                     verified = [*verified, *side_effect_findings]
                     has_side_effect_findings = True
+
+        if workflow.patched(_SIDE_EFFECT_CONSOLIDATION_PATCH):
+            verified = await workflow.execute_activity(
+                A.consolidate_side_effect_issues_activity,
+                args=[review_input, verified],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=_DEFAULT_RETRY,
+            )
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(

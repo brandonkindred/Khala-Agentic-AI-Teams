@@ -65,6 +65,7 @@ from llm_service import (
     LLMUnreachableAfterRetriesError,
 )
 from shared.concurrency import parallel_map
+from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -900,20 +901,25 @@ def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str)
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
-          resolved model) changes. It is derived from ``input_data.model_dump()``,
-          so it keys on the whole input, not a hand-picked subset: a new
-          ``CodeReviewInput`` field is hashed automatically and can never be
+          resolved model) changes, and also whenever the output-affecting
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` toggle flips. It is derived
+          from ``input_data.model_dump()`` plus that toggle, so it keys on the
+          whole input (not a hand-picked subset) plus consolidation identity: a
+          new ``CodeReviewInput`` field is hashed automatically and can never be
           silently dropped. Two submissions collide only when their full inputs
-          are identical, so a hit means the review would be the same work.
-          (Every current field is verdict-affecting, so this is exactly the
-          submission identity; a future non-verdict field would only cause extra
-          misses — full re-reviews — never a stale hit.)
+          and consolidation setting are identical, so a hit means the review
+          would be the same work. (Every current field is verdict-affecting, so
+          this is exactly the submission identity; a future non-verdict field
+          would only cause extra misses — full re-reviews — never a stale hit.)
         - Computed from raw fields only (no compaction/LLM), so the short-circuit
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
     payload = input_data.model_dump(mode="json")
     payload["__model__"] = model_fingerprint
+    payload["__side_effect_consolidation__"] = env_flag_enabled(
+        "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
+    )
     return _stable_json_digest(payload)
 
 

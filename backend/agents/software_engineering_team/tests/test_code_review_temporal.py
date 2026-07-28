@@ -226,6 +226,7 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
     has_side_effect_findings = bool(side_effect_findings)
     if side_effect_findings:
         verified = [*verified, *side_effect_findings]
+    verified = A.consolidate_side_effect_issues_activity(payload, verified)
     gate = A.finalize_review_activity(
         verified, not_reviewed, prep["skipped_issues"], approved_flags
     )
@@ -532,6 +533,38 @@ def test_side_effect_activity_fails_safe_when_llm_resolution_raises(
     monkeypatch.setattr(A, "_resolve_llm", _raise)
     out = A.find_side_effect_impact_activity(_input().model_dump(mode="json"))
     assert out == []
+
+
+def test_consolidation_activity_disabled_passthrough_and_fails_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabled toggle returns issues unchanged; consolidation errors keep them."""
+    from code_review_agent.temporal import activities as A
+
+    issues = [
+        {
+            "severity": "high",
+            "category": "side-effects",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "caller breaks",
+            "suggestion": "",
+        }
+    ]
+    payload = _input().model_dump(mode="json")
+
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION", "false")
+    assert A.consolidate_side_effect_issues_activity(payload, issues) == issues
+
+    monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION", "true")
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("index boom")
+
+    monkeypatch.setattr(
+        "code_review_agent.false_positive_filter.CodebaseIndex.from_input", _boom
+    )
+    assert A.consolidate_side_effect_issues_activity(payload, issues) == issues
 
 
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
@@ -855,12 +888,13 @@ def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
 
 def test_workflow_and_activities_are_registered() -> None:
     assert CodeReviewWorkflow in WORKFLOWS
-    assert len(ACTIVITIES) == 7
+    assert len(ACTIVITIES) == 8
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
     assert "find_architecture_and_redundancy_activity" in names
     assert "find_side_effect_impact_activity" in names
+    assert "consolidate_side_effect_issues_activity" in names
 
 
 # ---------------------------------------------------------------------------
