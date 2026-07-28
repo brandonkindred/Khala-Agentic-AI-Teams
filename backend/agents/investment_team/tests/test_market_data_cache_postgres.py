@@ -37,6 +37,7 @@ class _FakeCursor:
         self._rows = list(rows or [])
         self._raise = raise_on_execute
         self.executed: List[tuple] = []
+        self.rowcount = 0
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -48,6 +49,7 @@ class _FakeCursor:
         if self._raise:
             raise RuntimeError("fixture-placeholder-not-a-secret: simulated db failure")
         self.executed.append((sql, params))
+        self.rowcount = 1
 
     def fetchone(self) -> Optional[Any]:
         return self._rows.pop(0) if self._rows else None
@@ -168,16 +170,11 @@ def test_find_covering_snapshot_postgres_hit_returns_row(
     cursor = _FakeCursor(rows=[row])
 
     import investment_team.market_data_cache.store as store_mod
+    import shared.postgres.client as client_mod
 
     monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    monkeypatch.setattr(store_mod, "dict_row", object(), raising=False)
-    import sys
-
-    import shared.postgres
-
-    monkeypatch.setattr(shared.postgres, "dict_row", object(), raising=False)
-    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
+    monkeypatch.setenv("POSTGRES_HOST", "fake-host")
+    monkeypatch.setattr(client_mod, "get_conn", lambda database=None: _FakeConn(cursor))
 
     out = cache._find_covering_snapshot(
         symbol="AAA",
@@ -200,13 +197,12 @@ def test_find_covering_snapshot_postgres_miss_returns_none(
     Post: lookup returns None (no in-memory consultation needed)."""
     cursor = _FakeCursor(rows=[])
 
-    import sys
-
     import investment_team.market_data_cache.store as store_mod
+    import shared.postgres.client as client_mod
 
     monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
+    monkeypatch.setenv("POSTGRES_HOST", "fake-host")
+    monkeypatch.setattr(client_mod, "get_conn", lambda database=None: _FakeConn(cursor))
 
     out = cache._find_covering_snapshot(
         symbol="ZZZ",
@@ -231,13 +227,12 @@ def test_find_covering_snapshot_postgres_error_falls_back_to_memory(
 
     cursor = _FakeCursor(rows=[], raise_on_execute=True)
 
-    import sys
-
     import investment_team.market_data_cache.store as store_mod
+    import shared.postgres.client as client_mod
 
     monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
+    monkeypatch.setenv("POSTGRES_HOST", "fake-host")
+    monkeypatch.setattr(client_mod, "get_conn", lambda database=None: _FakeConn(cursor))
 
     out = cache._find_covering_snapshot(
         symbol="AAA",
@@ -266,9 +261,11 @@ def test_record_snapshot_postgres_insert(
     cursor = _FakeCursor()
 
     import investment_team.market_data_cache.store as store_mod
+    import shared.postgres.client as client_mod
 
     monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
+    monkeypatch.setenv("POSTGRES_HOST", "fake-host")
+    monkeypatch.setattr(client_mod, "get_conn", lambda database=None: _FakeConn(cursor))
 
     meta = _meta()
     cache._record_snapshot(meta)
@@ -303,9 +300,11 @@ def test_record_snapshot_postgres_failure_falls_back_to_memory(
     cursor = _FakeCursor(raise_on_execute=True)
 
     import investment_team.market_data_cache.store as store_mod
+    import shared.postgres.client as client_mod
 
     monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
+    monkeypatch.setenv("POSTGRES_HOST", "fake-host")
+    monkeypatch.setattr(client_mod, "get_conn", lambda database=None: _FakeConn(cursor))
 
     meta = _meta(symbol="ERR")
     cache._record_snapshot(meta)
