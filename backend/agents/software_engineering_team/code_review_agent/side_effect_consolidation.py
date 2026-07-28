@@ -168,10 +168,13 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
           line is cited, matching a single-line issue's shape).
         - ``severity`` is the highest-ranked severity in the group
           (``critical`` > ``high`` > ``medium`` > ``low`` > ``info``).
-        - ``description``/``suggestion`` are the group's non-blank values
-          deduped via ``dedupe_strings`` and, when more than one distinct
-          value survives, joined into a short bulleted list; a single
-          surviving value is used verbatim (no "Consolidated ..." preamble).
+        - ``description`` is the group's non-blank values deduped via
+          ``dedupe_strings``. A single surviving value is used verbatim;
+          multiple values are prefixed with "Consolidated N related
+          side-effect findings:" and joined as a bulleted list.
+        - ``suggestion`` is the group's non-blank values deduped via
+          ``dedupe_strings``. A single surviving value is used verbatim;
+          multiple values are joined as a plain bulleted list (no preamble).
         - ``pre_existing`` is True only when every issue in the group is.
     """
     file_counts: "OrderedDict[str, int]" = OrderedDict()
