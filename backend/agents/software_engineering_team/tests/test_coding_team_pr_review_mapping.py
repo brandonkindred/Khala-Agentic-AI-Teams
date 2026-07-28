@@ -37,6 +37,7 @@ class _Issue:
     category: str = "logic"
     file_path: str = ""
     line: Optional[int] = None
+    title: str = "Something is wrong"
     description: str = "something is wrong"
     suggestion: str = "fix it"
 
@@ -274,17 +275,30 @@ def test_split_review_comments_unexpected_shape_not_dropped() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_format_comment_body_includes_severity_and_fix() -> None:
+def test_format_comment_body_includes_title_severity_description_and_fix() -> None:
     body = format_comment_body(
-        _Issue(severity="high", category="logic", description="X", suggestion="Y")
+        _Issue(
+            severity="high", category="logic", title="Bug title", description="X", suggestion="Y"
+        )
     )
-    assert "**[HIGH] logic** — X" in body
+    assert "**Bug title**" in body
+    assert "[HIGH] logic" in body
+    assert "X" in body
     assert "**Suggested fix:** Y" in body
+    # Title heading must come before the description, and description before the fix.
+    assert body.index("Bug title") < body.index("X") < body.index("Suggested fix")
 
 
 def test_format_comment_body_no_suggestion() -> None:
     body = format_comment_body(_Issue(suggestion=""))
     assert "Suggested fix" not in body
+
+
+def test_format_comment_body_falls_back_to_derived_title_when_blank() -> None:
+    body = format_comment_body(
+        _Issue(title="", description="The UserListComponent does not paginate results.")
+    )
+    assert "**The UserListComponent does not paginate results.**" in body
 
 
 def test_format_issue_comment_prefixes_file_location() -> None:

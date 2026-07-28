@@ -107,6 +107,33 @@ def is_no_op_suggestion(suggestion: str) -> bool:
     return bool(_NO_OP_SUGGESTION_RE.match(text))
 
 
+_TITLE_MAX_LEN = 80
+
+
+def derive_issue_title(description: str, max_len: int = _TITLE_MAX_LEN) -> str:
+    """Derive a short, descriptive title from an issue's description.
+
+    Fallback for a finding that reaches a PR comment with no explicit title
+    (e.g. from an auxiliary pass that constructs a ``CodeReviewIssue``
+    directly rather than through the LLM-authored chunk-review schema):
+    every finding posted as a PR comment must display a title, so this
+    guarantees one exists from data the finding already carries.
+
+    Postconditions:
+        - Returns the description's first line, trimmed to at most
+          ``max_len`` characters at a word boundary with a trailing "…" when
+          truncated. Returns "" only when ``description`` is blank.
+    """
+    stripped = (description or "").strip()
+    if not stripped:
+        return ""
+    text = stripped.splitlines()[0].strip()
+    if not text or len(text) <= max_len:
+        return text
+    truncated = text[:max_len].rsplit(" ", 1)[0].rstrip(",.;:—-") or text[:max_len].rstrip()
+    return f"{truncated}…"
+
+
 def coerce_line(value: Any) -> Optional[int]:
     """Parse an LLM-provided line number into a positive int, or None.
 
@@ -322,6 +349,13 @@ class CodeReviewIssue(BaseModel):
         default=None,
         description="Optional start line for a multi-line issue; `line` is then the end line.",
     )
+    title: str = Field(
+        default="",
+        description="A short, descriptive title summarizing the issue (e.g. 'Missing pagination "
+        "in UserListComponent'), distinct from `description`, which explains the problem in full. "
+        "Every finding posted as a PR comment displays a title; a blank value here is filled in at "
+        "render time via `derive_issue_title(description)`.",
+    )
     description: str = Field(
         default="",
         description="Clear description of the issue",
@@ -419,6 +453,12 @@ class ChunkReviewIssueLLM(BaseModel):
     start_line: Optional[int] = Field(
         default=None,
         description="Optional start line for a multi-line issue; `line` is then the end line.",
+    )
+    title: str = Field(
+        default="",
+        description="A short, descriptive title summarizing the issue, distinct from "
+        "`description` (which explains the problem in full). Blank when the model omits it; the "
+        "downstream normalizer fills in a fallback derived from `description`.",
     )
     description: str = Field(
         default="",
