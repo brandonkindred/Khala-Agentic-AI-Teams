@@ -139,9 +139,9 @@ def run_phase5_deliver_merge(
 
     Preconditions: Phases 1-4 returned ``None``; ``quality_gates``,
       ``acceptance_trace``, ``aggregated_artifacts``, and ``iac_result``/
-      ``cicd_result``/``deploy_result`` from Phases 1-3 are set (their
-      ``summary`` attributes are used for runbook notes; artifacts/trace may
-      be empty).
+      ``cicd_result``/``deploy_result`` from Phase 2's parallel design
+      fan-out are set (their ``summary`` attributes are used for runbook
+      notes; artifacts/trace may be empty).
     Postconditions: on merge failure returns ``blocked_result`` set to a
       failed ``DevOpsTeamResult`` via ``build_team_failure_result`` with the
       blocked completion package; otherwise returns ``completion``
