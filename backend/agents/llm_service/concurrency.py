@@ -26,7 +26,7 @@ import threading
 
 from . import config as llm_config
 
-_DEFAULT_MAX_CONCURRENCY = 4
+_DEFAULT_MAX_CONCURRENCY = 8
 
 _llm_semaphore: "threading.BoundedSemaphore | None" = None
 _semaphore_lock = threading.Lock()

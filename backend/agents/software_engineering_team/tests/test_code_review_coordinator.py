@@ -2,9 +2,9 @@
 
 Pure-function tests (``parse_code_into_file_blocks``, the splitter and
 chunker) stay LLM-free. The LLM-integration tests use ``DummyLLMClient``
-subclasses now that ``ChunkReviewAgent`` is Strands-backed and bypasses
-``llm.complete_json`` in favor of the ``chat_json_round`` +
-structured-output flow.
+subclasses because ``ChunkReviewAgent`` calls ``llm.complete_json`` directly
+through ``complete_validated`` and validates responses against
+``ChunkReviewLLMResponse`` — no strands ``Agent``/``Model`` is involved.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ from llm_service import (
     LLMClient,
     LLMJsonParseError,
     LLMRateLimitError,
+    LLMSchemaValidationError,
     LLMSemanticExhaustionError,
     LLMTruncatedError,
 )
@@ -202,8 +203,8 @@ def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
 
     client = _ScriptedClient(
         [
-            {"approved": True, "issues": [], "summary": "Chunk 1 OK"},
-            {"approved": True, "issues": [], "summary": "Chunk 2 OK"},
+            {"approved": True, "issues": [], "summary": "Chunk 1 OK", "spec_compliance_notes": ""},
+            {"approved": True, "issues": [], "summary": "Chunk 2 OK", "spec_compliance_notes": ""},
             # Synthesis pass: empty summary → None → fall back to concatenation.
             {"summary": "", "spec_compliance_notes": "ignored"},
         ]
@@ -339,7 +340,7 @@ def test_chunk_prompt_includes_component_and_decision_text() -> None:
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             self.prompts.append(prompt)
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     arch = SystemArchitecture(
         overview="Layered service architecture.",
@@ -373,13 +374,14 @@ def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
                 "issues": [
                     {
                         "severity": "critical",
-                        "category": "security",
+                        "category": "logic",
                         "file_path": "app/main.py",
                         "description": "SQL injection risk",
                         "suggestion": "Use parameterized queries",
                     }
                 ],
                 "summary": "Critical issue found.",
+                "spec_compliance_notes": "",
             }
         ]
     )
@@ -401,7 +403,13 @@ def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
 
 def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
     """Two findings sharing file_path + description but on different lines are
-    distinct (line anchors inline comments), so dedup must keep both."""
+    distinct (line anchors inline comments), so dedup must keep both.
+
+    Severity is "high" (not "medium"): ``ChunkReviewLLMResponse``'s consistency
+    validator requires an ``approved=False`` verdict to carry at least one
+    actionable critical/high issue -- unrelated to this test's actual subject
+    (line-anchored dedup), so the fixture must satisfy it.
+    """
     code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(100))
 
     client = _ScriptedClient(
@@ -410,7 +418,7 @@ def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
                 "approved": False,
                 "issues": [
                     {
-                        "severity": "medium",
+                        "severity": "high",
                         "category": "logic",
                         "file_path": "app/main.py",
                         "line": 10,
@@ -418,7 +426,7 @@ def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
                         "suggestion": "extract a constant",
                     },
                     {
-                        "severity": "medium",
+                        "severity": "high",
                         "category": "logic",
                         "file_path": "app/main.py",
                         "line": 80,
@@ -427,6 +435,7 @@ def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
                     },
                 ],
                 "summary": "Two occurrences.",
+                "spec_compliance_notes": "",
             }
         ]
     )
@@ -467,6 +476,7 @@ def test_run_coordinator_drops_unanchored_twin_of_anchored_finding() -> None:
                     },
                 ],
                 "summary": "One issue, reported twice.",
+                "spec_compliance_notes": "",
             }
         ]
     )
@@ -850,6 +860,7 @@ def test_files_dict_input_matches_code_input() -> None:
                 }
             ],
             "summary": "Needs work.",
+            "spec_compliance_notes": "",
         }
     ]
 
@@ -895,7 +906,9 @@ def test_code_mode_blank_block_is_named_by_info_finding() -> None:
     """A ``### path ###`` header whose block is blank is reported, not dropped."""
     code = "### empty.py ###\n   \n\n### real.py ###\nx = 1"
     result = run_coordinator(
-        _ScriptedClient([{"approved": True, "issues": [], "summary": "ok"}]),
+        _ScriptedClient(
+            [{"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}]
+        ),
         CodeReviewInput(code=code, task_description="t"),
     )
     info = [i for i in result.issues if i.severity == "info"]
@@ -1379,8 +1392,10 @@ def test_unexpected_chunk_exception_fails_closed() -> None:
 
 
 def test_is_content_failure_classifies_model_output_errors_only() -> None:
-    """Known model-output failures (including a raw ``json.JSONDecodeError`` from
-    the chunk reviewer's ``json.loads``) are recoverable content failures;
+    """Known model-output failures (``LLMJsonParseError`` from the client,
+    a raw ``json.JSONDecodeError`` in the exception chain,
+    ``LLMSemanticExhaustionError``, ``LLMTruncatedError``, and
+    ``LLMSchemaValidationError``) are recoverable content failures;
     reviewer-code bugs are not."""
     from code_review_agent.coordinator import _is_content_failure
 
@@ -1389,6 +1404,10 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
     # A token-limit truncation is recoverable: a smaller chunk yields a smaller review.
     assert _is_content_failure(LLMTruncatedError("truncated", finish_reason="length")) is True
+    # A schema-invalid (but parseable) reply is recoverable the same way a
+    # parse failure is -- the chunk reviewer's complete_validated call raises
+    # this after exhausting its corrective retry.
+    assert _is_content_failure(LLMSchemaValidationError("schema invalid")) is True
     # A JSONDecodeError wrapped by strands must still be recognised via the chain.
     wrapped = RuntimeError("agent failed")
     wrapped.__cause__ = json.JSONDecodeError("Expecting value", "x", 0)
@@ -1399,10 +1418,11 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
 
 
 def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
-    """The chunk reviewer parses model output with a bare ``json.loads``; bad
-    JSON surfaces as a raw ``json.JSONDecodeError``. That is recoverable model
-    output, so it must take the degrade path (run completes, graceful) — not fail
-    closed like a reviewer-code bug. By default the range is non-blocking."""
+    """A raw ``json.JSONDecodeError`` in the exception chain (e.g. wrapped by
+    the injected client or a lower layer, rather than the client's own
+    ``LLMJsonParseError``) is still recoverable model output, so it must take
+    the degrade path (run completes, graceful) — not fail closed like a
+    reviewer-code bug. By default the range is non-blocking."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
@@ -1937,8 +1957,8 @@ def test_map_parallelism_clamped_by_llm_max_concurrency(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_MAP_PARALLELISM", raising=False)
     monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)
     assert (
-        _map_parallelism() == 4
-    )  # default ceiling (16) clamped by default LLM_MAX_CONCURRENCY (4)
+        _map_parallelism() == 8
+    )  # default ceiling (16) clamped by default LLM_MAX_CONCURRENCY (8)
 
 
 def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) -> None:
@@ -2009,7 +2029,9 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
 
 
 def test_headerless_code_reviews_as_single_unnamed_block() -> None:
-    client = _ScriptedClient([{"approved": True, "issues": [], "summary": "fine"}])
+    client = _ScriptedClient(
+        [{"approved": True, "issues": [], "summary": "fine", "spec_compliance_notes": ""}]
+    )
     result = run_coordinator(
         client, CodeReviewInput(code="x = compute()\ny = x + 1", task_description="t")
     )
@@ -2279,25 +2301,46 @@ def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_coordinator_synthesizes_issue_on_zero_issue_reject_with_summary() -> None:
+def test_zero_issue_reject_with_summary_now_fails_schema_validation() -> None:
+    """A chunk rejecting with zero issues but a meaningful summary used to be
+    silently repaired by ``mapping._outcome_from_output`` (synthesizing a
+    "high" issue from the summary text). ``ChunkReviewLLMResponse``'s
+    consistency validator now intentionally rejects that exact shape at the
+    schema layer instead (an ``approved=False`` verdict must already carry an
+    actionable critical/high issue) -- per ``models.py``'s own documented
+    rationale, this reply is no longer "silently absorbed by the
+    coordinator's safety net" but fails validation and retries once. With
+    this being the submission's only chunk, the retry fails identically and
+    the coordinator's total-failure guard raises ``CodeReviewUnavailableError``
+    rather than fabricating a verdict for code that was never actually
+    reviewed."""
     client = _ScriptedClient(
-        [{"approved": False, "issues": [], "summary": "Missing input validation throughout."}]
+        [
+            {
+                "approved": False,
+                "issues": [],
+                "summary": "Missing input validation throughout.",
+                "spec_compliance_notes": "",
+            }
+        ]
     )
-    result = run_coordinator(
-        client,
-        CodeReviewInput(code="### a.py ###\nx = 1", task_description="t", language="python"),
-    )
-    assert result.approved is False
-    assert len(result.issues) == 1
-    assert result.issues[0].severity == "high"
-    assert "Missing input validation" in result.issues[0].description
+    with pytest.raises(CodeReviewUnavailableError):
+        run_coordinator(
+            client,
+            CodeReviewInput(code="### a.py ###\nx = 1", task_description="t", language="python"),
+        )
 
 
-def test_rejecting_chunk_summary_survives_other_chunks_findings() -> None:
-    """A chunk that rejects with zero issues but a meaningful summary must
-    surface that summary as a synthesized high issue even when other chunks
-    contributed findings (e.g. an info empty-file finding) — the rejection is
-    reconciled per sub-review, never masked by the merged issue list."""
+def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> None:
+    """A chunk that rejects with zero issues but a meaningful summary now fails
+    ``ChunkReviewLLMResponse`` validation (see
+    ``test_zero_issue_reject_with_summary_now_fails_schema_validation``) instead
+    of being synthesized into a "high" issue. With sibling chunks that did
+    produce a verdict, the coordinator degrades the failing chunk to a
+    non-blocking "not reviewed" range rather than aborting the whole
+    submission -- so the overall review still completes, an unrelated empty
+    file still contributes its info finding, and no phantom high issue is
+    fabricated from the untrusted summary text."""
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
@@ -2308,8 +2351,14 @@ def test_rejecting_chunk_summary_survives_other_chunks_findings() -> None:
                     "approved": False,
                     "issues": [],
                     "summary": "Missing error handling around DB calls in b.py.",
+                    "spec_compliance_notes": "",
                 }
-            return {"approved": True, "issues": [], "summary": "a.py looks fine"}
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "a.py looks fine",
+                "spec_compliance_notes": "",
+            }
 
     files = {
         "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
@@ -2321,27 +2370,42 @@ def test_rejecting_chunk_summary_survives_other_chunks_findings() -> None:
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
 
-    assert result.approved is False
-    high = [i for i in result.issues if i.severity == "high"]
-    assert len(high) == 1
-    assert "Missing error handling around DB calls" in high[0].description
+    # b.py degrades non-blockingly (CODE_REVIEW_BLOCK_ON_UNREVIEWED is off by
+    # default) rather than being synthesized into a rejecting "high" issue.
+    assert "b.py (lines 1-2)" in result.not_reviewed_ranges
+    assert not any("Missing error handling around DB calls" in i.description for i in result.issues)
     info = [i for i in result.issues if i.severity == "info"]
     assert [i.file_path for i in info] == ["empty.py"]
 
 
 def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
     """A chunk that rejects with no issues AND no summary has no actionable
-    feedback: the documented auto-approve applies, and the approving chunk's
-    summary must never be synthesized into a phantom 'Code review rejected:
-    Looks good' issue (verdicts and summaries stay paired per chunk)."""
+    feedback for ``ChunkReviewLLMResponse``'s consistency validator either
+    (same as ``test_zero_issue_reject_with_summary_now_fails_schema_validation``,
+    the empty summary here doesn't change that), so it fails schema
+    validation and degrades to a non-blocking ``not_reviewed_ranges`` entry
+    rather than the old ``_reconcile_approval`` auto-approve safety net. The
+    approving sibling chunk's summary must never leak into a phantom 'Code
+    review rejected: Looks good' issue (verdicts and summaries stay paired
+    per chunk)."""
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
     class _SilentRejectB(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if "### b.py ###" in prompt:
-                return {"approved": False, "issues": [], "summary": ""}
-            return {"approved": True, "issues": [], "summary": "Looks good"}
+                return {
+                    "approved": False,
+                    "issues": [],
+                    "summary": "",
+                    "spec_compliance_notes": "",
+                }
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "Looks good",
+                "spec_compliance_notes": "",
+            }
 
     files = {
         "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
@@ -2352,6 +2416,7 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
 
+    assert "b.py (lines 1-2)" in result.not_reviewed_ranges
     assert result.approved is True
     assert result.issues == []
     assert "Looks good" in result.summary  # the approving summary survives as summary text
@@ -2360,8 +2425,19 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
 def test_no_stale_progress_reports_after_map_failure() -> None:
     """A worker still in flight when the map phase fails must never report
     progress afterwards — a stale 'reviewing' report would overwrite the
-    caller's recorded failure state."""
+    caller's recorded failure state.
+
+    ``parallel_map``'s fast-fail abort flag only *narrows* (its own docstring's
+    word), never eliminates, the window in which a not-yet-started task is
+    skipped instead of run — a task must already be past its own abort check
+    (i.e. actually "in flight") for cancellation to be a no-op. The fast-fail
+    branch below therefore waits on ``slow_started`` before raising, so the
+    slow chunk's worker is deterministically already blocked in ``release.wait``
+    (past that check) before the abort flag can ever be set, instead of
+    racing raw thread-scheduling timing to get there first.
+    """
     release = threading.Event()
+    slow_started = threading.Event()
     calls: list = []
 
     class _OneFailsOneBlocks(DummyLLMClient):
@@ -2371,7 +2447,9 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if "FAILME" in prompt:
+                assert slow_started.wait(timeout=10), "slow chunk must start first"
                 raise LLMRateLimitError("429")
+            slow_started.set()
             release.wait(timeout=10)
             result = super().complete_json(prompt, **kwargs)
             self.slow_finished.set()
@@ -2651,7 +2729,7 @@ def test_coordinator_does_not_run_class_cohesion_pass() -> None:
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if "Stated purpose" in prompt:
                 self.saw_cohesion_prompt = True
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     spy = _CohesionSpy()
     src = (
@@ -3046,6 +3124,7 @@ def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypa
                 }
             ],
             "summary": "One issue found.",
+            "spec_compliance_notes": "",
         }
     ]
     input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t")

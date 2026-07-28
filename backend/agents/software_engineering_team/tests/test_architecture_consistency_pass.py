@@ -334,7 +334,7 @@ def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
                         }
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_architecture_and_redundancy_issues(
         _FindingsClient(),
@@ -458,7 +458,7 @@ def test_runs_when_only_components_present_with_no_overview_or_document() -> Non
             if _ARCH_PASS_ANCHOR in prompt:
                 prompts.append(prompt)
                 return {"findings": []}
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     find_architecture_and_redundancy_issues(_FindingsClient(), _input(architecture=arch))
     # The pass actually ran (the guard did not short-circuit before any LLM call).
@@ -511,7 +511,7 @@ def test_returns_empty_for_non_code_review_profile() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_architecture_and_redundancy_issues(
         _FailIfAskedClient(),
@@ -543,7 +543,7 @@ def test_finds_and_returns_new_findings() -> None:
                         }
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_architecture_and_redundancy_issues(
         _FindingsClient(), _input(architecture=_arch())
@@ -574,7 +574,7 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
                         }
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_architecture_and_redundancy_issues(
         _FindingsClient(),
@@ -602,7 +602,7 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
                 calls["arch_pass"] += 1
                 return {"findings": []}
             calls["chunk_review"] += 1
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     # Two files -> at least the map phase runs more than once; the false-positive
     # filter is disabled by default (its own env toggle) so this isolates the count.
@@ -631,7 +631,7 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
                         }
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = run_coordinator(
         _FindingsClient(),
@@ -650,7 +650,7 @@ def test_coordinator_skips_pass_with_no_architecture() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = run_coordinator(_FailIfAskedClient(), CodeReviewInput(code="def f():\n    return 1\n"))
     assert result.approved
