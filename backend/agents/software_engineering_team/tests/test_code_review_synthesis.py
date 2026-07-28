@@ -299,9 +299,19 @@ class _NoNotesClient(DummyLLMClient):
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         if "### a.py ###" in prompt:
-            return {"approved": True, "issues": [], "summary": "alpha summary"}
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "alpha summary",
+                "spec_compliance_notes": "",
+            }
         if "### b.py ###" in prompt:
-            return {"approved": True, "issues": [], "summary": "beta summary"}
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "beta summary",
+                "spec_compliance_notes": "",
+            }
         # Synthesis pass: empty summary → None → fall back to concatenation.
         return {"summary": "", "spec_compliance_notes": "ignored"}
 
@@ -316,16 +326,22 @@ class _SynthOkClient(DummyLLMClient):
                 "issues": [
                     {
                         "severity": "critical",
-                        "category": "security",
+                        "category": "logic",
                         "file_path": "a.py",
                         "description": "SQL injection risk",
                         "suggestion": "Use parameterized queries",
                     }
                 ],
                 "summary": "alpha",
+                "spec_compliance_notes": "",
             }
         if "### b.py ###" in prompt:
-            return {"approved": True, "issues": [], "summary": "beta"}
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "beta",
+                "spec_compliance_notes": "",
+            }
         return {
             "summary": "SYNTHESIZED SUMMARY",
             "spec_compliance_notes": "SYNTHESIZED NOTES",
@@ -365,7 +381,12 @@ def test_single_chunk_makes_no_synthesis_call(monkeypatch) -> None:
 
     monkeypatch.setattr(coordinator_mod, "synthesize_review_findings", _counting)
 
-    client = _PayloadClient({"summary": "x", "spec_compliance_notes": "y"})
+    # This same payload serves the (only) chunk-review call here — a single-chunk
+    # submission never reaches the synthesis pass — so it must itself be a valid
+    # ChunkReviewLLMResponse, not just a bare summary/notes pair.
+    client = _PayloadClient(
+        {"approved": True, "issues": [], "summary": "x", "spec_compliance_notes": "y"}
+    )
     result = run_coordinator(
         client,
         CodeReviewInput(code="### a.py ###\nx = 1", task_description="t", language="python"),
