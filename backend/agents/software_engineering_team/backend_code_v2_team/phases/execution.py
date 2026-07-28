@@ -179,24 +179,20 @@ def _code_review_gate(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> GateOutcome:
-    """Run the backend code-review phase (build + lint + code review).
+    """Run the backend code-review phase (code review only).
 
-    Preconditions: ``deps.build_verifier``/``deps.linting_tool_agent`` are
-      independently skippable — build verification/linting are skipped
-      (treated as passing/absent), not failed, when unset.
-      ``deps.code_review_agent`` is not skippable in that sense: when unset,
+    Preconditions: ``deps.code_review_agent`` is not skippable: when unset,
       ``run_code_review_phase`` runs the LLM reviewer directly instead of an
       external agent, so a code-review LLM call always happens regardless.
       ``files`` is the microtask's current ``{path: content}`` output.
-    Postconditions: the review/agent logic itself never raises (build, lint,
-      and code-review failures are all contained to synthetic issues or
-      logged warnings); an exception from ``detail_callback`` — which is
-      invoked outside that containment and, in the gated loop, forwards to
-      the caller-supplied ``progress_callback`` — is not caught here and
-      propagates uncaught. Returns a ``GateOutcome`` with
-      ``passed``/``issues``/``summary`` copied from the resulting
-      ``PhaseReviewResult``, ``raw_issue_count`` defaulting to ``None`` if
-      absent.
+    Postconditions: the review/agent logic itself never raises (code-review
+      failures are all contained to synthetic issues or logged warnings); an
+      exception from ``detail_callback`` — which is invoked outside that
+      containment and, in the gated loop, forwards to the caller-supplied
+      ``progress_callback`` — is not caught here and propagates uncaught.
+      Returns a ``GateOutcome`` with ``passed``/``issues``/``summary`` copied
+      from the resulting ``PhaseReviewResult``, ``raw_issue_count`` defaulting
+      to ``None`` if absent.
     """
     from .review import run_code_review_phase
 
@@ -206,9 +202,7 @@ def _code_review_gate(
         microtask=microtask,
         repo_path=repo_path,
         files=files,
-        build_verifier=deps.build_verifier,
         code_review_agent=deps.code_review_agent,
-        linting_tool_agent=deps.linting_tool_agent,
         detail_callback=detail_callback,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
@@ -366,8 +360,8 @@ GATE_CONFIG = GatedExecutionConfig(
     # QA and Security are independent analysis calls over the same
     # post-Code-Review snapshot on the backend (each scopes its tool-agent call
     # to its own spec.tool_kind) -- see docs/GATE_DEPENDENCY_GRAPH.md. The
-    # frontend keeps the default False until its tool-agent fan-out is scoped
-    # per gate the same way.
+    # frontend also enables this, since it scopes its own QA/security
+    # tool-agent fan-out per gate the same way.
     parallelize_qa_security=True,
 )
 
@@ -391,7 +385,7 @@ def run_execution_with_review_gates(
     Execute microtasks with batch-based review cycles.
 
     After each microtask is coded, it must pass through review phases:
-    1. Code Review (build + lint + code review) - batch fix all issues
+    1. Code Review (code review only) - batch fix all issues
     2. QA Testing + Security Testing - independent, concurrent analysis passes
        over the same post-Code-Review snapshot (``GATE_CONFIG.parallelize_qa_security``
        is ``True``); batch fix all issues from either, then restart from Code Review
@@ -415,10 +409,9 @@ def run_execution_with_review_gates(
 
     Preconditions:
       - ``review_deps``, if given, supplies whichever of
-        ``build_verifier``/``code_review_agent``/``linting_tool_agent``/
-        ``qa_agent``/``security_agent``/``tool_agents`` the configured gates
-        need; unset ones mean "not available" to the underlying phase calls,
-        not an error.
+        ``code_review_agent``/``qa_agent``/``security_agent``/``tool_agents``
+        the configured gates need; unset ones mean "not available" to the
+        underlying phase calls, not an error.
     Postconditions:
       - Returns an ``ExecutionResult``; each microtask ends COMPLETED,
         SKIPPED, FAILED or REVIEW_FAILED.

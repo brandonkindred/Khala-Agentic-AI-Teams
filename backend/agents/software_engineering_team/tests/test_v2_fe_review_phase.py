@@ -1020,19 +1020,30 @@ def test_fe_run_review_code_review_llm_fallback_failure_does_not_drop_other_step
 # ---------------------------------------------------------------------------
 
 
-def test_fe_run_code_review_phase_build_failure_is_contained(monkeypatch, tmp_path: Path):
-    """Build failure inside the standalone code-review gate becomes a critical
-    synthetic issue and fails the phase — it must not raise."""
+def test_fe_run_code_review_phase_code_review_failure_is_contained(monkeypatch, tmp_path: Path):
+    """A critical code-review finding fails the standalone code-review gate — driven
+    solely by the code-review step, with no build/lint step involved."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import (
         run_code_review_phase,
     )
+    from software_engineering_team.shared.llm_review import LlmReviewOutput
+    from software_engineering_team.shared.v2_models import ReviewIssue
 
     monkeypatch.setattr(
         review_mod,
         "_run_llm_review",
-        lambda **_kw: MagicMock(issues=[], raw_issue_count=0),
+        lambda **_kw: LlmReviewOutput(
+            issues=[
+                ReviewIssue(
+                    source="code_review",
+                    severity="critical",
+                    description="unsafe innerHTML usage",
+                )
+            ],
+            raw_issue_count=1,
+        ),
     )
 
     result = run_code_review_phase(
@@ -1041,13 +1052,14 @@ def test_fe_run_code_review_phase_build_failure_is_contained(monkeypatch, tmp_pa
         microtask=Microtask(id="mt-1"),
         repo_path=tmp_path,
         files={"x.ts": "code"},
-        build_verifier=lambda *_a, **_k: (False, "tsc failed"),
     )
 
     assert result.passed is False
     assert result.phase_name == "code_review"
     assert any(
-        i.source == "build" and i.severity == "critical" and "tsc failed" in i.description
+        i.source == "code_review"
+        and i.severity == "critical"
+        and "unsafe innerHTML" in i.description
         for i in result.issues
     )
 
@@ -1120,17 +1132,18 @@ def test_fe_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
 
 
 def test_fe_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path):
-    """Successful build + empty LLM review → passed with no issues."""
+    """Empty LLM review → passed with no issues."""
     from software_engineering_team.frontend_code_v2_team.models import Microtask
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import (
         run_code_review_phase,
     )
+    from software_engineering_team.shared.llm_review import LlmReviewOutput
 
     monkeypatch.setattr(
         review_mod,
         "_run_llm_review",
-        lambda **_kw: MagicMock(issues=[], raw_issue_count=0),
+        lambda **_kw: LlmReviewOutput(issues=[], raw_issue_count=0),
     )
 
     result = run_code_review_phase(
@@ -1139,7 +1152,6 @@ def test_fe_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path)
         microtask=Microtask(id="mt-1"),
         repo_path=tmp_path,
         files={"x.ts": "code"},
-        build_verifier=lambda *_a, **_k: (True, "ok"),
     )
 
     assert result.passed is True

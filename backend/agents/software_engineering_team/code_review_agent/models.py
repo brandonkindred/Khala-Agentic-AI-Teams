@@ -568,6 +568,158 @@ class ChunkReviewLLMResponse(BaseModel):
         return self
 
 
+_ArchitectureFindingCategory = Literal["architecture", "refactor"]
+_SideEffectFindingCategory = Literal["side-effects", "documentation"]
+
+
+class ArchitectureConsistencyFindingLLM(BaseModel):
+    """Narrow LLM-authored shape for one Part 1 finding of the merged
+    architecture-consistency + side-effect-impact prompt
+    (``prompts.MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``).
+
+    Mirrors the fields ``architecture_consistency_pass._coerce_finding``
+    actually populates on ``CodeReviewIssue`` — severity, category,
+    file_path, line, description, suggestion — typed as an enumerated
+    schema in the same style as :class:`ChunkReviewIssueLLM`. Intentionally
+    omits ``start_line`` and ``pre_existing``: that pass's own
+    ``_coerce_finding`` never populates either (its prompt's output format
+    has no multi-line-anchor field, and only the side-effect pass emits
+    ``pre_existing``). Design-only: not yet consumed by
+    ``generate_structured``, ``coordinator.py``, or ``temporal/workflows.py`` —
+    wiring the merged pass into those call sites is tracked separately from
+    this schema design.
+    """
+
+    severity: _ChunkReviewIssueSeverity = Field(
+        default="medium",
+        description="Severity: critical, high, medium, low, or info",
+    )
+    category: _ArchitectureFindingCategory = Field(
+        description="architecture (a stated architecture boundary/pattern/decision the change "
+        "contradicts) or refactor (a capability the change re-implements that already exists "
+        "elsewhere in the repository)",
+    )
+    file_path: str = Field(
+        default="",
+        description="The changed file the finding is about",
+    )
+    line: Optional[int] = Field(
+        default=None,
+        description="1-based line number the finding is tied to, or None for a file-wide finding",
+    )
+    description: str = Field(
+        default="",
+        description="The specific contradiction or duplication, citing the architecture statement "
+        "or existing code verified",
+    )
+    suggestion: str = Field(
+        default="",
+        description="A concrete fix (e.g. which existing helper/module to reuse instead, or how to "
+        "align with the stated boundary)",
+    )
+
+
+class SideEffectImpactFindingLLM(BaseModel):
+    """Narrow LLM-authored shape for one Part 2 finding of the merged
+    architecture-consistency + side-effect-impact prompt
+    (``prompts.MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``).
+
+    Mirrors the fields ``side_effect_impact_pass._coerce_finding`` actually
+    populates on ``CodeReviewIssue`` — severity, category, file_path, line,
+    description, suggestion, and ``pre_existing``. ``pre_existing`` is
+    ``StrictBool`` here (matching :class:`ChunkReviewIssueLLM`'s rationale),
+    which is stricter than the current pass's ``chunking._coerce_bool``:
+    a bare numeric ``1``/``0`` or a string token is rejected at validation
+    time and drives ``complete_validated``'s corrective retry, rather than
+    being silently coerced to ``False`` (or a truthy string to ``True``) as
+    ``_coerce_bool`` does today. Intentionally omits ``start_line``: that
+    pass's own ``_coerce_finding`` never populates it either (its prompt's
+    output format has no multi-line-anchor field). Design-only: not yet
+    consumed anywhere — see :class:`ArchitectureConsistencyFindingLLM`.
+    """
+
+    severity: _ChunkReviewIssueSeverity = Field(
+        default="medium",
+        description="Severity: critical, high, medium, low, or info",
+    )
+    category: _SideEffectFindingCategory = Field(
+        description="side-effects (a real caller-breaking side effect) or documentation (a "
+        "docstring/comment that no longer matches the implementation)",
+    )
+    file_path: str = Field(
+        default="",
+        description="The changed file whose behavior the finding is about",
+    )
+    line: Optional[int] = Field(
+        default=None,
+        description="1-based line number the finding is tied to, or None for a file-wide finding",
+    )
+    description: str = Field(
+        default="",
+        description="For side-effects: the function's current behavior and the specific caller "
+        "file/line and assumption that breaks. For documentation: the exact discrepancy between "
+        "the docstring/comment and what the code actually does",
+    )
+    suggestion: str = Field(
+        default="",
+        description="A concrete fix (e.g. update the caller, or correct the docstring to match the "
+        "implementation)",
+    )
+    pre_existing: StrictBool = Field(
+        default=False,
+        description="True when this issue is a bug in code the change under review did NOT add "
+        "or modify — a pre-existing defect in unrelated, unchanged code — rather than a defect "
+        "the change introduced (mirrors CodeReviewIssue.pre_existing's canonical wording). Per "
+        "the merged prompt's Part 2 tagging guidance, that means the function(s) the finding is "
+        "about look untouched by this submission's actual work.",
+    )
+
+
+class MergedArchitectureSideEffectResponse(BaseModel):
+    """Merged LLM-authored output schema for
+    ``prompts.MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`` — the target reply
+    shape for consolidating the architecture-consistency pass
+    (``architecture_consistency_pass.py``) and the side-effect-impact pass
+    (``side_effect_impact_pass.py``) into a single LLM call.
+
+    The two passes' findings are kept in separate, explicitly-named arrays
+    rather than one merged list disambiguated only by ``category`` — so
+    downstream code can attribute each finding to its originating pass (and
+    convert either array straight into a list of ``CodeReviewIssue``, the
+    same way each pass's own ``_coerce_finding`` does today) without having
+    to re-derive which pass a given category value came from.
+
+    Design-only: this schema is not yet consumed by ``generate_structured``,
+    the coordinator's ``_run_tail_passes``, or the Temporal workflow/activity
+    — those wire-up changes belong to implementing the parent consolidation
+    (tracked separately), not to this schema design.
+
+    Both fields are required, not defaulted — mirroring
+    :class:`ChunkReviewLLMResponse`'s identical rationale. The merged
+    prompt's own output-contract instructs the model to always return both
+    keys, so a reply missing one is a truncated/malformed response, not a
+    legitimately empty part: defaulting it here would silently reinterpret
+    "the model never ran (or truncated) this half of the check" as "the
+    model ran this half and found nothing," hiding every finding that half
+    would have reported. Requiring both keys instead fails validation on
+    omission and drives ``complete_validated``'s corrective retry, giving
+    the model a chance to actually complete the omitted half — while an
+    explicit empty list for either key remains a valid, expected "found
+    nothing" outcome.
+    """
+
+    architecture_findings: List[ArchitectureConsistencyFindingLLM] = Field(
+        description="Findings from the architecture-consistency / cross-codebase-redundancy check "
+        "(Part 1 of the merged prompt). Empty list when that part found nothing; the key itself "
+        "is still required.",
+    )
+    side_effect_findings: List[SideEffectImpactFindingLLM] = Field(
+        description="Findings from the side-effect / blast-radius impact check (Part 2 of the "
+        "merged prompt). Empty list when that part found nothing; the key itself is still "
+        "required.",
+    )
+
+
 class CodeReviewInput(BaseModel):
     """Input for the Code Review agent.
 
