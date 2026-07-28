@@ -589,8 +589,11 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
         Returns a validated ``model_class`` instance when JSON can be
         recovered from ``text`` and validates against the schema; returns
         ``None`` for empty text, unrecoverable text, text where no candidate
-        object carries any of ``model_class``'s field names, or a schema
-        mismatch. Never raises.
+        object carries any of ``model_class``'s field names, or a
+        ``ValidationError`` (schema mismatch). Any other exception raised by
+        ``model_class.model_validate`` is a genuine bug (a broken custom
+        validator, a non-model ``model_class``) and propagates rather than
+        being swallowed.
     """
     if not text:
         return None
