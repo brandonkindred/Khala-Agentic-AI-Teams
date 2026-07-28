@@ -103,17 +103,38 @@ def truncate_all_teams(schemas: Iterable[TeamSchema]) -> int:
     return total
 
 
-def _real_postgres_schema_body(schema: TeamSchema):
+def _real_postgres_schema_body(schema: TeamSchema, *, worker_id: str = "master"):
     """Generator body shared by every ``real_postgres_schema(schema)`` fixture.
 
     Split out from :func:`real_postgres_schema` so the skip/register/truncate
     sequence is directly unit-testable (drive the generator with ``next()``)
     without going through pytest's fixture machinery.
+
+    ``worker_id`` is pytest-xdist's per-worker identifier ("master" when not
+    running under ``-n``). Module/session-scoped fixtures are instantiated
+    independently *per worker process* — under ``-n > 1`` a sibling worker may
+    still be exercising this schema's tables (in an unrelated test module also
+    using it) when this worker's fixture instance tears down. An uncoordinated
+    ``TRUNCATE ... CASCADE`` at that point would wipe rows the sibling worker is
+    mid-test against, so teardown truncation only runs on the single-worker
+    ("master") path; under multiple workers it's skipped and logged. Tests
+    sharing a schema across xdist workers must isolate via unique row
+    identifiers instead (the existing convention — see
+    ``branding_team/tests/test_store_real_postgres.py``'s ``uuid4``-suffixed
+    data), not via inter-module truncation.
     """
     if not is_postgres_enabled():
         pytest.skip(f"real Postgres tests require POSTGRES_HOST (team={schema.team})")
     register_team_schemas(schema)
     yield
+    if worker_id != "master":
+        logger.debug(
+            "real_postgres_schema: skipping teardown truncate under xdist (worker=%s team=%s) "
+            "to avoid racing sibling workers still using this schema",
+            worker_id,
+            schema.team,
+        )
+        return
     truncate_team_tables(schema)
 
 
@@ -126,6 +147,10 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     Skips the test (rather than raising) when ``POSTGRES_HOST`` is unset, matching
     every other real-Postgres fixture in this repo.
 
+    Under pytest-xdist (``-n > 1``), teardown truncation is skipped on every
+    worker but "master" — see :func:`_real_postgres_schema_body` for why an
+    uncoordinated cross-worker truncate is unsafe.
+
     A drop-in replacement for the per-team hand-rolled version of this pattern
     (see ``branding_team/tests/test_store_real_postgres.py``'s ``_branding_schema``
     fixture): any team's ``conftest.py`` or test module can do
@@ -135,8 +160,8 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     Not itself wired into any team's tests yet — callers opt in explicitly.
     """
 
-    def _fixture():
-        yield from _real_postgres_schema_body(schema)
+    def _fixture(worker_id="master"):
+        yield from _real_postgres_schema_body(schema, worker_id=worker_id)
 
     _fixture.__name__ = f"real_postgres_schema_{schema.team}"
     return pytest.fixture(scope=scope, autouse=True)(_fixture)

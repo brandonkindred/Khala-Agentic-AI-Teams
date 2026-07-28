@@ -787,6 +787,7 @@ def test_real_postgres_schema_body_skips_when_disabled(monkeypatch):
 
 
 def test_real_postgres_schema_body_registers_then_truncates_on_teardown(monkeypatch):
+    # worker_id="master" (the default): single-worker/no-xdist path, teardown truncates.
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
     from shared.postgres import testing as testing_mod
 
@@ -803,6 +804,34 @@ def test_real_postgres_schema_body_registers_then_truncates_on_teardown(monkeypa
     with pytest.raises(StopIteration):
         next(gen)  # drives past the yield: teardown truncate must now have run
     assert calls == ["register:demo", "truncate:demo"]
+
+
+def test_real_postgres_schema_body_skips_teardown_truncate_under_xdist_worker(monkeypatch):
+    # worker_id != "master": running under pytest-xdist with multiple workers. A
+    # sibling worker's module-scoped fixture instance for the same schema could
+    # still be mid-test, so this worker must NOT truncate on teardown (would race
+    # and wipe the sibling's rows) — register still runs (idempotent CREATE TABLE
+    # IF NOT EXISTS), but truncate must not be called at all.
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared.postgres import testing as testing_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(testing_mod, "register_team_schemas", lambda s: calls.append(f"register:{s.team}"))
+    monkeypatch.setattr(
+        testing_mod,
+        "truncate_team_tables",
+        lambda s: (_ for _ in ()).throw(AssertionError("must not truncate under a non-master xdist worker")),
+    )
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    gen = testing_mod._real_postgres_schema_body(schema, worker_id="gw0")
+
+    next(gen)
+    assert calls == ["register:demo"]
+
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert calls == ["register:demo"]  # unchanged — no truncate call was made
 
 
 def test_real_postgres_schema_returns_configured_pytest_fixture():
