@@ -628,7 +628,7 @@ single verify activity — see `CODE_REVIEW_VERIFY_TIMEOUT_SECONDS` below), so
 this ceiling still bounds *verification* concurrency in all dispatch modes.
 
 ### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
-Int (default `60`, floor `1`). Per-group timeout for the false-positive
+Int (default `300`, floor `1`). Per-group timeout for the false-positive
 verification phase's LLM calls (one call per cited file, fanned out across
 `CODE_REVIEW_MAP_PARALLELISM` worker threads when there is more than one
 group). A group whose verification call exceeds this timeout is treated the
