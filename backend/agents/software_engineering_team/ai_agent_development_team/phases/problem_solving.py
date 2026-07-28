@@ -8,6 +8,17 @@ from ..models import ExecutionResult, ProblemSolvingResult, ReviewResult
 def run_problem_solving(
     *, execution_result: ExecutionResult, review_result: ReviewResult
 ) -> ProblemSolvingResult:
+    """Synthesize placeholder artifacts for any missing-artifact-category issue.
+
+    Preconditions: ``review_result.issues`` may be empty. This is a purely
+      deterministic, non-LLM fix — it only ever addresses ``artifact_gate``-
+      sourced issues (missing required artifact categories); it cannot
+      resolve ``execution``-sourced issues (failed microtasks).
+    Postconditions: returns a ``ProblemSolvingResult`` where ``resolved`` is
+      True iff at least one placeholder file was synthesized; ``files`` is a
+      new dict — ``execution_result.files`` merged with the placeholder
+      patches — and ``execution_result`` itself is not mutated.
+    """
     fixes_applied = []
     patched_files = {}
 

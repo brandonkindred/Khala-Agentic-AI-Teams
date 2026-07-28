@@ -25,6 +25,20 @@ def run_execution(
     existing_code: str,
     tool_runners: Dict[ToolAgentKind, ToolRunner],
 ) -> ExecutionResult:
+    """Run each planned microtask's tool agent once, in planner order.
+
+    Preconditions: ``tool_runners`` must contain an entry for
+      ``ToolAgentKind.GENERAL`` (used as the fallback runner for any
+      microtask whose ``tool_agent`` has no dedicated entry); the caller
+      (``AIAgentDevelopmentTeamLead._build_tool_runners``) guarantees this.
+      ``planning_result.microtasks`` may be empty.
+    Postconditions: returns an ``ExecutionResult`` whose ``microtasks`` list
+      has one entry per input microtask, each with ``status`` set to
+      ``COMPLETED`` or ``FAILED`` based on the runner's ``out.success``;
+      ``files`` is the union of every microtask's output files. Does not
+      handle ``Microtask.depends_on`` — microtasks always run once, in
+      planner order, regardless of dependency status.
+    """
     files: Dict[str, str] = {}
     notes: List[str] = []
     updated_microtasks: List[Microtask] = []
