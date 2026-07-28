@@ -13,8 +13,6 @@ from software_engineering_team.shared.tool_agent_base import (
 )
 
 from ...models import ReviewIssue, ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ...output_templates import parse_problem_solving_single_issue_template
-from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
 MAX_RELEVANT_CODE_CHARS = 8_000
 
@@ -110,26 +108,21 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 
 
 class UxUsabilityToolAgent(BaseReviewToolAgent):
-    """UX/Usability tool agent: UX design planning and usability review with fixes.
+    """UX/Usability tool agent: UX design planning and usability review.
 
-    ``plan`` and ``review`` run in JSON mode (``_model_json``); ``problem_solve``
-    keeps text mode (``_model``) because its output is a ``## FILE`` marker
-    template that JSON mode would clobber.
+    Reports issues for the coding agent to fix. ``plan`` and ``review`` run in
+    JSON mode (``_model_json``).
     """
 
     name = "UX"
     execute_label = "UX/Usability"
     empty_label = "UX issues"
     issue_source = "ux"
-    problem_solve_sources = ("ux", "ux_usability", "tool_ux_usability")
     review_prompt = UX_ENGINEER_REVIEW_PROMPT
-    problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "json"
     uses_json_model = True
     review_model_attr = "_model_json"
-    default_recommendation = "Fix the UX issue."
-    _parse_single_issue = staticmethod(parse_problem_solving_single_issue_template)
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Generate UX design artifacts: user journeys, wireframes, interaction rules, microcopy."""

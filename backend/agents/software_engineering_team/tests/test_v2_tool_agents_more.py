@@ -432,48 +432,11 @@ class TestBackendSecurity:
         assert len(out.issues) == 1
         assert out.issues[0].source == "security"
 
-    def test_problem_solve_no_model(self):
+    def test_no_problem_solve_capability(self):
+        """Security is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
-        assert "skipped" in a.problem_solve(_be_phase_input()).summary
-
-    def test_problem_solve_no_security_issues(self):
-        a, _ = self._agent()
-        a._model = object()
-        out = a.problem_solve(
-            _be_phase_input(review_issues=[_be_review_issue(source="documentation")])
-        )
-        assert "No security issues" in out.summary
-
-    def test_problem_solve_fixes_issues(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        _patch_strands(
-            monkeypatch,
-            mod,
-            response="## FILE a.py ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n",
-        )
-        out = a.problem_solve(
-            _be_phase_input(
-                current_files={"a.py": "x"},
-                review_issues=[
-                    _be_review_issue(source="security", file_path="a.py"),
-                    _be_review_issue(source="tool_security", file_path="b.py"),
-                ],
-            )
-        )
-        assert "2 of 2" in out.summary
-
-    def test_problem_solve_llm_failure(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        _patch_strands(monkeypatch, mod, raise_exc=RuntimeError("err"))
-        out = a.problem_solve(
-            _be_phase_input(
-                current_files={"a.py": "x"},
-                review_issues=[_be_review_issue(source="security", file_path="a.py")],
-            )
-        )
-        assert "0 of 1" in out.summary
+        assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +458,7 @@ class TestBackendTestingQA:
     def test_execute_returns_stub(self):
         a, _ = self._agent()
         out = a.execute(_be_tool_input())
-        assert "Testing/QA execute" in out.summary or "QA" in out.summary
+        assert "Testing/QA execute" in out.summary
 
     def test_plan(self):
         a, _ = self._agent()
@@ -538,34 +501,11 @@ class TestBackendTestingQA:
         out = a.review(_be_phase_input(current_files={"a.py": "x"}))
         assert len(out.issues) >= 1
 
-    def test_problem_solve_no_model(self):
+    def test_no_problem_solve_capability(self):
+        """QA is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
-        out = a.problem_solve(_be_phase_input())
-        assert "skipped" in out.summary
-
-    def test_problem_solve_no_relevant_issues(self):
-        a, _ = self._agent()
-        a._model = object()
-        out = a.problem_solve(
-            _be_phase_input(review_issues=[_be_review_issue(source="security")])
-        )
-        assert "No" in out.summary or "no" in out.summary
-
-    def test_problem_solve_fixes_issues(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        _patch_strands(
-            monkeypatch,
-            mod,
-            response="## FILE a.py ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n",
-        )
-        out = a.problem_solve(
-            _be_phase_input(
-                current_files={"a.py": "x"},
-                review_issues=[_be_review_issue(source="qa", file_path="a.py")],
-            )
-        )
-        assert out.files or "fixed" in out.summary
+        assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------
@@ -637,6 +577,7 @@ class TestFrontendDocumentation:
             )
         )
         assert stub.calls
+        assert "TypeScript conventions" in stub.calls[0]
 
 
 # ---------------------------------------------------------------------------
@@ -687,26 +628,8 @@ class TestFrontendSecurity:
         out = a.review(_fe_phase_input(current_files={"a.tsx": "code"}))
         assert len(out.issues) == 1
 
-    def test_problem_solve_no_issues(self):
+    def test_no_problem_solve_capability(self):
+        """Security is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
-        a._model = object()
-        out = a.problem_solve(
-            _fe_phase_input(review_issues=[_fe_review_issue(source="documentation")])
-        )
-        assert "No security issues" in out.summary
-
-    def test_problem_solve_fixes_issues(self, monkeypatch):
-        a, mod = self._agent()
-        a._model = object()
-        _patch_strands(
-            monkeypatch,
-            mod,
-            response="## FILE a.tsx ##\nfixed\n## SUMMARY ##\nok\n## END SUMMARY ##\n",
-        )
-        out = a.problem_solve(
-            _fe_phase_input(
-                current_files={"a.tsx": "x"},
-                review_issues=[_fe_review_issue(source="security", file_path="a.tsx")],
-            )
-        )
-        assert "1 of 1" in out.summary
+        assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
