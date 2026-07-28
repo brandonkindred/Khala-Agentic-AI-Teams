@@ -295,46 +295,58 @@ class CodeReviewWorkflow:
         # Each is gated by its own workflow.patched so a pre-migration
         # history (recorded before that activity existed) replays its
         # original finalize-next sequence exactly.
-        run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
-        run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+        has_architecture_findings = False
+        has_side_effect_findings = False
 
         if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):
             # None of the three tail passes reads another's output (see
             # coordinator._run_tail_passes), so they can be scheduled as
             # concurrent activities instead of three sequential round-trips —
             # same "create the coroutine, gather later" idiom as the map
-            # fan-out above.
+            # fan-out above. Safe to evaluate _ARCHITECTURE_PASS_PATCH /
+            # _SIDE_EFFECT_PASS_PATCH up front here: this branch is only
+            # reached by a brand-new execution or one that already recorded
+            # the _CONCURRENT_TAIL_PASSES_PATCH marker (and therefore already
+            # evaluated those two markers at these same positions).
+            run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
+            run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+
             calls = [_verify()]
             if run_architecture:
                 calls.append(_architecture())
             if run_side_effect:
                 calls.append(_side_effect())
-            results = await asyncio.gather(*calls)
+            results_iter = iter(await asyncio.gather(*calls))
+            verified = next(results_iter)
+            if run_architecture:
+                architecture_findings = next(results_iter)
+                if architecture_findings:
+                    verified = [*verified, *architecture_findings]
+                    has_architecture_findings = True
+            if run_side_effect:
+                side_effect_findings = next(results_iter)
+                if side_effect_findings:
+                    verified = [*verified, *side_effect_findings]
+                    has_side_effect_findings = True
         else:
             # Pre-migration history: reproduce the original sequential
-            # scheduling exactly (see _CONCURRENT_TAIL_PASSES_PATCH).
-            results = [await _verify()]
-            if run_architecture:
-                results.append(await _architecture())
-            if run_side_effect:
-                results.append(await _side_effect())
-
-        results_iter = iter(results)
-        verified = next(results_iter)
-
-        has_architecture_findings = False
-        if run_architecture:
-            architecture_findings = next(results_iter)
-            if architecture_findings:
-                verified = [*verified, *architecture_findings]
-                has_architecture_findings = True
-
-        has_side_effect_findings = False
-        if run_side_effect:
-            side_effect_findings = next(results_iter)
-            if side_effect_findings:
-                verified = [*verified, *side_effect_findings]
-                has_side_effect_findings = True
+            # scheduling AND the original workflow.patched call positions
+            # exactly (see _CONCURRENT_TAIL_PASSES_PATCH) — each patched()
+            # call must stay at its original await boundary (after the
+            # activity it follows completes), since a history recorded
+            # under the old code has the corresponding marker event there,
+            # not up front alongside the other two.
+            verified = await _verify()
+            if workflow.patched(_ARCHITECTURE_PASS_PATCH):
+                architecture_findings = await _architecture()
+                if architecture_findings:
+                    verified = [*verified, *architecture_findings]
+                    has_architecture_findings = True
+            if workflow.patched(_SIDE_EFFECT_PASS_PATCH):
+                side_effect_findings = await _side_effect()
+                if side_effect_findings:
+                    verified = [*verified, *side_effect_findings]
+                    has_side_effect_findings = True
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(
