@@ -299,7 +299,9 @@ def test_ask_falls_back_to_thread_when_temporal_disabled():
 
 
 class _FakeLLM:
-    """Offline LLM stub: canned JSON for analysis, canned text for the rest."""
+    """Offline LLM stub: canned text for the reasoning pass (``complete``)
+    and canned JSON for the formatting pass (``complete_json``).
+    """
 
     def __init__(self, *, json_return: dict | None = None, text_return: str = "TXT") -> None:
         self._json = json_return or {}

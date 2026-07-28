@@ -233,6 +233,17 @@ def test_decomposition_with_deliberation(root_spec, mock_llm):
     assert result.answer == "Synthesised: both say 42"
     assert result.deliberation_notes is not None
     assert len(spawned) == 2
+    # Two-pass analysis on root + both children: three formatting calls and
+    # three reasoning completes (objective-tagged), plus deliberation and
+    # synthesis completes.
+    assert mock_llm.complete_json.call_count == 3
+    reasoning_calls = [
+        c
+        for c in mock_llm.complete.call_args_list
+        if str(c.kwargs.get("objective", "")).startswith("analyze specialist question")
+    ]
+    assert len(reasoning_calls) == 3
+    assert mock_llm.complete.call_count == 5  # 3 reasoning + deliberation + synthesis
 
 
 # ------------------------------------------------------------------

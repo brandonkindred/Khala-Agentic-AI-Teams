@@ -86,11 +86,10 @@ from .util import (
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .strands_adapter import (  # noqa: F401
         LLMClientModel,
-        get_strands_model,
         run_json_via_strands,
     )
 
-_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "get_strands_model", "run_json_via_strands"}
+_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "run_json_via_strands"}
 
 
 def __getattr__(name: str) -> Any:

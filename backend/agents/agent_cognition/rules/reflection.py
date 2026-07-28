@@ -216,6 +216,14 @@ class _CallCountingClient:
     """
 
     def __init__(self, inner: Any) -> None:
+        """Wrap an LLM client and initialize the call counter.
+
+        Preconditions:
+            ``inner`` must expose ``complete`` and ``complete_json`` methods.
+        Postconditions:
+            ``self.calls`` is ``0``; attributes other than ``complete`` /
+            ``complete_json`` / ``calls`` / ``_inner`` delegate to ``inner``.
+        """
         self._inner = inner
         self.calls = 0
 
