@@ -164,9 +164,16 @@ class ProposalCriticAgent:
             logger.warning("sales.proposal_critic.failed reason=%s", exc)
             return _fallback_proposal_report(str(exc))
 
-        approved = report.status == "PASS" and report.must_fix_count() == 0
-        if approved != report.approved:
-            report = report.model_copy(update={"approved": approved})
+        # Enforce the invariant documented on ProposalCriticReport.status:
+        # "status is PASS only when no must_fix violations exist. approved
+        # must equal (status == 'PASS')." A must_fix violation always forces
+        # FAIL, overriding whatever status the LLM returned — reconciling
+        # only `approved` (as a prior version of this code did) could leave
+        # status="PASS" with approved=False, which breaks that invariant.
+        status = "FAIL" if report.must_fix_count() > 0 else report.status
+        approved = status == "PASS"
+        if status != report.status or approved != report.approved:
+            report = report.model_copy(update={"status": status, "approved": approved})
         return report
 
     @staticmethod

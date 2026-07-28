@@ -389,6 +389,9 @@ def test_revise_also_uses_structured_path(monkeypatch: pytest.MonkeyPatch) -> No
     parsed, _ = DesignAgent().revise(prior_spec, critique)
 
     assert parsed["asset_class"] == "stocks"
+    # One structured invocation = one reasoning-pass (.complete) call plus
+    # one formatting-pass (.complete_json) call, recorded in separate lists.
+    assert len(stub_client.reasoning_calls) == 1
     assert len(stub_client.calls) == 1
 
 
@@ -424,6 +427,9 @@ def test_structured_success_dsl_invalid_falls_through_to_correction_retry(
     assert parsed["asset_class"] == "stocks"
     assert rationale == "scripted"
     # Exactly one structured attempt, then exactly one legacy correction retry.
+    # The one structured attempt is a reasoning-pass (.complete) call plus a
+    # formatting-pass (.complete_json) call, recorded in separate lists.
+    assert len(stub_client.reasoning_calls) == 1
     assert len(stub_client.calls) == 1
     assert len(legacy_agent.seen) == 1
     assert "rejected by the DSL validator" in legacy_agent.seen[0]
@@ -546,6 +552,9 @@ def test_self_review_uses_structured_path_when_available(
         parsed, _ = DesignAgent().run(prior_records=[])
 
     assert parsed["asset_class"] == "stocks"
+    # Two structured invocations (design-generate + self-review critique) =
+    # two reasoning-pass calls plus two formatting-pass calls.
+    assert len(client.reasoning_calls) == 2
     assert len(client.calls) == 2
     assert client.calls[0]["schema"] == DESIGN_SPEC_SCHEMA
     assert client.calls[1]["schema"] == CRITIQUE_SCHEMA

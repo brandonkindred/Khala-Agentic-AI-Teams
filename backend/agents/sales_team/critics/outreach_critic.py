@@ -179,10 +179,14 @@ class OutreachCriticAgent:
             logger.warning("sales.outreach_critic.failed reason=%s", exc)
             return _fallback_outreach_report(str(exc))
 
-        # Enforce the invariant: approved iff status == PASS with no must_fix items.
-        approved = report.status == "PASS" and report.must_fix_count() == 0
-        if approved != report.approved:
-            report = report.model_copy(update={"approved": approved})
+        # Enforce the invariant: approved iff status == PASS with no must_fix
+        # items. A must_fix violation always forces FAIL, overriding whatever
+        # status the LLM returned — reconciling only `approved` could leave
+        # status="PASS" with approved=False, an inconsistent report.
+        status = "FAIL" if report.must_fix_count() > 0 else report.status
+        approved = status == "PASS"
+        if status != report.status or approved != report.approved:
+            report = report.model_copy(update={"status": status, "approved": approved})
         return report
 
     @staticmethod

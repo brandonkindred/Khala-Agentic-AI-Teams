@@ -451,7 +451,9 @@ class TestProspectorAgent:
         assert [p.company_name for p in result.prospects] == ["Acme", "Beta"]
         assert "Sales Development Representative" in client.calls[0]["system_prompt"]
 
-    def test_prospect_companies_uses_same_schema(self, sample_icp: IdealCustomerProfile) -> None:
+    def test_prospect_companies_returns_typed_prospect_list(
+        self, sample_icp: IdealCustomerProfile
+    ) -> None:
         client = CannedLLMClient([{"prospects": [_prospect_payload("GlobalCo")]}])
         agent = ProspectorAgent(llm_client=client)
         result = agent.prospect_companies(sample_icp.model_dump_json(), "ProductX", "vp", 3, "ctx")
@@ -881,7 +883,9 @@ class TestLearningEngine:
         assert len(client.calls) == 1
         assert client.calls[0]["temperature"] == 0.0
         assert client.calls[0]["think"] is False
-        assert "Reasoning: proceeding as configured by the test fixture" in client.calls[0]["prompt"]
+        assert (
+            "Reasoning: proceeding as configured by the test fixture" in client.calls[0]["prompt"]
+        )
         assert "Acme" not in client.calls[0]["prompt"]
 
 

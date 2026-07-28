@@ -224,11 +224,16 @@ def test_max_depth_tracking():
             "skill_requirements": [],
         },
     ]
+    # Only 3 non-reasoning .complete() calls actually happen: strategy
+    # classification, then one synthesis call per level (depth 1, then depth
+    # 0) — deliberation is skipped at both depths since each node has a
+    # single child (below the >=2-children threshold), so it never draws
+    # from this queue. Supplying values for the skipped deliberation calls
+    # would go unconsumed and silently shift the labels on the values that
+    # ARE consumed onto the wrong calls.
     llm.complete.side_effect = _complete_side_effect(
         '{"strategy": "auto", "reasoning": "complex"}',
-        "deliberation depth 1",  # depth-1 deliberation (skipped, <2 children)
         "Mid synthesis",  # depth 1 synthesis
-        "deliberation depth 0",
         "Root synthesis",  # depth 0 synthesis
     )
 
@@ -274,7 +279,11 @@ def test_explicit_strategy_skips_classification():
 def test_conversation_history_passed_through():
     """Conversation history from the request reaches the agent."""
     llm = MagicMock()
-    llm.complete.return_value = '{"strategy": "none", "reasoning": "simple"}'
+    # Route by objective so the strategy-classification call and _analyse's
+    # think=True reasoning-pass call don't share a return value (the latter
+    # expects prose, not the classification JSON string) — same conflation
+    # this helper exists to avoid elsewhere in this file.
+    llm.complete.side_effect = _complete_side_effect('{"strategy": "none", "reasoning": "simple"}')
     llm.complete_json.return_value = {
         "summary": "Q",
         "can_answer_directly": True,

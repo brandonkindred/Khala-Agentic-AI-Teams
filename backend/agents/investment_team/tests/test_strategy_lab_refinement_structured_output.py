@@ -400,7 +400,7 @@ def test_structured_path_needs_no_correction_resend_unlike_fallback(
 
     Replays the SAME simulated failure sequence — one response the strict
     extractor rejects, then a valid one — down both paths and counts LLM
-    calls. ``structured_calls`` below counts only the formatting-pass
+    calls. ``structured_format_calls`` below counts only the formatting-pass
     (``complete_json``) calls, not the reasoning pass — after the
     reasoning+formatting split, the structured path's real total is two
     provider calls (reasoning then formatting), matching the legacy path's
@@ -423,16 +423,18 @@ def test_structured_path_needs_no_correction_resend_unlike_fallback(
 
     structured_client = _StubClient({"strategy_code": "# fixed", "changes_made": "ok"})
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
-    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(structured_client))
+    monkeypatch.setattr(
+        so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(structured_client)
+    )
     monkeypatch.setattr(_agent_runner, "Agent", _raise_if_agent_built)
     monkeypatch.setattr(mod, "build_json_correction_prompt", _count_structured_correction)
 
     RefinementAgent().run(
         spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
     )
-    structured_calls = len(structured_client.calls)
+    structured_format_calls = len(structured_client.calls)
 
-    assert structured_calls == 1
+    assert structured_format_calls == 1
     assert structured_corrections == 0
 
     # --- Legacy fallback path: same failure sequence, one resend. ---
@@ -463,4 +465,4 @@ def test_structured_path_needs_no_correction_resend_unlike_fallback(
     # provider-call count is lower (it isn't: 2 either way, once the
     # reasoning pass is counted on the structured side). See the docstring
     # above for the accurate accounting.
-    assert structured_calls < fallback_calls
+    assert structured_format_calls < fallback_calls

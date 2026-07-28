@@ -332,8 +332,12 @@ class TestOutreachCriticAgent:
 
         report = critic.review(sample_sequence, sample_dossier, sample_icp)
 
-        # Critic enforces approved == (status == 'PASS' AND no must_fix).
+        # Critic enforces approved == (status == 'PASS' AND no must_fix) AND
+        # reconciles status itself — a must_fix violation forces FAIL, not
+        # just approved=False (a status="PASS"/approved=False report would
+        # itself violate the documented invariant).
         assert report.approved is False
+        assert report.status == "FAIL"
 
     def test_parse_failure_falls_back_to_fail(
         self,
@@ -353,6 +357,9 @@ class TestOutreachCriticAgent:
         assert report.approved is False
         assert report.notes is not None and "parseable JSON" in report.notes
         assert len(llm.reasoning_calls) == 1
+        # The formatting pass retries on every invalid payload: 1 initial +
+        # correction_attempts=2 corrective resends, all queued as invalid.
+        assert len(llm.calls) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +448,41 @@ class TestProposalCriticAgent:
         assert report.status == "FAIL"
         assert report.notes is not None and "parseable JSON" in report.notes
         assert len(llm.reasoning_calls) == 1
+        # The formatting pass retries on every invalid payload: 1 initial +
+        # correction_attempts=2 corrective resends, all queued as invalid.
+        assert len(llm.calls) == 3
+
+    def test_invariant_forces_status_fail_on_must_fix(
+        self,
+        sample_proposal: SalesProposal,
+        sample_dossier: ProspectDossier,
+        sample_qualification: QualificationScore,
+    ) -> None:
+        # Model lies: claims PASS+approved while listing a must_fix violation.
+        bogus = {
+            "status": "PASS",
+            "approved": True,
+            "violations": [
+                {
+                    "rule_id": "proposal.roi.arithmetic",
+                    "severity": "must_fix",
+                    "section": "roi_model",
+                    "description": "payback_months doesn't reconcile",
+                    "suggested_fix": "recompute payback_months",
+                }
+            ],
+            "rubric_version": "v1",
+        }
+        llm = CannedLLMClient([bogus])
+        critic = ProposalCriticAgent(llm_client=llm)
+
+        report = critic.review(sample_proposal, sample_dossier, sample_qualification)
+
+        # Critic reconciles BOTH status and approved from the violations —
+        # not just approved (a status="PASS"/approved=False report would
+        # itself violate the documented invariant on ProposalCriticReport).
+        assert report.status == "FAIL"
+        assert report.approved is False
 
     def test_handles_missing_dossier_and_qualification(
         self, sample_proposal: SalesProposal

@@ -73,7 +73,12 @@ class CannedLLM(LLMClient):
         **kwargs: Any,
     ) -> dict[str, Any]:
         self.json_calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "think": think, "temperature": temperature}
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "temperature": temperature,
+            }
         )
         # Returned verbatim (no per-item ``dict()`` copy) so a non-object item can
         # flow through to exercise reflection's drop-malformed-item path.
@@ -745,11 +750,13 @@ def test_reflection_never_creates_or_activates_a_rule(monkeypatch: pytest.Monkey
 
 
 def test_reflect_requires_non_empty_agent_id() -> None:
+    """``reflect``'s precondition on a non-empty ``agent_id`` raises via assert."""
     with pytest.raises(AssertionError):
         reflection.reflect("", _NOW)
 
 
 def test_reflect_requires_tz_aware_now() -> None:
+    """``reflect``'s precondition on a tz-aware ``now`` raises via assert."""
     with pytest.raises(AssertionError):
         reflection.reflect("a", datetime(2026, 6, 1, 12, 0))  # naive
 
@@ -793,6 +800,10 @@ def test_dedupe_key_normalizes_text_mode_and_handles_retire() -> None:
 def test_restates_active_rule_matches_add_content_only() -> None:
     content = {("be kind", "advisory", None)}
     retire = reflection._build_proposal("a", ProposalAction.RETIRE, [], _NOW, target_rule_id="r1")
+    # proposed_rule["text"] is deliberately an int, not a str — it can never
+    # textually match a set of (str, str, str|None) content tuples, so this
+    # exercises the "non-str text" branch distinctly from the "wrong action"
+    # branch covered by `retire` above.
     bad_text = reflection._build_proposal(
         "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": 123}
     )
