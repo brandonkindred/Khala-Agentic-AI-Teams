@@ -1,6 +1,6 @@
 """Tests for the code review agent's Temporal instrumentation.
 
-Covers the four things testable without a live Temporal server:
+Covers the five things testable without a live (deployed) Temporal server:
 
 1. The default-on address resolver / enablement gate (``temporal.config``).
 2. The activity-boundary DTO round-trips (``temporal.phase_models``).
@@ -8,10 +8,13 @@ Covers the four things testable without a live Temporal server:
    replicating the workflow's orchestration in-process and asserting the verdict
    matches ``run_coordinator`` (durable path is behavior-identical to thread mode).
 4. ``CodeReviewAgent.run``'s Temporal-first dispatch and its fallbacks.
-
-The workflow class itself needs a Temporal worker to execute, so its live
-round-trip is an integration concern; here we assert it is importable and
-registered.
+5. A real ``CodeReviewWorkflow`` execute + replay round-trip, driven by
+   ``temporalio.testing.WorkflowEnvironment``'s embedded time-skipping test
+   server (no live/deployed Temporal server needed) — see
+   ``test_workflow_executes_and_replays_without_non_determinism`` near the
+   bottom of this file. It is marked ``integration`` (run with
+   ``-m integration``) since standing up the embedded server is heavier than
+   this file's other pure-Python tests.
 """
 
 from __future__ import annotations
@@ -1009,3 +1012,83 @@ def test_worker_start_defaults_temporal_address_when_unset(
 
     assert worker_mod.start_code_review_temporal_worker_thread() is True
     assert os.environ["TEMPORAL_ADDRESS"] == "resolved:7233"
+
+
+# ---------------------------------------------------------------------------
+# 6. Live workflow execute + replay (WorkflowEnvironment)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_executes_and_replays_without_non_determinism() -> None:
+    """Execute ``CodeReviewWorkflow`` end-to-end and replay its recorded history.
+
+    This is the baseline the issue asks for: a ``WorkflowEnvironment``-driven
+    execute + replay round-trip against today's sequential (pre-parallelization)
+    workflow, so a later change to the tail passes (architecture-consistency,
+    side-effect-impact) has a real replay-determinism guard instead of only the
+    activity-level orchestration replica ``_run_activity_pipeline`` exercises
+    above. Unlike that helper, this drives the actual ``CodeReviewWorkflow.run``
+    coroutine through a real Temporal worker and sandbox, so it is the one test
+    that would catch a ``workflow.patched`` ordering regression.
+
+    Uses the REAL activities (not hand-written fakes) against the ``dummy`` LLM
+    harness this suite already runs under (``tests/conftest.py`` sets
+    ``LLM_PROVIDER=dummy``), so prepare -> map -> verify -> gate -> narrative
+    executes for real, just fast and deterministically.
+
+    ``WorkflowEnvironment.start_time_skipping()`` downloads (and thereafter
+    caches) a small ephemeral test-server binary from ``temporal.download`` on
+    first use in an environment -- unlike an activity/worker connecting to a
+    deployed Temporal server, this needs one-time outbound network access, so
+    the test skips (rather than fails) when that download is unreachable (e.g.
+    a network-restricted sandbox), while still running for real wherever that
+    egress is allowed (a normal dev machine or CI runner).
+
+    Marked ``integration`` (run with ``-m integration``): standing up the
+    embedded test server is heavier than this file's other pure-Python tests,
+    matching this suite's existing convention for that marker.
+    """
+    import concurrent.futures
+
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-replay-test"
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[CodeReviewWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            async with worker:
+                result = await env.client.execute_workflow(
+                    CodeReviewWorkflow.run,
+                    review_input.model_dump(mode="json"),
+                    id=workflow_id,
+                    task_queue=TASK_QUEUE,
+                )
+
+            history = await env.client.get_workflow_handle(workflow_id).fetch_history()
+
+    # Sanity check: the durable path produced the same verdict shape the
+    # activity-level pipeline test above asserts against `run_coordinator`.
+    assert result["approved"] is True
+    assert result["summary"]
+
+    # The property this issue exists to guard: replaying the just-recorded
+    # history against the same workflow code must not raise a non-determinism
+    # error.
+    await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)
