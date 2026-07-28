@@ -43,6 +43,10 @@ class ReviewPrepDTO(BaseModel):
           JSON-native); ``context_fp`` fingerprints those shared fields plus the
           resolved model, and ``surface_by_path`` is the whole submission's
           cross-file symbol surface — both fed unchanged into every map call.
+        - ``fanout_width`` is this review's own adaptive map-phase concurrency
+          cap (``config.resolve_temporal_fanout_width(len(chunks))``): at most
+          this many ``review_chunk_activity`` calls run concurrently for this
+          review, regardless of ``len(chunks)``.
     """
 
     no_code: bool = False
@@ -52,6 +56,7 @@ class ReviewPrepDTO(BaseModel):
     context_fp: str = ""
     surface_by_path: Dict[str, List[str]] = Field(default_factory=dict)
     single_chunk: bool = False
+    fanout_width: int = 1
 
 
 class ChunkOutcomeDTO(BaseModel):

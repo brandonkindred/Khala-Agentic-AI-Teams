@@ -8,9 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from llm_service import DummyLLMClient, LLMClient
-from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
+from software_engineering_team.shared.deliver_utils import DeliverGitOps
 from software_engineering_team.shared.git_utils import (
-    DEVELOPMENT_BRANCH,
     abort_merge,
     checkout_branch,
     commit_working_tree,
@@ -21,47 +20,22 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
 )
 from software_engineering_team.shared.repo_writer import write_agent_output
-from software_engineering_team.shared.team_lead_base import (
-    BaseTeamLead,
-    TeamLeadSharedState,
-    build_team_failure_result,
-)
+from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
-from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
+from .change_review_agent import ChangeReviewAgent
 from .cicd_pipeline_agent import CICDPipelineAgent
 from .deployment_strategy_agent import DeploymentStrategyAgent
-from .devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
-from .doc_runbook_agent import DocumentationRunbookAgent, DocumentationRunbookInput
+from .devsecops_review_agent import DevSecOpsReviewAgent
+from .doc_runbook_agent import DocumentationRunbookAgent
 from .iac_agent import InfrastructureAsCodeAgent
-from .models import (
-    CriterionTrace,
-    DevOpsCompletionPackage,
-    DevOpsTaskSpec,
-    DevOpsTeamResult,
-    GitCommitMetadata,
-    GitMergeMetadata,
-    GitOperationsMetadata,
-    HandoffInfo,
-    ReleaseReadiness,
-    SubtaskContract,
+from .models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult, SubtaskContract
+from .phases import (
+    criterion_traces_from_phase4,  # noqa: F401 (public re-export; test_devops_team.py imports it here)
+    run_phase1_intake_clarify,
+    run_phase2_design_fanout,
+    run_phase4_quality_gate,
+    run_phase5_deliver_merge,
 )
-from .phases import assemble_quality_gates, run_phase1_intake_clarify, run_phase2_design_fanout
-
-# Commit-message template for the shared deliver helper. ``deliver_inline_merge``
-# calls ``template.format(scope=..., summary=...)``; only ``{summary}`` is used
-# here (``str.format`` ignores the unreferenced ``scope`` kwarg).
-DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE = "feat(devops): {summary}"
-
-# Fallback runtime verification checklist used when the deployment-strategy
-# agent's output carries no health checks of its own; the required-approval
-# name for production deploys. Named so Phase 5's ReleaseReadiness assembly
-# has a single, reusable source for these defaults instead of inline literals.
-DEFAULT_RUNTIME_CHECKS = [
-    "deployment_rollout_status",
-    "service_health",
-    "alert_health",
-]
-PROD_APPROVAL = "manual_prod_approval"
 
 # Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
 # Keep list values read-only — do not mutate them in the adapter.
@@ -88,12 +62,18 @@ _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = [
 
 
 def _git_ops() -> DeliverGitOps:
-    """Bundle this module's git callables for the shared deliver helper.
+    """Bundle this module's git/write callables for the shared deliver helper.
 
     Postconditions:
-        - Returns a ``DeliverGitOps`` whose callables are the names bound in this
-          module, so tests can monkeypatch the ``devops_team.orchestrator``
-          boundary (e.g. ``merge_branch``) exactly as the v2 teams do.
+        - Returns a ``DeliverGitOps`` containing only the git/write callables
+          required by ``deliver_inline_merge`` (``abort_merge``,
+          ``checkout_branch``, ``commit_working_tree``, ``create_feature_branch``,
+          ``delete_branch``, ``merge_branch``, ``write_agent_output``); each is
+          the name bound in this module, so tests can monkeypatch the
+          ``devops_team.orchestrator`` boundary (e.g. ``merge_branch``) exactly
+          as the v2 teams do. ``ensure_development_branch`` and ``get_head_sha``
+          are intentionally excluded — they're used directly elsewhere in the
+          pipeline, not by the deliver helper.
     """
     return DeliverGitOps(
         abort_merge=abort_merge,
@@ -104,70 +84,6 @@ def _git_ops() -> DeliverGitOps:
         merge_branch=merge_branch,
         write_agent_output=write_agent_output,
     )
-
-
-def _criterion_traces_from_phase4(
-    criteria: List[str],
-    acceptance_trace: List[Dict[str, object]],
-    artifact_keys: List[str],
-) -> List[CriterionTrace]:
-    """Map acceptance criteria onto Phase 4 validation evidence.
-
-    Preconditions:
-        - ``criteria`` is an iterable of criterion strings (may be empty).
-        - ``acceptance_trace`` is an iterable of dict-like Phase 4 entries
-          (may be empty); non-dict entries are ignored.
-        - ``artifact_keys`` is an iterable of artifact path strings used as
-          fallback ``implementation_refs`` when no Phase 4 match exists.
-
-    Postconditions:
-        - Returns one ``CriterionTrace`` per entry in ``criteria``, in order.
-        - A Phase 4 match (first entry whose ``criterion`` string-equals the
-          criterion) supplies coerced ``implementation_refs`` and ``tests``.
-        - Unmatched criteria get ``implementation_refs=sorted(artifact_keys)``
-          and ``tests=[]``.
-        - Never invents a fabricated ``{"validation": "pass"}`` entry.
-    """
-    by_criterion: Dict[str, Dict[str, object]] = {}
-    for entry in acceptance_trace:
-        if not isinstance(entry, dict):
-            continue
-        key = str(entry.get("criterion", ""))
-        if key and key not in by_criterion:
-            by_criterion[key] = entry
-
-    fallback_refs = sorted(artifact_keys)
-    traces: List[CriterionTrace] = []
-    for criterion in criteria:
-        match = by_criterion.get(criterion)
-        if match is None:
-            traces.append(
-                CriterionTrace(
-                    criterion=criterion,
-                    implementation_refs=list(fallback_refs),
-                    tests=[],
-                )
-            )
-            continue
-
-        raw_refs = match.get("implementation_refs", [])
-        refs = [str(r) for r in raw_refs] if isinstance(raw_refs, list) else []
-
-        raw_tests = match.get("tests", [])
-        tests: List[Dict[str, str]] = []
-        if isinstance(raw_tests, list):
-            for item in raw_tests:
-                if isinstance(item, dict):
-                    tests.append({str(k): str(v) for k, v in item.items()})
-
-        traces.append(
-            CriterionTrace(
-                criterion=criterion,
-                implementation_refs=refs,
-                tests=tests,
-            )
-        )
-    return traces
 
 
 DEVOPS_REQUIRED_GATE_NAMES = [
@@ -205,10 +121,7 @@ from . import tool_dispatch  # noqa: E402
 from .infra_debug_agent import InfraDebugAgent  # noqa: E402
 from .infra_patch_agent import InfraPatchAgent  # noqa: E402
 from .task_clarifier import DevOpsTaskClarifierAgent  # noqa: E402
-from .test_validation_agent import (  # noqa: E402
-    DevOpsTestValidationAgent,
-    DevOpsTestValidationInput,
-)
+from .test_validation_agent import DevOpsTestValidationAgent  # noqa: E402
 from .tool_agents import (  # noqa: E402
     CDKExecutionToolAgent,
     CICDLintPipelineValidationToolAgent,
@@ -224,7 +137,10 @@ from .tool_agents import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 from . import debug_patch  # noqa: E402
-from .debug_patch import MAX_INFRA_FIX_ITERATIONS, _DebugPatchState  # noqa: E402,F401
+from .debug_patch import (  # noqa: E402,F401 (re-exported for test_devops_debug_patch.py)
+    MAX_INFRA_FIX_ITERATIONS,
+    _DebugPatchState,
+)
 
 
 class DevOpsTeamLeadAgent(BaseTeamLead):
@@ -495,6 +411,21 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         write_changes: bool,
         subdir: str = "",
     ) -> DevOpsTeamResult:
+        """Sequence the 5 DevOps phases via the shared gated-phase framework.
+
+        Each phase's logic lives in a standalone function under ``phases/``
+        (or ``debug_patch.py`` for Phase 3); this method is a thin adapter
+        that builds the small closures below (to thread shared nonlocal state
+        between phases) and sequences them with ``self._run_gated_phases``,
+        the generic ``BaseTeamLead`` sequencing helper (run in order, stop at
+        the first non-``None`` failure). This intentionally does not use
+        ``BaseV2DevelopmentAgent._run_development_workflow``: that method is
+        a fixed Pre-flight/Planning/microtask-review-gated-Execution/
+        Documentation/Deliver state machine built for the code-v2 teams'
+        LLM-planning contract, and this team's phases (env-policy gating,
+        3-way parallel design fan-out, a debug-patch retry loop, gate-name
+        tracking) don't share that shape.
+        """
         self._report_status(
             "start",
             detail=f"DevOps team pipeline: starting task {task_spec.task_id}",
@@ -595,141 +526,30 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
               may be empty).
             Postconditions: runs tool validation, execution verification, the
               debug-patch loop, and independent reviews; sets nonlocal
-              ``quality_gates`` and ``infra_fix_iterations`` (Phase 4.6 attempts
-              consumed; stays 1 when no retry was needed). Returns a failed
-              ``DevOpsTeamResult`` on quality-gate or build-verifier failure via
-              ``_run_phase_gates``; otherwise returns ``None`` so Phase 5 runs.
+              ``quality_gates``, ``acceptance_trace``, and
+              ``infra_fix_iterations`` (Phase 4.6 attempts consumed; stays 1
+              when no retry was needed). Returns a failed ``DevOpsTeamResult``
+              on quality-gate or build-verifier failure; otherwise returns
+              ``None`` so Phase 5 runs.
+
+            Thin wrapper around the standalone ``run_phase4_quality_gate``;
+            converts its typed result into this pipeline's gate contract.
             """
-            nonlocal aggregated_artifacts, quality_gates, acceptance_trace, infra_fix_iterations
+            nonlocal quality_gates, acceptance_trace, infra_fix_iterations
 
-            # Phase 4: tool validation + independent reviews
-            self._report_status(
-                "phase4",
-                detail="DevOps team pipeline: phase 4 - validation and review",
-            )
-            vt = tool_dispatch.run_validation_tools(self, repo_path)
-            iac_checks, policy_checks = vt.iac_checks, vt.policy_checks
-            cicd_checks, dry_run_checks = vt.cicd_checks, vt.dry_run_checks
-            tool_gate_map: Dict[str, str] = dict(vt.tool_gate_map)
-
-            # Phase 4.5: Execution verification
-            self._report_status(
-                "phase4.5",
-                detail="DevOps team pipeline: phase 4.5 - execution verification",
-            )
-            repo_str = str(repo_path)
-            exec_results = self._run_execution_tools(repo_str, aggregated_artifacts)
-            for er in exec_results:
-                if not isinstance(er, dict):
-                    logger.warning("DevOps execution result is not a dict: %r", er)
-                    continue
-                fc = er.get("failure_class", "")
-                if fc:
-                    logger.info(
-                        "DevOps execution [%s %s]: failure_class=%s",
-                        er.get("tool", "?"),
-                        er.get("command", "?"),
-                        fc,
-                    )
-
-            # Phase 4.6: Debug-patch loop for fixable execution failures.
-            # Mutation contract: ``attempt`` / ``is_success`` share ``state`` and
-            # ``aggregated_artifacts`` by reference (same as the former inline
-            # locals). After the loop, ``state.exec_gate_map`` (aggregated
-            # execution-tool check statuses) is merged into local
-            # ``tool_gate_map``; remaining ``state.exec_failures`` do not
-            # early-return a failed ``DevOpsTeamResult`` (pre-refactor behavior
-            # preserved).
-            state = _DebugPatchState(exec_results=exec_results)
-            if state.exec_failures:
-
-                def _debug_patch_attempt(i: int) -> Optional[_DebugPatchState]:
-                    nonlocal infra_fix_iterations
-                    infra_fix_iterations = i + 1
-                    return self._debug_patch_once(
-                        i,
-                        state=state,
-                        aggregated_artifacts=aggregated_artifacts,
-                        repo_path=repo_path,
-                        repo_str=repo_str,
-                        write_changes=write_changes,
-                        subdir=subdir,
-                        max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                    )
-
-                self._run_bounded_retry_loop(
-                    max_iterations=MAX_INFRA_FIX_ITERATIONS,
-                    attempt=_debug_patch_attempt,
-                    is_success=lambda s: not s.exec_failures,
-                )
-
-            tool_gate_map.update(state.exec_gate_map)
-
-            devsec = self.devsecops_review_agent.run(
-                DevSecOpsReviewInput(
-                    task_description=task_spec.title,
-                    requirements=task_spec.goal.summary,
-                    artifacts=aggregated_artifacts,
-                )
-            )
-            change_review = self.change_review_agent.run(
-                ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
-            )
-
-            val = self.test_validation_agent.run(
-                DevOpsTestValidationInput(
-                    acceptance_criteria=task_spec.acceptance_criteria,
-                    tool_results={
-                        "iac": iac_checks.checks,
-                        "policy": policy_checks.checks,
-                        "cicd": cicd_checks.checks,
-                        "deploy_dry_run": dry_run_checks.checks,
-                    },
-                )
-            )
-            acceptance_trace = list(val.acceptance_trace)
-
-            qg = assemble_quality_gates(
+            result = run_phase4_quality_gate(
+                self,
                 task_spec=task_spec,
-                val=val,
-                devsec=devsec,
-                policy_checks=policy_checks,
-                change_review=change_review,
+                repo_path=repo_path,
                 aggregated_artifacts=aggregated_artifacts,
+                write_changes=write_changes,
+                subdir=subdir,
+                build_verifier=build_verifier,
             )
-            quality_gates = qg.quality_gates
-
-            def _quality_gates_check() -> Optional[DevOpsTeamResult]:
-                """Fail the phase when any assembled quality gate is ``fail``.
-
-                Preconditions: ``qg`` is set by Phase 4 setup above.
-                Postconditions: returns the blocked ``DevOpsTeamResult`` with the
-                  existing completion-package shape when any gate fails; otherwise
-                  ``None``.
-                """
-                return qg.gate_result
-
-            def _build_verifier_check() -> Optional[DevOpsTeamResult]:
-                """Fail the phase when an injected build verifier rejects the repo.
-
-                Preconditions: quality gates already passed (prior gate returned
-                  ``None``); ``build_verifier`` may be ``None``; ``repo_path`` and
-                  ``task_spec`` are set by Phase 4 setup above.
-                Postconditions: when ``build_verifier`` is set and returns a
-                  failing result, returns ``DevOpsTeamResult(success=False, …)``
-                  with the verifier error (or the default failure string);
-                  otherwise ``None`` (including when verifier is absent).
-                """
-                if build_verifier is not None:
-                    verify_ok, verify_err = build_verifier(repo_path, "devops", task_spec.task_id)
-                    if not verify_ok:
-                        return DevOpsTeamResult(
-                            success=False,
-                            failure_reason=verify_err or "Build verification failed",
-                        )
-                return None
-
-            return self._run_phase_gates([_quality_gates_check, _build_verifier_check])
+            quality_gates = result.quality_gates
+            acceptance_trace = result.acceptance_trace
+            infra_fix_iterations = result.infra_fix_iterations
+            return result.blocked_result
 
         def _phase5_completion_deliver() -> Optional[DevOpsTeamResult]:
             """Phase 5: completion package assembly + deliver/merge.
@@ -742,113 +562,33 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
               package; otherwise assigns nonlocal ``completion`` (completed status,
               git ops, handoff, quality gates) and returns ``None`` so the thin
               success envelope after the sequencer runs.
-            """
-            nonlocal completion, acceptance_trace
 
-            # Phase 5: commit, merge, release readiness
+            Thin wrapper around the standalone ``run_phase5_deliver_merge``;
+            converts its typed result into this pipeline's gate contract.
+            """
+            nonlocal completion
+
             self._report_status(
                 "phase5",
                 detail="DevOps team pipeline: phase 5 - completion package assembly",
             )
-            doc = self.doc_runbook_agent.run(
-                DocumentationRunbookInput(
-                    task_id=task_spec.task_id,
-                    task_title=task_spec.title,
-                    artifacts=aggregated_artifacts,
-                    quality_gates=quality_gates,
-                    notes=[iac_result.summary, cicd_result.summary, deploy_result.summary],
-                )
+            result = run_phase5_deliver_merge(
+                task_spec=task_spec,
+                repo_path=repo_path,
+                quality_gates=quality_gates,
+                acceptance_trace=acceptance_trace,
+                aggregated_artifacts=aggregated_artifacts,
+                iac_result=iac_result,
+                cicd_result=cicd_result,
+                deploy_result=deploy_result,
+                write_changes=write_changes,
+                doc_runbook_agent=self.doc_runbook_agent,
+                git_ops=_git_ops(),
+                get_head_sha=get_head_sha,
             )
-
-            completion = doc.completion_package
-            completion.acceptance_criteria_trace = _criterion_traces_from_phase4(
-                list(task_spec.acceptance_criteria),
-                acceptance_trace,
-                list(aggregated_artifacts.keys()),
-            )
-            completion.release_readiness = ReleaseReadiness(
-                deployment_strategy=deploy_result.strategy
-                or task_spec.constraints.deployment.strategy
-                or "rolling",
-                rollback_available=bool(deploy_result.rollback_plan),
-                alerting_configured=bool(deploy_result.alerting_configured),
-                required_approvals=[PROD_APPROVAL]
-                if "production" in task_spec.platform_scope.environments
-                else [],
-                runtime_verification_checklist=list(getattr(deploy_result, "health_checks", []))
-                or DEFAULT_RUNTIME_CHECKS,
-            )
-            # Deliver the artifacts for real via the shared inline-merge helper and
-            # report the actual outcome (real branch, commit SHA, merge status) rather
-            # than fabricated placeholders. A model-only run (write_changes=False) does
-            # no git work, so the neutral default honestly reports "nothing delivered".
-            git_ops = GitOperationsMetadata()
-            if write_changes and aggregated_artifacts:
-                deliver_result = deliver_inline_merge(
-                    task_id=task_spec.task_id,
-                    repo_path=repo_path,
-                    deliver_files=aggregated_artifacts,
-                    summary=f"implement task [{task_spec.task_id}]",
-                    task_title=task_spec.title,
-                    commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
-                    ops=_git_ops(),
-                    logger=logger,
-                )
-                # deliver_inline_merge leaves development checked out at the merged
-                # commit. merge_branch fast-forwards (development never advanced since
-                # the branch was cut), so this single HEAD SHA is the honest identifier
-                # for both the delivered commit and the merge result.
-                head_ok, head_sha = get_head_sha(repo_path)
-                sha = head_sha if head_ok else ""
-                commit_msg = (
-                    deliver_result.commit_messages[0]
-                    if deliver_result.commit_messages
-                    else f"feat(devops): implement task [{task_spec.task_id}]"
-                )
-                if not deliver_result.merged:
-                    return build_team_failure_result(
-                        DevOpsTeamResult,
-                        deliver_result.summary or "DevOps delivery merge failed",
-                        completion_package=DevOpsCompletionPackage(
-                            task_id=task_spec.task_id,
-                            status="blocked",
-                            files_changed=sorted(aggregated_artifacts.keys()),
-                            quality_gates=quality_gates,
-                            git_operations=GitOperationsMetadata(
-                                branch_created=deliver_result.branch_name,
-                                commits=[GitCommitMetadata(hash="", message=commit_msg)],
-                                merge=GitMergeMetadata(
-                                    target_branch=DEVELOPMENT_BRANCH,
-                                    strategy="merge",
-                                    merge_commit_hash="",
-                                    status="failed",
-                                ),
-                            ),
-                            notes=[deliver_result.summary],
-                        ),
-                    )
-                merge_status = "merged" if head_ok else "merged_sha_unknown"
-                if not head_ok:
-                    completion.notes.append(
-                        "Merge succeeded but HEAD SHA could not be read after merge; commit hash unknown."
-                    )
-                git_ops = GitOperationsMetadata(
-                    branch_created=deliver_result.branch_name,
-                    commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
-                    merge=GitMergeMetadata(
-                        target_branch=DEVELOPMENT_BRANCH,
-                        strategy="merge",
-                        merge_commit_hash=sha,
-                        status=merge_status,
-                    ),
-                )
-            completion.git_operations = git_ops
-            completion.handoff = HandoffInfo(
-                prod_approval_required="production" in task_spec.platform_scope.environments,
-                runbook_updated=bool(doc.files),
-            )
-            completion.status = "completed"
-            completion.quality_gates = quality_gates
+            if result.blocked_result is not None:
+                return result.blocked_result
+            completion = result.completion
             return None
 
         early_exit = self._run_gated_phases(

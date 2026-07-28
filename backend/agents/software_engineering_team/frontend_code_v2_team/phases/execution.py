@@ -179,6 +179,13 @@ def run_execution(
 # ``backend_code_v2_team``'s per-gate scoping and removing the shared-instance
 # race that previously blocked enabling ``parallelize_qa_security`` for this
 # team -- ``GATE_CONFIG`` below now sets it to ``True``, matching backend.
+# Independently of that scoping, the CR gate's full ``deps.tool_agents`` fan-out
+# still runs ``testing_qa``/``security`` a second time on top of each gate's own
+# scoped call; all three gates read ``deps.tool_agent_cache`` (a per-microtask-
+# cycle ``AgentReviewCache``, reset in ``_run_review_cycles``) and forward it
+# into ``run_microtask_review`` so the second call within a cycle is served
+# from cache instead of re-invoking the tool agent -- see the caching design in
+# docs/GATE_DEPENDENCY_GRAPH.md.
 # ``.review`` is imported lazily to keep the module import free of the circular
 # ``review`` <-> ``execution`` dependency.
 
@@ -232,7 +239,11 @@ def _code_review_gate(
       build/lint/code-review findings *and* every wired tool agent's findings
       (e.g. accessibility, ui_design), not only code-review-sourced ones.
       Copies ``passed``/``issues``/``summary``/``raw_issue_count`` (defaulting
-      to ``None``) from the result unfiltered.
+      to ``None``) from the result unfiltered. Also forwards
+      ``deps.tool_agent_cache`` into ``run_microtask_review`` so that any
+      ``testing_qa``/``security`` tool-agent calls made here are served from
+      cache (rather than re-invoked) when the QA/Security gates already
+      computed them earlier in the same cycle, or vice versa.
     """
     from .review import run_microtask_review
 
@@ -251,6 +262,7 @@ def _code_review_gate(
         detail_callback=detail_callback,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
+        tool_agent_cache=deps.tool_agent_cache,
     )
     return GateOutcome(
         passed=r.passed,
@@ -281,6 +293,12 @@ def _qa_gate(
     external agent is supplied, and the fan-out calls it unconditionally, so
     a code-review LLM call happens on every invocation of this gate; its
     issues are filtered out below, not never produced.
+
+    ``cache``: forwarded to ``run_microtask_review`` as the pre-existing
+    per-agent QA/security LLM cache (unrelated to ``tool_agent_cache``).
+    ``deps.tool_agent_cache`` is forwarded separately so a ``testing_qa``
+    tool-agent result already computed by the CR gate's fan-out this cycle is
+    reused here instead of re-invoked.
 
     Preconditions: ``deps.qa_agent``/``deps.tool_agents`` are set consistently
       with what the caller wants exercised; ``files`` is the microtask's
@@ -318,6 +336,7 @@ def _qa_gate(
         tool_agents=_scoped_tool_agents(deps.tool_agents, ToolAgentKind.TESTING_QA),
         detail_callback=detail_callback,
         cache=cache,
+        tool_agent_cache=deps.tool_agent_cache,
     )
     qa_issues = [i for i in r.issues if i.source == "qa"]
     return GateOutcome(passed=not qa_issues, issues=qa_issues, summary=r.summary)
@@ -344,6 +363,12 @@ def _security_gate(
     external agent is supplied, and the fan-out calls it unconditionally, so
     a code-review LLM call happens on every invocation of this gate; its
     issues are filtered out below, not never produced.
+
+    ``cache``: forwarded to ``run_microtask_review`` as the pre-existing
+    per-agent QA/security LLM cache (unrelated to ``tool_agent_cache``).
+    ``deps.tool_agent_cache`` is forwarded separately so a ``security``
+    tool-agent result already computed by the CR gate's fan-out this cycle is
+    reused here instead of re-invoked.
 
     Preconditions: ``deps.security_agent``/``deps.tool_agents`` are set
       consistently with what the caller wants exercised; ``files`` is the
@@ -381,6 +406,7 @@ def _security_gate(
         tool_agents=_scoped_tool_agents(deps.tool_agents, ToolAgentKind.SECURITY),
         detail_callback=detail_callback,
         cache=cache,
+        tool_agent_cache=deps.tool_agent_cache,
     )
     sec_issues = [i for i in r.issues if i.source == "security"]
     return GateOutcome(passed=not sec_issues, issues=sec_issues, summary=r.summary)
@@ -439,9 +465,12 @@ GATE_CONFIG = GatedExecutionConfig(
     # QA and Security are independent analysis calls over the same
     # post-Code-Review snapshot on the frontend too (each gate scopes its
     # tool-agent call to its own kind via ``_scoped_tool_agents`` above) --
-    # matching backend_code_v2_team's existing concurrent behavior. See
-    # docs/GATE_DEPENDENCY_GRAPH.md for the residual CR-gate tool-agent
-    # duplication this does not (yet) resolve.
+    # matching backend_code_v2_team's existing concurrent behavior. The CR
+    # gate's full ``deps.tool_agents`` fan-out still calls ``testing_qa``/
+    # ``security`` a second time, but all three gates share
+    # ``deps.tool_agent_cache`` (see the gate-adapter comment above), so the
+    # second call within a cycle is served from cache instead of re-invoking
+    # the tool agent -- see docs/GATE_DEPENDENCY_GRAPH.md.
     parallelize_qa_security=True,
 )
 

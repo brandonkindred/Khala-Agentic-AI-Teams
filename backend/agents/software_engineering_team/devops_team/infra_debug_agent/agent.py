@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 _FIXABLE_TYPES = frozenset({"syntax", "validation"})
 
+# Bound the artifacts inlined into the debug prompt so a large or numerous IaC
+# file can't push the single-shot classify call past the model's context
+# window (that would raise and abort the debug/patch retry loop entirely).
+_MAX_ARTIFACTS = 5
+_MAX_ARTIFACT_CHARS = 2_000
+
 
 class InfraDebugAgent:
     """Classifies IaC (terraform/cdk/compose/helm) execution errors from CLI output.
@@ -57,8 +63,8 @@ class InfraDebugAgent:
             explicitly overrides this via its own "fixable" response field).
         """
         artifacts_snippet = "".join(
-            f"\n### {fname} ###\n{content[:2000]}\n"
-            for fname, content in list(input_data.artifacts.items())[:5]
+            f"\n### {fname} ###\n{content[:_MAX_ARTIFACT_CHARS]}\n"
+            for fname, content in list(input_data.artifacts.items())[:_MAX_ARTIFACTS]
         )
 
         context = (

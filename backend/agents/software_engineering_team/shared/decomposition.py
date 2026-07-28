@@ -40,6 +40,16 @@ class DecompositionContext:
         decomposition_reason: Why decomposition was triggered (e.g., "truncated").
         continuation_attempted: Whether continuation was attempted before decomposition.
         partial_responses: List of partial responses collected for post-mortem.
+
+    Invariants:
+        * `depth` only increases across a `create_child` chain and never
+          decreases; `can_decompose()` is the sole gate on how deep that
+          chain may go (`depth < max_depth`).
+        * `_partial_responses` is shared by reference with every child
+          created via `create_child`, so appending to it via
+          `add_partial_response` on any node in the chain is visible to
+          all others; `_decomposition_history` is copied per child instead,
+          so each node's history reflects only its own path from the root.
     """
 
     original_task: str
@@ -55,7 +65,25 @@ class DecompositionContext:
     _partial_responses: List[str] = field(default_factory=list)
 
     def create_child(self, chunk_index: int, total_chunks: int) -> "DecompositionContext":
-        """Create a child context for processing a chunk."""
+        """Create a child context for processing a chunk.
+
+        Preconditions:
+            * `chunk_index` is the 0-based index of the chunk being
+              processed and `total_chunks` is the total chunk count for
+              this decomposition; both are used only for the history
+              label, so out-of-range values are not validated.
+        Postconditions:
+            * Returns a new `DecompositionContext` with `depth` one greater
+              than `self.depth`, `parent_context` set to `self`, and
+              `chunks_processed`/`total_chunks` reset to 0 (the child
+              tracks its own sub-decomposition, if any).
+            * The child's `_partial_responses` is the SAME list object as
+              `self._partial_responses` (shared, not copied); its
+              `_decomposition_history` is a shallow copy of `self`'s with
+              one new entry appended describing this chunk's position.
+            * Does not mutate `self` or `total_chunks`/`chunks_processed`
+              on `self`.
+        """
         child = DecompositionContext(
             original_task=self.original_task,
             original_content=self.original_content,
@@ -75,25 +103,74 @@ class DecompositionContext:
         return child
 
     def add_partial_response(self, content: str) -> None:
-        """Add a partial response to the tracking list."""
+        """Add a partial response to the tracking list.
+
+        Preconditions:
+            * None; `content` may be empty.
+        Postconditions:
+            * Appends `content` to `self._partial_responses` in place.
+              Since that list is shared by reference across a
+              `create_child` chain, the appended entry becomes visible
+              through every context in the chain, not just `self`.
+        """
         self._partial_responses.append(content)
 
     def mark_continuation_attempted(self) -> None:
-        """Mark that continuation was attempted."""
+        """Mark that continuation was attempted.
+
+        Preconditions:
+            * None.
+        Postconditions:
+            * Sets `self.continuation_attempted` to `True` unconditionally;
+              idempotent if already `True`. Only affects `self`, not any
+              parent or child context.
+        """
         self.continuation_attempted = True
 
     def can_decompose(self) -> bool:
-        """Check if further decomposition is allowed."""
+        """Check if further decomposition is allowed.
+
+        Preconditions:
+            * None.
+        Postconditions:
+            * Returns `self.depth < self.max_depth`. A context at
+              `depth == max_depth` already cannot decompose further (the
+              comparison is strict), so `max_depth` is an exclusive bound
+              on reachable depth, not an inclusive one.
+        """
         return self.depth < self.max_depth
 
     def get_decomposition_path(self) -> str:
-        """Return a string describing the decomposition path."""
+        """Return a string describing the decomposition path.
+
+        Preconditions:
+            * None.
+        Postconditions:
+            * Returns the literal string `"root"` if
+              `self._decomposition_history` is empty (i.e. this context has
+              no recorded ancestry, whether or not `self.depth` is 0).
+            * Otherwise returns the history entries joined with `" -> "`,
+              in the order they were appended (oldest first).
+        """
         if not self._decomposition_history:
             return "root"
         return " -> ".join(self._decomposition_history)
 
     def log_decomposition(self, agent_name: str, num_chunks: int) -> None:
-        """Log the decomposition event."""
+        """Log the decomposition event.
+
+        Preconditions:
+            * `agent_name` identifies the caller for the log line;
+              `num_chunks` is the chunk count about to be processed.
+              Neither is validated (e.g. `num_chunks` may be 0 or
+              negative; it is only interpolated into the message).
+        Postconditions:
+            * Emits exactly one `logger.info` call describing this
+              context's `depth + 1` (1-based, out of `max_depth`),
+              `num_chunks`, and `get_decomposition_path()`. Does not
+              mutate `self` or raise on logging failure beyond whatever
+              the standard `logging` module itself may raise.
+        """
         logger.info(
             "%s: Decomposing content (depth %d/%d) into %d chunks. Path: %s",
             agent_name,
@@ -109,6 +186,11 @@ class DecompositionStrategy(ABC, Generic[T]):
 
     Subclasses define how to split content into smaller pieces
     and how to merge results from those pieces.
+
+    Invariants:
+        * Implementations are expected to be stateless with respect to a
+          given `decompose`/`merge` call pair (concrete subclasses in this
+          module hold only immutable configuration, e.g. `chunk_size`).
     """
 
     @abstractmethod
@@ -122,6 +204,17 @@ class DecompositionStrategy(ABC, Generic[T]):
         Returns:
             List of content chunks. Should return at least 2 chunks,
             or the original content if it cannot be decomposed further.
+
+        Preconditions:
+            * `content` may be empty; `context` is the caller's current
+              decomposition context (not required to be inspected by
+              every implementation).
+        Postconditions:
+            * Implementations must not mutate `content` or `context`.
+            * A returned list of length <= 1 is the contract's signal
+              that content could not be decomposed further; callers
+              (e.g. `RecursiveProcessor._decompose_and_process`) rely on
+              this to stop recursing rather than looping forever.
         """
 
     @abstractmethod
@@ -133,6 +226,17 @@ class DecompositionStrategy(ABC, Generic[T]):
 
         Returns:
             Merged result.
+
+        Preconditions:
+            * `results` may be empty (e.g. when every chunk failed to
+              process).
+        Postconditions:
+            * Must return a value of the same shape callers expect for a
+              single unmerged result (concrete subclasses in this module
+              return an empty `dict` for an empty `results`).
+            * Must not mutate the elements of `results` in place from the
+              caller's perspective beyond what merging into the returned
+              value requires.
         """
 
     def create_chunk_prompt(
@@ -154,6 +258,17 @@ class DecompositionStrategy(ABC, Generic[T]):
 
         Returns:
             Prompt for processing this chunk.
+
+        Preconditions:
+            * `chunk_index` is 0-based and `total_chunks` is the total
+              chunk count for the current decomposition; neither is
+              validated against the other (e.g. `chunk_index >=
+              total_chunks` is not checked here).
+        Postconditions:
+            * Pure function (no side effects); returns a new prompt string
+              embedding `chunk` verbatim plus the 1-based chunk position
+              (`chunk_index + 1` of `total_chunks`). Does not modify
+              `original_prompt` or `chunk`.
         """
         return f"""Process this portion of the content (chunk {chunk_index + 1} of {total_chunks}).
 
@@ -177,7 +292,22 @@ class SectionDecompositionStrategy(DecompositionStrategy[Dict[str, Any]]):
         self.chunk_size = chunk_size
 
     def decompose(self, content: str, context: DecompositionContext) -> List[str]:
-        """Split by markdown headers, then by size if needed."""
+        """Split by markdown headers, then by size if needed.
+
+        Preconditions:
+            * `content` may be empty or whitespace-only; `context` is
+              accepted per the base class signature but unused here.
+        Postconditions:
+            * Returns `[]` if `content` is falsy (e.g. `""`).
+            * Returns `[content]` unchanged (not stripped) if `content` is
+              truthy but whitespace-only.
+            * Otherwise tries, in order: splitting on `\\n## ` boundaries,
+              then `\\n# ` boundaries (each stripped of surrounding
+              whitespace, empty pieces dropped); if either split yields
+              more than 1 section, that result is returned immediately.
+            * If no header split applies, falls back to
+              `_chunk_by_size(content)`.
+        """
         if not content or not content.strip():
             return [content] if content else []
 
@@ -195,7 +325,20 @@ class SectionDecompositionStrategy(DecompositionStrategy[Dict[str, Any]]):
         return self._chunk_by_size(content)
 
     def _chunk_by_size(self, content: str) -> List[str]:
-        """Split content into fixed-size chunks."""
+        """Split content into fixed-size chunks.
+
+        Preconditions:
+            * `content` is non-empty (callers only reach this after the
+              emptiness/whitespace-only checks in `decompose`).
+        Postconditions:
+            * Splits `content` into consecutive slices of `self.chunk_size`
+              characters (last slice may be shorter); slices that are
+              whitespace-only after stripping are dropped from the result,
+              though the returned chunks themselves are NOT stripped.
+            * Returns `[content]` (the whole, unmodified string) if every
+              slice was whitespace-only, so the result is never empty for
+              non-empty input.
+        """
         chunks = []
         for i in range(0, len(content), self.chunk_size):
             chunk = content[i : i + self.chunk_size]
@@ -204,7 +347,24 @@ class SectionDecompositionStrategy(DecompositionStrategy[Dict[str, Any]]):
         return chunks if chunks else [content]
 
     def merge(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Merge dictionaries by concatenating lists and merging nested dicts."""
+        """Merge dictionaries by concatenating lists and merging nested dicts.
+
+        Preconditions:
+            * `results` may be empty. Non-dict elements are tolerated (see
+              postconditions) rather than rejected.
+        Postconditions:
+            * Returns `{}` if `results` is empty.
+            * Non-dict elements of `results` are silently skipped.
+            * For each key across all dict elements, in first-seen order:
+              if the key is new, its value is taken as-is (by reference,
+              not copied); if both the existing and new values are lists,
+              the new list's items are appended (`extend`, not replace);
+              if both are dicts, they are merged recursively via
+              `_merge_dicts`; otherwise, the new value replaces the
+              existing one only if the existing value is falsy and the
+              new one is truthy (first non-empty value wins, not
+              last-write-wins).
+        """
         if not results:
             return {}
 
@@ -226,7 +386,20 @@ class SectionDecompositionStrategy(DecompositionStrategy[Dict[str, Any]]):
         return merged
 
     def _merge_dicts(self, target: Dict[str, Any], source: Dict[str, Any]) -> None:
-        """Recursively merge source dict into target dict."""
+        """Recursively merge source dict into target dict.
+
+        Preconditions:
+            * `target` and `source` are both `dict`; either may be empty.
+        Postconditions:
+            * Mutates `target` in place; returns `None`.
+            * For each key in `source`: if absent from `target`, it is
+              added (value taken by reference); if both values are lists,
+              `target`'s list is extended with `source`'s items; if both
+              are dicts, merges recursively. Unlike `merge`, a key present
+              in `target` whose value is neither a matching list nor a
+              matching dict is left UNCHANGED (no falsy/truthy fallback
+              here) — `source`'s value for that key is silently dropped.
+        """
         for key, value in source.items():
             if key not in target:
                 target[key] = value
@@ -247,6 +420,30 @@ class FileBasedDecompositionStrategy(DecompositionStrategy[Dict[str, str]]):
         """Split task into per-file descriptions.
 
         Looks for file paths in the content and creates separate tasks.
+
+        Preconditions:
+            * `content` may be empty or contain no recognizable file
+              paths; `context` is passed through to the fallback
+              strategy unused otherwise.
+        Postconditions:
+            * Scans `content` with three regex patterns (list-item paths,
+              numbered-list paths, and backtick/quoted paths), collecting
+              matches into a `set` (so duplicates across patterns collapse
+              and result order is by sorted filename, not first-seen
+              order).
+            * A matched candidate is kept only if it contains `/` or `.`
+              (`"/" in file_path or "." in file_path` — note this is `(a
+              and b) or c` by operator precedence, i.e. `file_path and
+              ("/" in file_path) or ("." in file_path)`, so any truthy
+              `file_path` containing `.` is kept regardless of `/`).
+            * If more than 1 distinct file is found, returns one prompt
+              per file (`"Generate file: {f}\\n\\n{content}"`), sorted by
+              filename; each embeds the FULL original `content`, not a
+              per-file excerpt.
+            * If 0 or 1 files are found, falls back to
+              `SectionDecompositionStrategy().decompose(content, context)`
+              instead (a fresh instance with the default chunk size,
+              independent of any strategy the caller is using).
         """
         # Look for file paths in various formats
         file_patterns = [
@@ -273,7 +470,20 @@ class FileBasedDecompositionStrategy(DecompositionStrategy[Dict[str, str]]):
         return SectionDecompositionStrategy().decompose(content, context)
 
     def merge(self, results: List[Dict[str, str]]) -> Dict[str, str]:
-        """Merge file dictionaries."""
+        """Merge file dictionaries.
+
+        Preconditions:
+            * `results` may be empty. Non-dict elements are tolerated
+              rather than rejected.
+        Postconditions:
+            * Returns `{}` if `results` is empty.
+            * Non-dict elements are silently skipped.
+            * Merges via `dict.update`, in list order: for a key
+              appearing in more than one result, the LAST result's value
+              wins (last-write-wins), unlike
+              `SectionDecompositionStrategy.merge`'s first-non-empty-wins
+              rule.
+        """
         merged: Dict[str, str] = {}
         for result in results:
             if isinstance(result, dict):
@@ -293,6 +503,20 @@ class RecursiveProcessor(Generic[T]):
         strategy: DecompositionStrategy[T],
         max_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
     ):
+        """Initialize the processor with a decomposition strategy.
+
+        Preconditions:
+            * `strategy` is expected to be a usable
+              `DecompositionStrategy` instance; not validated here.
+            * `max_depth` is expected to be `>= 0`; a non-positive value is
+              accepted without error but means any `DecompositionContext`
+              created with it (depth starts at 0) will immediately fail
+              `can_decompose()`.
+        Postconditions:
+            * `self.strategy` and `self.max_depth` are set exactly to the
+              given arguments (no copying, no validation, no defaulting
+              beyond the parameter default).
+        """
         self.strategy = strategy
         self.max_depth = max_depth
 
@@ -333,6 +557,30 @@ class RecursiveProcessor(Generic[T]):
             LLMJsonParseError: If ``process_fn`` is not provided and the
                               default LLM call's response cannot be parsed as
                               JSON at all (via ``extract_json_from_response``).
+
+        Preconditions:
+            * `llm` must be usable by `process_fn` if provided, or by
+              `resolve_strands_model` otherwise; not validated here.
+            * `context`, if provided, is assumed to belong to the same
+              decomposition tree as prior recursive calls (this method
+              does not verify `context.original_task`/`original_content`
+              match `prompt`/`content`); if omitted, a fresh root context
+              (`depth=0`) is created from `prompt`, `content`, and
+              `self.max_depth`.
+        Postconditions:
+            * On success (no truncation), returns the raw result of
+              `process_fn(prompt)` if given, or the result of parsing a
+              one-shot Strands agent's response as JSON via
+              `extract_json_from_response`.
+            * On `LLMTruncatedError`: records the partial content on
+              `context`, marks continuation as attempted (idempotent),
+              and logs a warning. If `context.can_decompose()` is `False`,
+              writes a post-mortem file and RE-RAISES the original
+              exception. Otherwise, delegates to
+              `_decompose_and_process` and returns its (merged) result.
+            * Does not mutate `prompt` or `content`; may mutate the
+              (possibly caller-supplied) `context` object as described
+              above.
         """
         from llm_service import LLMTruncatedError
         from software_engineering_team.shared.continuation import MAX_CONTINUATION_CYCLES
@@ -400,7 +648,33 @@ class RecursiveProcessor(Generic[T]):
         process_fn: Optional[Callable[[str], T]],
         context: DecompositionContext,
     ) -> T:
-        """Decompose content and process each chunk."""
+        """Decompose content and process each chunk.
+
+        Preconditions:
+            * `context.can_decompose()` is assumed `True` (the caller,
+              `process`, only reaches this method after checking that);
+              not re-checked here.
+        Postconditions:
+            * If `self.strategy.decompose(content, context)` yields <= 1
+              chunk, logs a warning and returns `self.strategy.merge([])`
+              — an EMPTY merge result, NOT the single chunk's content and
+              NOT a raised error. This is the base case that prevents
+              infinite recursion when content cannot be split further.
+            * Otherwise, updates `context.total_chunks` and, for each
+              chunk in order: creates a child context via
+              `context.create_child`, builds a chunk prompt via
+              `self.strategy.create_chunk_prompt`, and recursively calls
+              `self.process(...)` with that chunk's own prompt/content/
+              child context. A chunk whose processing raises any
+              `Exception` is logged and skipped (not retried, not
+              propagated) — remaining chunks still run.
+            * `context.chunks_processed` is updated (1-based) before each
+              chunk is dispatched, reflecting the LAST chunk started, not
+              necessarily the last chunk completed.
+            * Returns `self.strategy.merge(results)` over whatever chunk
+              results succeeded, even if some chunks failed; only returns
+              `self.strategy.merge([])` (empty) if ALL chunks failed.
+        """
         chunks = self.strategy.decompose(content, context)
 
         if len(chunks) <= 1:
@@ -485,6 +759,17 @@ def process_with_decomposition(
 
     Returns:
         Processed result as a dictionary.
+
+    Preconditions:
+        * Same as `RecursiveProcessor.process` (with `context=None`,
+          `process_fn=None`), since this is a thin passthrough that
+          always starts a fresh root context.
+    Postconditions:
+        * Constructs a new `RecursiveProcessor` with `strategy` (defaulting
+          to a fresh `SectionDecompositionStrategy()` if `strategy` is
+          `None`) and `max_depth`, then returns
+          `processor.process(llm, prompt, content, agent_name)` — i.e. the
+          same result/exception behavior as `RecursiveProcessor.process`.
     """
     if strategy is None:
         strategy = SectionDecompositionStrategy()

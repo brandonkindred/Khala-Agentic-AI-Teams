@@ -59,6 +59,19 @@ _FINALIZED_CHECKPOINT = "finalized"
 _PHASE_HEARTBEAT_INTERVAL_S = 30.0
 
 
+def _degraded_checkpoint_key(phase: str) -> str:
+    """Checkpoint key for ``phase``'s degradation flag, distinct from its output payload.
+
+    Preconditions:
+        ``phase`` is a ``BrandPhase`` value string.
+    Postconditions:
+        Returns a key that never collides with a phase-name checkpoint key,
+        used by both the writer (``run_branding_phase_activity``) and the
+        reader (``finalize_branding_activity``).
+    """
+    return f"{phase}__degraded"
+
+
 @activity.defn(name="branding_begin_job")
 def begin_branding_job_activity(job_id: str) -> bool:
     """Transition the job to RUNNING; report whether the run should proceed.
@@ -98,6 +111,13 @@ def run_branding_phase_activity(
           before returning), the stored output is returned without re-running
           the phase. A checkpoint with a ``None`` payload does not short-circuit.
           Otherwise the freshly computed output is checkpointed before return.
+        - The phase's degradation flag (whether ``orchestrator.run_single_phase``
+          fell back to a default-constructed model because the LLM text couldn't
+          be parsed) is checkpointed under ``_degraded_checkpoint_key(phase)``
+          — written *before* the output checkpoint so a crash between the two
+          writes can never leave an output checkpoint (which short-circuits a
+          retry) without its paired degradation flag. ``finalize_branding_activity``
+          reads it back to populate ``TeamOutput.degraded_phases``.
     """
     from branding_team.models import BrandingMission, BrandPhase
     from branding_team.orchestrator import orchestrator
@@ -115,8 +135,11 @@ def run_branding_phase_activity(
 
     mission = BrandingMission(**payload["mission"])
     with BackgroundHeartbeat(activity.heartbeat, _PHASE_HEARTBEAT_INTERVAL_S, copy_context=True):
-        model = orchestrator.run_single_phase(mission, BrandPhase(phase), prior_outputs or {})
+        model, degraded = orchestrator.run_single_phase(
+            mission, BrandPhase(phase), prior_outputs or {}
+        )
     out = model.model_dump(mode="json")
+    save_checkpoint(_CHECKPOINT_TEAM, job_id, _degraded_checkpoint_key(phase), degraded)
     save_checkpoint(_CHECKPOINT_TEAM, job_id, phase, out)
     return out
 
@@ -195,7 +218,9 @@ def finalize_branding_activity(
     Postconditions:
         - Reconstructs the phase models, runs compliance, and builds ``TeamOutput``
           via the orchestrator's shared ``_assemble_team_output`` (same assembly as
-          thread mode).
+          thread mode). ``TeamOutput.degraded_phases`` is populated from the
+          per-phase degradation checkpoints ``run_branding_phase_activity`` wrote,
+          so a Temporal run surfaces the same degradation signal as the thread path.
         - The brand-version append is gated by the ``"finalized"`` checkpoint so a
           finalize retry that runs after the checkpoint is durably written does not
           re-append. The append and the checkpoint are two separate job-service
@@ -211,6 +236,7 @@ def finalize_branding_activity(
     from branding_team.models import (
         BrandCheckRequest,
         BrandingMission,
+        BrandPhase,
         ChannelActivationOutput,
         CompetitiveSnapshot,
         DesignAssetRequestResult,
@@ -254,6 +280,14 @@ def finalize_branding_activity(
     snapshot = CompetitiveSnapshot(**competitive_snapshot) if competitive_snapshot else None
     design_result = DesignAssetRequestResult(**design_asset_result) if design_asset_result else None
 
+    degraded_phases = [
+        BrandPhase(key)
+        for key in phase_outputs
+        if (load_checkpoint(_CHECKPOINT_TEAM, job_id, _degraded_checkpoint_key(key)) or {}).get(
+            "payload"
+        )
+    ]
+
     output = orchestrator._assemble_team_output(
         mission=mission,
         human_review=human_review,
@@ -266,6 +300,7 @@ def finalize_branding_activity(
         competitive_snapshot=snapshot,
         design_asset_result=design_result,
         stop_idx=stop_idx,
+        degraded_phases=degraded_phases,
     )
 
     # Best-effort dedup of the non-idempotent brand-version append: the checkpoint

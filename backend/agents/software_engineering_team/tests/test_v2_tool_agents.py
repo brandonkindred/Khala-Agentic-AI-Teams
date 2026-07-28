@@ -235,6 +235,21 @@ def test_architecture_plan_no_model() -> None:
     assert out.summary
 
 
+def test_architecture_build_plan_prompt_caps_spec_content() -> None:
+    """An oversized spec is capped at MAX_SPEC_CHARS so a single-shot planning
+    call (no tool fallback) can't be pushed past the model's context window."""
+    from software_engineering_team.frontend_code_v2_team.tool_agents.architecture.agent import (
+        MAX_SPEC_CHARS,
+        ArchitectureToolAgent,
+    )
+
+    agent = ArchitectureToolAgent.__new__(ArchitectureToolAgent)
+    big_spec = "S" * (MAX_SPEC_CHARS + 5000)
+    prompt = agent._build_plan_prompt(_phase_input(spec_context=big_spec))
+    assert big_spec not in prompt
+    assert "S" * MAX_SPEC_CHARS in prompt
+
+
 def test_architecture_plan_null_summary_uses_empty_summary_override(monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.tool_agents.architecture import (
         agent as mod,
