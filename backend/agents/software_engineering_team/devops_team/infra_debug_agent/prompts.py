@@ -34,5 +34,8 @@ Also determine whether ALL errors are fixable via code changes (syntax, validati
   "fixable": true
 }"""
     ),
+    # Empty trailer preserves the pre-migration prompt's lack of a trailing
+    # "Return JSON only." instruction (unlike the other devops single-shot
+    # prompts, this one never had one).
     trailer="",
 )

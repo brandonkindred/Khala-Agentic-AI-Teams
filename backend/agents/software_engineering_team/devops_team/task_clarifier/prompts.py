@@ -18,6 +18,11 @@ DEVOPS_TASK_CLARIFIER_PROMPT = build_json_output_prompt(
 - security/compliance constraints
 - change window requirements (when relevant)
 
+Rules:
+- Be strict for production-affecting changes.
+- Missing rollback details for staging/prod is blocking.
+- Missing approval gate for production deploy is blocking.
+
 """
     ),
     json_schema=(
@@ -26,12 +31,5 @@ DEVOPS_TASK_CLARIFIER_PROMPT = build_json_output_prompt(
         "- gaps: list[{area, message, blocking}]\n"
         "- clarification_requests: list[string]"
     ),
-    trailer=(
-        """Rules:
-- Be strict for production-affecting changes.
-- Missing rollback details for staging/prod is blocking.
-- Missing approval gate for production deploy is blocking.
-- Respond with JSON only.
-"""
-    ),
+    trailer="Respond with JSON only.\n",
 )
