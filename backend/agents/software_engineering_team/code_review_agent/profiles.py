@@ -108,6 +108,11 @@ _SHARED_OUTPUT_SECTION = (
     'When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to '
     "that exact prefixed number. REQUIRED when the issue is tied to a specific line; OMIT it for "
     "file-wide or structural issues.\n"
+    '  - "title": string. A short, descriptive title for the issue (roughly 5-12 words) that '
+    'names WHAT is wrong, e.g. "Missing pagination in UserListComponent" or "SQL query built via '
+    'string concatenation". This is the first thing a developer reads -- it must stand on its own, '
+    "distinct from and more specific than the category, and it must be the finding's conclusion, "
+    "never your reasoning toward it.\n"
     '  - "description": string (clear description of the issue)\n'
     '  - "suggestion": string (concrete fix recommendation). If there is nothing to change, do NOT '
     'include the finding in "issues" at all -- a finding whose only "suggestion" would be "no '
@@ -146,6 +151,8 @@ _SHARED_OUTPUT_SECTION = (
     "- Every issue MUST have ALL of the following fields populated:\n"
     '  - "file_path": The exact file path where the problem exists (e.g., '
     '"src/app/components/user-list/user-list.component.ts")\n'
+    '  - "title": A short, descriptive title naming the problem, e.g. "Missing pagination in '
+    'UserListComponent". Never a placeholder like "Issue found" or "Code review finding".\n'
     '  - "description": A specific, actionable description that explains WHAT is wrong and WHY. Do '
     'NOT write vague descriptions like "code needs work" or "not production ready". Instead, '
     'reference the specific code pattern, function, or line that has the problem. Example: "The '
@@ -162,6 +169,14 @@ _SHARED_OUTPUT_SECTION = (
     "a file but did not -- those are in-scope defects and must use pre_existing: false.\n"
     "- The coding agent that receives these issues will use them as instructions, so each issue "
     "must be detailed enough to be acted upon WITHOUT additional context.\n\n"
+    "**NEVER PUBLISH YOUR CHAIN OF THOUGHT:**\n"
+    '- Every string field ("title", "description", "suggestion", "summary", '
+    '"spec_compliance_notes") is posted verbatim as a PR comment or review body. Write only your '
+    "finished conclusion in each -- never your step-by-step reasoning, deliberation, uncertainty, "
+    'or exploration (e.g. no "let me check...", "first I\'ll look at...", "I think this might be '
+    '...", or a trace of what you considered and ruled out).\n'
+    "- State findings directly and confidently, as a finished verdict a developer can act on -- not "
+    "as a narrated thought process.\n\n"
     "**THOROUGHNESS REQUIREMENTS:**\n"
     "- You MUST review EVERY file in the code submission, not just a sample\n"
     "- For each file, check EVERY function, method, class, and code block\n"
