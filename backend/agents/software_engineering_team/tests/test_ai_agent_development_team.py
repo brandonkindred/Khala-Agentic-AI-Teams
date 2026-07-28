@@ -141,6 +141,9 @@ def test_ai_agent_development_workflow_problem_solving(tmp_path: Path):
     assert result.problem_solving_result is not None
     assert result.problem_solving_result.resolved is True
     assert result.iterations_used >= 1
+    # final_files must reflect the problem-solving placeholder patches, not
+    # the pre-loop snapshot of execution.files.
+    assert any("_placeholder.md" in path for path in result.final_files)
 
 
 def test_ai_agent_development_workflow_aborts_when_fix_unavailable(

@@ -33,11 +33,12 @@ def run_execution(
       (``AIAgentDevelopmentTeamLead._build_tool_runners``) guarantees this.
       ``planning_result.microtasks`` may be empty.
     Postconditions: returns an ``ExecutionResult`` whose ``microtasks`` list
-      has one entry per input microtask, each with ``status`` set to
-      ``COMPLETED`` or ``FAILED`` based on the runner's ``out.success``;
-      ``files`` is the union of every microtask's output files. Does not
-      handle ``Microtask.depends_on`` — microtasks always run once, in
-      planner order, regardless of dependency status.
+      has one entry per input microtask (the same objects, mutated in place),
+      each with ``status`` set to ``COMPLETED`` or ``FAILED`` based on the
+      runner's ``out.success``; ``output_files`` and ``notes`` are also set on
+      each input microtask. ``files`` is the union of every microtask's output
+      files. Does not handle ``Microtask.depends_on`` — microtasks always run
+      once, in planner order, regardless of dependency status.
     """
     files: Dict[str, str] = {}
     notes: List[str] = []

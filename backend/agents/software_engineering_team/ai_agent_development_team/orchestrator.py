@@ -165,7 +165,6 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                 tool_runners=self._build_tool_runners(),
             )
             result.execution_result = execution
-            result.final_files = execution.files
 
             def _attempt_review_cycle(i: int):
                 """One review/problem-solving iteration for ``_run_bounded_retry_loop``.
@@ -215,6 +214,10 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                 attempt=_attempt_review_cycle,
                 is_success=lambda r: r.passed,
             )
+            # Reflect any problem-solving patches applied during the loop
+            # (including on abort/exhausted paths, where partial progress is
+            # still useful to callers inspecting final_files).
+            result.final_files = execution.files
             if not succeeded:
                 if result.needs_followup:
                     # Abort path: _attempt_review_cycle already populated
