@@ -116,7 +116,11 @@ def run_code_review(
         - ``repo_path`` is None or the path of the materialized workspace the
           changed files live in; when set, the false-positive verifier is given
           read access to the whole repository so it can confirm existing files a
-          finding claims are missing.
+          finding claims are missing. Forwarded both as a live ``repo_reader``
+          (used on the in-process path) and as ``repo_root`` on the review input
+          (used to reconstruct the same access worker-side when the agent
+          dispatches to Temporal, which cannot carry the live reader object
+          across the workflow boundary).
 
     Postconditions:
         - When ``files`` (a ``{path: content}`` mapping of the task's changed
@@ -146,6 +150,7 @@ def run_code_review(
             architecture=architecture,
             existing_codebase=existing_codebase,
             user_decisions=user_decisions or None,
+            repo_root=repo_path,
         )
         run_kwargs: Dict[str, Any] = {"progress_callback": progress_callback}
         # Forward the reader only when a workspace path was supplied: passing

@@ -33,6 +33,7 @@ from product_requirements_analysis_agent.question_data import (
 from product_requirements_analysis_agent.question_processing import (
     filter_duplicate_questions,
     parse_question_option,
+    parse_spec_review_response,
 )
 from product_requirements_analysis_agent.question_processing import (
     parse_open_question as _real_parse_open_question,
@@ -634,6 +635,43 @@ def test_parse_open_question_preserves_extended_metadata() -> None:
     assert parsed.asked_via == ["slack", "web_ui"]
 
 
+def test_parse_open_question_defaults_non_sequence_section_impact_and_asked_via() -> None:
+    """_parse_open_question should ignore string values instead of exploding them into characters."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-004",
+            "question_text": "Which SLO tier should we target?",
+            "section_impact": "Requirements",
+            "asked_via": "slack",
+        },
+        index=0,
+    )
+
+    assert parsed.section_impact == []
+    assert parsed.asked_via == []
+
+
+def test_parse_spec_review_response_skips_malformed_question_without_raising() -> None:
+    """parse_spec_review_response must never raise, even when an open question has non-list options."""
+    result = parse_spec_review_response(
+        {
+            "issues": ["Missing auth flow"],
+            "gaps": ["No SLA defined"],
+            "open_questions": [
+                {"question_text": "Malformed question", "options": None},
+                {"question_text": "Well-formed question", "options": []},
+            ],
+            "summary": "Reviewed",
+        }
+    )
+
+    assert isinstance(result, SpecReviewResult)
+    assert [q.question_text for q in result.open_questions] == ["Well-formed question"]
+
+
 def test_parse_open_question_handles_non_numeric_constraint_layer() -> None:
     """_parse_open_question should fall back to 0 instead of raising on a non-numeric value."""
     llm = MagicMock()
@@ -832,6 +870,29 @@ def test_add_recommendations_returns_unchanged_when_no_questions() -> None:
     agent = ProductRequirementsAnalysisAgent(llm)
     result = agent._add_recommendations([], "# Spec content")
     assert result == []
+
+
+def test_add_recommendations_treats_null_recommendation_as_absent() -> None:
+    """A null ``recommendation`` from the LLM must leave the question's recommendation
+    empty, not the literal string "None" (str(None) coerced from an unconditional
+    str() call on the raw value)."""
+    llm = _StubClient(
+        {
+            "recommendations": [
+                {"id": "q1", "recommendation": None},
+                {"id": "q2", "recommendation": "Use OAuth for the MVP."},
+            ]
+        }
+    )
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(id="q1", question_text="Which auth?")
+    q2 = OpenQuestion(id="q2", question_text="Which storage?")
+
+    result = agent._add_recommendations([q1, q2], "# Spec content")
+
+    result_by_id = {q.id: q for q in result}
+    assert result_by_id["q1"].recommendation == ""
+    assert result_by_id["q2"].recommendation == "Use OAuth for the MVP."
 
 
 def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents() -> None:
