@@ -116,8 +116,11 @@ def test_merged_schema_accepts_explicit_empty_lists_but_requires_both_keys():
 def test_merged_schema_rejects_cross_part_category():
     """A finding placed under the wrong part's array must fail validation --
     proves the schema actually enforces the two finding shapes stay separate,
-    not merely "any string category is accepted everywhere"."""
-    with pytest.raises(ValidationError):
+    not merely "any string category is accepted everywhere". Both required
+    top-level keys are supplied in every case (the sibling as an explicit
+    empty list) so the raised error can only come from the invalid
+    ``category`` value, never from the sibling key being missing."""
+    with pytest.raises(ValidationError) as exc_info:
         MergedArchitectureSideEffectResponse.model_validate(
             {
                 "architecture_findings": [
@@ -126,18 +129,23 @@ def test_merged_schema_rejects_cross_part_category():
                         "category": "side-effects",  # invalid for Part 1
                         "description": "wrong category for this array",
                     }
-                ]
+                ],
+                "side_effect_findings": [],
             }
         )
-    with pytest.raises(ValidationError):
+    assert any(err["loc"][-1] == "category" for err in exc_info.value.errors())
+
+    with pytest.raises(ValidationError) as exc_info:
         MergedArchitectureSideEffectResponse.model_validate(
             {
+                "architecture_findings": [],
                 "side_effect_findings": [
                     {
                         "severity": "medium",
                         "category": "refactor",  # invalid for Part 2
                         "description": "wrong category for this array",
                     }
-                ]
+                ],
             }
         )
+    assert any(err["loc"][-1] == "category" for err in exc_info.value.errors())
