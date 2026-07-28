@@ -365,8 +365,8 @@ _ChunkReviewIssueCategory = Literal[
 class ChunkReviewIssueLLM(BaseModel):
     """Narrow LLM-authored shape for one issue in a chunk-review response.
 
-    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
-    ``generate_structured`` (see ``llm_service``'s README, "When to use which
+    Schema for ``chunk_reviewer._run_chunk_review`` to validate replies via
+    ``llm_service.complete_validated`` (see ``llm_service``'s README, "When to use which
     entrypoint"). This is the raw per-issue shape the model is asked to
     emit — distinct from the persisted :class:`CodeReviewIssue`, which
     additionally range-validates ``line``/``start_line`` against the cited
@@ -439,12 +439,10 @@ class ChunkReviewIssueLLM(BaseModel):
 class ChunkReviewLLMResponse(BaseModel):
     """Narrow LLM-authored shape for one chunk-review call's response.
 
-    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
-    ``generate_structured``. Today that function hand-parses this exact
-    shape out of a ``complete_json_with_continuation`` reply via bare
-    ``.get()``/``str()``/``bool()`` coercions (chunk_reviewer.py). This model
-    documents and validates that contract; wiring it into an actual
-    ``generate_structured`` call is a separate, follow-up change.
+    ``chunk_reviewer._run_chunk_review`` validates every chunk-review reply
+    against this model via ``llm_service.complete_validated``, replacing the
+    hand-rolled ``.get()``/``str()``/``bool()`` coercions the reviewer used to
+    apply to a raw ``complete_json_with_continuation`` reply.
 
     All four fields are required, not defaulted: the chunk-review prompt's
     own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in

@@ -135,6 +135,7 @@ class _CiteFirstPrefixed(DummyLLMClient):
                 }
             ],
             "summary": "per-chunk issue",
+            "spec_compliance_notes": "",
         }
 
 

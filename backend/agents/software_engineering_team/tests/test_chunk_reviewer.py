@@ -1,9 +1,10 @@
-"""Tests for Code Review Chunk Reviewer (Strands-migrated).
+"""Tests for Code Review Chunk Reviewer.
 
-Uses ``DummyLLMClient`` subclasses instead of ``MagicMock``: the Strands
-adapter path doesn't call ``llm.complete_json`` directly (it goes through
-``chat_json_round`` with a ``StructuredOutputTool``), so mock-based
-assertions on ``complete_json.call_args`` are no longer meaningful.
+``ChunkReviewAgent`` calls the injected ``LLMClient``'s ``complete_json``
+directly (via ``llm_service.complete_validated``, validated against
+``ChunkReviewLLMResponse``) — no strands ``Agent``/``Model`` is built for
+this call path. Uses ``DummyLLMClient`` subclasses instead of ``MagicMock``
+so the injected client behaves like a real ``LLMClient``.
 """
 
 from __future__ import annotations
@@ -14,13 +15,12 @@ import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent, review_chunk
 from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
 
-from llm_service import LLMJsonParseError
+from llm_service import LLMJsonParseError, LLMSchemaValidationError
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.tests.conftest import _patch_fenced_response
 
 
 class _StubClient(DummyLLMClient):
-    """DummyLLMClient subclass returning a canned CodeReview-shaped dict."""
+    """DummyLLMClient subclass returning a canned ChunkReviewLLMResponse-shaped dict."""
 
     def __init__(self, canned: Dict[str, Any]) -> None:
         super().__init__()
@@ -55,28 +55,29 @@ def _chunk_input(**overrides: Any) -> ChunkReviewInput:
 
 
 class _NonJsonClient(DummyLLMClient):
-    """DummyLLMClient whose reply is not JSON, so the reviewer's parse via
-    ``complete_json_with_continuation`` raises ``LLMJsonParseError`` (a non-dict
-    reply is emitted verbatim as assistant text by the dummy strands stream, and
-    neither a bare ``json.loads`` nor the ``extract_json_from_response`` recovery
-    ladder can make sense of it)."""
+    """DummyLLMClient whose ``complete_json`` cannot produce parseable JSON, so
+    it raises ``LLMJsonParseError`` itself -- matching the real ``LLMClient``
+    contract (``complete_json`` returns ``Dict[str, Any]``, never a bare
+    string; a real client that cannot parse its own reply raises rather than
+    returning unparsed text, e.g. ``OllamaLLMClient._extract_json``)."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-        return "I could not produce the requested JSON object."
+        raise LLMJsonParseError(
+            "I could not produce the requested JSON object.",
+            response_preview="I could not produce the requested JSON object.",
+        )
 
 
 def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> None:
-    """The chunk reviewer parses the model reply via
-    ``complete_json_with_continuation``, so an invalid (non-JSON, unrecoverable)
-    reply surfaces as ``LLMJsonParseError`` once that helper's
-    ``extract_json_from_response`` recovery ladder also fails.
+    """When the injected client's ``complete_json`` cannot produce parseable
+    JSON on any of ``complete_validated``'s attempts, ``LLMJsonParseError``
+    propagates unchanged out of ``_run_chunk_review``.
 
     This guards the coupling in ``mapping._CONTENT_FAILURE_TYPES``, which lists
-    ``LLMJsonParseError`` precisely because this parse path raises it: if the
-    reviewer ever bypassed ``complete_json_with_continuation`` for a bare
-    ``json.loads`` again (re-raising ``json.JSONDecodeError`` instead), that
-    classification would silently stop matching — this test fails loudly
-    instead.
+    ``LLMJsonParseError`` precisely because this call path can raise it: if the
+    reviewer stopped calling ``complete_validated``/``llm.complete_json`` and
+    raised something else instead, that classification would silently stop
+    matching -- this test fails loudly instead.
     """
     agent = ChunkReviewAgent(llm=_NonJsonClient())
     with pytest.raises(LLMJsonParseError):
@@ -84,55 +85,27 @@ def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> 
 
 
 class _NonObjectJsonClient(DummyLLMClient):
-    """DummyLLMClient whose reply is well-formed but non-object JSON (a bare
-    fenced array) -- complete_json_with_continuation's recovery ladder parses
-    this successfully with no exception, so the reviewer's own guard must be
-    the thing that turns it into LLMJsonParseError."""
+    """DummyLLMClient whose ``complete_json`` returns well-formed but
+    non-object JSON (a bare list) -- ``ChunkReviewLLMResponse.model_validate``
+    rejects a non-mapping value, so this must surface as
+    ``LLMSchemaValidationError``, not an unclassified ``AttributeError``."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
-        return '```json\n["not", "an", "object"]\n```'
+        return ["not", "an", "object"]
 
 
-def test_chunk_review_raises_llm_json_parse_error_on_non_object_json_response() -> None:
-    """A validly-parsed but non-object JSON response (e.g. a fenced array) must
-    also raise LLMJsonParseError, not crash with an unclassified AttributeError
-    on data.get(...) -- the latter would bypass mapping.py's bisection/retry
-    recovery entirely and abort the whole submission's review instead of
-    degrading gracefully like any other malformed response.
+def test_chunk_review_raises_llm_schema_validation_error_on_non_object_json_response() -> None:
+    """A validly-parsed but non-object JSON response (e.g. a bare list) must
+    raise ``LLMSchemaValidationError`` once ``complete_validated`` exhausts its
+    corrective retry (the fake client returns the same value every time) --
+    not crash with an unclassified error. ``mapping.py``'s
+    ``_CONTENT_FAILURE_TYPES`` already classifies ``LLMSchemaValidationError``
+    as a recoverable content failure alongside ``LLMJsonParseError``, so this
+    still degrades gracefully like any other malformed response.
     """
     agent = ChunkReviewAgent(llm=_NonObjectJsonClient())
-    with pytest.raises(LLMJsonParseError):
+    with pytest.raises(LLMSchemaValidationError):
         agent.run(_chunk_input())
-
-
-def test_chunk_review_recovers_markdown_fenced_model_response(monkeypatch) -> None:
-    """A markdown-fenced JSON reply — the shape a model returns when it wraps its
-    JSON answer in a ```json fence despite the "JSON only" system prompt — now
-    recovers via ``complete_json_with_continuation``'s ``extract_json_from_response``
-    fallback instead of crashing on a bare ``json.loads`` of the fenced text.
-    """
-    payload = {
-        "approved": False,
-        "issues": [
-            {
-                "severity": "high",
-                "category": "general",
-                "file_path": "app/main.py",
-                "description": "Missing input validation",
-                "suggestion": "Validate before use",
-            }
-        ],
-        "summary": "Found one issue.",
-        "spec_compliance_notes": "",
-    }
-    _patch_fenced_response(monkeypatch, payload)
-    agent = ChunkReviewAgent(llm=DummyLLMClient())
-    result = agent.run(_chunk_input())
-    assert isinstance(result, ChunkReviewOutput)
-    assert result.approved is False
-    assert len(result.issues) == 1
-    assert result.issues[0]["description"] == "Missing input validation"
-    assert result.summary == "Found one issue."
 
 
 def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
@@ -154,6 +127,7 @@ def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
     assert result["approved"] is True
     assert result["issues"] == []
     assert "summary" in result
+    assert "spec_compliance_notes" in result
 
 
 def test_chunk_review_agent_run_returns_chunk_review_output() -> None:
@@ -176,13 +150,14 @@ def test_chunk_review_agent_carries_file_path_from_issue() -> None:
                 "issues": [
                     {
                         "severity": "critical",
-                        "category": "security",
+                        "category": "documentation",
                         "file_path": "app/models.py",
                         "description": "Missing docstring on User",
                         "suggestion": "Add a docstring describing fields",
                     },
                 ],
                 "summary": "One issue found.",
+                "spec_compliance_notes": "",
             }
         )
     )
@@ -244,8 +219,10 @@ def test_review_guardrails_note_is_in_every_prompt() -> None:
     agent.run(_chunk_input())
     prompt = client.prompts[0]
     assert "**Review guardrails" in prompt
-    assert "COMPLETE" in prompt  # units shown are complete -> no phantom truncation
-    assert "does not exist" in prompt  # don't flag existing files as missing
+    # Full sentences, not bare substrings, so a stray unrelated occurrence of
+    # "COMPLETE" or "does not exist" elsewhere in the prompt can't false-pass.
+    assert "The code shown below is COMPLETE." in prompt
+    assert "Do NOT claim that a file, module, or symbol referenced here 'does not exist'" in prompt
     assert "from .models import" in prompt  # relative imports are conventional
 
 
@@ -304,17 +281,64 @@ def test_new_output_fields_are_parsed_through() -> None:
     assert result.spec_compliance_notes == "Chunk meets the spec."
 
 
-def test_missing_new_output_fields_default_to_empty() -> None:
-    """When the model omits the new output fields, they default to empty strings."""
+def test_missing_new_output_fields_raise_schema_validation_error() -> None:
+    """``ChunkReviewLLMResponse`` requires all four top-level fields (no
+    defaults): a reply missing ``spec_compliance_notes`` fails validation.
+    ``complete_validated`` retries once with a corrective prompt, but
+    ``_StubClient`` always returns the same canned (still-incomplete) payload
+    regardless of prompt, so the retry fails identically and
+    ``LLMSchemaValidationError`` is raised -- replacing the old hand-rolled
+    parser's silent ``.get(..., "")`` default."""
     agent = ChunkReviewAgent(llm=_StubClient({"approved": True, "issues": [], "summary": "ok"}))
-    result = agent.run(_chunk_input())
-    assert result.spec_compliance_notes == ""
+    with pytest.raises(LLMSchemaValidationError):
+        agent.run(_chunk_input())
+
+
+def test_reject_without_actionable_issue_raises_schema_validation_error() -> None:
+    """``ChunkReviewLLMResponse``'s consistency validator rejects ``approved=False``
+    with no issues at all -- there is no actionable critical/high finding to
+    justify the rejection, so the reply is malformed and fails schema
+    validation rather than being silently accepted."""
+    agent = ChunkReviewAgent(
+        llm=_StubClient(
+            {"approved": False, "issues": [], "summary": "No issues.", "spec_compliance_notes": ""}
+        )
+    )
+    with pytest.raises(LLMSchemaValidationError):
+        agent.run(_chunk_input())
+
+
+def test_reject_with_only_low_severity_issue_raises_schema_validation_error() -> None:
+    """``approved=False`` still fails validation when every issue is below the
+    critical/high threshold -- an info/low finding alone does not justify a
+    rejection per the review prompt's own contract."""
+    agent = ChunkReviewAgent(
+        llm=_StubClient(
+            {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "low",
+                        "category": "naming",
+                        "description": "Minor style nit.",
+                        "suggestion": "Consider renaming.",
+                    },
+                ],
+                "summary": "Minor issue only.",
+                "spec_compliance_notes": "",
+            }
+        )
+    )
+    with pytest.raises(LLMSchemaValidationError):
+        agent.run(_chunk_input())
 
 
 def test_chunk_review_agent_passes_blank_file_path_through_unchanged() -> None:
-    """A blank/missing issue file_path is passed through raw — never filled
-    with the chunk label, which would defeat the coordinator's per-path offset
-    lookup (the coordinator resolves blank paths itself)."""
+    """A blank/omitted issue file_path stays blank — never filled with the
+    chunk label, which would defeat the coordinator's per-path offset lookup
+    (the coordinator resolves blank paths itself). ``ChunkReviewIssueLLM``
+    defaults an omitted ``file_path`` to ``""`` and always emits the key on
+    ``model_dump()``, so it is present-but-blank rather than absent."""
     agent = ChunkReviewAgent(
         llm=_StubClient(
             {
@@ -328,12 +352,13 @@ def test_chunk_review_agent_passes_blank_file_path_through_unchanged() -> None:
                     },
                 ],
                 "summary": "Fix naming.",
+                "spec_compliance_notes": "",
             }
         )
     )
     result = agent.run(_chunk_input(file_path_or_label="app/main.py"))
     assert len(result.issues) == 1
-    assert "file_path" not in result.issues[0]
+    assert result.issues[0]["file_path"] == ""
     assert result.issues[0]["severity"] == "high"
 
 
@@ -377,28 +402,29 @@ def test_final_output_contract_note_follows_the_code_block() -> None:
     assert prompt.index("Code to review") < prompt.index("Respond with ONLY")
 
 
-def test_run_forwards_think_override(monkeypatch) -> None:
-    """``ChunkReviewAgent.run(think=...)`` threads the override to
-    ``resolve_code_review_model``; the default is ``None`` (model default)."""
-    from code_review_agent import chunk_reviewer
+class _ThinkRecorderClient(DummyLLMClient):
+    """Delegates to Dummy but records the ``think`` kwarg of every call."""
 
-    captured: Dict[str, Any] = {}
-    real = chunk_reviewer.resolve_code_review_model
+    def __init__(self) -> None:
+        super().__init__()
+        self.think_values: list = []
 
-    def _spy(llm: Any, think: Any = None) -> Any:
-        captured["think"] = think
-        # Resolve against the injected Dummy (a strands Model) so the review still
-        # runs; the Dummy ignores think, so pass None to the real resolver.
-        return real(llm, think=None)
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        self.think_values.append(kwargs.get("think"))
+        return super().complete_json(prompt, **kwargs)
 
-    monkeypatch.setattr(chunk_reviewer, "resolve_code_review_model", _spy)
 
-    agent = ChunkReviewAgent(llm=DummyLLMClient())
+def test_run_forwards_think_override() -> None:
+    """``ChunkReviewAgent.run(think=...)`` threads the override directly to the
+    injected client's ``complete_json`` call (via ``complete_validated``); the
+    default is ``None`` (the client's own platform-default thinking level, per
+    ``LLMClient.complete_json``'s contract)."""
+    client = _ThinkRecorderClient()
+    agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input(), think=False)
-    assert captured["think"] is False
-    captured.clear()
+    assert client.think_values[-1] is False
     agent.run(_chunk_input())
-    assert captured["think"] is None
+    assert client.think_values[-1] is None
 
 
 def test_shared_context_is_passed_through_in_full() -> None:
