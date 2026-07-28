@@ -1,4 +1,4 @@
-"""Cybersecurity Expert agent: security reviews and vulnerability remediation.
+"""Cybersecurity Expert agent: security review and vulnerability reporting.
 
 Built on the AWS Strands Agents SDK via ``llm_service.get_strands_model``. The
 model returned by ``get_strands_model`` is passed to a Strands ``Agent`` so the
@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 class CybersecurityExpertAgent:
     """
-    Cybersecurity expert that reviews code for security flaws and resolves
-    any identified vulnerabilities.
+    Cybersecurity expert that reviews code for security flaws. Reports
+    vulnerabilities for the coding agent to remediate — never patches them
+    itself (see ``SecurityOutput.vulnerabilities``).
     """
 
     def __init__(self, llm_client=None) -> None:
