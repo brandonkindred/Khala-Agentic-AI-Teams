@@ -5,6 +5,13 @@
 pipeline's phase order. These tests verify ``SYSTEM_PROMPT`` derives its
 per-phase header titles from that source instead of hand-written literals,
 and that doing so left the rendered prompt unchanged.
+
+``test_system_prompt_sections_follow_reordered_phase_order`` below is the
+SYSTEM_PROMPT-side half of the ``PHASE_ORDER`` drift guard; its Temporal-side
+sibling is ``test_phase_sequence_matches_brand_phase_values`` /
+``test_phase_sequence_derives_from_canonical_phase_order`` in
+``test_temporal_unit.py``. Together they prove neither the assistant prompt
+nor the Temporal phase sequence can silently desync from ``PHASE_ORDER``.
 """
 
 from __future__ import annotations
@@ -193,7 +200,13 @@ def test_phase_header_rejects_mismatched_index() -> None:
 def test_system_prompt_sections_follow_reordered_phase_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Swapping two phases in PHASE_ORDER must reorder whole sections, not just header numbers."""
+    """Swapping two phases in PHASE_ORDER must reorder whole sections, not just header numbers.
+
+    Drift guard: proves SYSTEM_PROMPT's phase content is *derived from* (not
+    independent of) PHASE_ORDER. See
+    ``test_temporal_unit.py::test_phase_sequence_matches_brand_phase_values``
+    for the equivalent guard on the Temporal side (``PHASE_SEQUENCE``).
+    """
     import branding_team.assistant.prompts as prompts_mod
     import branding_team.graphs.shared as shared_mod
 

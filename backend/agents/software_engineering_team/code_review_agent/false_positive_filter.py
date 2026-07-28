@@ -67,14 +67,23 @@ logger = logging.getLogger(__name__)
 # leaves it enabled.
 _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 
-# How many file paths to enumerate inline in the verification prompt before
-# deferring the rest to the ``list_files`` tool. A manifest is a convenience so
-# the model knows what it can read; it is never the only way to discover files.
-_MANIFEST_LIMIT = 300
-
 # Cap on substring matches returned by ``search_codebase`` so a common token
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
+
+# Cap on file paths listed inline in the verification prompt's manifest, so a
+# submission touching a large repo can't by itself blow the prompt past the
+# model's context window; the rest remains reachable via list_files()/
+# read_file(), so nothing is actually inaccessible -- only the inline listing
+# is bounded.
+_MANIFEST_LIMIT = 300
+
+# Cap on the task description / each acceptance criterion inlined into the
+# verification prompt. Unlike the cited file body (deliberately kept in full
+# -- see _build_group_prompt), there is no tool the model can call to read the
+# rest of an oversized task field, so an unbounded field has no fallback path
+# at all if it blows the prompt past context.
+_CONTEXT_FIELD_CHARS = 4_000
 
 # Column-0 token prefixes that should NOT be counted as construct start lines
 # by the heuristic fallback used for non-Python files.
@@ -854,11 +863,16 @@ def _build_group_prompt(
 ) -> str:
     """Render the user prompt for verifying one file's findings.
 
-    The prompt inlines the cited file's full content up to ``max_inline_chars``
-    (so the model has the primary evidence even without a tool call) and lists
-    the other available paths; everything beyond the budget — the rest of a huge
-    file, every other file, the existing-codebase excerpt — is reachable through
-    the tools. The wording is a stable anchor for the verdict contract: it names
+    ``max_inline_chars`` is accepted but intentionally unused -- retained only
+    for call-site compatibility with callers still computing it. See the
+    module-level fail-safe rationale for why the primary file body is inlined
+    in full rather than bounded by it.
+
+    The prompt inlines the cited file's full content (so the model has the
+    primary evidence even without a tool call) and lists up to
+    ``_MANIFEST_LIMIT`` available paths; other files (including any manifest
+    overflow) and the existing-codebase excerpt remain reachable through the
+    tools. The wording is a stable anchor for the verdict contract: it names
     the file, indexes each finding, and asks for a ``verdicts`` array.
 
     Postconditions:
@@ -868,6 +882,7 @@ def _build_group_prompt(
           are not capped so an oversized task field can never dominate the prompt 
           or overflow the context.
     """
+    _ = max_inline_chars  # retained for call-site compatibility
     parts: List[str] = []
     task = input_data.task_description.strip()
     if task:
@@ -887,18 +902,11 @@ def _build_group_prompt(
     parts.append("")
 
     body = index.read_file(file_path)
-    inlined = body[:max_inline_chars]
-    truncated = len(body) > max_inline_chars
-    fence = _code_fence_for(inlined)
+    fence = _code_fence_for(body)
     parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
     parts.append(fence)
-    parts.append(inlined)
+    parts.append(body)
     parts.append(fence)
-    if truncated:
-        parts.append(
-            f"(Only the first {max_inline_chars} characters of `{file_path}` are shown above; "
-            "call read_file to see the rest.)"
-        )
     parts.append("")
 
     parts.append(
@@ -1130,8 +1138,8 @@ def _verify_and_filter(
                     issue.severity,
                     issue.file_path,
                     issue.line if issue.line is not None else "-",
-                    issue.description[:120],
-                    verdict.reasoning[:160] or "no reasoning given",
+                    issue.description,
+                    verdict.reasoning or "no reasoning given",
                 )
 
     if not removed_indices:

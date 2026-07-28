@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
@@ -44,6 +45,7 @@ class ReviewDependencies:
         code_review_agent: Any = None,
         linting_tool_agent: Any = None,
         tool_agents: Optional[Dict[Any, Any]] = None,
+        tool_agent_cache: Optional[AgentReviewCache] = None,
     ) -> None:
         self.build_verifier = build_verifier
         self.qa_agent = qa_agent
@@ -51,6 +53,13 @@ class ReviewDependencies:
         self.code_review_agent = code_review_agent
         self.linting_tool_agent = linting_tool_agent
         self.tool_agents = tool_agents or {}
+        # Per-microtask-cycle cache of tool-agent review results, reset by
+        # ``_run_review_cycles`` at the start of each microtask's cycle loop.
+        # Unused (stays ``None``) unless a team's gate functions read it and
+        # thread it into ``run_microtask_review`` — currently only the
+        # frontend team does (see docs/GATE_DEPENDENCY_GRAPH.md's "residual
+        # 2x" caching design); other callers are unaffected.
+        self.tool_agent_cache = tool_agent_cache
 
 
 def _run_general_microtask_impl(
@@ -308,7 +317,13 @@ class GatedExecutionConfig:
     # ``GateOutcome``. ``run_qa_gate``/``run_security_gate`` additionally
     # receive a ``cache: AgentReviewCache`` keyword (see ``_run_review_cycles``)
     # — ``run_code_review_gate`` does not, since code review already has its
-    # own cross-cycle cache.
+    # own cross-cycle cache. This ``cache`` keyword is a separate, pre-existing
+    # mechanism from ``deps.tool_agent_cache`` (see ``ReviewDependencies``
+    # above): it caches the QA/security *LLM* steps, while ``tool_agent_cache``
+    # caches tool-agent ``.review()`` results and travels via ``deps`` — a
+    # team's gate callables read it off ``deps`` themselves (see the frontend
+    # gates in ``frontend_code_v2_team/phases/execution.py``) rather than
+    # receiving it as a keyword here, so this callable signature is unchanged.
     run_code_review_gate: Callable[..., GateOutcome]
     run_qa_gate: Callable[..., GateOutcome]
     run_security_gate: Callable[..., GateOutcome]
@@ -488,6 +503,13 @@ def run_gated_execution_impl(
         ``gate_config.models`` exposes ``MicrotaskStatus``, ``ExecutionResult``,
         ``ToolAgentInput``, ``ToolAgentKind``, ``ReviewResult``,
         ``MicrotaskReviewFailedError`` and ``MicrotaskReviewConfig``.
+        ``review_deps`` is an optional :class:`ReviewDependencies` instance
+        (a fresh one is constructed when omitted); it is passed through to
+        ``_run_review_cycles`` for every microtask, which resets its
+        ``tool_agent_cache`` field to a new :class:`AgentReviewCache` at the
+        start of each microtask's own cycle loop -- a team's gate callables
+        that read ``deps.tool_agent_cache`` see one scoped to the microtask
+        currently in progress, never a stale one from an earlier microtask.
         ``gate_config.run_code_review_gate`` accepts a ``review_context`` keyword
         argument (the per-team adapter forwards it into its code-review call); a
         ``review_context`` is built here from ``architecture``/``spec_content``

@@ -3,9 +3,10 @@
 Covers every variation point the migrated callers rely on: empty-input
 short-circuit, worker bounding, order preservation (and completion order),
 ``skip_none`` filtering, contextvar propagation (and its opt-out), the
-fast-fail error policy with the ``on_first_exception`` hook, and the opt-in
+fast-fail error policy with the ``on_first_exception`` hook, the opt-in
 ``wait_for_stragglers`` policy for callers that must not leave in-flight work
-running in the background after a failure.
+running in the background after a failure, and the opt-in per-item
+``timeout``/``on_timeout`` degrade-not-abort policy.
 """
 
 from __future__ import annotations
@@ -329,6 +330,37 @@ def test_abort_is_set_before_a_slow_hook_so_queued_tasks_never_start() -> None:
     assert started["count"] == 1
 
 
+def test_abort_is_set_before_a_slow_hook_with_timeout_also_set() -> None:
+    """Same guarantee as the sibling test above, but with ``timeout`` set —
+    the internal abort flag must still be checked (and honored) by the
+    timeout-aware worker wrapper, not just the plain one used when
+    ``timeout`` is ``None``."""
+    started = {"count": 0}
+    lock = threading.Lock()
+
+    def fn(x: int) -> int:
+        with lock:
+            started["count"] += 1
+        if x == 0:
+            raise RuntimeError("fast")
+        return x
+
+    def slow_hook() -> None:
+        time.sleep(0.2)
+
+    with pytest.raises(RuntimeError, match="fast"):
+        parallel_map(
+            [0, 1, 2, 3],
+            fn,
+            max_workers=1,
+            wait_for_stragglers=True,
+            on_first_exception=slow_hook,
+            timeout=1.0,
+        )
+
+    assert started["count"] == 1
+
+
 def test_on_first_exception_hook_raising_does_not_mask_worker_error(caplog) -> None:
     """A raising hook is logged and discarded — the original worker exception
     still propagates rather than being replaced by the hook's error."""
@@ -384,6 +416,403 @@ def test_pool_is_shut_down_even_when_hook_raises_baseexception(monkeypatch) -> N
         pm.parallel_map([1], fn, max_workers=1, on_first_exception=hook)
 
     assert shutdown_calls, "pool.shutdown must run even when the hook raises BaseException"
+
+
+def test_timeout_degrades_slow_item_success_items_unaffected() -> None:
+    """A per-item timeout degrades only the slow item to None; other items
+    still complete and return their real values, and on_timeout fires once
+    with the timed-out item."""
+    timed_out_items: list[int] = []
+
+    def on_timeout(item: int) -> None:
+        timed_out_items.append(item)
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(1.0)  # exceeds the timeout below
+        return x * 10
+
+    out = parallel_map(
+        [0, 1, 2],
+        fn,
+        max_workers=3,
+        skip_none=False,
+        timeout=0.1,
+        on_timeout=on_timeout,
+    )
+
+    assert out == [None, 10, 20]
+    assert timed_out_items == [0]
+
+
+def test_timeout_degrades_queued_item_stuck_behind_a_hung_worker() -> None:
+    """With max_workers=1, a permanently hung first item must not starve a
+    queued second item forever: once the number of abandoned stragglers
+    reaches the worker count, a not-yet-started item is degraded too instead
+    of parallel_map hanging indefinitely."""
+    release = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release.wait(timeout=10)  # simulates a permanent hang
+            return x
+        return x * 10
+
+    try:
+        out = parallel_map([0, 1], fn, max_workers=1, skip_none=False, timeout=0.05)
+        # Item 1 never got a worker slot (item 0's hung thread never freed one
+        # up) so it degrades to None exactly like the timed-out item 0.
+        assert out == [None, None]
+    finally:
+        release.set()
+
+
+def test_timeout_queued_item_still_runs_behind_a_merely_slow_not_hung_worker() -> None:
+    """A queued item behind a slightly-over-budget (but not permanently hung)
+    worker must still get to run and receive its own full budget, rather than
+    being force-degraded the instant every worker looks saturated."""
+    release = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release.wait(timeout=2)  # a bit over the timeout, then returns
+            return x
+        return x * 10
+
+    threading.Timer(0.1, release.set).start()
+    out = parallel_map([0, 1], fn, max_workers=1, skip_none=False, timeout=0.05)
+
+    assert out == [None, 10]
+
+
+def test_timeout_degrades_a_late_but_successfully_completed_future() -> None:
+    """A future that genuinely ran past its own budget must be degraded even
+    if it happens to complete (successfully) while parallel_map's loop is
+    busy elsewhere (here: a slow on_timeout hook for a different, hung
+    item) and only gets to observe it as already-``done`` afterward — it
+    must not slip through as a real result just because the loop was late
+    to check its deadline while it was still pending."""
+    release_hang = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_hang.wait(timeout=5)  # permanently hung, released in finally
+            return 0
+        if x == 1:
+            # Comfortably within budget; frees a worker at ~0.15s so item 2
+            # starts well after item 0 (needed so item 0's own deadline is
+            # reached — and its slow hook fires — before item 2's is, even
+            # accounting for poll-interval jitter).
+            time.sleep(0.15)
+            return 11
+        # Starts at ~0.15s, finishes at ~0.55s: 0.4s of real runtime against
+        # a 0.3s budget — genuinely over budget, and finishes while item 0's
+        # slow hook (below) still has parallel_map's loop tied up.
+        time.sleep(0.40)
+        return 22
+
+    def on_timeout(item: int) -> None:
+        if item == 0:
+            # Long enough to span item 2's real completion (~0.55s) before
+            # the loop gets back around to calling `wait()` again.
+            time.sleep(0.4)
+
+    try:
+        out = parallel_map(
+            [0, 1, 2],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.3,
+            on_timeout=on_timeout,
+        )
+        assert out == [None, 11, None]
+    finally:
+        release_hang.set()
+
+
+def test_timeout_saturation_resets_once_the_pool_shows_progress() -> None:
+    """The saturation grace-period fallback must not accumulate forever: once
+    an abandoned straggler's worker resumes and makes real progress (here:
+    several small in-budget items complete one after another on the single
+    worker), later queued items must still get to run instead of being
+    force-cancelled just because a stale straggler count once reached the
+    worker count."""
+    release_hang = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_hang.wait(timeout=0.2)  # slightly over budget, then returns
+            return 0
+        time.sleep(0.01)  # comfortably within budget
+        return x * 10
+
+    threading.Timer(0.06, release_hang.set).start()
+    try:
+        out = parallel_map([0, 1, 2, 3], fn, max_workers=1, skip_none=False, timeout=0.05)
+        # Item 0 alone degrades (it ran over budget); every item queued
+        # behind it keeps running normally once the worker recovers.
+        assert out == [None, 10, 20, 30]
+    finally:
+        release_hang.set()
+
+
+def test_timeout_abandoned_stragglers_tracked_individually_not_by_pool_progress() -> None:
+    """Unrelated progress on a healthy worker must never be credited as a
+    *different*, still-genuinely-hung worker recovering. With max_workers=2:
+    worker 1 hangs forever from the start; worker 2 cycles through several
+    quick, in-budget items and only then also hangs forever. The queued item
+    behind both must still eventually be degraded (saturation correctly
+    reached once a second worker is truly stuck) rather than polled forever
+    because the first hang's contribution was wiped out by worker 2's
+    unrelated completions."""
+    release_a = threading.Event()
+    release_z = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_a.wait(timeout=5)  # worker 1: permanently hung
+            return 0
+        if 1 <= x <= 5:
+            time.sleep(0.02)  # worker 2: several quick, in-budget items
+            return x * 10
+        if x == 6:
+            release_z.wait(timeout=5)  # worker 2: now also permanently hung
+            return 6
+        return 70  # item 7: queued behind both hangs, must never get to run
+
+    try:
+        out = parallel_map(
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.2,
+        )
+        assert out == [None, 10, 20, 30, 40, 50, None, None]
+    finally:
+        release_a.set()
+        release_z.set()
+
+
+def test_timeout_accepts_a_genuinely_on_time_completion_observed_late() -> None:
+    """A task that actually finishes within its own budget must be accepted
+    with its real value even if parallel_map's loop doesn't get around to
+    observing it as done until well after — here, because a different item's
+    on_timeout hook is slow. Elapsed time must be measured against the
+    worker's own recorded finish time, not the observing thread's clock."""
+    release_hang = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release_hang.wait(timeout=5)  # permanently hung, released in finally
+            return 0
+        time.sleep(0.02)  # finishes comfortably within the 0.2s budget
+        return 42
+
+    def on_timeout(item: int) -> None:
+        if item == 0:
+            # Delays the loop well past item 1's real completion (~0.02s),
+            # long after it was genuinely already done and within budget.
+            time.sleep(0.3)
+
+    try:
+        out = parallel_map(
+            [0, 1],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.2,
+            on_timeout=on_timeout,
+        )
+        assert out == [None, 42]
+    finally:
+        release_hang.set()
+
+
+def test_timeout_uses_item_not_index_for_non_subscriptable_items() -> None:
+    """on_timeout receives the actual submitted item even when `items` is a
+    sized-but-not-subscriptable iterable (e.g. a set), rather than indexing
+    the original input with `items[i]`."""
+    timed_out_items: list[int] = []
+
+    def on_timeout(item: int) -> None:
+        timed_out_items.append(item)
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(1.0)
+        return x
+
+    out = parallel_map(
+        {0, 1},
+        fn,
+        max_workers=2,
+        skip_none=False,
+        timeout=0.1,
+        on_timeout=on_timeout,
+    )
+
+    assert None in out
+    assert timed_out_items == [0]
+
+
+def test_nan_timeout_rejected() -> None:
+    """A NaN timeout is rejected up front rather than silently disabling the
+    timeout check (NaN compares False against both <= 0 and > 0)."""
+    with pytest.raises(ValueError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, timeout=float("nan"))
+
+
+def test_timeout_none_default_is_unaffected() -> None:
+    """timeout unset (default None) behaves exactly as before — no degrade
+    logic engages even for a slow item."""
+
+    def fn(x: int) -> int:
+        time.sleep(0.05)
+        return x * 10
+
+    assert parallel_map([0, 1, 2], fn, max_workers=3) == [0, 10, 20]
+
+
+def test_timeout_racing_a_genuine_exception_still_fast_fails() -> None:
+    """When one item times out and a different item raises, the exception
+    still propagates (fast-fail wins over a degrade)."""
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(1.0)  # will time out
+        if x == 1:
+            raise RuntimeError("boom")
+        return x
+
+    with pytest.raises(RuntimeError, match="boom"):
+        parallel_map([0, 1], fn, max_workers=2, timeout=0.1)
+
+
+def test_timeout_wait_for_stragglers_blocks_on_degraded_item() -> None:
+    """wait_for_stragglers=True blocks on a degraded (timed-out) item's
+    still-running future before parallel_map returns."""
+    finished = {"done": False}
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(0.2)  # exceeds the timeout, but keeps running afterward
+            finished["done"] = True
+        return x
+
+    out = parallel_map(
+        [0, 1],
+        fn,
+        max_workers=2,
+        skip_none=False,
+        timeout=0.05,
+        wait_for_stragglers=True,
+    )
+
+    assert out == [None, 1]
+    assert finished["done"] is True
+
+
+def test_timeout_without_wait_for_stragglers_does_not_block() -> None:
+    """Default wait_for_stragglers=False does not block on a degraded item's
+    still-running future — parallel_map returns without joining it."""
+    finished = {"done": False}
+    release = threading.Event()
+
+    def fn(x: int) -> int:
+        if x == 0:
+            release.wait(timeout=10)
+            finished["done"] = True
+        return x
+
+    try:
+        out = parallel_map([0, 1], fn, max_workers=2, skip_none=False, timeout=0.05)
+        assert out == [None, 1]
+        assert finished["done"] is False
+    finally:
+        release.set()
+
+
+def test_timeout_set_but_everything_completes_in_time() -> None:
+    """A timeout configured but never hit — every item finishes before its
+    deadline — behaves like a normal successful run."""
+
+    def fn(x: int) -> int:
+        return x * 10
+
+    assert parallel_map([0, 1, 2], fn, max_workers=3, timeout=5.0) == [0, 10, 20]
+
+
+def test_on_timeout_hook_raising_does_not_mask_the_degrade(caplog) -> None:
+    """A raising on_timeout hook is logged and discarded — the timed-out
+    item's result still degrades to None rather than the hook's error
+    propagating."""
+
+    def hook(_item: int) -> None:
+        raise KeyError("hook blew up")
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(1.0)
+        return x
+
+    with caplog.at_level(logging.ERROR, logger="shared.concurrency.parallel_map"):
+        out = parallel_map(
+            [0, 1],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.1,
+            on_timeout=hook,
+        )
+
+    assert out == [None, 1]
+    assert "on_timeout hook raised" in caplog.text
+    assert "hook blew up" in caplog.text
+
+
+def test_on_timeout_hook_raising_baseexception_still_propagates() -> None:
+    """Unlike a plain Exception, a BaseException (e.g. a real interrupt) from
+    on_timeout is never swallowed — it propagates out of parallel_map exactly
+    like a fast-fail worker exception would, and the pool still shuts down
+    cleanly rather than hanging."""
+
+    def hook(_item: int) -> None:
+        raise KeyboardInterrupt("stop")
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(1.0)
+        return x
+
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        parallel_map(
+            [0, 1],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.1,
+            on_timeout=hook,
+        )
+
+
+def test_invalid_timeout_rejected() -> None:
+    """A non-positive or non-numeric timeout raises up front."""
+    with pytest.raises(ValueError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, timeout=0)
+    with pytest.raises(ValueError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, timeout=-1.0)
+    with pytest.raises(TypeError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, timeout="1")
+    with pytest.raises(TypeError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, timeout=True)
+
+
+def test_non_callable_on_timeout_rejected() -> None:
+    """A non-callable on_timeout raises TypeError up front."""
+    with pytest.raises(TypeError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, timeout=1.0, on_timeout="nope")
 
 
 def test_invalid_max_workers_rejected() -> None:

@@ -29,7 +29,7 @@ from software_engineering_team.devops_team.models import (
 from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
-    _criterion_traces_from_phase4,
+    criterion_traces_from_phase4,
 )
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
@@ -1280,7 +1280,7 @@ class TestCriterionTracesFromPhase4:
     """Unit tests for the Phase 4 → CriterionTrace mapper."""
 
     def test_match_uses_phase4_entry(self) -> None:
-        traces = _criterion_traces_from_phase4(
+        traces = criterion_traces_from_phase4(
             criteria=["c1", "c2"],
             acceptance_trace=[
                 {
@@ -1303,7 +1303,7 @@ class TestCriterionTracesFromPhase4:
         ]
 
     def test_no_match_uses_empty_tests_and_artifact_keys(self) -> None:
-        traces = _criterion_traces_from_phase4(
+        traces = criterion_traces_from_phase4(
             criteria=["lonely"],
             acceptance_trace=[],
             artifact_keys=["a.py"],
@@ -1317,7 +1317,7 @@ class TestCriterionTracesFromPhase4:
         ]
 
     def test_coerces_bad_shapes(self) -> None:
-        traces = _criterion_traces_from_phase4(
+        traces = criterion_traces_from_phase4(
             criteria=["c1"],
             acceptance_trace=[
                 {
@@ -1332,7 +1332,7 @@ class TestCriterionTracesFromPhase4:
         assert traces[0].tests == [{"ok": "1"}, {"gate": "True"}]
 
     def test_never_invents_validation_pass(self) -> None:
-        traces = _criterion_traces_from_phase4(
+        traces = criterion_traces_from_phase4(
             criteria=["c1"],
             acceptance_trace=[],
             artifact_keys=[],

@@ -260,6 +260,7 @@ def run_microtask_review(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     cache: Optional[AgentReviewCache] = None,
+    tool_agent_cache: Optional[AgentReviewCache] = None,
 ) -> ReviewResult:
     """Run full review on a single microtask's output files.
 
@@ -271,12 +272,22 @@ def run_microtask_review(
         - ``microtask`` exposes ``.id``/``.title``/``.description``.
         - ``cache``: see ``software_engineering_team.shared.agent_review``;
           forwarded to the QA/security steps only.
+        - ``tool_agent_cache``: within *this* call, consulted/populated only
+          by the tool-agent fan-out step (not the QA/security LLM steps,
+          which use ``cache`` instead). Because the three gates
+          (``_code_review_gate``/``_qa_gate``/``_security_gate``) each pass
+          the *same* ``tool_agent_cache`` instance (read off
+          ``ReviewDependencies.tool_agent_cache``, one instance per microtask
+          cycle), a tool agent computed by an earlier gate's call within the
+          same cycle is reused by a later gate's call instead of recomputed.
 
     Postconditions:
         - Delegates to ``_shared_run_microtask_review``, which forwards
           ``review_context`` into the code-review step's ``CodeReviewInput``
           (``None`` when omitted, so existing callers are unaffected). See the
           shared function for the full review-result contract.
+        - When given, ``tool_agent_cache`` and ``cache`` may each be mutated
+          (populated with new entries) as a side effect of a live agent call.
     """
     return _shared_run_microtask_review(
         config=REVIEW_CONFIG,
@@ -300,6 +311,7 @@ def run_microtask_review(
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
         agent_review_cache=cache,
+        tool_agent_cache=tool_agent_cache,
     )
 
 

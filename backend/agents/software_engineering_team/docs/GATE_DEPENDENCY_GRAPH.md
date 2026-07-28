@@ -88,7 +88,7 @@ the parent effort names it, but it has no live position in the sequence today.
 | Code review (agent) | `_code_review_step` via `run_code_review_phase_impl` | `microtask_files`, `review_context` (architecture/spec); `enable_llm_review_grounding` (a plain parameter of `run_code_review_phase_impl`, **not** a `ReviewConfig` attribute — the caller `_run_review_cycles` forwards it via `getattr(config, "enable_llm_review_grounding", True)` off the higher-level `MicrotaskReviewConfig`, `execution.py:902`/`985`) | `ReviewIssue(source="code_review", ...)`; combined `GateOutcome(passed, issues, summary, raw_issue_count)` (`execution.py:360-377`) |
 | QA (backend) | `run_qa_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:391-436`, body at `213-357`) | `microtask_files` (post-CR content), `deps.qa_agent`, `agent_review_cache`, and **only** `deps.tool_agents["testing_qa"]` — the shared body filters by `spec.tool_kind` (`review.py:295-297`) before calling any tool agent | `GateOutcome` with `source="qa"` issues |
 | Security (backend) | `run_security_testing_phase_impl` → `_run_agent_testing_phase` (`review.py:439-475`, same shared body) | `microtask_files`, `deps.security_agent`, `agent_review_cache`, and **only** `deps.tool_agents["security"]`, filtered the same way | `GateOutcome` with `source="security"` issues |
-| QA / Security (frontend) | `_qa_gate` (`frontend_code_v2_team/phases/execution.py:213-244`) / `_security_gate` (`247-278`) → `run_microtask_review` (`shared/v2_review.py:750-938`, invoked via `from .review import run_microtask_review` inside each gate) | `microtask_files`, `deps.qa_agent` or `deps.security_agent`, and `_scoped_tool_agents(deps.tool_agents, kind)` — **only their own kind** (`testing_qa` / `security`), not the full mapping (see note below) | `GateOutcome`, filtered post hoc to `source="qa"` or `source="security"` |
+| QA / Security (frontend) | `_qa_gate` (`frontend_code_v2_team/phases/execution.py:213-244`) / `_security_gate` (`247-278`) → `run_microtask_review` (`shared/v2_review.py:750-938`, invoked via `from .review import run_microtask_review` inside each gate) | `microtask_files`, `deps.qa_agent` or `deps.security_agent`, `deps.tool_agent_cache` (a content-addressed `AgentReviewCache`, reset per microtask cycle in `_run_review_cycles`, forwarded so a tool agent already run by the CR gate this cycle is reused instead of re-invoked — see the caching design below), and `_scoped_tool_agents(deps.tool_agents, kind)` — **only their own kind** (`testing_qa` / `security`), not the full mapping (see note below) | `GateOutcome`, filtered post hoc to `source="qa"` or `source="security"` |
 | Documentation | `_run_documentation_phase` (`execution.py:1224-1347`) | `microtask_files` (last review-accepted write), `deps.tool_agents[DOCUMENTATION]`, `task.description` | Refined `doc_files` merged into `microtask_files`/`all_files`/`mt.output_files`; sets `mt.status = COMPLETED` |
 | DbC (dormant) | `run_dbc_comments` (`quality_gate_tools.py:232-303`) | Whole repo directory tree on disk (not `microtask_files`) | Pre/postcondition comments written to disk **and committed**; the actual commit call is `write_files_and_commit(...)` at `quality_gate_tools.py:294` (lines 261-293 are the file-scan/prompt-building that precedes it); not currently invoked by the pipeline |
 
@@ -156,7 +156,7 @@ Edge classification:
   gate meant to surface `ACCESSIBILITY`/`UI_DESIGN` findings, which have no
   dedicated gate of their own.
 
-  **Residual duplication (audited, not yet fixed):** `deps.tool_agents`' full
+  **Residual duplication (audited, now fixed — see below):** `deps.tool_agents`' full
   mapping also contains `TESTING_QA` and `SECURITY`
   (`frontend_code_v2_team/orchestrator.py:98-104`). So within one microtask
   review cycle: the CR gate's full fan-out calls `TESTING_QA.review()` and
@@ -173,10 +173,17 @@ Edge classification:
   `ACCESSIBILITY`/`UI_DESIGN` are unaffected (CR-gate-only, no dedicated
   gate to duplicate against).
 
-  **Caching design to close the residual 2x (scoped for the follow-up
-  implementation issue, not implemented here):** thread a new per-tool-agent
-  result cache through `run_microtask_review` → `_run_tool_agents_review`,
-  modeled directly on the existing `AgentReviewCache`
+  **Caching design to close the residual 2x — implemented.** A per-tool-agent
+  result cache is threaded through `run_microtask_review` →
+  `_run_tool_agents_review` (`shared/v2_review.py`), stored on
+  `ReviewDependencies.tool_agent_cache` and reset per microtask cycle in
+  `_run_review_cycles` (`shared/phases/review_cycle.py`) alongside
+  `agent_review_cache`. It is consulted/populated only by the frontend team's
+  `_code_review_gate`/`_qa_gate`/`_security_gate`, which each forward
+  `deps.tool_agent_cache` into their `run_microtask_review` call — the backend
+  team never reads this attribute, so it is a no-op there (consistent with the
+  backend never having had this duplication). The design below is what was
+  implemented, modeled directly on the existing `AgentReviewCache`
   (`shared/agent_review.py:32-60`) that already prevents this same class of
   duplication for the QA/security *LLM* steps.
   - **Cache key**: a digest of `(kind.value, current_files content,
@@ -306,19 +313,22 @@ Edge classification:
   `_run_agent_testing_phase` filter, and `frontend_code_v2_team`'s
   `GATE_CONFIG` now sets `parallelize_qa_security=True` (matching the
   backend), so QA and Security run concurrently by default on the frontend
-  too. The CR gate's full-mapping fan-out still calls `TESTING_QA`/`SECURITY`
-  a second time on top of each gate's own dedicated call (the residual 2x
-  duplication documented above) — that duplication is a real but pre-existing
-  cost, not a concurrency-safety issue, since Code Review always finishes (and
-  re-passes) before the concurrent QA+Security phase begins, so there is no
-  shared mutable state accessed at the same time. Closing it via the caching
-  design above remains a separately-tracked follow-up.
+  too. The CR gate's full-mapping fan-out previously called
+  `TESTING_QA`/`SECURITY` a second time on top of each gate's own dedicated
+  call (the residual 2x duplication documented above) — that duplication was
+  a real but pre-existing cost, not a concurrency-safety issue, since Code
+  Review always finishes (and re-passes) before the concurrent QA+Security
+  phase begins, so there was no shared mutable state accessed at the same
+  time. It is now closed by the caching design above (implemented): a second
+  concurrent call for an already-cached key becomes a cache hit instead of a
+  second live call into a shared tool-agent instance.
 
-The follow-up implementation issue should scope itself to closing the residual
-CR-vs-QA/Security tool-agent duplication via the caching design above, and,
-only after isolating build verification's repair path from its read-only
-checks, the Code-Review sub-steps item — rather than attempting to
-parallelize the full sequential chain. DbC is out of scope for parallelization —
-if it is wired in, it needs an explicit serialized position in the sequence, not
-a concurrent or independent one. Any redesign must also preserve (or deliberately
-revisit) the frontend-only terminal edge at the cycle cap noted above.
+The follow-up implementation issue closed the residual CR-vs-QA/Security
+tool-agent duplication via the caching design above. What remains is, only
+after isolating build verification's repair path from its read-only checks,
+the Code-Review sub-steps item — rather than attempting to parallelize the
+full sequential chain. DbC is out of scope for parallelization — if it is
+wired in, it needs an explicit serialized position in the sequence, not a
+concurrent or independent one. Any redesign must also preserve (or
+deliberately revisit) the frontend-only terminal edge at the cycle cap noted
+above.
