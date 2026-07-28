@@ -1,5 +1,9 @@
 """
-Review phase: code review, build verification, lint, QA, security.
+Review phase: code review, QA, security.
+
+Build verification and linting run via the full review paths
+(``run_review``, ``run_microtask_review``) or the pre-review quality gate,
+not via the standalone code-review phase wrapper.
 
 Invokes passed-in quality agents when available; otherwise uses the team's
 own LLM-based review. No code from ``backend_agent`` is used.
@@ -310,28 +314,28 @@ def run_code_review_phase(
     microtask: Microtask,
     repo_path: Path,
     files: Dict[str, str],
-    build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
     code_review_agent: Any = None,
-    linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = PROFILE.default_language,
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> PhaseReviewResult:
     """
-    Run code review phase only: build verification + lint + code review.
+    Run code review phase only: the code review step.
 
     This is the first phase after coding, focusing on code quality, syntax,
-    and adherence to coding standards.
+    and adherence to coding standards. Build verification and linting run
+    elsewhere (this team's own pre-review quality gate, or the separate
+    ``run_review``/``run_microtask_review`` path), not in this phase.
 
     Thin wrapper over the shared parametrised implementation
     (:func:`software_engineering_team.shared.phases.review.run_code_review_phase_impl`)
-    driven by this team's :data:`REVIEW_CONFIG`. ``_run_build_verification`` and
-    ``_run_llm_review`` are referenced here by bare module-global name (resolved
-    at call time, not captured at import time), so this module stays the test
-    patch surface for ``Agent`` / ``resolve_text_mode_strands_model`` /
-    ``_run_build_verification`` -- exactly the technique ``run_review`` /
-    ``run_microtask_review`` already use for the same reason.
+    that injects this team's LLM-based reviewer via ``llm_review_fn`` and the
+    per-team result class via ``phase_review_result_cls``. ``_run_llm_review``
+    is referenced here by bare module-global name (resolved at call time, not
+    captured at import time), so this module stays the test patch surface for
+    ``Agent`` / ``resolve_text_mode_strands_model`` -- exactly the technique
+    ``run_review`` / ``run_microtask_review`` already use for the same reason.
     """
     return run_code_review_phase_impl(
         llm=llm,
@@ -339,16 +343,12 @@ def run_code_review_phase(
         microtask=microtask,
         repo_path=repo_path,
         files=files,
-        build_verifier=build_verifier,
         code_review_agent=code_review_agent,
-        linting_tool_agent=linting_tool_agent,
         detail_callback=detail_callback,
         language=language,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
-        config=REVIEW_CONFIG,
         llm_review_fn=_run_llm_review,
-        build_verify_fn=_run_build_verification,
         phase_review_result_cls=PhaseReviewResult,
     )
 
