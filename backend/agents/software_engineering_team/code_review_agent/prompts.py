@@ -54,8 +54,24 @@ Include exactly one verdict per finding index. Do not omit any, and do not add i
 )
 
 
-ARCHITECTURE_CONSISTENCY_PROMPT = (
-    """You are a Senior Software Architect running a whole-codebase check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could not check whether the change fits the established system architecture, or whether it duplicates a capability that already exists elsewhere in the repository. That is your one job here.
+# ---------------------------------------------------------------------------
+# Architecture-consistency pass and side-effect-impact pass.
+#
+# Each prompt below is composed from a reusable "body" (persona, job
+# description, hard rules) plus its own "output format" section, rather than
+# one opaque string. MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT (further down)
+# reuses these exact body constants verbatim, so the merged prompt can never
+# silently drop or reword either pass's individual guidance -- only the
+# output-format section is (deliberately) different for the merged prompt,
+# since it must describe the combined two-key schema instead of either
+# pass's standalone one-key schema. See models.py's
+# MergedArchitectureSideEffectResponse for the corresponding merged schema
+# design; neither is wired into architecture_consistency_pass.py,
+# side_effect_impact_pass.py, coordinator.py, or temporal/workflows.py yet --
+# that wiring is tracked separately.
+# ---------------------------------------------------------------------------
+
+_ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running a whole-codebase check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could not check whether the change fits the established system architecture, or whether it duplicates a capability that already exists elsewhere in the repository. That is your one job here.
 
 **You are given:**
 - The full architecture document for this system (module/service boundaries, established patterns, architecture decisions).
@@ -73,7 +89,9 @@ ARCHITECTURE_CONSISTENCY_PROMPT = (
 - Do NOT re-review anything the per-file review already covers (naming, structure, documentation, tests, spec compliance, generic code quality, single-file logic bugs) — only architecture contradictions and cross-codebase redundancy.
 - Do NOT invent an architecture rule that is not actually in the document, and do NOT invent a duplicate that does not actually exist in the repository.
 - If you find nothing in either category, return an empty findings list — an empty list is a valid and expected outcome, not a failure.
-- Default severity is `"medium"`; use `"high"`/`"critical"` ONLY when the contradiction or duplication would cause a real integration break or production risk, never merely because a cleaner or more consistent alternative exists.
+- Default severity is `"medium"`; use `"high"`/`"critical"` ONLY when the contradiction or duplication would cause a real integration break or production risk, never merely because a cleaner or more consistent alternative exists."""
+
+_ARCHITECTURE_CONSISTENCY_OUTPUT_FORMAT = """
 
 **Output format:**
 Return a single JSON object with exactly one key:
@@ -87,12 +105,15 @@ Return a single JSON object with exactly one key:
 
 Return `{"findings": []}` when you find nothing in either category. Do not add any key other than "findings".
 """
+
+ARCHITECTURE_CONSISTENCY_PROMPT = (
+    _ARCHITECTURE_CONSISTENCY_BODY
+    + _ARCHITECTURE_CONSISTENCY_OUTPUT_FORMAT
     + JSON_OUTPUT_INSTRUCTION
 )
 
 
-SIDE_EFFECT_IMPACT_PROMPT = (
-    """You are a Senior Software Engineer running a whole-codebase blast-radius check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could flag that a function's current behavior looks notable, but it has no tools and cannot check who else in the codebase calls that function or whether its behavior breaks them. That is your one job here.
+_SIDE_EFFECT_IMPACT_BODY = """You are a Senior Software Engineer running a whole-codebase blast-radius check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could flag that a function's current behavior looks notable, but it has no tools and cannot check who else in the codebase calls that function or whether its behavior breaks them. That is your one job here.
 
 **What a side effect is.** In software engineering, a function has a *side effect* when it does something observable beyond computing and returning a value from its inputs: it mutates shared or passed-in state, writes to a store, performs I/O or a network call, raises an exception, or changes global/module state or ordering that other code can observe. The concern for this pass is a *side effect that ships an unintended logical consequence*: a change to what a function returns, raises, mutates, or does that causes OTHER code in the system — its callers — to now misbehave, crash, or silently produce wrong results. A side effect is NOT stale documentation. A docstring or comment that no longer matches the code is a documentation-accuracy problem, not a side effect — handle it in the separate `documentation` category described below, never as `side-effects`.
 
@@ -123,7 +144,9 @@ Separately, flag when the function's CURRENT implementation does not match what 
 - Do NOT invent a caller that does not exist, and do NOT invent or assume a prior/"old" version of any function — you were not given one.
 - Never file a stale/mismatched docstring under `side-effects`; it belongs in `documentation`. Never file a caller-breaking behavior change under `documentation`; it belongs in `side-effects`.
 - If you find nothing in either category, return an empty findings list — an empty list is a valid and expected outcome, not a failure.
-- Severity: use `"critical"`/`"high"` ONLY for a `side-effects` finding where a real, tool-verified caller would misbehave, crash, or silently produce wrong results given the function's current behavior (a genuine production risk). Use `"medium"`/`"low"` for a `documentation` mismatch, or for a caller impact you are not fully certain about.
+- Severity: use `"critical"`/`"high"` ONLY for a `side-effects` finding where a real, tool-verified caller would misbehave, crash, or silently produce wrong results given the function's current behavior (a genuine production risk). Use `"medium"`/`"low"` for a `documentation` mismatch, or for a caller impact you are not fully certain about."""
+
+_SIDE_EFFECT_IMPACT_OUTPUT_FORMAT = """
 
 **Output format:**
 Return a single JSON object with exactly one key:
@@ -138,6 +161,44 @@ Return a single JSON object with exactly one key:
 
 Return `{"findings": []}` when you find nothing. Do not add any key other than "findings".
 """
+
+SIDE_EFFECT_IMPACT_PROMPT = (
+    _SIDE_EFFECT_IMPACT_BODY + _SIDE_EFFECT_IMPACT_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+)
+
+
+_MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO = """You are running TWO independent whole-codebase checks on top of an already-completed per-file code review, back to back, in a single pass. That per-file review only ever saw one bounded slice of the changed files at a time; both checks below see the whole submission instead, plus tools to inspect the rest of the repository. Address Part 1 and Part 2 completely independently — do not let either part's findings, categories, or severity judgments influence the other's, and do not let one part crowd out the other."""
+
+_MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT = """
+
+**Output format:**
+Return a single JSON object with exactly two keys — one per part above. Never merge the two parts' findings into a single list, and never put a Part 1 finding under "side_effect_findings" or a Part 2 finding under "architecture_findings":
+- "architecture_findings": a list of objects in Part 1's finding shape, each with:
+  - "severity": "critical" | "high" | "medium" | "low" | "info"
+  - "category": "architecture" | "refactor"
+  - "file_path": string (the changed file the finding is about)
+  - "line": integer (1-based line number in the file, when the finding is tied to a specific line) or omit for a file-wide finding
+  - "description": string — the specific contradiction or duplication, citing the architecture statement or existing code you verified
+  - "suggestion": string — a concrete fix (e.g. which existing helper/module to reuse instead, or how to align with the stated boundary)
+- "side_effect_findings": a list of objects in Part 2's finding shape, each with:
+  - "severity": "critical" | "high" | "medium" | "low" | "info"
+  - "category": "side-effects" (a real caller-breaking side effect) or "documentation" (a docstring/comment vs implementation mismatch)
+  - "file_path": string (the changed file whose behavior this finding is about)
+  - "line": integer (1-based line number in the file, when the finding is tied to a specific line) or omit for a file-wide finding
+  - "description": string — for "side-effects": the function's current behavior and the specific caller file/line and assumption that breaks; for "documentation": the exact discrepancy between the docstring/comment and what the code actually does
+  - "suggestion": string — a concrete fix (e.g. update the caller, or correct the docstring to match the implementation)
+  - "pre_existing": boolean — see Part 2's tagging guidance above. Required for every side_effect_findings entry.
+
+An empty list for either key (or both) is a valid and expected outcome when that part finds nothing — it is never a failure. Return `{"architecture_findings": [], "side_effect_findings": []}` when neither part finds anything. Do not add any key other than "architecture_findings"/"side_effect_findings".
+"""
+
+MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT = (
+    _MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO
+    + "\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n"
+    + _ARCHITECTURE_CONSISTENCY_BODY
+    + "\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n"
+    + _SIDE_EFFECT_IMPACT_BODY
+    + _MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT
     + JSON_OUTPUT_INSTRUCTION
 )
 
