@@ -1021,12 +1021,16 @@ def test_worker_start_defaults_temporal_address_when_unset(
 
 
 @contextlib.asynccontextmanager
-async def _workflow_environment_worker():
+async def _workflow_environment_worker(activities=None):
     """Shared ``WorkflowEnvironment`` + ``Worker`` startup/teardown for the
     ``CodeReviewWorkflow`` integration tests below. Yields the started ``env``
-    with a real ``CodeReviewWorkflow`` worker already listening on
-    ``TASK_QUEUE`` (real activities, against the ``dummy`` LLM harness this
-    suite runs under).
+    with a ``CodeReviewWorkflow`` worker already listening on ``TASK_QUEUE``,
+    against the ``dummy`` LLM harness this suite runs under.
+
+    ``activities`` defaults to the real, production ``ACTIVITIES`` list; pass
+    a substitute list (e.g. swapping one activity for a stand-in that raises
+    directly, bypassing that activity's own fail-safe try/except) to exercise
+    a tail-pass failure mode the real activities never produce on their own.
 
     ``WorkflowEnvironment.start_time_skipping()`` downloads (and thereafter
     caches) a small ephemeral test-server binary from ``temporal.download`` on
@@ -1053,7 +1057,7 @@ async def _workflow_environment_worker():
                 env.client,
                 task_queue=TASK_QUEUE,
                 workflows=[CodeReviewWorkflow],
-                activities=ACTIVITIES,
+                activities=activities if activities is not None else ACTIVITIES,
                 activity_executor=activity_executor,
             )
             async with worker:
@@ -1221,4 +1225,79 @@ async def test_workflow_fails_on_verify_failure_without_leaking_sibling_passes(
     cause = exc_info.value.cause
     assert cause is not None
     assert "verify boom" in str(cause)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When verify succeeds but a *later*-listed tail pass fails, the
+    workflow must fail with that pass's own exception as its cause -- never
+    a ``TypeError`` from mistakenly treating the exception object itself as
+    a findings list to spread -- and side-effect (listed after architecture)
+    must still run to completion rather than being abandoned.
+
+    The real architecture activity is internally fail-safe and never raises
+    (see ``find_architecture_and_redundancy_activity``'s docstring), so this
+    substitutes a stand-in activity registered under the same activity name
+    that raises directly, to exercise the branch a real activity can't
+    reach on its own.
+    """
+    from code_review_agent import side_effect_impact_pass
+    from code_review_agent.temporal import (
+        ACTIVITIES,
+        TASK_QUEUE,
+        CodeReviewWorkflow,
+        filter_false_positives_activity,
+        finalize_review_activity,
+        find_side_effect_impact_activity,
+        prepare_review_activity,
+        review_chunk_activity,
+        synthesize_findings_activity,
+    )
+    from temporalio import activity as activity_module
+    from temporalio.client import WorkflowFailureError
+
+    completed: set[str] = set()
+    real_side_effect = side_effect_impact_pass.find_side_effect_impact_issues
+
+    def _tracked_side_effect(*args: Any, **kwargs: Any) -> Any:
+        result = real_side_effect(*args, **kwargs)
+        completed.add("side_effect")
+        return result
+
+    monkeypatch.setattr(side_effect_impact_pass, "find_side_effect_impact_issues", _tracked_side_effect)
+
+    @activity_module.defn(name="code_review_architecture_consistency")
+    def _raising_architecture_activity(review_input: Dict[str, Any]) -> Any:
+        raise RuntimeError("architecture boom")
+
+    stand_in_activities = [
+        prepare_review_activity,
+        review_chunk_activity,
+        filter_false_positives_activity,
+        _raising_architecture_activity,
+        find_side_effect_impact_activity,
+        finalize_review_activity,
+        synthesize_findings_activity,
+    ]
+    assert len(stand_in_activities) == len(ACTIVITIES)
+
+    review_input = _input()
+
+    async with _workflow_environment_worker(activities=stand_in_activities) as env:
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await env.client.execute_workflow(
+                CodeReviewWorkflow.run,
+                review_input.model_dump(mode="json"),
+                id="code-review-workflow-architecture-failure-test",
+                task_queue=TASK_QUEUE,
+            )
+
+    cause = exc_info.value.cause
+    assert cause is not None
+    assert "architecture boom" in str(cause)
+    assert "TypeError" not in str(cause)
+    assert completed == {"side_effect"}
     assert completed == {"architecture", "side_effect"}

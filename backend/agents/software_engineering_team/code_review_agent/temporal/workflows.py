@@ -319,29 +319,39 @@ class CodeReviewWorkflow:
             # return_exceptions=True: wait for every tail pass to finish
             # (success or failure) instead of asyncio.gather's default of
             # raising as soon as the first exception surfaces and leaving
-            # the others un-awaited -- that default would (a) discard a
-            # sibling's completed result with no chance to use it, and (b)
-            # pick whichever exception happens to resolve first in real
-            # time, which is not guaranteed to match on replay. Re-raising
-            # the first exception found in `calls`' fixed verify /
-            # architecture / side-effect order below reproduces sequential
-            # execution's deterministic error precedence instead.
+            # the others un-awaited -- that default would leave a sibling
+            # activity un-awaited from the workflow's point of view (an
+            # orphaned command Temporal's workflow sandbox does not
+            # tolerate) and pick whichever exception happens to resolve
+            # first in real time, which is not guaranteed to match on
+            # replay. Extract each call's own result into its own local
+            # (in `calls`' fixed verify/architecture/side-effect order)
+            # BEFORE checking for exceptions, so a failed slot's exception
+            # object is read once as itself and never mistaken for (and
+            # spread as) a findings list; only once every local holds its
+            # plain result value do we re-raise the first exception found,
+            # in that same fixed order -- reproducing sequential
+            # execution's deterministic error precedence (verify's failure,
+            # if any, always wins) and total-failure semantics (a tail-pass
+            # failure aborts the whole review before any result is used,
+            # exactly as it would if the later passes were never reached).
             results = await asyncio.gather(*calls, return_exceptions=True)
-            for result in results:
-                if isinstance(result, BaseException):
-                    raise result
             results_iter = iter(results)
-            verified = next(results_iter)
-            if run_architecture:
-                architecture_findings = next(results_iter)
-                if architecture_findings:
-                    verified = [*verified, *architecture_findings]
-                    has_architecture_findings = True
-            if run_side_effect:
-                side_effect_findings = next(results_iter)
-                if side_effect_findings:
-                    verified = [*verified, *side_effect_findings]
-                    has_side_effect_findings = True
+            verify_result = next(results_iter)
+            architecture_result = next(results_iter) if run_architecture else None
+            side_effect_result = next(results_iter) if run_side_effect else None
+
+            first_exception = next((r for r in results if isinstance(r, BaseException)), None)
+            if first_exception is not None:
+                raise first_exception
+
+            verified = verify_result
+            if run_architecture and architecture_result:
+                verified = [*verified, *architecture_result]
+                has_architecture_findings = True
+            if run_side_effect and side_effect_result:
+                verified = [*verified, *side_effect_result]
+                has_side_effect_findings = True
         else:
             # Pre-migration history: reproduce the original sequential
             # scheduling AND the original workflow.patched call positions
