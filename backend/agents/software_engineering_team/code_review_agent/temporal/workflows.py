@@ -97,6 +97,20 @@ _SIDE_EFFECT_PASS_PATCH = "code-review-side-effect-impact-pass"
 # ``workflow.deprecate_patch(_ADAPTIVE_FANOUT_PATCH)`` before deleting it.
 _ADAPTIVE_FANOUT_PATCH = "code-review-adaptive-fanout-width"
 
+# Replay-compatibility gate for scheduling the false-positive-verification,
+# architecture-consistency, and side-effect-impact tail-pass activities
+# concurrently via ``asyncio.gather`` (see ``run``) instead of one at a time.
+# Same rationale as ``_ARCHITECTURE_PASS_PATCH``: a history recorded before
+# this existed scheduled the tail passes sequentially, each in its own
+# workflow task, so ``workflow.patched`` returns False on replay and that
+# history's original sequential command sequence is reproduced exactly; a new
+# execution records the marker and always takes the new, concurrent path.
+# TODO: Remove this gate (and always schedule the tail passes concurrently)
+# once no pre-migration CodeReviewWorkflow histories remain open (confirm via
+# the Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_CONCURRENT_TAIL_PASSES_PATCH)`` before deleting it.
+_CONCURRENT_TAIL_PASSES_PATCH = "code-review-concurrent-tail-passes"
+
 
 @workflow.defn(name="CodeReviewWorkflow")
 class CodeReviewWorkflow:
@@ -241,52 +255,83 @@ class CodeReviewWorkflow:
             )
 
         self._advance("verifying", 0.92)
-        verified = await workflow.execute_activity(
-            A.filter_false_positives_activity,
-            args=[
-                review_input,
-                issues,
-                bool(review_input.get("skip_false_positive_filter", False)),
-            ],
-            task_queue=TASK_QUEUE,
-            start_to_close_timeout=timedelta(minutes=30),
-            retry_policy=_LLM_RETRY,
-        )
 
-        has_architecture_findings = False
-        if workflow.patched(_ARCHITECTURE_PASS_PATCH):
-            # Architecture-consistency / cross-codebase-redundancy pass: additive,
-            # once per submission (not once per chunk), matching thread mode's
-            # run_coordinator (see coordinator.py's identical call ordering — after
-            # false-positive verification, before the final dedupe/gate). Gated by
-            # workflow.patched so a pre-migration history (recorded before this
-            # activity existed) replays its original finalize-next sequence exactly.
-            architecture_findings = await workflow.execute_activity(
+        def _verify() -> Any:
+            return workflow.execute_activity(
+                A.filter_false_positives_activity,
+                args=[
+                    review_input,
+                    issues,
+                    bool(review_input.get("skip_false_positive_filter", False)),
+                ],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=_LLM_RETRY,
+            )
+
+        def _architecture() -> Any:
+            return workflow.execute_activity(
                 A.find_architecture_and_redundancy_activity,
                 args=[review_input],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=_LLM_RETRY,
             )
-            if architecture_findings:
-                verified = [*verified, *architecture_findings]
-                has_architecture_findings = True
 
-        has_side_effect_findings = False
-        if workflow.patched(_SIDE_EFFECT_PASS_PATCH):
-            # Side-effect / blast-radius pass: additive, once per submission (not
-            # once per chunk), matching thread mode's run_coordinator (see
-            # coordinator.py's identical call ordering — after the architecture
-            # pass, before the final dedupe/gate). Gated by workflow.patched so a
-            # pre-migration history (recorded before this activity existed)
-            # replays its original finalize-next sequence exactly.
-            side_effect_findings = await workflow.execute_activity(
+        def _side_effect() -> Any:
+            return workflow.execute_activity(
                 A.find_side_effect_impact_activity,
                 args=[review_input],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=_LLM_RETRY,
             )
+
+        # Architecture-consistency / cross-codebase-redundancy pass and
+        # side-effect / blast-radius pass are both additive, once per
+        # submission (not once per chunk), matching thread mode's
+        # run_coordinator (see coordinator.py's identical call ordering —
+        # after false-positive verification, before the final dedupe/gate).
+        # Each is gated by its own workflow.patched so a pre-migration
+        # history (recorded before that activity existed) replays its
+        # original finalize-next sequence exactly.
+        run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
+        run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+
+        if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):
+            # None of the three tail passes reads another's output (see
+            # coordinator._run_tail_passes), so they can be scheduled as
+            # concurrent activities instead of three sequential round-trips —
+            # same "create the coroutine, gather later" idiom as the map
+            # fan-out above.
+            calls = [_verify()]
+            if run_architecture:
+                calls.append(_architecture())
+            if run_side_effect:
+                calls.append(_side_effect())
+            results = await asyncio.gather(*calls)
+        else:
+            # Pre-migration history: reproduce the original sequential
+            # scheduling exactly (see _CONCURRENT_TAIL_PASSES_PATCH).
+            results = [await _verify()]
+            if run_architecture:
+                results.append(await _architecture())
+            if run_side_effect:
+                results.append(await _side_effect())
+
+        results_iter = iter(results)
+        verified = next(results_iter)
+
+        has_architecture_findings = False
+        if run_architecture:
+            architecture_findings = next(results_iter)
+            if architecture_findings:
+                verified = [*verified, *architecture_findings]
+                has_architecture_findings = True
+
+        has_side_effect_findings = False
+        if run_side_effect:
+            side_effect_findings = next(results_iter)
             if side_effect_findings:
                 verified = [*verified, *side_effect_findings]
                 has_side_effect_findings = True
