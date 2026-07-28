@@ -11,7 +11,9 @@ synthesis, architecture-consistency, side-effect impact, and ``mapping.py`` cach
 fingerprinting — the chunk reviewer itself now calls ``LLMClient.complete_json``
 directly rather than dispatching through this module).
 ``resolve_code_review_verify_model`` routes the false-positive verifier onto the
-lighter ``code_review_verify`` key; wiring synthesis onto that key is separate
+lighter ``code_review_verify`` key and pins Ollama failover candidates to that
+key's per-agent / default model so a non-empty provider-list ``entry.model``
+cannot shadow the lighter selection; wiring synthesis onto that key is separate
 follow-up work.
 
 This is intentionally distinct from the generic
@@ -26,11 +28,15 @@ interchangeable; these helpers preserve the existing code-review behavior.
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Union
 
 from strands.models.model import Model as _StrandsModel
 
-from llm_service import LLMClient, get_strands_model
+from llm_service import LLMClient, LLMClientModel, get_strands_model, with_model_override
+from llm_service.config import AGENT_DEFAULT_MODELS, ENV_LLM_MODEL
+
+_VERIFY_AGENT_KEY = "code_review_verify"
 
 
 def resolve_code_review_model(
@@ -64,6 +70,50 @@ def resolve_code_review_model(
     return get_strands_model("code_review", think=think)
 
 
+def _code_review_verify_model_pin() -> str:
+    """Return the model id the verify path should pin Ollama candidates to.
+
+    Prefer ``LLM_MODEL_code_review_verify``, else ``AGENT_DEFAULT_MODELS`` for
+    the verify key. Intentionally skips the global ``LLM_MODEL`` / UI runtime
+    model so the lighter verify default is not shadowed by the primary review's
+    configured model (those globals still apply to blank ``entry.model`` fallback
+    via ``resolve_model``; the pin is specifically for overriding a filled
+    provider-list entry).
+
+    Preconditions: ``AGENT_DEFAULT_MODELS`` contains ``code_review_verify``.
+    Postconditions: returns a non-empty model id string. Never raises.
+    """
+    per_agent = (os.environ.get(f"{ENV_LLM_MODEL}_{_VERIFY_AGENT_KEY}") or "").strip()
+    if per_agent:
+        return per_agent
+    return AGENT_DEFAULT_MODELS[_VERIFY_AGENT_KEY]
+
+
+def _apply_code_review_verify_model_pin(
+    model: "Union[LLMClient, _StrandsModel]",
+) -> "Union[LLMClient, _StrandsModel]":
+    """Pin Ollama failover candidates on ``model`` to the verify-key model id.
+
+    Mirrors the blog pipeline's stage-model override: when the backing client is
+    a :class:`~llm_service.factory.FailoverLLMClient`, ``with_model_override``
+    forces Ollama entries to use the verify pin even if ``entry.model`` is set.
+    Non-Ollama (e.g. Claude) candidates keep their configured model — same
+    contract as the factory helper. A Dummy / non-failover backing is unchanged.
+
+    Preconditions: ``model`` is a strands ``LLMClientModel`` or an LLM client.
+    Postconditions: returns a ready-to-use model; ``model`` is never mutated.
+    """
+    pin = _code_review_verify_model_pin()
+    if isinstance(model, LLMClientModel):
+        pinned_backing = with_model_override(model.client, pin)
+        if pinned_backing is model.client:
+            return model
+        cfg = model.get_config()
+        cfg["model_id"] = pin
+        return LLMClientModel(pinned_backing, **cfg)
+    return with_model_override(model, pin)
+
+
 def resolve_code_review_verify_model(
     llm: "Union[LLMClient, _StrandsModel]", think: Optional[Union[bool, str]] = None
 ) -> "Union[LLMClient, _StrandsModel]":
@@ -77,6 +127,13 @@ def resolve_code_review_verify_model(
     calls this resolver; ``synthesis.py`` still uses
     :func:`resolve_code_review_model` until its own follow-up wires it over.
 
+    After resolving via ``get_strands_model("code_review_verify")``, the
+    production path also pins Ollama failover candidates to the verify key's
+    per-agent env / ``AGENT_DEFAULT_MODELS`` entry (see
+    :func:`_apply_code_review_verify_model_pin`). Without that pin, a
+    non-empty provider-list ``entry.model`` would keep the primary review
+    model and the agent-key swap would change attribution only.
+
     Preconditions:
         - ``llm`` is an ``LLMClient`` or an object implementing the strands
           ``Model`` interface.
@@ -86,16 +143,18 @@ def resolve_code_review_verify_model(
     Postconditions:
         - Returns ``llm`` itself when it already implements the strands ``Model``
           interface (the test path injects such a client); ``think`` is ignored
-          for it (see ``thinking_override_supported``). Otherwise returns
-          ``get_strands_model("code_review_verify", think=think)`` (or without
-          ``think`` when it is ``None``), safe to share across concurrent
-          ``Agent`` calls.
+          for it (see ``thinking_override_supported``). Otherwise returns a
+          ``code_review_verify``-keyed model whose Ollama failover candidates
+          use the verify pin (Claude candidates keep their configured model),
+          safe to share across concurrent ``Agent`` calls.
     """
     if isinstance(llm, _StrandsModel):
         return llm
     if think is None:
-        return get_strands_model("code_review_verify")
-    return get_strands_model("code_review_verify", think=think)
+        base = get_strands_model(_VERIFY_AGENT_KEY)
+    else:
+        base = get_strands_model(_VERIFY_AGENT_KEY, think=think)
+    return _apply_code_review_verify_model_pin(base)
 
 
 def thinking_override_supported(llm: "Union[LLMClient, _StrandsModel]") -> bool:
