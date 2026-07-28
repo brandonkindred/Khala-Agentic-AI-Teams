@@ -734,11 +734,16 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             Preconditions: Phases 1–4 returned ``None``; ``quality_gates``,
               ``acceptance_trace``, ``aggregated_artifacts``, and Phase 2 results
               are set (artifacts / trace may be empty).
-            Postconditions: on merge failure returns a failed ``DevOpsTeamResult``
-              via ``build_team_failure_result`` with the blocked completion
-              package; otherwise assigns nonlocal ``completion`` (completed status,
-              git ops, handoff, quality gates) and returns ``None`` so the thin
-              success envelope after the sequencer runs.
+            Postconditions: assigns nonlocal ``completion`` from the doc/runbook
+              agent, then populates its ``acceptance_criteria_trace`` and
+              ``release_readiness`` before delivery/merge runs. On merge failure
+              (via :func:`deliver_and_merge`) returns a failed ``DevOpsTeamResult``
+              carrying its own freshly-built blocked completion package (not
+              ``completion`` — see ``deliver_and_merge``'s docstring); otherwise
+              extends ``completion.notes`` with any delivery notes, then sets its
+              ``git_operations``, ``handoff``, ``status`` ("completed"), and
+              ``quality_gates``, and returns ``None`` so the thin success envelope
+              after the sequencer runs.
             """
             nonlocal completion, acceptance_trace
 
