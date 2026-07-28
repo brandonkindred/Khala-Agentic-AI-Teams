@@ -186,8 +186,9 @@ class ReflectionReport(BaseModel):
     pending proposal (or of an earlier suggestion in the same batch);
     ``superseded`` counts stale-evidence pending proposals retired this run;
     ``llm_calls`` is ``0`` on the empty-history fast path, otherwise the true
-    count of model calls made (the proposal call plus any compaction or
-    structured-output retry calls).
+    count of model calls made (the reasoning and formatting calls for the
+    proposal — two calls under ``complete_validated_via_reasoning`` — plus any
+    compaction or structured-output retry calls).
     """
 
     agent_id: str
@@ -201,10 +202,14 @@ class ReflectionReport(BaseModel):
 class _CallCountingClient:
     """Wrap an ``LLMClient`` and count every model call routed through it.
 
-    ``compact_text`` may call the model one or more times before the proposal
-    call, and ``complete_validated`` may retry on a schema miss; counting all of
-    them keeps ``ReflectionReport.llm_calls`` honest. Only ``complete`` and
-    ``complete_json`` are intercepted; every other attribute delegates unchanged.
+    ``compact_text`` may call the model before the proposal; the proposal
+    itself makes two calls through ``complete_validated_via_reasoning`` — a
+    reasoning ``complete()`` call and a formatting ``complete_json()`` call
+    (with possible correction retries inside ``complete_validated``) — each
+    of which is counted here. Counting all of them keeps
+    ``ReflectionReport.llm_calls`` honest. Only ``complete`` and
+    ``complete_json`` are intercepted; every other attribute delegates
+    unchanged.
 
     Invariant: ``calls`` equals the number of ``complete`` + ``complete_json``
     invocations made through this wrapper.

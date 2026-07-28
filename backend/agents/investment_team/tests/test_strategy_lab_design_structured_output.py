@@ -1,9 +1,10 @@
 """DesignAgent structured-output happy path and degrade behavior.
 
-``DesignAgent._invoke_and_parse`` requests provider-enforced
-schema-conformant decoding (``DESIGN_SPEC_SCHEMA``) via
-``LLMClient.complete_json(schema=...)`` when the active provider supports it
-(currently Ollama only), eliminating the ``build_json_correction_prompt``
+``DesignAgent._invoke_and_parse`` uses ``invoke_structured_with_schema``,
+which first runs a prose reasoning pass with ``think=True`` and then a
+schema-conformant formatting pass with ``think=False`` and
+``schema=DESIGN_SPEC_SCHEMA`` when the active provider supports structured
+output (currently Ollama only), eliminating the ``build_json_correction_prompt``
 happy-path resend for the design generate/revise loop. ``DesignAgent._self_review``
 gets the same treatment for ``CRITIQUE_SCHEMA``.
 

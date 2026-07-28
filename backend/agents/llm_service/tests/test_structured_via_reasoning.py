@@ -266,6 +266,21 @@ def test_json_via_reasoning_step_one_failure_skips_formatting_call() -> None:
     assert client.format_calls == []
 
 
+def test_json_via_reasoning_rejects_empty_reasoning_prompt() -> None:
+    client = _RecordingClient({"ok": True})
+
+    with pytest.raises(ValueError, match="reasoning_prompt must be non-empty"):
+        complete_json_via_reasoning(
+            client,
+            reasoning_prompt="",
+            reasoning_system_prompt=None,
+            formatting_instructions="f",
+            objective="obj",
+        )
+
+    assert client.order == []
+
+
 # ---------------------------------------------------------------------------
 # complete_validated_via_reasoning
 # ---------------------------------------------------------------------------

@@ -38,6 +38,14 @@ from sales_team.models import (
 
 
 class _CannedLLM(LLMClient):
+    """Test double: placeholder prose for the reasoning pass, queued JSON for formatting.
+
+    ``complete()`` returns a fixed prose string without consuming the response
+    queue (so the reasoning pass cannot steal a canned formatting payload).
+    ``complete_json()`` records the formatting prompt and pops the next queued
+    response.
+    """
+
     def __init__(self, responses: List[Dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.calls: List[Dict[str, Any]] = []
@@ -75,6 +83,7 @@ class _CannedLLM(LLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        """Record the formatting prompt and return the next queued JSON response."""
         self.calls.append({"prompt": prompt})
         return self._responses.pop(0)
 

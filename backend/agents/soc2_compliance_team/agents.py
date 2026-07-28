@@ -28,6 +28,15 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# Context-window budget for the TSC reasoning prompt: reserve tokens for the
+# prompt template + response, convert the remainder to chars, then split
+# between README and code with a README hard cap.
+_RESPONSE_RESERVE_TOKENS = 8000
+_CHARS_PER_TOKEN_ESTIMATE = 3.5
+_README_BUDGET_FRACTION = 4
+_README_MAX_CHARS = 200_000
+_DEFAULT_CONTEXT_TOKENS = 16384
+
 # ---------------------------------------------------------------------------
 # Shared prompt instructions for TSC agents
 # ---------------------------------------------------------------------------
@@ -122,10 +131,11 @@ def _run_tsc_agent(
     Preconditions:
         * ``llm`` is an ``LLMClient``-compatible object usable by
           :func:`complete_json_via_reasoning` and :func:`compact_text`
-          (``get_max_context_tokens`` is optional — falls back to ``16384``
-          when absent).
-        * ``category`` / ``criterion_name`` / ``focus_areas`` are non-empty
-          strings describing the TSC criterion being audited.
+          (``get_max_context_tokens`` is optional — falls back to
+          ``_DEFAULT_CONTEXT_TOKENS`` when absent).
+        * ``category`` is a valid :class:`TSCCategory` value;
+          ``criterion_name`` and ``focus_areas`` are non-empty strings
+          describing the TSC criterion being audited.
         * ``context`` is a fully-populated :class:`RepoContext` for the
           repository under audit.
     Postconditions:
@@ -140,10 +150,15 @@ def _run_tsc_agent(
           (e.g. on LLM/transport failure) — this function does not catch or
           degrade those failures itself.
     """
-    # Compute budgets from model context: reserve 8K tokens for prompt template + response
-    ctx_tokens = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
-    total_chars = int((ctx_tokens - 8000) * 3.5)
-    readme_budget = min(total_chars // 4, 200_000)
+    # Compute budgets from model context: reserve tokens for prompt template + response
+    ctx_tokens = (
+        llm.get_max_context_tokens()
+        if hasattr(llm, "get_max_context_tokens")
+        else _DEFAULT_CONTEXT_TOKENS
+    )
+    available_tokens = max(ctx_tokens - _RESPONSE_RESERVE_TOKENS, 0)
+    total_chars = int(available_tokens * _CHARS_PER_TOKEN_ESTIMATE)
+    readme_budget = min(total_chars // _README_BUDGET_FRACTION, _README_MAX_CHARS)
     code_budget = total_chars - readme_budget
     reasoning_prompt = f"""You are a SOC2 auditor specializing in the **{criterion_name}** Trust Service Criterion.
 Your task is to review the following repository content and identify compliance gaps or risks.

@@ -836,10 +836,11 @@ def _design_self_review_enabled() -> bool:
 
     Reads ``STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED`` (default ``true``;
     accepted truthy values are ``"true"`` / ``"1"`` / ``"yes"``, case-
-    insensitive; anything else is treated as ``false``). When disabled
-    the designer reverts to its pre-change single-call behaviour on
-    both ``run()`` and ``revise()`` — the external review loop still
-    runs unchanged.
+    insensitive; anything else is treated as ``false``). When disabled,
+    the designer skips the internal self-review and self-revision loop in
+    ``_with_self_review``; the external review loop and the main
+    generation/revision calls (``run()`` / ``revise()`` via
+    ``_invoke_and_parse``) remain unchanged.
     """
     raw = os.environ.get("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
     return raw.strip().lower() in {"true", "1", "yes"}

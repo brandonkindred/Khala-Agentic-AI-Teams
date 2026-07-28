@@ -137,6 +137,46 @@ def test_run_tsc_agent_parses_response_into_audit_result() -> None:
     assert call["think"] is False
 
 
+def test_run_tsc_agent_formatting_prompt_is_transcribe_only() -> None:
+    """Formatting pass must not carry investigative directives that invite invention.
+
+    The formatting call never sees repo content — only the reasoning prose —
+    so instructions like "cite repo content" / "report that as a finding"
+    belong on the reasoning pass only. Reintroducing them here could fabricate
+    locations or flip ``compliant``.
+
+    Note: ``FakeLLM.complete`` echoes its prompt, so those phrases can still
+    appear inside the ``--- ANALYSIS ---`` block. Assert against the
+    instructions prefix only.
+    """
+    llm = _FakeLLM({"summary": "S", "findings": [], "compliant": True})
+    _run_tsc_agent(llm, TSCCategory.SECURITY, "Security", "auth", _ctx())
+
+    format_prompt = llm.calls[0]["prompt"]
+    instructions, sep, _analysis = format_prompt.partition("--- ANALYSIS ---")
+    assert sep, "formatting prompt must wrap prose in ANALYSIS delimiters"
+    assert "Transcribe the analysis below faithfully" in instructions
+    assert "cite repo content" not in instructions.lower()
+    assert "report that as a finding" not in instructions.lower()
+
+    reasoning_prompt = llm.reasoning_calls[0]["prompt"]
+    assert "cite repo content" in reasoning_prompt.lower()
+    assert "report that as a finding" in reasoning_prompt.lower()
+
+
+def test_run_tsc_agent_clamps_budget_when_context_smaller_than_reserve() -> None:
+    """A tiny advertised context window must not produce a negative char budget."""
+    llm = _FakeLLM({"summary": "ok", "findings": []}, ctx_tokens=1000)
+    out = _run_tsc_agent(
+        llm,
+        TSCCategory.SECURITY,
+        "Security",
+        "auth",
+        _ctx(readme_content="x" * 50, code_summary="y" * 50),
+    )
+    assert isinstance(out, TSCAuditResult)
+
+
 def test_run_tsc_agent_skips_empty_findings_and_invents_compliance() -> None:
     llm = _FakeLLM(
         {
@@ -315,6 +355,7 @@ def test_report_writer_returns_next_steps_when_no_findings() -> None:
     # The two-pass split: a think=True reasoning call followed by a
     # think=False formatting call, not a single call to either method.
     assert llm.reasoning_calls[0]["think"] is True
+    assert llm.reasoning_calls[0]["temperature"] == 0.2
     assert llm.calls[0]["think"] is False
     assert llm.calls[0]["temperature"] == 0.0
 
@@ -373,8 +414,14 @@ def test_report_writer_returns_compliance_report_when_findings_exist() -> None:
     # The two-pass split: a think=True reasoning call followed by a
     # think=False formatting call, not a single call to either method.
     assert llm.reasoning_calls[0]["think"] is True
+    assert llm.reasoning_calls[0]["temperature"] == 0.2
     assert llm.calls[0]["think"] is False
     assert llm.calls[0]["temperature"] == 0.0
+    # Formatting instructions (prefix before ANALYSIS) are transcription-only.
+    instructions, sep, _ = llm.calls[0]["prompt"].partition("--- ANALYSIS ---")
+    assert sep
+    assert "Transcribe" in instructions
+    assert "cite repo content" not in instructions.lower()
 
 
 def test_report_writer_prompt_serializes_findings_as_json() -> None:
