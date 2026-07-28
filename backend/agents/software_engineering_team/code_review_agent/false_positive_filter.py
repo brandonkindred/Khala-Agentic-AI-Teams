@@ -54,7 +54,7 @@ from software_engineering_team.shared.context_sizing import (
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .code_boundaries import node_end_line, node_start_line
-from .model_resolution import resolve_code_review_model
+from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
 from .repo_reader import RepoReader
@@ -1050,7 +1050,7 @@ def _verify_and_filter(
         # repo file is still verifiable, so we proceed.)
         return list(issues)
 
-    model = resolve_code_review_model(llm)
+    model = resolve_code_review_verify_model(llm)
     max_inline_chars = compute_code_review_map_chunk_chars(llm)
 
     # Group findings by the resolved canonical path of their cited file so each

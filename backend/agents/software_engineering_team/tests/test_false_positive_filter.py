@@ -739,6 +739,31 @@ def test_resolve_path_exact_suffix_and_misses() -> None:
     )
 
 
+def test_filter_resolves_via_code_review_verify_key(monkeypatch) -> None:
+    """Production path resolves the verifier model via the lighter ``code_review_verify``
+    agent key (not the primary ``code_review`` key used by chunk review)."""
+    import code_review_agent.false_positive_filter as fpf
+    import code_review_agent.model_resolution as mr
+
+    calls: List[str] = []
+    stub = _VerdictStub(
+        verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}],
+    )
+
+    def _fake_get(agent_key: str, **_kw: Any) -> Any:
+        calls.append(agent_key)
+        return stub
+
+    monkeypatch.setattr(mr, "get_strands_model", _fake_get)
+    # Stub context sizing so a bare non-Model ``llm`` does not fail setup before
+    # the verification call (``compute_code_review_map_chunk_chars`` probes the
+    # injected client; production resolution only needs a non-strands object).
+    monkeypatch.setattr(fpf, "compute_code_review_map_chunk_chars", lambda _llm: 8_000)
+    out = filter_false_positives(object(), _input(), [_issue()])  # type: ignore[arg-type]
+    assert calls == ["code_review_verify"]
+    assert len(out) == 1  # confirmed-real finding kept
+
+
 def test_filter_removes_confirmed_false_positive() -> None:
     """A finding with an explicit high-confidence false verdict is dropped; a real one is kept."""
     keep = _issue(description="real bug", line=5)

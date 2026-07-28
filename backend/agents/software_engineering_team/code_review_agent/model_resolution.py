@@ -5,21 +5,23 @@ and ``side_effect_impact_pass`` all need the same thing: run a strands ``Agent``
 the injected ``llm`` when it already implements the strands ``Model`` interface
 (the test path injects such a client), or on the shared, cached production model
 otherwise. Keeping that one rule here stops those call sites from drifting apart.
-Today all of them use ``resolve_code_review_model`` (``mapping.py`` also calls it,
-but only to fingerprint the model identity for cache keys — the chunk reviewer
-itself now calls ``LLMClient.complete_json`` directly rather than dispatching
-through this module). ``resolve_code_review_verify_model`` below adds the lighter
-``code_review_verify`` routing path but is not yet wired into any call site —
-that adoption is tracked as separate follow-up work.
+
+``resolve_code_review_model`` covers the primary ``code_review`` key (still used by
+synthesis, architecture-consistency, side-effect impact, and ``mapping.py`` cache
+fingerprinting — the chunk reviewer itself now calls ``LLMClient.complete_json``
+directly rather than dispatching through this module).
+``resolve_code_review_verify_model`` routes the false-positive verifier onto the
+lighter ``code_review_verify`` key; wiring synthesis onto that key is separate
+follow-up work.
 
 This is intentionally distinct from the generic
 ``software_engineering_team.shared.strands_model.resolve_strands_model``: the
 code-review subsystem resolves its production model by agent key via the cached
-``get_strands_model("code_review")`` (so ``LLM_MODEL_code_review`` routing
-applies and one cached, concurrency-safe model is reused across the parallel
-chunk and verification calls), rather than wrapping the injected client with a
-cache-bypassing ``get_strands_model(client=llm)``. The two are not
-interchangeable; this helper preserves the existing code-review behavior.
+``get_strands_model(...)`` helpers (so ``LLM_MODEL_code_review`` /
+``LLM_MODEL_code_review_verify`` routing applies and one cached, concurrency-safe
+model is reused across parallel calls), rather than wrapping the injected client
+with a cache-bypassing ``get_strands_model(client=llm)``. The two are not
+interchangeable; these helpers preserve the existing code-review behavior.
 """
 
 from __future__ import annotations
@@ -71,11 +73,9 @@ def resolve_code_review_verify_model(
     ``code_review_verify`` agent key (its own, genuinely lighter
     ``AGENT_DEFAULT_MODELS`` entry) instead of ``code_review`` — intended for
     bounded tasks like false-positive verification and narrative synthesis, as
-    opposed to open-ended chunk review. Not yet called by any production call
-    site (``false_positive_filter.py`` and ``synthesis.py`` still call
-    :func:`resolve_code_review_model`); wiring them over to this resolver is
-    tracked as separate follow-up work, not part of adding the routing path
-    itself.
+    opposed to open-ended chunk review. ``false_positive_filter.py`` already
+    calls this resolver; ``synthesis.py`` still uses
+    :func:`resolve_code_review_model` until its own follow-up wires it over.
 
     Preconditions:
         - ``llm`` is an ``LLMClient`` or an object implementing the strands
