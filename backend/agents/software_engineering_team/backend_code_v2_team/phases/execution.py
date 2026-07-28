@@ -385,7 +385,7 @@ def run_execution_with_review_gates(
     Execute microtasks with batch-based review cycles.
 
     After each microtask is coded, it must pass through review phases:
-    1. Code Review (build + lint + code review) - batch fix all issues
+    1. Code Review (code review only) - batch fix all issues
     2. QA Testing + Security Testing - independent, concurrent analysis passes
        over the same post-Code-Review snapshot (``GATE_CONFIG.parallelize_qa_security``
        is ``True``); batch fix all issues from either, then restart from Code Review

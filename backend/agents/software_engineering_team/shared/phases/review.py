@@ -33,10 +33,7 @@ from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.security_service import is_blocking
 from software_engineering_team.shared.v2_models import Phase, ReviewIssue
-from software_engineering_team.shared.v2_review import (
-    ReviewConfig,
-    _code_review_step,
-)
+from software_engineering_team.shared.v2_review import _code_review_step
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +50,6 @@ def run_code_review_phase_impl(
     language: str = "python",
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
-    config: ReviewConfig,
     llm_review_fn: Callable[..., Any],
     phase_review_result_cls: Callable[..., Any],
 ) -> Any:
@@ -64,7 +60,6 @@ def run_code_review_phase_impl(
 
     Preconditions:
         - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
-        - ``config`` is the team's :class:`ReviewConfig`.
         - ``llm_review_fn`` is the team's chunking/prompt/parse reviewer,
           forwarded verbatim to the shared ``_code_review_step``.
         - ``phase_review_result_cls`` constructs the team's phase-result type

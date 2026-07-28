@@ -343,7 +343,6 @@ def run_code_review_phase(
         language=language,
         review_context=review_context,
         enable_llm_review_grounding=enable_llm_review_grounding,
-        config=REVIEW_CONFIG,
         llm_review_fn=_run_llm_review,
         phase_review_result_cls=PhaseReviewResult,
     )

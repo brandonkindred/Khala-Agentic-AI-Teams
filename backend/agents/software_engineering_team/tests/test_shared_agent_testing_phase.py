@@ -319,7 +319,6 @@ def test_run_code_review_phase_impl_runs_code_review_step_standalone():
     clean code-review result passes with no issues — build/lint no longer gate this phase."""
     from pathlib import Path
 
-    from software_engineering_team.backend_code_v2_team.phases._profile import REVIEW_CONFIG
     from software_engineering_team.shared.llm_review import LlmReviewOutput
     from software_engineering_team.shared.phases.review import run_code_review_phase_impl
 
@@ -334,7 +333,6 @@ def test_run_code_review_phase_impl_runs_code_review_step_standalone():
         detail_callback=messages.append,
         llm_review_fn=lambda **_kw: LlmReviewOutput(issues=[], raw_issue_count=0),
         phase_review_result_cls=_PhaseResult,
-        config=REVIEW_CONFIG,
     )
 
     assert "Running build verification..." not in messages
@@ -350,7 +348,6 @@ def test_run_code_review_phase_impl_fails_on_code_review_issue():
     ``_code_review_step``'s output, with no build/lint step involved."""
     from pathlib import Path
 
-    from software_engineering_team.backend_code_v2_team.phases._profile import REVIEW_CONFIG
     from software_engineering_team.shared.llm_review import LlmReviewOutput
     from software_engineering_team.shared.phases.review import run_code_review_phase_impl
 
@@ -358,6 +355,7 @@ def test_run_code_review_phase_impl_fails_on_code_review_issue():
         source="code_review",
         severity="critical",
         description="SQL injection risk",
+        recommendation="",
     )
 
     result = run_code_review_phase_impl(
@@ -368,7 +366,6 @@ def test_run_code_review_phase_impl_fails_on_code_review_issue():
         files={"x.py": "code"},
         llm_review_fn=lambda **_kw: LlmReviewOutput(issues=[cr_issue], raw_issue_count=1),
         phase_review_result_cls=_PhaseResult,
-        config=REVIEW_CONFIG,
     )
 
     assert result.passed is False
