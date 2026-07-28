@@ -7,8 +7,9 @@ around their network call, so the cap is truly global: a review that fans out
 many concurrent chunk/verification calls can never exceed ``LLM_MAX_CONCURRENCY``
 in-flight requests and trip a provider's concurrent-request rate limit.
 
-This is a leaf module: it imports only stdlib + ``llm_service.config`` (itself
-stdlib-only), so it cannot create an import cycle with either client. The gate
+This is a leaf module: it imports only stdlib + ``llm_service.config`` (itself a
+leaf with no project-internal imports besides the stdlib-only ``shared.env``), so
+it cannot create an import cycle with either client. The gate
 must be acquired around the network call ONLY — never around the multi-minute
 429 backoff sleep (``backoff.py``), which runs after the gate is released, so a
 waiting call never holds a slot.
