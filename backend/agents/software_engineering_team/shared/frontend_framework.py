@@ -38,9 +38,10 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
 
     Checks for:
     - angular.json -> Angular
-    - package.json with @angular/core -> Angular
-    - package.json with react -> React
+    - package.json with @angular/core or @angular/common -> Angular
+    - package.json with react or react-dom -> React
     - package.json with vue -> Vue
+    - vue.config.js or vite.config.ts, plus a *.vue file -> Vue
 
     Returns "angular", "react", "vue", or None if not detected.
     """

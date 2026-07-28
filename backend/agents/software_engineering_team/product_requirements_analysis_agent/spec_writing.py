@@ -290,6 +290,9 @@ def generate_prd_document(
         only, for the rare case ``compact_text`` itself fails and falls back to
         returning the original (still oversized) text.
     """
+    # Local import (mirrors the TYPE_CHECKING-only ``LLMClient`` import above): this
+    # module is imported before ``llm_service`` finishes initializing, so importing
+    # at module scope would be circular.
     from llm_service import compact_text
 
     # Summarize answered questions for the prompt; this may be empty on the first run
