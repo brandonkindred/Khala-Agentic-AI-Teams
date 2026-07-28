@@ -343,10 +343,11 @@ class CodeReviewWorkflow:
         has_side_effect_findings = False
 
         async def _empty_tail_pass() -> List[Dict[str, Any]]:
-            # Stand-in for a disabled pass in the gather below: no activity is
-            # scheduled, so the gather always has a uniform three-coroutine
-            # shape (and three ActivityTaskScheduledEvents whenever a real
-            # activity is behind it) regardless of which passes are enabled.
+            # Stand-in for a disabled pass in the gather below: schedules no
+            # activity. Keeps ``asyncio.gather``'s coroutine arity fixed at
+            # three (verify / architecture / side-effect slots) regardless of
+            # which passes are enabled; the ActivityTaskScheduledEvent count
+            # equals the number of enabled passes (1-3), not always three.
             return []
 
         if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):

@@ -1296,13 +1296,14 @@ async def test_gather_return_exceptions_reproduces_sequential_error_precedence()
     awaitable actually finishes first in real time, and must let every
     awaitable run to completion instead of abandoning the others.
 
-    Ordering is driven by an ``asyncio.Event`` rather than wall-clock
-    ``asyncio.sleep`` delays, so the completion order is a deterministic
-    property of cooperative scheduling, not a timing race: ``side_effect``
-    has no internal await point and so completes on its very first step,
-    ``architecture`` completes right after and signals ``architecture_done``,
-    and ``verify`` deliberately waits on that event so it is guaranteed to
-    finish last despite being listed first in ``calls``.
+    Ordering is driven by ``asyncio.gather``'s list-order scheduling and an
+    ``asyncio.Event``: ``_verify`` is scheduled first but immediately
+    suspends on ``architecture_done.wait()``; ``_architecture`` then runs
+    to completion and sets ``architecture_done``; ``_side_effect`` runs to
+    completion next; finally ``_verify`` resumes and finishes last. This
+    guarantees ``verify`` is listed first but completes last, so surfacing
+    ``verify_exc`` proves list-order precedence rather than
+    completion-order precedence.
     """
     import asyncio
 
