@@ -1,8 +1,9 @@
 """Prompts for the branding assistant (chat agent).
 
 The assistant guides users through a structured 5-phase branding framework.
-See ``branding_team.graphs.shared.phase_order_text()`` for the current,
-single-sourced phase list.
+Phase order and display titles are sourced from
+``branding_team.graphs.shared.PHASE_ORDER`` and
+``branding_team.graphs.shared.PHASE_TITLES``.
 """
 
 from branding_team.graphs.shared import PHASE_ORDER, PHASE_TITLES
@@ -35,6 +36,10 @@ def _phase_header(phase: BrandPhase, n: int | None = None) -> str:
     """
     if n is None:
         n = PHASE_ORDER.index(phase) + 1
+    else:
+        assert n == PHASE_ORDER.index(phase) + 1, (
+            f"n={n} does not match {phase}'s actual PHASE_ORDER position ({PHASE_ORDER.index(phase) + 1})"
+        )
     return f'**Phase {n} — {PHASE_TITLES[phase]} ("{_PHASE_SUBTITLES[phase]}")**'
 
 

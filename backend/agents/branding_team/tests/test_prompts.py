@@ -183,6 +183,13 @@ def test_phase_header_computes_index_when_omitted() -> None:
     assert _phase_header(phase) == _phase_header(phase, 1)
 
 
+def test_phase_header_rejects_mismatched_index() -> None:
+    """``_phase_header`` enforces its precondition that a supplied ``n`` matches *phase*'s real position."""
+    phase = PHASE_ORDER[0]
+    with pytest.raises(AssertionError):
+        _phase_header(phase, len(PHASE_ORDER) + 1)
+
+
 def test_system_prompt_sections_follow_reordered_phase_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
