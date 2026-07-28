@@ -315,6 +315,13 @@ class CodeReviewWorkflow:
         has_architecture_findings = False
         has_side_effect_findings = False
 
+        async def _empty_tail_pass() -> List[Dict[str, Any]]:
+            # Stand-in for a disabled pass in the gather below: no activity is
+            # scheduled, so the gather always has a uniform three-coroutine
+            # shape (and three ActivityTaskScheduledEvents whenever a real
+            # activity is behind it) regardless of which passes are enabled.
+            return []
+
         if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):
             # None of the three tail passes reads another's output (see
             # coordinator._run_tail_passes), so they can be scheduled as
@@ -328,23 +335,18 @@ class CodeReviewWorkflow:
             run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
             run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
 
-            calls = [_verify()]
-            if run_architecture:
-                calls.append(_architecture())
-            if run_side_effect:
-                calls.append(_side_effect())
-            results_iter = iter(await asyncio.gather(*calls))
-            verified = next(results_iter)
-            if run_architecture:
-                architecture_findings = next(results_iter)
-                if architecture_findings:
-                    verified = [*verified, *architecture_findings]
-                    has_architecture_findings = True
-            if run_side_effect:
-                side_effect_findings = next(results_iter)
-                if side_effect_findings:
-                    verified = [*verified, *side_effect_findings]
-                    has_side_effect_findings = True
+            calls = [
+                _verify(),
+                _architecture() if run_architecture else _empty_tail_pass(),
+                _side_effect() if run_side_effect else _empty_tail_pass(),
+            ]
+            verified, architecture_findings, side_effect_findings = await asyncio.gather(*calls)
+            if architecture_findings:
+                verified = [*verified, *architecture_findings]
+                has_architecture_findings = True
+            if side_effect_findings:
+                verified = [*verified, *side_effect_findings]
+                has_side_effect_findings = True
         else:
             # Pre-migration history: reproduce the original sequential
             # scheduling AND the original workflow.patched call positions
