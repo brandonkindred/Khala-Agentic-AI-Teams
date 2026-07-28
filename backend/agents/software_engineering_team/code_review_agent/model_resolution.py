@@ -1,14 +1,16 @@
 """Shared strands-model resolution for the code-review agents.
 
-The chunk reviewer, the synthesis pass, and the false-positive verifier all need
-the same thing: run a strands ``Agent`` on the injected ``llm`` when it already
-implements the strands ``Model`` interface (the test path injects such a
-client), or on the shared, cached production model otherwise. Keeping that one
-rule here stops the three call sites from drifting apart. Today all three call
-sites (and ``architecture_consistency_pass``/``side_effect_impact_pass``) use
-``resolve_code_review_model``; ``resolve_code_review_verify_model`` below adds
-the lighter ``code_review_verify`` routing path but is not yet wired into any
-of them — that adoption is tracked as separate follow-up work.
+The synthesis pass, the false-positive verifier, ``architecture_consistency_pass``,
+and ``side_effect_impact_pass`` all need the same thing: run a strands ``Agent`` on
+the injected ``llm`` when it already implements the strands ``Model`` interface
+(the test path injects such a client), or on the shared, cached production model
+otherwise. Keeping that one rule here stops those call sites from drifting apart.
+Today all of them use ``resolve_code_review_model`` (``mapping.py`` also calls it,
+but only to fingerprint the model identity for cache keys — the chunk reviewer
+itself now calls ``LLMClient.complete_json`` directly rather than dispatching
+through this module). ``resolve_code_review_verify_model`` below adds the lighter
+``code_review_verify`` routing path but is not yet wired into any call site —
+that adoption is tracked as separate follow-up work.
 
 This is intentionally distinct from the generic
 ``software_engineering_team.shared.strands_model.resolve_strands_model``: the
