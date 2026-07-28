@@ -84,6 +84,19 @@ _ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
 # ``workflow.deprecate_patch(_SIDE_EFFECT_PASS_PATCH)`` before deleting it.
 _SIDE_EFFECT_PASS_PATCH = "code-review-side-effect-impact-pass"
 
+# Replay-compatibility gate for bounding the map-phase fan-out by
+# ``prep["fanout_width"]`` (see ``run``) instead of scheduling every chunk's
+# activity unconditionally. Same rationale as ``_ARCHITECTURE_PASS_PATCH``: a
+# history recorded before this existed scheduled every chunk in one batch, so
+# ``workflow.patched`` returns False on replay and that history's original
+# unconstrained fan-out is reproduced exactly; a new execution records the
+# marker and always takes the new, capacity-bounded path.
+# TODO: Remove this gate (and always bound the fan-out unconditionally) once
+# no pre-migration CodeReviewWorkflow histories remain open (confirm via the
+# Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_ADAPTIVE_FANOUT_PATCH)`` before deleting it.
+_ADAPTIVE_FANOUT_PATCH = "code-review-adaptive-fanout-width"
+
 
 @workflow.defn(name="CodeReviewWorkflow")
 class CodeReviewWorkflow:
@@ -171,23 +184,39 @@ class CodeReviewWorkflow:
         base_input: Dict[str, Any] = prep["base_input"]
         context_fp: str = prep["context_fp"]
         surface_by_path: Dict[str, List[str]] = prep["surface_by_path"]
+        fanout_width: int = prep.get("fanout_width", 1) or 1
 
         self._advance("reviewing", 0.10)
-        # Fan out: one durable activity per chunk, run concurrently. A worker
-        # restart re-runs only the chunks that had not completed.
-        outcomes = await asyncio.gather(
-            *[
-                workflow.execute_activity(
-                    A.review_chunk_activity,
-                    args=[chunk, base_input, context_fp, surface_by_path],
-                    task_queue=TASK_QUEUE,
-                    start_to_close_timeout=timedelta(hours=1),
-                    heartbeat_timeout=timedelta(minutes=5),
-                    retry_policy=_LLM_RETRY,
-                )
-                for chunk in chunks
-            ]
-        )
+
+        def _review_one(chunk: Dict[str, Any]) -> Any:
+            return workflow.execute_activity(
+                A.review_chunk_activity,
+                args=[chunk, base_input, context_fp, surface_by_path],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(hours=1),
+                heartbeat_timeout=timedelta(minutes=5),
+                retry_policy=_LLM_RETRY,
+            )
+
+        if workflow.patched(_ADAPTIVE_FANOUT_PATCH):
+            # Fan out: one durable activity per chunk, at most `fanout_width`
+            # in flight at once for THIS review — this review's own adaptive
+            # width (chunk count clamped by the worker's validated activity
+            # capacity; see config.resolve_temporal_fanout_width), so a small
+            # review never over-requests and a large review can never exceed
+            # the worker's provisioned capacity. A worker restart re-runs only
+            # the chunks that had not completed.
+            semaphore = asyncio.Semaphore(fanout_width)
+
+            async def _review_one_bounded(chunk: Dict[str, Any]) -> Any:
+                async with semaphore:
+                    return await _review_one(chunk)
+
+            outcomes = await asyncio.gather(*[_review_one_bounded(chunk) for chunk in chunks])
+        else:
+            # Pre-migration history: reproduce the original unconstrained
+            # fan-out exactly (see _ADAPTIVE_FANOUT_PATCH).
+            outcomes = await asyncio.gather(*[_review_one(chunk) for chunk in chunks])
 
         issues: List[Dict[str, Any]] = []
         not_reviewed: List[Dict[str, Any]] = []
