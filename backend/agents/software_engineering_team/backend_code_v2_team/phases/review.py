@@ -1,5 +1,9 @@
 """
-Review phase: code review, build verification, lint, QA, security.
+Review phase: code review, QA, security.
+
+Build verification and linting run via the full review paths
+(``run_review``, ``run_microtask_review``) or the pre-review quality gate,
+not via the standalone code-review phase wrapper.
 
 Invokes passed-in quality agents when available; otherwise uses the team's
 own LLM-based review. No code from ``backend_agent`` is used.
