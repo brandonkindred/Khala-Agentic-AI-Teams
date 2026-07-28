@@ -254,12 +254,15 @@ def _fail_outreach_report(rule_id: str, description: str = "violation") -> Dict[
 
 
 class TestOutreachCriticAgent:
+    """Regression tests for OutreachCriticAgent's two-call review flow."""
+
     def test_pass_report_marks_approved(
         self,
         sample_sequence: OutreachSequence,
         sample_dossier: ProspectDossier,
         sample_icp: IdealCustomerProfile,
     ) -> None:
+        """A passing sequence yields an approved report and prose-only reasoning prompts."""
         llm = CannedLLMClient([_pass_outreach_report()])
         critic = OutreachCriticAgent(llm_client=llm)
 
@@ -275,6 +278,14 @@ class TestOutreachCriticAgent:
         # think=True, the formatting pass with think=False.
         assert llm.reasoning_calls[0]["think"] is True
         assert llm.calls and llm.calls[0]["think"] is False
+        # Reasoning user + system prompts must stay free of JSON-only
+        # directives — those belong on the formatting pass only.
+        reasoning_prompt = llm.reasoning_calls[0]["prompt"] or ""
+        reasoning_system = llm.reasoning_calls[0]["system_prompt"] or ""
+        for text in (reasoning_prompt, reasoning_system):
+            assert "Return JSON only" not in text
+            assert "No markdown fences" not in text
+            assert "Return ONLY a JSON object" not in text
 
     def test_fail_with_fabricated_citation(
         self,
@@ -389,12 +400,15 @@ def _fail_proposal_report(rule_id: str) -> Dict[str, Any]:
 
 
 class TestProposalCriticAgent:
+    """Regression tests for ProposalCriticAgent's two-call review flow."""
+
     def test_pass_report_marks_approved(
         self,
         sample_proposal: SalesProposal,
         sample_dossier: ProspectDossier,
         sample_qualification: QualificationScore,
     ) -> None:
+        """A passing proposal yields an approved report and prose-only reasoning prompts."""
         llm = CannedLLMClient([_pass_proposal_report()])
         critic = ProposalCriticAgent(llm_client=llm)
 
@@ -407,8 +421,11 @@ class TestProposalCriticAgent:
         # Regression guard: the reasoning pass must stay prose-only — a JSON
         # directive here would outrank its "answer in structured prose"
         # instruction and collapse the two-call split back to one.
-        assert "Return JSON only" not in reasoning_system
-        assert "No markdown fences" not in reasoning_system
+        reasoning_prompt = llm.reasoning_calls[0]["prompt"] or ""
+        for text in (reasoning_prompt, reasoning_system):
+            assert "Return JSON only" not in text
+            assert "No markdown fences" not in text
+            assert "Return ONLY a JSON object" not in text
 
     def test_fail_with_broken_roi_math(
         self,
@@ -487,6 +504,7 @@ class TestProposalCriticAgent:
     def test_handles_missing_dossier_and_qualification(
         self, sample_proposal: SalesProposal
     ) -> None:
+        """Missing dossier/qualification render as placeholders on the reasoning pass only."""
         llm = CannedLLMClient([_pass_proposal_report()])
         critic = ProposalCriticAgent(llm_client=llm)
         report = critic.review(sample_proposal, None, None)
@@ -495,6 +513,15 @@ class TestProposalCriticAgent:
         # _build_prompt output); the formatting call only sees its prose.
         assert "(no dossier supplied)" in llm.reasoning_calls[0]["prompt"]
         assert "(no qualification supplied)" in llm.reasoning_calls[0]["prompt"]
+        # Formatting user prompt is transcribe-only — source placeholders must
+        # not leak into it (CannedLLM.complete returns fixed prose, not the
+        # reasoning prompt, so a leak here means the formatting path was fed
+        # the dossier/qualification material directly).
+        formatting_prompt = llm.calls[0]["prompt"] or ""
+        assert "(no dossier supplied)" not in formatting_prompt
+        assert "(no qualification supplied)" not in formatting_prompt
+        assert "--- DOSSIER ---" not in formatting_prompt
+        assert "--- QUALIFICATION ---" not in formatting_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -503,11 +530,15 @@ class TestProposalCriticAgent:
 
 
 class TestFormatCriticFeedback:
+    """Unit tests for format_critic_feedback severity ordering and rendering."""
+
     def test_empty_violations_returns_notes_or_default(self) -> None:
+        """Empty violation list falls back to notes text or a default rejection line."""
         assert format_critic_feedback([], notes=None).startswith("Critic rejected")
         assert format_critic_feedback([], notes="parse failure") == "parse failure"
 
     def test_sorts_must_fix_first(self) -> None:
+        """must_fix violations are listed before should_fix and consider."""
         violations = [
             CriticViolation(
                 rule_id="rule.consider",
@@ -535,6 +566,7 @@ class TestFormatCriticFeedback:
         assert idx_must < idx_should < idx_consider
 
     def test_includes_evidence_quote_and_section(self) -> None:
+        """Rendered feedback includes section path, evidence quote, and suggested fix."""
         violations = [
             CriticViolation(
                 rule_id="outreach.day1.subject_length",
