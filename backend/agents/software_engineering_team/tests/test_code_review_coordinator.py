@@ -1937,8 +1937,8 @@ def test_map_parallelism_clamped_by_llm_max_concurrency(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_MAP_PARALLELISM", raising=False)
     monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)
     assert (
-        _map_parallelism() == 4
-    )  # default ceiling (16) clamped by default LLM_MAX_CONCURRENCY (4)
+        _map_parallelism() == 8
+    )  # default ceiling (16) clamped by default LLM_MAX_CONCURRENCY (8)
 
 
 def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) -> None:
