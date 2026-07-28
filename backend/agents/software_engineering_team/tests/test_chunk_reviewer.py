@@ -20,7 +20,7 @@ from llm_service.clients.dummy import DummyLLMClient
 
 
 class _StubClient(DummyLLMClient):
-    """DummyLLMClient subclass returning a canned CodeReview-shaped dict."""
+    """DummyLLMClient subclass returning a canned ChunkReviewLLMResponse-shaped dict."""
 
     def __init__(self, canned: Dict[str, Any]) -> None:
         super().__init__()
