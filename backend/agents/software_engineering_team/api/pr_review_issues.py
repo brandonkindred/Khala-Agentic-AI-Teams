@@ -307,11 +307,13 @@ def create_review_issues(
           updated proposals to both the job store and the durable review row.
           Idempotent: a proposal already carrying an ``issue_url`` is skipped, so
           a repeated request never opens a duplicate; an unknown id is ignored.
-          ``issue_url`` may already be set before this function ever runs -- when
-          ``annotate_duplicate_proposals`` matched the finding to a pre-existing
-          open issue at review time -- and such a proposal is skipped exactly the
-          same way, so a matched finding can never be filed as a second, duplicate
-          issue.
+          A finding ``annotate_duplicate_proposals`` matched to a pre-existing
+          open issue at review time never reaches ``pending_issue_proposals`` in
+          the first place (``_partition_review_issues`` drops it) -- there is no
+          matched-and-still-present case in practice. The ``issue_url``-already-
+          set skip above is kept anyway as a defense-in-depth guard, so even a
+          proposal that somehow still carried a pre-filled ``issue_url`` could
+          never be filed as a second, duplicate issue.
           Returns ``{"job_id", "created", "proposals"}`` where ``created`` lists
           each newly-opened issue and ``proposals`` is the full, updated
           proposal list.
