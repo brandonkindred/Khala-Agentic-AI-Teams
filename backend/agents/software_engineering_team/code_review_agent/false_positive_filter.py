@@ -636,10 +636,7 @@ def _find_heuristic_function_at_line(
     shown = display_line if display_line is not None else line_number
     lines = content.splitlines()
     if line_number > len(lines):
-        return (
-            f"Line {shown} is beyond the end of {path} "
-            f"(file has {len(lines)} lines)."
-        )
+        return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
     best_start: Optional[int] = None
     for i, line in enumerate(lines, start=1):
         if i > line_number:
