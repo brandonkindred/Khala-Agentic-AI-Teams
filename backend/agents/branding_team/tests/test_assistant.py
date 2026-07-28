@@ -60,6 +60,51 @@ def test_parse_extraction_returns_empty_on_garbage() -> None:
     assert degraded is True
 
 
+def test_parse_extraction_returns_degraded_on_truncated_json() -> None:
+    """Simulates a max-tokens cutoff: the object is never closed. ``repair=False``
+    means no fuzzy salvage runs, so this must surface as a real parse failure
+    (``degraded=True``), not a silent empty mission update."""
+    raw = '{"mission_update": {"company_name": "Ac'
+    mission_update, suggestions, degraded = _parse_extraction(raw)
+    assert mission_update == {}
+    assert suggestions == []
+    assert degraded is True
+
+
+def test_parse_extraction_returns_degraded_on_malformed_json_like_text() -> None:
+    """JSON-like text with a syntax error (dangling trailing comma) is not
+    strictly valid JSON and must not be silently treated as an
+    empty-but-successful parse."""
+    raw = '{"mission_update": {"company_name": "Acme",}}'
+    mission_update, suggestions, degraded = _parse_extraction(raw)
+    assert mission_update == {}
+    assert suggestions == []
+    assert degraded is True
+
+
+def test_parse_extraction_schema_mismatched_payload_is_degraded() -> None:
+    """Valid-looking JSON that carries none of the extraction schema's keys
+    can't be anchored to a real payload — ``required_keys`` recovery treats
+    this the same as unparseable text (``degraded=True``) rather than
+    silently accepting an unrelated object."""
+    raw = json.dumps({"foo": "bar", "baz": 123})
+    mission_update, suggestions, degraded = _parse_extraction(raw)
+    assert mission_update == {}
+    assert suggestions == []
+    assert degraded is True
+
+
+def test_parse_extraction_returns_degraded_when_mission_update_wrong_type() -> None:
+    """``mission_update`` present but not a dict: ``_coerce_mission`` rejects it
+    and yields an empty mission update. The JSON itself parsed fine, so this
+    stays a non-degraded "shape wrong" case, not a parse failure."""
+    raw = json.dumps({"mission_update": "not-a-dict", "suggested_questions": ["q"]})
+    mission_update, suggestions, degraded = _parse_extraction(raw)
+    assert mission_update == {}
+    assert suggestions == ["q"]
+    assert degraded is False
+
+
 def test_parse_extraction_accepts_top_level_mission_fields() -> None:
     """Schema-drift fallback: the LLM occasionally omits the ``mission_update``
     wrapper and emits mission fields at the top level. The parser must
@@ -309,6 +354,27 @@ def test_branding_assistant_agent_handles_extraction_failure_gracefully() -> Non
     """Extractor failure must not break the conversation reply or mutate mission."""
     conversation_llm = MagicMock(return_value="Got it — tell me more about your audience.")
     extraction_llm = MagicMock(side_effect=Exception("extractor down"))
+    agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
+    mission = make_mission(
+        company_name="Acme", company_description="Software company.", target_audience="TBD"
+    )
+    reply, updated_mission, suggested_questions, degraded = agent.respond(
+        messages=[],
+        current_mission=mission,
+        user_message="we sell to dev teams",
+    )
+    assert "Got it" in reply
+    assert updated_mission.company_name == "Acme"
+    assert len(suggested_questions) >= 1
+    assert degraded is True
+
+
+def test_branding_assistant_agent_handles_truncated_extraction_output() -> None:
+    """The extractor returns truncated (not exception-raising) JSON. This must
+    surface as ``degraded=True`` through the full ``respond()`` path rather
+    than an indistinguishable no-op mission update."""
+    conversation_llm = MagicMock(return_value="Got it — tell me more about your audience.")
+    extraction_llm = MagicMock(return_value='{"mission_update": {"company_name": "Ac')
     agent = BrandingAssistantAgent(conversation_llm=conversation_llm, extraction_llm=extraction_llm)
     mission = make_mission(
         company_name="Acme", company_description="Software company.", target_audience="TBD"
