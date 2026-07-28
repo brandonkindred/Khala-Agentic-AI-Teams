@@ -237,12 +237,16 @@ def extract_answer_from_qa_history(
 
     Returns:
         AnsweredQuestion if a matching answer was found, None otherwise.
+        Also returns ``None`` when ``question.question_text`` contains no keyword
+        longer than 4 characters (the matcher cannot score short questions such
+        as ``"Use X?"``).
 
     Preconditions: ``question`` is an :class:`OpenQuestion` (``question_text`` a
         string); ``qa_history`` is a string (possibly empty).
     Postconditions: returns the best-matching recorded answer as an
-        :class:`AnsweredQuestion`, or ``None`` when no block matches; never raises
-        for input satisfying the preconditions above.
+        :class:`AnsweredQuestion`, or ``None`` when no block matches or the
+        question has no keyword longer than 4 characters; never raises for input
+        satisfying the preconditions above.
     """
     if not qa_history:
         return None
@@ -318,8 +322,9 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
     Preconditions: ``qa_history`` is a string (possibly empty).
     Postconditions: returns one tuple per ``### question`` block found that has a
         non-empty question text or answer, tagged with the iteration heading it
-        falls under; a block with neither (e.g. a stray ``###`` header with no
-        content) is skipped; empty list for empty input.
+        falls under; blocks that appear before any explicit ``## Iteration N``
+        heading are tagged as iteration 1; a block with neither (e.g. a stray
+        ``###`` header with no content) is skipped; empty list for empty input.
     """
     if not qa_history or not qa_history.strip():
         return []

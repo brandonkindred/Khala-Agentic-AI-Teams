@@ -79,7 +79,7 @@ def test_extract_answer_preserves_multiline_rationale(tmp_path: Path) -> None:
 
 
 def test_extract_answer_preserves_bullet_in_multiline_answer_and_rationale(tmp_path: Path) -> None:
-    """A Markdown bullet mid-value isn't mistaken for a status marker and stops buffering."""
+    """A Markdown bullet mid-value is not treated as a section boundary and is preserved as part of the buffered answer."""
     question_text = "What migration strategy should we use for the users table?"
     answer = "Line one\n* Bullet\nLine three"
     rationale = "Rationale one\n* Bullet rationale\nRationale three"
@@ -291,7 +291,7 @@ def test_parse_qa_history_blocks_preserves_multiline_answer() -> None:
 
 
 def test_parse_qa_history_blocks_preserves_bullet_in_multiline_answer() -> None:
-    """A Markdown bullet mid-answer isn't mistaken for a status marker and stops buffering."""
+    """A Markdown bullet mid-answer is not treated as a section boundary and is preserved in the parsed answer."""
     qa_history = (
         "# Q&A History\n\n"
         "## Iteration 1\n\n"
