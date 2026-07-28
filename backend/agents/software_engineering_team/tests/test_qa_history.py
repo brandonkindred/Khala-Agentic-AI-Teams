@@ -14,6 +14,7 @@ from pathlib import Path
 from product_requirements_analysis_agent.models import AnsweredQuestion, OpenQuestion
 from product_requirements_analysis_agent.qa_history import (
     extract_answer_from_qa_history,
+    format_answered_questions_for_prompt,
     parse_qa_history_blocks,
     record_answers,
 )
@@ -24,13 +25,14 @@ def _open_question(question_text: str) -> OpenQuestion:
 
 
 def _answered_question(
-    question_text: str, selected_answer: str, rationale: str = ""
+    question_text: str, selected_answer: str, rationale: str = "", other_text: str = ""
 ) -> AnsweredQuestion:
     return AnsweredQuestion(
         question_id="q1",
         question_text=question_text,
         selected_answer=selected_answer,
         rationale=rationale,
+        other_text=other_text,
     )
 
 
@@ -371,3 +373,71 @@ def test_parse_qa_history_blocks_single_line_still_works() -> None:
 def test_parse_qa_history_blocks_empty_input_returns_empty_list() -> None:
     assert parse_qa_history_blocks("") == []
     assert parse_qa_history_blocks("   \n  ") == []
+
+
+# ---------------------------------------------------------------------------
+# other_text escaping (record_answers / format_answered_questions_for_prompt)
+# ---------------------------------------------------------------------------
+
+
+def test_record_answers_escapes_other_text_matching_question_header(tmp_path: Path) -> None:
+    question_text = "Which option should we pick for the custom answer?"
+    other_text = "My custom reason.\n### Not a real header\nStill part of the note."
+    aq = _answered_question(question_text, "Other", other_text=other_text)
+
+    record_answers(tmp_path, [aq], iteration=1)
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, question_text_out, _answer, _full_block = blocks[0]
+    assert question_text_out == question_text
+    assert "\\### Not a real header" in qa_history
+
+
+def test_format_answered_questions_for_prompt_escapes_other_text_matching_marker() -> None:
+    aq = _answered_question(
+        "Which option should we pick?",
+        "Other",
+        other_text="First line.\n**Answer:** looks like a marker but isn't",
+    )
+
+    prompt_block = format_answered_questions_for_prompt([aq])
+
+    assert "\\**Answer:** looks like a marker but isn't" in prompt_block
+
+
+def test_format_answered_questions_for_prompt_escapes_multiline_answer_and_rationale() -> None:
+    aq = _answered_question(
+        "What approach should we use?",
+        selected_answer="Line one.\n### Not a real header",
+        rationale="Rationale one.\n## Not a real iteration",
+    )
+
+    prompt_block = format_answered_questions_for_prompt([aq])
+
+    assert "\\### Not a real header" in prompt_block
+    assert "\\## Not a real iteration" in prompt_block
+
+
+# ---------------------------------------------------------------------------
+# Match-threshold consistency (extract_answer_from_qa_history vs is_same_decision)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_answer_retrieves_answer_at_exactly_the_match_threshold() -> None:
+    # Two key words ("aaaaa", "bbbbb") in the incoming question; the recorded
+    # question only contains one of them, so match_ratio is exactly 0.5 —
+    # previously required strictly > 0.5 and returned None here.
+    qa_history = (
+        "# Q&A History\n\n## Iteration 1\n\n### aaaaa ccccc\n**Answer:** Recorded answer.\n\n"
+    )
+    question = _open_question("aaaaa bbbbb")
+
+    result = extract_answer_from_qa_history(question, qa_history)
+
+    assert result is not None
+    assert result.selected_answer == "Recorded answer."

@@ -88,15 +88,15 @@ def format_answered_questions_for_prompt(answered_questions: List[AnsweredQuesti
     lines: List[str] = []
     for aq in answered_questions:
         lines.append(f"### {aq.question_text}")
-        lines.append(f"{_ANSWER_MARKER} {aq.selected_answer}")
+        lines.append(_format_field_value(_ANSWER_MARKER, aq.selected_answer).rstrip("\n"))
         if aq.rationale:
-            lines.append(f"{_RATIONALE_MARKER} {aq.rationale}")
+            lines.append(_format_field_value(_RATIONALE_MARKER, aq.rationale).rstrip("\n"))
         if aq.was_auto_answered:
             lines.append(f"{_AUTO_ANSWERED_MARKER} with {aq.confidence:.0%} confidence*")
         elif aq.was_default:
             lines.append(_DEFAULT_APPLIED_MARKER)
         if aq.other_text:
-            lines.append(f"{_CUSTOM_TEXT_MARKER} {aq.other_text}")
+            lines.append(_format_field_value(_CUSTOM_TEXT_MARKER, aq.other_text).rstrip("\n"))
         lines.append("")
     return "\n".join(lines)
 
@@ -275,7 +275,9 @@ def extract_answer_from_qa_history(
         matches = sum(1 for w in key_words if w in recorded_question_lower)
         match_ratio = matches / len(key_words) if key_words else 0
 
-        if match_ratio > _QUESTION_MATCH_THRESHOLD:  # Good enough match
+        if (
+            match_ratio >= _QUESTION_MATCH_THRESHOLD
+        ):  # Good enough match; matches is_same_decision's threshold
             answer, rationale = _consume_block_body(lines[1:])
 
             if answer and (best_match is None or match_ratio > best_match[0]):
@@ -313,8 +315,10 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
         ``full_block_text`` when the block is written back out.
 
     Preconditions: ``qa_history`` is a string (possibly empty).
-    Postconditions: returns one tuple per ``### question`` block found, tagged with
-        the iteration heading it falls under; empty list for empty input.
+    Postconditions: returns one tuple per ``### question`` block found that has a
+        non-empty question text or answer, tagged with the iteration heading it
+        falls under; a block with neither (e.g. a stray ``###`` header with no
+        content) is skipped; empty list for empty input.
     """
     if not qa_history or not qa_history.strip():
         return []
@@ -412,7 +416,7 @@ def record_answers(
         elif aq.was_default:
             new_section += f"{_DEFAULT_APPLIED_MARKER}\n"
         if aq.other_text:
-            new_section += f"{_CUSTOM_TEXT_MARKER} {aq.other_text}\n"
+            new_section += _format_field_value(_CUSTOM_TEXT_MARKER, aq.other_text)
         new_section += "\n"
 
     if not qa_file.exists():
