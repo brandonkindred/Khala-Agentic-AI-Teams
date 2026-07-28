@@ -176,6 +176,18 @@ class ProposalCriticAgent:
         dossier: Optional[ProspectDossier],
         qualification: Optional[QualificationScore],
     ) -> str:
+        """Render the shared user prompt for both the reasoning and formatting passes.
+
+        Preconditions:
+            * ``proposal`` is a fully-populated :class:`SalesProposal`.
+        Postconditions:
+            * Returns a prompt embedding ``proposal`` (and ``qualification``, when
+              supplied) as JSON in full, and ``dossier`` as JSON truncated to
+              ``_DOSSIER_CHAR_CAP`` characters (with a truncation marker appended)
+              to keep the prompt within budget. ``dossier``/``qualification`` of
+              ``None`` render as an explicit placeholder string rather than being
+              omitted, so the model never mistakes "not supplied" for "empty".
+        """
         proposal_json = json.dumps(proposal.model_dump(mode="json"), indent=2)
         if dossier is not None:
             dossier_json = json.dumps(dossier.model_dump(mode="json"), indent=2)

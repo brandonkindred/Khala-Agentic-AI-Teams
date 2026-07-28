@@ -72,7 +72,7 @@ def test_simple_direct_answer():
 
 
 def test_one_level_decomposition_with_deliberation():
-    """Orchestrator decomposes, deliberates, and synthesises."""
+    """Orchestrator decomposes and synthesises (deliberation skipped: 1 child < 2 threshold)."""
     llm = MagicMock()
     llm.complete_json.side_effect = [
         # Root analysis
@@ -249,6 +249,7 @@ def test_explicit_strategy_skips_classification():
         "confidence": 0.9,
         "skill_requirements": [],
     }
+
     # complete should NOT be called for classification (it's still legitimately
     # called for _analyse's think=True reasoning pass, which _complete_side_effect
     # handles separately).

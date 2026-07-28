@@ -363,6 +363,54 @@ def test_validated_via_reasoning_step_one_failure_skips_formatting_call() -> Non
     assert client.format_calls == []
 
 
+def test_validated_via_reasoning_tags_objectives_per_pass() -> None:
+    client = _RecordingClient({"status": "PASS", "score": 1.0})
+
+    complete_validated_via_reasoning(
+        client,
+        schema=_Verdict,
+        reasoning_prompt="p",
+        reasoning_system_prompt=None,
+        objective="critique sales proposal",
+    )
+
+    assert client.reasoning_calls[0]["objective"] == "critique sales proposal (reasoning)"
+    assert client.format_calls[0]["objective"] == "critique sales proposal (format)"
+
+
+def test_validated_via_reasoning_routes_system_prompts_per_pass() -> None:
+    client = _RecordingClient({"status": "PASS", "score": 1.0})
+
+    complete_validated_via_reasoning(
+        client,
+        schema=_Verdict,
+        reasoning_prompt="p",
+        reasoning_system_prompt="REASONING SYSTEM",
+        formatting_system_prompt="FORMATTING SYSTEM",
+        objective="obj",
+    )
+
+    assert client.reasoning_calls[0]["system_prompt"] == "REASONING SYSTEM"
+    assert client.format_calls[0]["system_prompt"] == "FORMATTING SYSTEM"
+
+
+def test_validated_via_reasoning_forwards_schema_to_formatting_call_only() -> None:
+    """The Pydantic ``schema`` drives validation on the formatting call only;
+    the unconstrained reasoning call never sees it as a kwarg."""
+    client = _RecordingClient({"status": "PASS", "score": 1.0})
+
+    complete_validated_via_reasoning(
+        client,
+        schema=_Verdict,
+        reasoning_prompt="p",
+        reasoning_system_prompt=None,
+        objective="obj",
+    )
+
+    assert "schema" not in client.reasoning_calls[0]
+    assert "schema" not in client.format_calls[0]
+
+
 def test_validated_via_reasoning_runs_one_reasoning_pass_across_corrections() -> None:
     """A schema miss re-prompts only the formatting call; the (expensive)
     reasoning pass is not repeated."""

@@ -14,8 +14,6 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from pydantic import ValidationError
-
 from llm_service import compact_text, complete_json_via_reasoning
 
 from .models import (
@@ -246,25 +244,19 @@ class ReportWriterAgent:
         """Synthesize the fan-in report from all TSC audit results.
 
         Preconditions:
-            - ``tsc_results`` is the list of per-criterion audit results.
+            - ``tsc_results`` is the list of per-criterion audit results; it
+              may be empty (e.g. all criteria failed and were isolated to
+              fail-closed placeholders upstream, or a caller invokes this with
+              nothing to report).
         Postconditions:
             - Returns ``(compliance_report, next_steps_document)`` with exactly
               one element non-None: the compliance report when any result is
               non-compliant or has a critical/high finding, otherwise the
-              next-steps document.
-            - The chosen helper (``_produce_compliance_report`` or
-              ``_produce_next_steps``) performs exactly two sequential LLM
-              calls: a reasoning prose pass (``think=True``) followed by a
-              JSON formatting pass (``think=False``).
-            - In the compliance-report branch, ``findings_by_tsc`` is built by
-              re-parsing the category's already-serialized dicts back into
-              ``TSCFinding``. If ANY finding in a category fails to
-              deserialize, the whole category's findings are logged and
-              dropped together (the try/except wraps the category's full
-              list comprehension) — its key is kept in the returned report's
-              ``findings_by_tsc`` field with an empty list, rather than
-              failing the report or partially keeping that category's other,
-              validly-parsed findings.
+              next-steps document. An empty ``tsc_results`` has no findings by
+              definition, so it always takes the next-steps branch.
+            - Delegates the LLM work and its call contract to
+              ``_produce_compliance_report`` / ``_produce_next_steps`` (see
+              their own docstrings); this method makes no LLM call itself.
         """
         has_findings = any(
             not r.compliant
@@ -293,7 +285,27 @@ class ReportWriterAgent:
         tsc_results: List[TSCAuditResult],
         findings_by_tsc: Dict[str, List[Dict[str, Any]]],
     ) -> SOC2ComplianceReport:
-        """Generate full SOC2 compliance audit report with executive summary and recommendations."""
+        """Run the reasoning + formatting passes and assemble the compliance report.
+
+        Preconditions:
+            * ``tsc_results`` is the list of per-criterion audit results that
+              produced ``findings_by_tsc`` (already-serialized, one entry per
+              criterion in ``tsc_results``, in the same category order).
+            * ``findings_by_tsc`` is the JSON-serialized form of
+              ``tsc_results``'s findings, embedded in the reasoning prompt so
+              the model can cite them.
+        Postconditions:
+            * Performs exactly two sequential LLM calls via
+              :func:`complete_json_via_reasoning`: a reasoning prose pass
+              (``think=True``) followed by a JSON formatting pass
+              (``think=False``) that supplies ``executive_summary``, ``scope``,
+              ``recommendations_summary``, and ``raw_markdown``.
+            * ``findings_by_tsc`` on the returned report is built directly from
+              ``tsc_results`` — the already-typed ``TSCFinding`` objects the
+              caller passed in — never from the LLM's formatting-pass output;
+              the formatting pass is not asked to reproduce findings, so there
+              is nothing to re-validate here.
+        """
         summaries = "\n".join(f"- **{r.category.value}**: {r.summary}" for r in tsc_results)
         reasoning_prompt = f"""You are a SOC2 lead auditor. Produce a **SOC2 Compliance Audit Report** for the following audit results.
 
@@ -316,12 +328,12 @@ recommendations)."""
             reasoning_prompt=reasoning_prompt,
             reasoning_system_prompt=None,
             formatting_instructions=(
-                'Write a single JSON object with:\n'
+                "Write a single JSON object with:\n"
                 '- "executive_summary": string (2–5 paragraphs: scope, overall posture, key risks, and high-level recommendation)\n'
                 '- "scope": string (one paragraph: what was in scope)\n'
                 '- "recommendations_summary": array of strings (prioritized remediation steps, ordered by impact)\n'
                 '- "raw_markdown": string (full report in markdown: title, executive summary, scope, '
-                'findings by TSC with severity and recommendation, then recommendations summary)\n\n'
+                "findings by TSC with severity and recommendation, then recommendations summary)\n\n"
                 "Respond with valid JSON only. No text outside JSON. "
                 "Transcribe the analysis below faithfully — do not add or invent "
                 "information beyond it."
@@ -329,19 +341,14 @@ recommendations)."""
             reasoning_temperature=0.2,
             objective="generate soc2 report",
         )
-        findings_typed: Dict[str, List[TSCFinding]] = {}
-        for cat, list_dicts in findings_by_tsc.items():
-            try:
-                findings_typed[cat] = [TSCFinding(**d) for d in list_dicts]
-            except ValidationError as exc:
-                # Log before dropping: silently returning an empty list makes a
-                # malformed-findings bug invisible in production.
-                logger.warning(
-                    "Failed to type findings for TSC category %s; dropping them: %s",
-                    cat,
-                    exc,
-                )
-                findings_typed[cat] = []
+        # Sourced from tsc_results (already-typed TSCFinding objects), not from
+        # the LLM's formatting-pass output — the formatting pass only supplies
+        # executive_summary/scope/recommendations_summary/raw_markdown, so
+        # re-parsing findings_by_tsc's serialized dicts back into TSCFinding
+        # here would be a redundant, purely-input round-trip.
+        findings_typed: Dict[str, List[TSCFinding]] = {
+            r.category.value: r.findings for r in tsc_results
+        }
         return SOC2ComplianceReport(
             executive_summary=data.get("executive_summary") or "",
             scope=data.get("scope") or f"Repository: {repo_path}",
@@ -356,7 +363,19 @@ recommendations)."""
         repo_path: str,
         tsc_results: List[TSCAuditResult],
     ) -> NextStepsDocument:
-        """Generate next steps for SOC2 certification when no material issues were found."""
+        """Run the reasoning + formatting passes and assemble the next-steps document.
+
+        Preconditions:
+            * ``tsc_results`` is the list of per-criterion audit results with
+              no material findings (``run`` only calls this on that branch);
+              it may be empty.
+        Postconditions:
+            * Performs exactly two sequential LLM calls via
+              :func:`complete_json_via_reasoning`: a reasoning prose pass
+              (``think=True``) followed by a JSON formatting pass
+              (``think=False``) that supplies ``title``, ``introduction``,
+              ``steps``, ``recommended_timeline``, and ``raw_markdown``.
+        """
         summaries = "\n".join(f"- **{r.category.value}**: {r.summary}" for r in tsc_results)
         reasoning_prompt = f"""You are a SOC2 advisor. The following code repository was audited and **no material SOC2 compliance issues** were found. Produce a short document: "Next Steps for SOC2 Certification".
 
@@ -376,11 +395,11 @@ timeline."""
             reasoning_prompt=reasoning_prompt,
             reasoning_system_prompt=None,
             formatting_instructions=(
-                'Write a single JSON object with:\n'
+                "Write a single JSON object with:\n"
                 '- "title": string (e.g. "Next Steps for SOC2 Certification")\n'
                 '- "introduction": string (2–4 sentences: codebase audit result and what this document covers)\n'
                 '- "steps": array of objects, each with "title" and "description" (and optionally "resources"), '
-                'e.g. engage CPA firm, scope examination, document controls, collect evidence, Type I then Type II\n'
+                "e.g. engage CPA firm, scope examination, document controls, collect evidence, Type I then Type II\n"
                 '- "recommended_timeline": string (high-level timeline, e.g. "3–6 months readiness, then 2–4 months '
                 'for Type I/II examination")\n'
                 '- "raw_markdown": string (full document in markdown for display/saving)\n\n'

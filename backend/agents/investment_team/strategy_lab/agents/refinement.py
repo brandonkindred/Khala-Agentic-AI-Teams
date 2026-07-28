@@ -133,9 +133,9 @@ class RefinementAgent:
         response are logged and discarded.
 
         Raises:
-            DesignBudgetExhausted: If the active per-cycle design LLM budget
-                is spent (raised by :func:`charge_active_budget` on the
-                legacy parse-retry path, or by the structured path when
+            _llm_budget.DesignBudgetExhausted: If the active per-cycle design
+                LLM budget is spent (raised by :func:`charge_active_budget` on
+                the legacy parse-retry path, or by the structured path when
                 ``charge=True``).
             StrategyLabLLMError: If the LLM envelope exhausts transport retries
                 or hits a fatal LLM error.

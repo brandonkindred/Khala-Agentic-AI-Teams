@@ -411,15 +411,12 @@ def test_report_writer_defaults_scope_on_empty_llm_response() -> None:
     assert "/some/repo" in report.scope
 
 
-def test_report_writer_handles_invalid_finding_dicts() -> None:
-    """If the per-category findings list contains invalid dicts, the
-    writer's typed conversion falls back to an empty list rather than
-    raising."""
-    # The except branch is exercised by handing ``_produce_compliance_report``
-    # a malformed per-category findings override directly (``bad_findings``
-    # below) — dicts whose keys don't satisfy ``TSCFinding``, so the typed
-    # conversion raises and falls back to an empty list. No monkey-patching
-    # is needed: the helper takes the findings mapping as an argument.
+def test_report_writer_sources_findings_from_tsc_results_not_llm_output() -> None:
+    """``findings_by_tsc`` on the returned report always reflects the
+    already-typed ``tsc_results`` the caller passed in — never a round-trip
+    through the (prompt-only) ``findings_by_tsc`` dict or the LLM's
+    formatting-pass output. A malformed ``findings_by_tsc`` override (which
+    only ever feeds the prompt) has no effect on the returned report."""
     agent = ReportWriterAgent()
     llm = _FakeLLM(
         {
@@ -429,8 +426,6 @@ def test_report_writer_handles_invalid_finding_dicts() -> None:
             "raw_markdown": "rm",
         }
     )
-    # Pass a malformed findings_by_tsc directly to the inner helper to
-    # cover the except branch.
     bad_findings = {"security": [{"missing_required_fields": True}]}
     tsc_results = [
         _audit_result(
@@ -440,5 +435,4 @@ def test_report_writer_handles_invalid_finding_dicts() -> None:
         )
     ]
     report = agent._produce_compliance_report(llm, "/r", tsc_results, bad_findings)
-    # Conversion failure ⇒ typed list for security becomes []
-    assert report.findings_by_tsc["security"] == []
+    assert report.findings_by_tsc["security"] == tsc_results[0].findings

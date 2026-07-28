@@ -101,7 +101,9 @@ def audit_criterion(category: TSCCategory, context: RepoContext) -> TSCAuditResu
         - ``context`` is a ``RepoContext`` (typically from :func:`load_context`).
     Postconditions:
         - Returns a ``TSCAuditResult`` whose ``category`` equals ``category``.
-        - Performs exactly one LLM call (via the criterion's agent).
+        - Performs exactly two sequential LLM calls (via the criterion's
+          agent): a reasoning prose pass (``think=True``) followed by a JSON
+          formatting pass (``think=False``); see ``agents._run_tsc_agent``.
     """
     # Explicit raise (not ``assert``) so the precondition still holds under
     # ``python -O``, matching the module-level guard and ``audit_criterion_safe``.
@@ -199,7 +201,9 @@ def write_report(
     Postconditions:
         - Returns ``(compliance_report, next_steps_document)`` with exactly one
           element non-None: the compliance report when material findings exist,
-          otherwise the next-steps document. Performs exactly one LLM call.
+          otherwise the next-steps document. Performs exactly two sequential
+          LLM calls (a reasoning prose pass followed by a JSON formatting
+          pass); see ``ReportWriterAgent.run``.
     """
     return ReportWriterAgent().run(get_client(_AGENT_KEY), str(repo_path), tsc_results)
 
