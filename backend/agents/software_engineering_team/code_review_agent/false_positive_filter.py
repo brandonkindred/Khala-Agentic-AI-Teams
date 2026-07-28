@@ -38,8 +38,6 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -47,6 +45,7 @@ from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
+from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_map_chunk_chars,
@@ -1099,32 +1098,36 @@ def _verify_and_filter(
     if workers <= 1:
         group_verdicts = [_verify_one(item) for item in group_items]
     else:
-        # Per-future ``result(timeout=...)`` (rather than ``executor.map(...,
-        # timeout=...)``) so a single stuck verification call can never block
-        # the whole pass: a ``map`` timeout raises out of ``list(...)``
-        # instead of being caught per-group, and would abort the merge below
-        # for every group, not just the slow one.
+        # Fan out via the shared parallel_map helper instead of a hand-rolled
+        # ThreadPoolExecutor: same bounded-pool/per-item-timeout semantics as
+        # before, but with contextvars (trace_id, LLM attribution) now
+        # propagated into each worker. _verify_one already catches every
+        # exception internally and returns {} (never raises), so only
+        # parallel_map's timeout path is ever exercised here.
         timeout = _verify_timeout_seconds()
-        executor = ThreadPoolExecutor(max_workers=workers)
-        try:
-            futures = [executor.submit(_verify_one, item) for item in group_items]
-            group_verdicts = []
-            for (file_path, _group), future in zip(group_items, futures):
-                try:
-                    group_verdicts.append(future.result(timeout=timeout))
-                except FuturesTimeoutError:
-                    logger.warning(
-                        "FalsePositiveFilter: verification timed out after %ss for %s; keeping its findings",
-                        timeout,
-                        file_path,
-                    )
-                    group_verdicts.append({})
-        finally:
-            # ``wait=False``/``cancel_futures=True``: a future that already
-            # timed out above may still be running in its worker thread: a
-            # plain ``with ThreadPoolExecutor(...)`` would block on exit
-            # waiting for it, reintroducing the same hang this fix removes.
-            executor.shutdown(wait=False, cancel_futures=True)
+
+        def _on_verify_timeout(item: Tuple[str, List[CodeReviewIssue]]) -> None:
+            file_path, _group = item
+            logger.warning(
+                "FalsePositiveFilter: verification timed out after %ss for %s; keeping its findings",
+                timeout,
+                file_path,
+            )
+
+        raw_results = parallel_map(
+            group_items,
+            _verify_one,
+            max_workers=workers,
+            skip_none=False,
+            timeout=timeout,
+            on_timeout=_on_verify_timeout,
+        )
+        # skip_none=False + preserve_order=True (default) keeps a degraded
+        # (timed-out) slot as None in place, so this stays positionally
+        # aligned with group_items for the zip-based merge below. A timeout
+        # means "keep the group's findings" (fail-safe), i.e. an empty
+        # verdict dict — same as the old FuturesTimeoutError handler.
+        group_verdicts = [r if r is not None else {} for r in raw_results]
 
     removed_indices: set[int] = set()
     for (file_path, group), verdicts in zip(group_items, group_verdicts):
