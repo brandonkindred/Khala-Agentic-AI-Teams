@@ -15,13 +15,13 @@ chunk review and the verification call in an end-to-end run.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
-    _MANIFEST_LIMIT,
     CodebaseIndex,
     _build_group_prompt,
     _build_tools,
@@ -614,24 +614,26 @@ def test_render_finding_block_collapses_embedded_newlines() -> None:
     assert block[3] == "suggestion: fix step one fix step two"
 
 
-def test_group_prompt_has_anchor_indices_and_truncation_note() -> None:
-    """``_build_group_prompt`` emits per-finding anchor indices, the task description, and the inline-truncation note."""
+def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
+    """``_build_group_prompt`` emits per-finding anchor indices, the task description, and the full file body."""
     idx = CodebaseIndex(files={"app/main.py": "X" * 50}, existing_codebase="old")
     issues = [_issue(description="d0"), _issue(description="d1", line=None)]
     prompt = _build_group_prompt(idx, "app/main.py", issues, _input(), max_inline_chars=10)
     assert "verdicts" in prompt.lower()
     assert "Finding index 0" in prompt and "Finding index 1" in prompt
     assert "wire up foo" in prompt  # task description
-    assert "first 10 characters" in prompt  # inline truncation note
+    assert "X" * 50 in prompt  # full file body, not truncated
+    assert "first 10 characters" not in prompt
 
 
-def test_group_prompt_truncates_large_manifest() -> None:
-    """A submission with more files than the manifest limit defers the rest to list_files()."""
-    files = {f"f{i:04d}.py": "x = 1\n" for i in range(_MANIFEST_LIMIT + 5)}
+def test_group_prompt_caps_manifest_and_notes_overflow() -> None:
+    """A submission with more files than the manifest cap lists only the cap and notes the rest."""
+    files = {f"f{i:04d}.py": "x = 1\n" for i in range(305)}
     idx = CodebaseIndex(files=files)
     prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input(), 1000)
-    assert "and 5 more (call list_files())" in prompt
-
+    assert "f0000.py" in prompt
+    assert "f0304.py" not in prompt
+    assert "call list_files()" in prompt
 
 def test_code_fence_for_grows_past_backtick_runs() -> None:
     """``_code_fence_for`` returns a fence longer than the longest backtick run in the content."""
@@ -874,6 +876,43 @@ def test_filter_timeout_keeps_group_findings_without_hanging(monkeypatch) -> Non
 def test_filter_empty_issue_list() -> None:
     """An empty finding list returns empty without invoking the verifier."""
     assert filter_false_positives(_RaisingStub(), _input(), []) == []
+
+
+def test_verify_group_propagates_trace_id_into_worker_threads(monkeypatch) -> None:
+    """A trace_id bound in the parent thread (shared.observability.bind_trace_id)
+    is visible inside each verification worker thread. The fan-out now goes
+    through parallel_map (propagate_context=True by default), closing the gap
+    the old hand-rolled ThreadPoolExecutor left — it never copied context into
+    its worker threads, so trace_id/LLM attribution was silently dropped."""
+    from shared.observability import bind_trace_id, current_trace_id
+
+    # High enough (relative to 3 groups) to force the parallel_map branch
+    # (workers > 1), not the sequential fast path, which runs in-thread and
+    # would prove nothing about context propagation.
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "4")
+    seen_trace_ids: List[str] = []
+    lock = threading.Lock()
+
+    class TraceCapturingStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                with lock:
+                    seen_trace_ids.append(current_trace_id())
+                return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
+    a = _issue(file_path="a.py")
+    b = _issue(file_path="b.py")
+    c = _issue(file_path="c.py")
+    inp = _input(files={"a.py": "x=1\n", "b.py": "y=2\n", "c.py": "z=3\n"})
+    stub = TraceCapturingStub()
+
+    with bind_trace_id("trace-abc123"):
+        out = filter_false_positives(stub, inp, [a, b, c])
+
+    assert out == [a, b, c]  # nothing dropped; this test targets propagation only
+    assert len(seen_trace_ids) == 3
+    assert all(tid == "trace-abc123" for tid in seen_trace_ids)
 
 
 # --------------------------------------------------------------------------- repo reader

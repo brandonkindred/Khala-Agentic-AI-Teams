@@ -89,11 +89,12 @@ def test_writer_agent_requires_guidelines() -> None:
         agent._assert_guidelines_present()
 
 
-def test_writer_agent_assertion_on_none_llm() -> None:
+def test_writer_agent_raises_on_none_llm() -> None:
+    """A ``None`` llm_client raises ValueError (not assert, which -O can strip)."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     # Direct construction intentional: make_writer_agent() replaces None with DummyLLMClient.
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="llm_client"):
         BlogWriterAgent(llm_client=None)
 
 

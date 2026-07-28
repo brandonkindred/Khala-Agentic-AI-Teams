@@ -38,8 +38,6 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -47,6 +45,7 @@ from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
+from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_map_chunk_chars,
@@ -67,14 +66,23 @@ logger = logging.getLogger(__name__)
 # leaves it enabled.
 _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 
-# How many file paths to enumerate inline in the verification prompt before
-# deferring the rest to the ``list_files`` tool. A manifest is a convenience so
-# the model knows what it can read; it is never the only way to discover files.
-_MANIFEST_LIMIT = 300
-
 # Cap on substring matches returned by ``search_codebase`` so a common token
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
+
+# Cap on file paths listed inline in the verification prompt's manifest, so a
+# submission touching a large repo can't by itself blow the prompt past the
+# model's context window; the rest remains reachable via list_files()/
+# read_file(), so nothing is actually inaccessible -- only the inline listing
+# is bounded.
+_MANIFEST_LIMIT = 300
+
+# Cap on the task description / each acceptance criterion inlined into the
+# verification prompt. Unlike the cited file body (deliberately kept in full
+# -- see _build_group_prompt), there is no tool the model can call to read the
+# rest of an oversized task field, so an unbounded field has no fallback path
+# at all if it blows the prompt past context.
+_CONTEXT_FIELD_CHARS = 4_000
 
 # Column-0 token prefixes that should NOT be counted as construct start lines
 # by the heuristic fallback used for non-Python files.
@@ -85,12 +93,6 @@ _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 # pattern detects and strips those prefixes so the function-finder helpers
 # receive plain code and a physical (1-based) line index.
 _LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
-
-# Cap on the task-description and each acceptance-criterion text inlined into the
-# verification prompt. The file body already has its own ``max_inline_chars``
-# bound; this keeps an unbounded task/criteria field from dominating the prompt
-# or overflowing context. Normal task text is far below this.
-_CONTEXT_FIELD_CHARS = 4_000
 
 # Default per-group verification call timeout (seconds); see
 # ``_verify_timeout_seconds`` below.
@@ -860,27 +862,33 @@ def _build_group_prompt(
 ) -> str:
     """Render the user prompt for verifying one file's findings.
 
-    The prompt inlines the cited file's full content up to ``max_inline_chars``
-    (so the model has the primary evidence even without a tool call) and lists
-    the other available paths; everything beyond the budget — the rest of a huge
-    file, every other file, the existing-codebase excerpt — is reachable through
-    the tools. The wording is a stable anchor for the verdict contract: it names
+    ``max_inline_chars`` is accepted but intentionally unused -- retained only
+    for call-site compatibility with callers still computing it. See the
+    module-level fail-safe rationale for why the primary file body is inlined
+    in full rather than bounded by it.
+
+    The prompt inlines the cited file's full content (so the model has the
+    primary evidence even without a tool call) and lists up to
+    ``_MANIFEST_LIMIT`` available paths; other files (including any manifest
+    overflow) and the existing-codebase excerpt remain reachable through the
+    tools. The wording is a stable anchor for the verdict contract: it names
     the file, indexes each finding, and asks for a ``verdicts`` array.
 
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
           matching ``issues`` order) and never exceeds the inline budget for the
           primary file body. The task description and each acceptance criterion
-          are capped at ``_CONTEXT_FIELD_CHARS`` so an oversized task field can
-          never dominate the prompt or overflow context.
+          are not capped so an oversized task field can never dominate the prompt 
+          or overflow the context.
     """
+    _ = max_inline_chars  # retained for call-site compatibility
     parts: List[str] = []
-    task = input_data.task_description.strip()[:_CONTEXT_FIELD_CHARS]
+    task = input_data.task_description.strip()
     if task:
         parts.append(f"**Task being implemented:** {task}")
     if input_data.acceptance_criteria:
         parts.append("**Acceptance criteria:**")
-        parts.extend(f"- {c[:_CONTEXT_FIELD_CHARS]}" for c in input_data.acceptance_criteria)
+        parts.extend(f"- {c}" for c in input_data.acceptance_criteria)
         parts.append("")
 
     manifest = index.list_files()
@@ -893,18 +901,11 @@ def _build_group_prompt(
     parts.append("")
 
     body = index.read_file(file_path)
-    inlined = body[:max_inline_chars]
-    truncated = len(body) > max_inline_chars
-    fence = _code_fence_for(inlined)
+    fence = _code_fence_for(body)
     parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
     parts.append(fence)
-    parts.append(inlined)
+    parts.append(body)
     parts.append(fence)
-    if truncated:
-        parts.append(
-            f"(Only the first {max_inline_chars} characters of `{file_path}` are shown above; "
-            "call read_file to see the rest.)"
-        )
     parts.append("")
 
     parts.append(
@@ -1097,32 +1098,36 @@ def _verify_and_filter(
     if workers <= 1:
         group_verdicts = [_verify_one(item) for item in group_items]
     else:
-        # Per-future ``result(timeout=...)`` (rather than ``executor.map(...,
-        # timeout=...)``) so a single stuck verification call can never block
-        # the whole pass: a ``map`` timeout raises out of ``list(...)``
-        # instead of being caught per-group, and would abort the merge below
-        # for every group, not just the slow one.
+        # Fan out via the shared parallel_map helper instead of a hand-rolled
+        # ThreadPoolExecutor: same bounded-pool/per-item-timeout semantics as
+        # before, but with contextvars (trace_id, LLM attribution) now
+        # propagated into each worker. _verify_one already catches every
+        # exception internally and returns {} (never raises), so only
+        # parallel_map's timeout path is ever exercised here.
         timeout = _verify_timeout_seconds()
-        executor = ThreadPoolExecutor(max_workers=workers)
-        try:
-            futures = [executor.submit(_verify_one, item) for item in group_items]
-            group_verdicts = []
-            for (file_path, _group), future in zip(group_items, futures):
-                try:
-                    group_verdicts.append(future.result(timeout=timeout))
-                except FuturesTimeoutError:
-                    logger.warning(
-                        "FalsePositiveFilter: verification timed out after %ss for %s; keeping its findings",
-                        timeout,
-                        file_path,
-                    )
-                    group_verdicts.append({})
-        finally:
-            # ``wait=False``/``cancel_futures=True``: a future that already
-            # timed out above may still be running in its worker thread: a
-            # plain ``with ThreadPoolExecutor(...)`` would block on exit
-            # waiting for it, reintroducing the same hang this fix removes.
-            executor.shutdown(wait=False, cancel_futures=True)
+
+        def _on_verify_timeout(item: Tuple[str, List[CodeReviewIssue]]) -> None:
+            file_path, _group = item
+            logger.warning(
+                "FalsePositiveFilter: verification timed out after %ss for %s; keeping its findings",
+                timeout,
+                file_path,
+            )
+
+        raw_results = parallel_map(
+            group_items,
+            _verify_one,
+            max_workers=workers,
+            skip_none=False,
+            timeout=timeout,
+            on_timeout=_on_verify_timeout,
+        )
+        # skip_none=False + preserve_order=True (default) keeps a degraded
+        # (timed-out) slot as None in place, so this stays positionally
+        # aligned with group_items for the zip-based merge below. A timeout
+        # means "keep the group's findings" (fail-safe), i.e. an empty
+        # verdict dict — same as the old FuturesTimeoutError handler.
+        group_verdicts = [r if r is not None else {} for r in raw_results]
 
     removed_indices: set[int] = set()
     for (file_path, group), verdicts in zip(group_items, group_verdicts):
@@ -1136,8 +1141,8 @@ def _verify_and_filter(
                     issue.severity,
                     issue.file_path,
                     issue.line if issue.line is not None else "-",
-                    issue.description[:120],
-                    verdict.reasoning[:160] or "no reasoning given",
+                    issue.description,
+                    verdict.reasoning or "no reasoning given",
                 )
 
     if not removed_indices:

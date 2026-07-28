@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # is replaced with `_`. This is a defense-in-depth measure against prompt
 # injection through manifest fields.
 _PROMPT_VAR_ALLOWED = re.compile(r"[^A-Za-z0-9 _\-./:@,()\[\]{}+=#'\"\n\t]")
-_PROMPT_VAR_MAX_LEN = 4000
+_PROMPT_VAR_MAX_LEN = 100000
 
 
 def sanitize_prompt_var(value: object, *, max_len: int = _PROMPT_VAR_MAX_LEN) -> str:
@@ -44,9 +44,10 @@ def sanitize_prompt_var(value: object, *, max_len: int = _PROMPT_VAR_MAX_LEN) ->
 
     - Coerces to str
     - Strips disallowed characters
-    - Truncates content longer than max_len characters and appends a
-      '…[truncated]' marker, so the returned string is
-      max_len + len('…[truncated]') characters when truncation occurs
+    - Caps length at ``max_len`` (default 100k chars) to prevent a prompt-bomb
+      / context-blowing input while still allowing large legitimate prompts;
+      a truncated value carries a trailing ``"…[truncated]"`` marker, so its
+      final length is ``max_len + len("…[truncated]")``, not exactly ``max_len``
     """
     text = "" if value is None else str(value)
     text = _PROMPT_VAR_ALLOWED.sub("_", text)
@@ -70,7 +71,8 @@ class LLMClient:
 
     The real wiring (Ollama / Claude via `backend.agents.llm_service`) lands
     this week. Until then `complete()` returns a deterministic fallback so
-    the documentation phase still produces output and tests remain stable.
+    every LLM-driven phase that uses this client (documentation today, setup
+    planning next) still produces output and tests remain stable.
     """
 
     _warned_fallback = False
@@ -87,7 +89,7 @@ class LLMClient:
 
     @property
     def is_configured(self) -> bool:
-        """True once a real LLM endpoint has been wired in."""
+        """Temporary stub: always ``False`` until ``llm_service`` is wired in."""
         # NOTE: flip this to a real readiness check when llm_service lands.
         return False
 
@@ -113,4 +115,4 @@ class LLMClient:
     @staticmethod
     def _fallback(request: LLMRequest) -> str:
         # A small, structured fallback so callers can detect it explicitly.
-        return f"[llm-fallback] {request.user.strip()[:512]}"
+        return f"[llm-fallback] {request.user.strip()}"

@@ -6,6 +6,7 @@ return a canned result and verify the orchestrator correctly assembles
 ``TeamOutput`` from it.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,18 +18,26 @@ from branding_team import (
     WorkflowStatus,
 )
 from branding_team.models import (
+    AudienceSegment,
+    AudienceSegmentsOutput,
     BrandCheckRequest,
+    BrandDiscoveryAuditOutput,
     BrandHealthKPI,
     ChannelActivationOutput,
     ChannelGuideline,
     ColorEntry,
     CompetitiveSnapshot,
     CoreValue,
+    CoreValuesOutput,
     CreativeRefinementDecision,
     DesignSystemDefinition,
+    DifferentiationPillar,
+    DifferentiationPillarsOutput,
     GovernanceOutput,
     MoodBoardConcept,
     NarrativeMessagingOutput,
+    PositioningOutput,
+    PurposeVisionOutput,
     StrategicCoreOutput,
     TypographySpec,
     VisualIdentityOutput,
@@ -242,6 +251,7 @@ def test_full_run_approved() -> None:
 
     assert result.status == WorkflowStatus.READY_FOR_ROLLOUT
     assert result.current_phase == BrandPhase.COMPLETE
+    assert result.degraded_phases == []
     assert result.strategic_core is not None
     assert result.strategic_core.positioning_statement
     assert result.strategic_core.core_values
@@ -277,6 +287,7 @@ def test_requires_human_approval() -> None:
 
     assert result.status == WorkflowStatus.NEEDS_HUMAN_DECISION
     assert result.human_feedback == "Need legal review."
+    assert result.degraded_phases == []
     assert result.strategic_core is not None
     assert result.narrative_messaging is not None
     assert result.visual_identity is not None
@@ -309,6 +320,7 @@ def test_brand_checks() -> None:
 
     assert len(result.brand_checks) == 2
     assert any(not item.is_on_brand for item in result.brand_checks)
+    assert result.degraded_phases == []
 
 
 def test_market_research_integration() -> None:
@@ -338,6 +350,7 @@ def test_market_research_integration() -> None:
         )
     assert result.competitive_snapshot is not None
     assert result.competitive_snapshot.summary == "Competitive summary"
+    assert result.degraded_phases == []
 
 
 def test_design_assets_integration() -> None:
@@ -354,6 +367,7 @@ def test_design_assets_integration() -> None:
     assert result.design_asset_result is not None
     assert result.design_asset_result.request_id.startswith("design_")
     assert result.design_asset_result.status == "pending"
+    assert result.degraded_phases == []
 
 
 def test_run_with_store_appends_version(fake_pg) -> None:
@@ -482,6 +496,330 @@ def test_phase_absorbed_fields_populated() -> None:
     # Wiki backlog absorbed into governance
     assert result.governance.wiki_backlog
     assert result.governance.wiki_backlog[0].title
+
+
+def test_unparseable_phase_output_marks_phase_degraded(caplog) -> None:
+    """A phase whose agent text isn't valid JSON gets a default output and is
+    recorded in ``TeamOutput.degraded_phases`` instead of failing silently."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    agent_result = MagicMock()
+    agent_result.message = {"content": [{"text": "not valid json at all"}]}
+    mock_result.result["phase2_narrative"].get_agent_results.return_value = [agent_result]
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with (
+        patch(
+            "branding_team.orchestrator.build_branding_graph",
+            return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+        ),
+        caplog.at_level("WARNING", logger="branding_team.orchestrator"),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == [BrandPhase.NARRATIVE_MESSAGING]
+    assert any("phase2_narrative" in r.message and r.levelname == "WARNING" for r in caplog.records)
+    assert result.narrative_messaging is not None
+    assert result.narrative_messaging.tagline == ""
+    # Unaffected phases still parse normally and are not marked degraded.
+    assert result.strategic_core is not None
+    assert result.strategic_core.positioning_statement
+
+
+def test_trailing_unrelated_json_object_does_not_win_over_real_payload() -> None:
+    """A reply carrying the real phase payload followed by an unrelated JSON
+    object (e.g. a usage/metadata echo) must still recover the real payload —
+    not silently accept the trailing object just because it parses too, which
+    would validate against defaults and wrongly report degraded=False."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    real_payload = _full_narrative()
+    agent_result = MagicMock()
+    agent_result.message = {
+        "content": [
+            {
+                "text": real_payload.model_dump_json()
+                + "\n"
+                + json.dumps({"usage": {"tokens": 42}, "model": "some-model"})
+            }
+        ]
+    }
+    mock_result.result["phase2_narrative"].get_agent_results.return_value = [agent_result]
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.build_branding_graph",
+        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert result.narrative_messaging is not None
+    assert result.narrative_messaging.tagline == real_payload.tagline
+
+
+def test_extract_phase_output_uses_structured_output_when_present() -> None:
+    """Agents built with ``structured_output=`` populate ``AgentResult.structured_output``
+    rather than the message's text blocks; extraction must check that field before
+    falling back to text or it silently discards the agent's real output."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = PositioningOutput(
+        positioning_statement=(
+            "For enterprise product leaders who need cohesive digital experiences, "
+            "Northstar Labs is the hands-on partner that delivers clarity."
+        ),
+        brand_promise="Every customer touchpoint will feel cohesive, useful, and unmistakably aligned.",
+    )
+
+    node_result = MagicMock()
+    node_result.get_agent_results.return_value = [agent_result]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.positioning_statement == agent_result.structured_output.positioning_statement
+    assert output.brand_promise == agent_result.structured_output.brand_promise
+
+
+def _phase1_leaf_node(structured_output) -> MagicMock:
+    """A mock NodeResult for a single Phase 1 fan-out/fan-in leaf agent."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = structured_output
+    node = MagicMock()
+    node.get_agent_results.return_value = [agent_result]
+    return node
+
+
+def test_extract_phase_output_merges_every_phase1_fragment() -> None:
+    """Phase 1 wraps six agents as one top-level node; get_agent_results()[-1] only
+    ever sees the synthesizer, so the five specialists' fragments must be merged
+    in separately or their data is silently discarded (see PR review discussion)."""
+    positioning_leaf = _phase1_leaf_node(
+        PositioningOutput(
+            positioning_statement="For enterprise leaders who need clarity, we deliver it.",
+            brand_promise="Every touchpoint feels cohesive.",
+        )
+    )
+    nested_results = {
+        "discovery_auditor": _phase1_leaf_node(
+            BrandDiscoveryAuditOutput(
+                current_brand_perception="Seen as reliable but generic.",
+                market_position="Mid-market challenger.",
+                strengths=["Delivery speed"],
+                weaknesses=["Low brand recall"],
+                opportunities=["Category consolidating"],
+                threats=["Bigger competitors out-spending"],
+                stakeholder_insights=["Sales wants sharper differentiation"],
+            )
+        ),
+        "purpose_vision_writer": _phase1_leaf_node(
+            PurposeVisionOutput(
+                brand_purpose="Why we exist.",
+                mission_statement="What we do for customers.",
+                vision_statement="Where the brand is headed.",
+            )
+        ),
+        "values_articulator": _phase1_leaf_node(
+            CoreValuesOutput(
+                core_values=[
+                    CoreValue(value="Clarity"),
+                    CoreValue(value="Trust"),
+                    CoreValue(value="Momentum"),
+                ]
+            )
+        ),
+        "audience_segmenter": _phase1_leaf_node(
+            AudienceSegmentsOutput(
+                target_audience_segments=[AudienceSegment(name="Enterprise product leaders")]
+            )
+        ),
+        "differentiation_mapper": _phase1_leaf_node(
+            DifferentiationPillarsOutput(
+                differentiation_pillars=[
+                    DifferentiationPillar(pillar="Execution speed"),
+                    DifferentiationPillar(pillar="Hands-on partnership"),
+                ]
+            )
+        ),
+        "positioning_synthesizer": positioning_leaf,
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    # Matches real Strands semantics: get_agent_results() on the outer node
+    # flattens to every nested agent, in completion order (synthesizer last).
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.brand_discovery.current_brand_perception == "Seen as reliable but generic."
+    assert output.brand_discovery.stakeholder_insights == ["Sales wants sharper differentiation"]
+    assert output.brand_purpose == "Why we exist."
+    assert output.mission_statement == "What we do for customers."
+    assert output.vision_statement == "Where the brand is headed."
+    assert [v.value for v in output.core_values] == ["Clarity", "Trust", "Momentum"]
+    assert [s.name for s in output.target_audience_segments] == ["Enterprise product leaders"]
+    assert [p.pillar for p in output.differentiation_pillars] == [
+        "Execution speed",
+        "Hands-on partnership",
+    ]
+    assert output.positioning_statement == "For enterprise leaders who need clarity, we deliver it."
+    assert output.brand_promise == "Every touchpoint feels cohesive."
+
+
+def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
+    """A node whose nested result isn't Phase 1's known node-id set (e.g. every
+    other phase) must fall through to the existing single-agent-result logic
+    unchanged — _merge_phase1_fragments is additive, never a regression."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = PositioningOutput(
+        positioning_statement="Fallback statement.",
+        brand_promise="Fallback promise.",
+    )
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = {"some_other_phase_node": MagicMock()}
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [agent_result]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.positioning_statement == "Fallback statement."
+    assert output.brand_promise == "Fallback promise."
+
+
+def _text_node_result(text: str) -> MagicMock:
+    """A mock NodeResult whose single agent result carries raw ``text`` and
+    no ``structured_output``, forcing extraction down the
+    ``_parse_model_from_text`` path exercised by the tests below."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": [{"text": text}]}
+    agent_result.structured_output = None
+    node_result = MagicMock()
+    node_result.get_agent_results.return_value = [agent_result]
+    return node_result
+
+
+def test_parse_model_from_text_truncated_json_returns_none_and_extract_degrades() -> None:
+    """JSON cut off mid-object (e.g. a truncated LLM response) must not
+    validate — _parse_model_from_text returns None, and _extract_phase_output
+    must surface that as degraded=True rather than silently defaulting."""
+    from branding_team.orchestrator import _parse_model_from_text
+
+    full_json = _full_strategic_core().model_dump_json()
+    truncated = full_json[: len(full_json) // 2]
+
+    assert _parse_model_from_text(truncated, StrategicCoreOutput) is None
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": _text_node_result(truncated)}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is True
+    assert output == StrategicCoreOutput()
+
+
+def test_parse_model_from_text_prose_wrapped_json_recovers() -> None:
+    """Real prose before and after the JSON block (a common LLM reply shape)
+    must still be recovered — proving the degradation signal isn't
+    spuriously set for payloads that are genuinely recoverable."""
+    from branding_team.orchestrator import _parse_model_from_text
+
+    real_payload = _full_strategic_core()
+    text = (
+        "Here is the strategic core output:\n\n"
+        + real_payload.model_dump_json()
+        + "\n\nLet me know if any revisions are needed."
+    )
+
+    parsed = _parse_model_from_text(text, StrategicCoreOutput)
+    assert parsed == real_payload
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": _text_node_result(text)}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is False
+    assert output.positioning_statement == real_payload.positioning_statement
+    assert output.brand_promise == real_payload.brand_promise
+
+
+def test_parse_model_from_text_schema_mismatch_returns_none_and_extract_degrades() -> None:
+    """Syntactically valid JSON that fails schema validation (a required
+    nested field missing) must not validate — _parse_model_from_text returns
+    None, and _extract_phase_output must surface that as degraded=True."""
+    from branding_team.orchestrator import _parse_model_from_text
+
+    text = json.dumps(
+        {
+            "positioning_statement": "For enterprise leaders who need clarity, we deliver it.",
+            "core_values": [{"behavioral_definition": "Missing the required 'value' field."}],
+        }
+    )
+
+    assert _parse_model_from_text(text, StrategicCoreOutput) is None
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": _text_node_result(text)}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is True
+    assert output == StrategicCoreOutput()
 
 
 def test_gather_integrations_market_research_failure_returns_none() -> None:

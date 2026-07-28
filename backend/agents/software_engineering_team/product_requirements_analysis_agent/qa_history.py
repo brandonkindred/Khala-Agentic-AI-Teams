@@ -24,6 +24,10 @@ from .models import AnsweredQuestion, OpenQuestion
 
 logger = logging.getLogger(__name__)
 
+# Minimum keyword/word-overlap ratio for two questions to be treated as the
+# same underlying decision (duplicate-answer lookup and supersede detection).
+_QUESTION_MATCH_THRESHOLD = 0.5
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically (write-temp-then-rename).
@@ -144,7 +148,7 @@ def extract_answer_from_qa_history(
         matches = sum(1 for w in key_words if w in recorded_question_lower)
         match_ratio = matches / len(key_words) if key_words else 0
 
-        if match_ratio > 0.5:  # Good enough match
+        if match_ratio > _QUESTION_MATCH_THRESHOLD:  # Good enough match
             # Extract answer from block
             answer = ""
             rationale = ""
@@ -162,8 +166,8 @@ def extract_answer_from_qa_history(
         _, matched_q, answer, rationale = best_match
         logger.debug(
             "Extracted answer for duplicate question: '%s' -> '%s'",
-            question.question_text[:40],
-            answer[:40],
+            question.question_text,
+            answer,
         )
         return AnsweredQuestion(
             question_id=question.id,
@@ -172,7 +176,7 @@ def extract_answer_from_qa_history(
             selected_answer=answer,
             was_auto_answered=False,
             was_default=False,
-            rationale=rationale or f"Previously answered (matched: {matched_q[:50]})",
+            rationale=rationale or f"Previously answered (matched: {matched_q})",
             confidence=0.9,  # High confidence since it was user-answered before
         )
 
@@ -250,7 +254,7 @@ def is_same_decision(existing_question: str, new_question: str) -> bool:
     if not existing_w or not new_w:
         return False
     overlap = len(existing_w & new_w) / max(len(existing_w), len(new_w))
-    return overlap >= 0.5
+    return overlap >= _QUESTION_MATCH_THRESHOLD
 
 
 def record_answers(

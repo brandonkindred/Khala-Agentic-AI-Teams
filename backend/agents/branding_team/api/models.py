@@ -266,6 +266,7 @@ class ConversationStateResponse(BaseModel):
     mission: BrandingMission
     latest_output: Optional[TeamOutput] = None
     suggested_questions: List[str] = Field(default_factory=list)
+    degraded: bool = False
 
 
 class ConversationSummaryResponse(BaseModel):
