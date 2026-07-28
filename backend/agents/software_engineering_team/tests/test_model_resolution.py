@@ -14,9 +14,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from code_review_agent import model_resolution
+from strands.models.model import Model as _StrandsModel
+
 from llm_service.config import AGENT_DEFAULT_MODELS
 from llm_service.strands_adapter import LLMClientModel
-from strands.models.model import Model as _StrandsModel
 
 
 class _FakeStrandsModel(_StrandsModel):
