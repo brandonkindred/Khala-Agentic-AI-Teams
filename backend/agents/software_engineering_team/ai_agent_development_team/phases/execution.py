@@ -36,11 +36,11 @@ def run_execution(
       has one entry per input microtask (the same objects, mutated in place),
       each with ``status`` set to ``COMPLETED`` or ``FAILED`` based on the
       runner's ``out.success`` and ``notes`` set from the runner summary.
-      ``microtask.output_files`` is populated only for successful microtasks;
-      ``ExecutionResult.files`` is the union of every runner's returned files
-      (including failed runs). Does not handle ``Microtask.depends_on`` —
-      microtasks always run once, in planner order, regardless of dependency
-      status.
+      ``microtask.output_files`` is populated only for successful microtasks
+      and cleared for failed ones; ``ExecutionResult.files`` is the union of
+      every runner's returned files (including failed runs). Does not handle
+      ``Microtask.depends_on`` — microtasks always run once, in planner order,
+      regardless of dependency status.
     """
     files: Dict[str, str] = {}
     notes: List[str] = []
@@ -64,6 +64,7 @@ def run_execution(
             microtask.output_files = out.files or {}
         else:
             microtask.status = MicrotaskStatus.FAILED
+            microtask.output_files = {}
 
         microtask.notes = out.summary or ""
         files.update(out.files)

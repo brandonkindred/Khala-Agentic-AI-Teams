@@ -17,7 +17,8 @@ def run_problem_solving(
     Postconditions: returns a ``ProblemSolvingResult`` where ``resolved`` is
       True iff at least one placeholder file was synthesized; ``files`` is a
       new dict — ``execution_result.files`` merged with the placeholder
-      patches — and ``execution_result`` itself is not mutated.
+      patches — and ``execution_result`` itself is not mutated. ``fixes_applied``
+      lists each synthesized placeholder and is empty when ``resolved`` is False.
     """
     fixes_applied = []
     patched_files = {}

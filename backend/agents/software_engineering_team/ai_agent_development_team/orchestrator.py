@@ -151,7 +151,9 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
 
             Preconditions: ``_phase_intake`` has run (``intake`` is set).
             Postconditions: sets nonlocal ``planning`` and ``result.planning_result``;
-              always returns None today (see _phase_intake docstring).
+              always returns None because ``run_planning`` has no soft-failure
+              branch and exceptions propagate to ``run_workflow``'s outer
+              try/except.
             """
             nonlocal planning
             result.current_phase = Phase.PLANNING
@@ -221,6 +223,9 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
 
                 execution.files = problem_solving.files
                 execution.summary = f"{execution.summary} | {problem_solving.summary}"
+                # Intentionally return the pre-fix (non-passing) review: the
+                # helper treats ``r.passed`` as False and continues, so the next
+                # iteration re-runs ``run_review`` against the patched files.
                 return review
 
             # ``None`` from attempt is the explicit abort signal;
@@ -230,9 +235,8 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                 attempt=_attempt_review_cycle,
                 is_success=lambda r: r.passed,
             )
-            # Reflect any problem-solving patches applied during the loop
-            # (including on abort/exhausted paths, where partial progress is
-            # still useful to callers inspecting final_files).
+            # Last attempted file set (see ``final_files`` Field description):
+            # includes problem-solving patches even on abort/exhausted paths.
             result.final_files = execution.files
             if not succeeded:
                 if result.needs_followup:
