@@ -365,8 +365,8 @@ _ChunkReviewIssueCategory = Literal[
 class ChunkReviewIssueLLM(BaseModel):
     """Narrow LLM-authored shape for one issue in a chunk-review response.
 
-    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
-    ``generate_structured`` (see ``llm_service``'s README, "When to use which
+    Schema for ``chunk_reviewer._run_chunk_review`` to validate replies via
+    ``llm_service.complete_validated`` (see ``llm_service``'s README, "When to use which
     entrypoint"). This is the raw per-issue shape the model is asked to
     emit — distinct from the persisted :class:`CodeReviewIssue`, which
     additionally range-validates ``line``/``start_line`` against the cited

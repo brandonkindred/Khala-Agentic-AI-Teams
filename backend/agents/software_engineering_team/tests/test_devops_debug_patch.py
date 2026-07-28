@@ -766,7 +766,8 @@ class TestDevOpsPipelineDebugPatchLoop:
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
                 {"files": {}, "summary": "doc ok"},
-            ]
+            ],
+            strict=True,
         )
 
         agent = DevOpsTeamLeadAgent(llm_client=client)
@@ -821,6 +822,7 @@ class TestDevOpsPipelineDebugPatchLoop:
             )
         assert result.success
         assert result.iterations == MAX_INFRA_FIX_ITERATIONS
+        client.assert_exhausted()
 
 
 # ---------------------------------------------------------------------------

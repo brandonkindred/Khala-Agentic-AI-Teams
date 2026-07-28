@@ -294,6 +294,45 @@ def test_missing_new_output_fields_raise_schema_validation_error() -> None:
         agent.run(_chunk_input())
 
 
+def test_reject_without_actionable_issue_raises_schema_validation_error() -> None:
+    """``ChunkReviewLLMResponse``'s consistency validator rejects ``approved=False``
+    with no issues at all -- there is no actionable critical/high finding to
+    justify the rejection, so the reply is malformed and fails schema
+    validation rather than being silently accepted."""
+    agent = ChunkReviewAgent(
+        llm=_StubClient(
+            {"approved": False, "issues": [], "summary": "No issues.", "spec_compliance_notes": ""}
+        )
+    )
+    with pytest.raises(LLMSchemaValidationError):
+        agent.run(_chunk_input())
+
+
+def test_reject_with_only_low_severity_issue_raises_schema_validation_error() -> None:
+    """``approved=False`` still fails validation when every issue is below the
+    critical/high threshold -- an info/low finding alone does not justify a
+    rejection per the review prompt's own contract."""
+    agent = ChunkReviewAgent(
+        llm=_StubClient(
+            {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "low",
+                        "category": "naming",
+                        "description": "Minor style nit.",
+                        "suggestion": "Consider renaming.",
+                    },
+                ],
+                "summary": "Minor issue only.",
+                "spec_compliance_notes": "",
+            }
+        )
+    )
+    with pytest.raises(LLMSchemaValidationError):
+        agent.run(_chunk_input())
+
+
 def test_chunk_review_agent_passes_blank_file_path_through_unchanged() -> None:
     """A blank/omitted issue file_path stays blank — never filled with the
     chunk label, which would defeat the coordinator's per-path offset lookup
