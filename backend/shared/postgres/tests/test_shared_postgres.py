@@ -798,7 +798,10 @@ def test_real_postgres_schema_body_registers_then_truncates_on_teardown(monkeypa
     schema = TeamSchema(team="demo", table_names=["demo_a"])
     gen = testing_mod._real_postgres_schema_body(schema)
 
-    next(gen)  # advances to the yield: register must have run, truncate must not have
+    yielded = next(gen)  # advances to the yield: register must have run, truncate must not have
+    # Bare `yield` by design: the fixture built from this body is autouse-only
+    # (register/truncate side effects), never requested by name for its value.
+    assert yielded is None
     assert calls == ["register:demo"]
 
     with pytest.raises(StopIteration):
