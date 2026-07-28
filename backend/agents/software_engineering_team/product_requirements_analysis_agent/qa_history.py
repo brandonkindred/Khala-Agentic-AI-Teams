@@ -183,7 +183,7 @@ def _format_field_value(marker: str, value: str) -> str:
         ``value``'s continuation lines, escaped; never raises.
     """
     value_lines = value.split("\n")
-    rendered = [value_lines[0]] + [_escape_continuation_line(vl) for vl in value_lines[1:]]
+    rendered = [value_lines[0], *(_escape_continuation_line(vl) for vl in value_lines[1:])]
     return f"{marker} " + "\n".join(rendered) + "\n"
 
 
@@ -199,8 +199,9 @@ def _consume_block_body(lines: List[str]) -> Tuple[str, str]:
     Preconditions: ``lines`` are the lines of a qa_history.md block following its
         ``### question`` header (may be empty).
     Postconditions: returns ``(answer, rationale)``; continuation lines for each field
-        are joined with ``\\n`` and the result is stripped. Either string is empty if
-        its marker was never seen; never raises.
+        are unescaped via :func:`_unescape_continuation_line`, joined with ``\\n``,
+        and the result is stripped. Either string is empty if its marker was never
+        seen; never raises.
     """
     answer_lines: List[str] = []
     rationale_lines: List[str] = []
