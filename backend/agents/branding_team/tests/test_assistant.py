@@ -31,29 +31,33 @@ def test_parse_extraction_returns_mission_and_suggestions() -> None:
             "suggested_questions": ["What 3 values matter most?", "Who are your competitors?"],
         }
     )
-    mission_update, suggestions = _parse_extraction(raw)
+    mission_update, suggestions, degraded = _parse_extraction(raw)
     assert mission_update == {"company_name": "Acme", "target_audience": "Developers"}
     assert suggestions == ["What 3 values matter most?", "Who are your competitors?"]
+    assert degraded is False
 
 
 def test_parse_extraction_tolerates_markdown_fences() -> None:
     inner = json.dumps({"mission_update": {"company_name": "Acme"}, "suggested_questions": []})
-    mission_update, suggestions = _parse_extraction(f"```json\n{inner}\n```")
+    mission_update, suggestions, degraded = _parse_extraction(f"```json\n{inner}\n```")
     assert mission_update == {"company_name": "Acme"}
     assert suggestions == []
+    assert degraded is False
 
 
 def test_parse_extraction_extracts_object_from_surrounding_prose() -> None:
     raw = 'Here is the JSON: {"mission_update": {"company_name": "Acme"}}'
-    mission_update, suggestions = _parse_extraction(raw)
+    mission_update, suggestions, degraded = _parse_extraction(raw)
     assert mission_update == {"company_name": "Acme"}
     assert suggestions == []
+    assert degraded is False
 
 
 def test_parse_extraction_returns_empty_on_garbage() -> None:
-    mission_update, suggestions = _parse_extraction("nothing here")
+    mission_update, suggestions, degraded = _parse_extraction("nothing here")
     assert mission_update == {}
     assert suggestions == []
+    assert degraded is True
 
 
 def test_parse_extraction_accepts_top_level_mission_fields() -> None:
@@ -67,19 +71,20 @@ def test_parse_extraction_accepts_top_level_mission_fields() -> None:
             "values": ["clarity", "trust"],
         }
     )
-    mission_update, suggestions = _parse_extraction(raw)
+    mission_update, suggestions, degraded = _parse_extraction(raw)
     assert mission_update == {
         "company_name": "Acme",
         "target_audience": "Developers",
         "values": ["clarity", "trust"],
     }
     assert suggestions == []
+    assert degraded is False
 
 
 def test_parse_extraction_top_level_fallback_ignores_non_mission_keys() -> None:
     """The fallback must NOT promote arbitrary non-mission keys."""
     raw = json.dumps({"company_name": "Acme", "unrelated_field": "ignored"})
-    mission_update, _ = _parse_extraction(raw)
+    mission_update, _, _ = _parse_extraction(raw)
     assert mission_update == {"company_name": "Acme"}
     assert "unrelated_field" not in mission_update
 
@@ -96,9 +101,10 @@ def test_parse_extraction_prefers_mission_update_wrapper_when_present() -> None:
             "suggested_questions": ["q1"],
         }
     )
-    mission_update, suggestions = _parse_extraction(raw)
+    mission_update, suggestions, degraded = _parse_extraction(raw)
     assert mission_update == {"company_name": "Acme"}
     assert suggestions == ["q1"]
+    assert degraded is False
 
 
 def test_parse_extraction_top_level_fallback_collects_nested_palettes() -> None:
@@ -112,7 +118,7 @@ def test_parse_extraction_top_level_fallback_collects_nested_palettes() -> None:
             ],
         }
     )
-    mission_update, _ = _parse_extraction(raw)
+    mission_update, _, _ = _parse_extraction(raw)
     assert mission_update["company_name"] == "Acme"
     assert mission_update["color_palettes"] == [{"name": "warm", "colors": ["#aa3300", "#ffcc99"]}]
 
@@ -252,7 +258,7 @@ def test_branding_assistant_agent_two_stage_returns_natural_reply_and_extracts_m
     mission = make_mission(
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
-    reply, updated_mission, suggested_questions = agent.respond(
+    reply, updated_mission, suggested_questions, degraded = agent.respond(
         messages=[("assistant", "Hi! What's your company or product name?")],
         current_mission=mission,
         user_message="Brandon Kindred. it is a personal brand",
@@ -265,6 +271,7 @@ def test_branding_assistant_agent_two_stage_returns_natural_reply_and_extracts_m
         "What do you want to be known for?",
         "Who is your audience?",
     ]
+    assert degraded is False
     conversation_llm.assert_called_once()
     extraction_llm.assert_called_once()
 
@@ -287,7 +294,7 @@ def test_branding_assistant_agent_suppresses_accidental_json_from_conversation_l
     mission = make_mission(
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
-    reply, updated_mission, _ = agent.respond(
+    reply, updated_mission, _, degraded = agent.respond(
         messages=[],
         current_mission=mission,
         user_message="Brandon Kindred. it is a personal brand",
@@ -295,6 +302,7 @@ def test_branding_assistant_agent_suppresses_accidental_json_from_conversation_l
     assert "{" not in reply and '"company_name"' not in reply
     assert reply.strip() != ""
     assert updated_mission.company_name == "Brandon Kindred"
+    assert degraded is False
 
 
 def test_branding_assistant_agent_handles_extraction_failure_gracefully() -> None:
@@ -305,7 +313,7 @@ def test_branding_assistant_agent_handles_extraction_failure_gracefully() -> Non
     mission = make_mission(
         company_name="Acme", company_description="Software company.", target_audience="TBD"
     )
-    reply, updated_mission, suggested_questions = agent.respond(
+    reply, updated_mission, suggested_questions, degraded = agent.respond(
         messages=[],
         current_mission=mission,
         user_message="we sell to dev teams",
@@ -313,6 +321,7 @@ def test_branding_assistant_agent_handles_extraction_failure_gracefully() -> Non
     assert "Got it" in reply
     assert updated_mission.company_name == "Acme"
     assert len(suggested_questions) >= 1
+    assert degraded is True
 
 
 def test_branding_assistant_agent_legacy_llm_kwarg_drives_both_stages() -> None:
@@ -344,13 +353,14 @@ def test_branding_assistant_agent_legacy_llm_kwarg_drives_both_stages() -> None:
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
 
-    reply, updated_mission, suggested_questions = agent.respond(
+    reply, updated_mission, suggested_questions, degraded = agent.respond(
         messages=[], current_mission=mission, user_message="We're Acme"
     )
 
     # Both stages used the injected fake — no real Strands Agent constructed.
     assert fake_llm.call_count == 2
     assert "Acme" in reply
+    assert degraded is False
     assert updated_mission.company_name == "Acme"
     assert suggested_questions == ["What does Acme do?"]
 
@@ -434,10 +444,11 @@ def test_branding_assistant_agent_handles_conversation_llm_failure() -> None:
     mission = make_mission(
         company_name="TBD", company_description="To be discussed.", target_audience="TBD"
     )
-    reply, updated_mission, suggested_questions = agent.respond(
+    reply, updated_mission, suggested_questions, degraded = agent.respond(
         messages=[], current_mission=mission, user_message="Hello"
     )
     assert "help" in reply.lower() or "brand" in reply.lower()
     assert updated_mission.company_name == "TBD"
     assert len(suggested_questions) >= 1
+    assert degraded is True
     extraction_llm.assert_not_called()

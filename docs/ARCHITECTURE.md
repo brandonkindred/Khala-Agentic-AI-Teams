@@ -164,7 +164,7 @@ flowchart TB
     execGroup -.->|"on crash"| supportGroup
 ```
 
-Quality gate agents (code review, QA, security, accessibility, acceptance verifier, DbC, linting) are not task assignees — they are invoked inside backend and frontend workflows for every task. The repair agent and build fix specialist handle agent crashes and persistent build failures respectively.
+Quality gate agents (code review, QA, security, accessibility, acceptance verifier, DbC, linting) are not task assignees — they are invoked inside backend and frontend workflows for every task. The repair agent and build fix specialist handle agent crashes and persistent build failures respectively. Lint/build verification is a distinct, CI-owned gate that runs once ahead of code review (see §5, §6) — it is not re-executed as part of the code review step.
 
 ---
 

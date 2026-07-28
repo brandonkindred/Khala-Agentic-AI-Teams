@@ -58,7 +58,12 @@ def test_task_queue_env_override(monkeypatch) -> None:
 
 def test_phase_sequence_matches_brand_phase_values() -> None:
     """PHASE_SEQUENCE must be the five runnable BrandPhase values, in order —
-    the workflow indexes it and the finalize activity maps it to ``stop_idx``."""
+    the workflow indexes it and the finalize activity maps it to ``stop_idx``.
+
+    This is the Temporal-side half of the ``PHASE_ORDER`` drift guard; its
+    SYSTEM_PROMPT-side sibling is
+    ``test_prompts.py::test_system_prompt_sections_follow_reordered_phase_order``.
+    """
     from branding_team.temporal.constants import PHASE_SEQUENCE
 
     assert PHASE_SEQUENCE == [
@@ -73,7 +78,11 @@ def test_phase_sequence_matches_brand_phase_values() -> None:
 def test_phase_sequence_derives_from_canonical_phase_order() -> None:
     """PHASE_SEQUENCE (temporal, value strings) must not drift from the canonical
     PHASE_ORDER (graphs/shared, enums). Asserting equality here catches a reorder
-    or insertion in one that is not mirrored in the other."""
+    or insertion in one that is not mirrored in the other.
+
+    See ``test_prompts.py::test_system_prompt_sections_follow_reordered_phase_order``
+    for the equivalent drift guard on the SYSTEM_PROMPT side.
+    """
     from branding_team.graphs.shared import PHASE_ORDER
     from branding_team.temporal.constants import PHASE_SEQUENCE
 
@@ -256,27 +265,35 @@ def test_phase_activity_runs_phase_and_checkpoints(monkeypatch) -> None:
     from branding_team.temporal import activities
 
     model = StrategicCoreOutput(positioning_statement="POS-123")
-    saved: dict = {}
+    calls: list = []
     monkeypatch.setattr(shared.temporal, "load_checkpoint", lambda team, jid, phase: None)
     monkeypatch.setattr(
         shared.temporal,
         "save_checkpoint",
-        lambda team, jid, phase, payload: saved.update(
-            team=team, jid=jid, phase=phase, payload=payload
+        lambda team, jid, phase, payload: calls.append(
+            {"team": team, "jid": jid, "phase": phase, "payload": payload}
         ),
     )
 
-    with patch.object(main_mod.orchestrator, "run_single_phase", return_value=model) as mock_rsp:
+    with patch.object(
+        main_mod.orchestrator, "run_single_phase", return_value=(model, False)
+    ) as mock_rsp:
         out = activities.run_branding_phase_activity(_phase_payload(), "strategic_core", {})
 
     assert out["positioning_statement"] == "POS-123"
     mock_rsp.assert_called_once()
+    # The degradation flag is checkpointed before the output, so a crash between
+    # the two writes can never leave an output checkpoint without its paired flag.
+    assert [c["phase"] for c in calls] == ["strategic_core__degraded", "strategic_core"]
+    degraded_call, output_call = calls
     # Checkpoint must use the branding_team job slug (the row's actual slug), not
     # the "branding" worker slug.
-    assert saved["team"] == "branding_team"
-    assert saved["jid"] == "job-abc"
-    assert saved["phase"] == "strategic_core"
-    assert saved["payload"]["positioning_statement"] == "POS-123"
+    assert degraded_call["team"] == "branding_team"
+    assert degraded_call["jid"] == "job-abc"
+    assert degraded_call["payload"] is False
+    assert output_call["team"] == "branding_team"
+    assert output_call["jid"] == "job-abc"
+    assert output_call["payload"]["positioning_statement"] == "POS-123"
 
 
 def test_phase_activity_checkpoint_short_circuits(monkeypatch) -> None:
@@ -312,7 +329,9 @@ def test_phase_activity_none_payload_checkpoint_does_not_short_circuit(monkeypat
     monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
 
     model = StrategicCoreOutput(positioning_statement="FRESH")
-    with patch.object(main_mod.orchestrator, "run_single_phase", return_value=model) as mock_rsp:
+    with patch.object(
+        main_mod.orchestrator, "run_single_phase", return_value=(model, False)
+    ) as mock_rsp:
         out = activities.run_branding_phase_activity(_phase_payload(), "strategic_core", {})
 
     assert out["positioning_statement"] == "FRESH"
@@ -419,6 +438,47 @@ def test_finalize_activity_completes_and_appends(monkeypatch) -> None:
     assert kwargs["status"] == job_store.JOB_STATUS_COMPLETED
     # Real assembly produced a populated brand book from the strategic core.
     assert "Brand Purpose" in kwargs["result"]["brand_book"]["content"]
+    assert kwargs["result"]["degraded_phases"] == []
+
+
+def test_finalize_activity_propagates_degraded_phase_checkpoint(monkeypatch) -> None:
+    """A phase whose activity checkpointed degraded=True must surface in the
+    finalized TeamOutput.degraded_phases, matching the thread path's signal."""
+    import shared.temporal
+    from branding_team.api import main as main_mod
+    from branding_team.temporal import activities
+
+    def _load_checkpoint(team, jid, phase):
+        if phase == activities._degraded_checkpoint_key("strategic_core"):
+            return {"payload": True}
+        return None
+
+    monkeypatch.setattr(shared.temporal, "load_checkpoint", _load_checkpoint)
+    monkeypatch.setattr(shared.temporal, "save_checkpoint", MagicMock())
+
+    phase_outputs = {
+        "strategic_core": {
+            "brand_purpose": "",
+            "mission_statement": "",
+            "vision_statement": "",
+            "positioning_statement": "",
+            "brand_promise": "",
+            "core_values": [],
+        }
+    }
+
+    with (
+        patch(
+            "branding_team.shared.job_store.update_job_if_not_cancelled", return_value=True
+        ) as mock_update,
+        patch.object(main_mod.branding_store, "append_brand_version"),
+    ):
+        activities.finalize_branding_activity(
+            _phase_payload(target_phase="strategic_core"), phase_outputs, None, None
+        )
+
+    _, kwargs = mock_update.call_args
+    assert kwargs["result"]["degraded_phases"] == ["strategic_core"]
 
 
 def test_finalize_activity_finalized_checkpoint_blocks_double_append(monkeypatch) -> None:
@@ -554,7 +614,7 @@ def test_run_single_phase_extracts_output_and_injects_context(monkeypatch) -> No
 
     mission = make_mission()
     orchestrator = orch_mod.BrandingTeamOrchestrator()
-    result = orchestrator.run_single_phase(
+    result, degraded = orchestrator.run_single_phase(
         mission,
         BrandPhase.NARRATIVE_MESSAGING,
         {"strategic_core": {"positioning_statement": "POS-UP"}},
@@ -562,6 +622,7 @@ def test_run_single_phase_extracts_output_and_injects_context(monkeypatch) -> No
 
     assert isinstance(result, NarrativeMessagingOutput)
     assert result.tagline == "TAG"
+    assert degraded is False
     # The isolated phase sees the mission AND the upstream output injected into
     # its task (the context the sequential graph edge would otherwise carry).
     assert "Northstar Labs" in captured["task"]

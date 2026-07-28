@@ -1,6 +1,6 @@
 """Tests for the code review agent's Temporal instrumentation.
 
-Covers the four things testable without a live Temporal server:
+Covers the five things testable without a live (deployed) Temporal server:
 
 1. The default-on address resolver / enablement gate (``temporal.config``).
 2. The activity-boundary DTO round-trips (``temporal.phase_models``).
@@ -8,10 +8,13 @@ Covers the four things testable without a live Temporal server:
    replicating the workflow's orchestration in-process and asserting the verdict
    matches ``run_coordinator`` (durable path is behavior-identical to thread mode).
 4. ``CodeReviewAgent.run``'s Temporal-first dispatch and its fallbacks.
-
-The workflow class itself needs a Temporal worker to execute, so its live
-round-trip is an integration concern; here we assert it is importable and
-registered.
+5. A real ``CodeReviewWorkflow`` execute + replay round-trip, driven by
+   ``temporalio.testing.WorkflowEnvironment``'s embedded time-skipping test
+   server (no live/deployed Temporal server needed) — see
+   ``test_workflow_executes_and_replays_without_non_determinism`` near the
+   bottom of this file. It is marked ``integration`` (run with
+   ``-m integration``) since standing up the embedded server is heavier than
+   this file's other pure-Python tests.
 """
 
 from __future__ import annotations
@@ -163,6 +166,14 @@ def test_review_prep_dto_round_trips() -> None:
     assert reloaded.chunks == []
 
 
+def test_review_prep_dto_fanout_width_round_trips() -> None:
+    dto = pm.ReviewPrepDTO(fanout_width=5)
+    reloaded = pm.ReviewPrepDTO.model_validate(dto.model_dump(mode="json"))
+    assert reloaded.fanout_width == 5
+    # Default matches the sequential-safe floor when a caller doesn't set it.
+    assert pm.ReviewPrepDTO().fanout_width == 1
+
+
 # ---------------------------------------------------------------------------
 # 3. Activity pipeline == coordinator verdict (durable path is identical)
 # ---------------------------------------------------------------------------
@@ -200,10 +211,14 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
     has_architecture_findings = bool(architecture_findings)
     if architecture_findings:
         verified = [*verified, *architecture_findings]
+    side_effect_findings = A.find_side_effect_impact_activity(payload)
+    has_side_effect_findings = bool(side_effect_findings)
+    if side_effect_findings:
+        verified = [*verified, *side_effect_findings]
     gate = A.finalize_review_activity(
         verified, not_reviewed, prep["skipped_issues"], approved_flags
     )
-    if len(summaries) == 1 and not has_architecture_findings:
+    if len(summaries) == 1 and not has_architecture_findings and not has_side_effect_findings:
         summary, notes = summaries[0], (spec_notes[0] if spec_notes else "")
     else:
         synth = A.synthesize_findings_activity(
@@ -249,6 +264,7 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
 
     prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
     assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
+    assert prep["fanout_width"] == cfg.resolve_temporal_fanout_width(len(prep["chunks"]))
 
     coordinator_out = run_coordinator(DummyLLMClient(), review_input)
     pipeline_out = _run_activity_pipeline(review_input)
@@ -263,6 +279,17 @@ def test_prepare_activity_reports_no_code_for_empty_files() -> None:
 
     prep = A.prepare_review_activity(_input(code="").model_dump(mode="json"))
     assert prep["no_code"] is True
+
+
+def test_prepare_activity_single_chunk_fanout_width_is_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_review_agent.temporal import activities as A
+
+    monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    prep = A.prepare_review_activity(_input().model_dump(mode="json"))
+    assert prep["single_chunk"] is True
+    assert prep["fanout_width"] == 1
 
 
 def test_prepare_activity_compacts_architecture_overview() -> None:
@@ -853,6 +880,72 @@ def test_worker_max_concurrent_activities_env_parsing(
     assert worker_mod._max_concurrent_activities() == expected
 
 
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [
+        (None, 8),
+        ("16", 16),
+        ("0", 1),
+        ("-5", 1),
+        ("not-a-number", 8),
+    ],
+)
+def test_worker_max_concurrent_activities_delegates_to_config(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
+) -> None:
+    """``worker._max_concurrent_activities`` must track
+    ``config.resolve_max_concurrent_activities`` exactly -- it's a thin
+    delegation, not an independent implementation, so both must agree on every
+    env-parsing edge case."""
+    from code_review_agent.temporal import worker as worker_mod
+
+    if env_value is None:
+        monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    else:
+        monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", env_value)
+
+    assert cfg.resolve_max_concurrent_activities() == expected
+    assert worker_mod._max_concurrent_activities() == cfg.resolve_max_concurrent_activities()
+
+
+# ---------------------------------------------------------------------------
+# 5b. Per-review adaptive Temporal fan-out width
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env_value, chunk_count, expected",
+    [
+        (None, 3, 3),  # small review: never requests more than it has chunks
+        (None, 1, 1),
+        (None, 0, 1),  # defensive floor: never zero or negative
+        (None, 40, 8),  # large review (telemetry's ~20-50-chunk band): capped
+        # at the default worker capacity -- cannot exceed validated capacity,
+        # so this cannot regress the 4->8 timeout incident.
+        ("20", 40, 20),  # raising the ceiling raises the per-review cap too
+        ("20", 5, 5),  # ...but a small review still only takes what it needs
+        ("not-a-number", 40, 8),  # garbage ceiling falls back to the default
+    ],
+)
+def test_resolve_temporal_fanout_width_scales_with_chunk_count(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, chunk_count: int, expected: int
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    else:
+        monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", env_value)
+
+    assert cfg.resolve_temporal_fanout_width(chunk_count) == expected
+
+
+def test_resolve_temporal_fanout_width_never_exceeds_worker_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", "8")
+    for chunk_count in (1, 5, 8, 9, 40, 540):
+        assert cfg.resolve_temporal_fanout_width(chunk_count) <= 8
+
+
 def test_worker_start_delegates_to_start_team_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """When enabled, the boot hook delegates to ``start_team_worker`` with the
     resolved concurrency ceiling instead of the shared framework's 4-slot
@@ -919,3 +1012,83 @@ def test_worker_start_defaults_temporal_address_when_unset(
 
     assert worker_mod.start_code_review_temporal_worker_thread() is True
     assert os.environ["TEMPORAL_ADDRESS"] == "resolved:7233"
+
+
+# ---------------------------------------------------------------------------
+# 6. Live workflow execute + replay (WorkflowEnvironment)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_executes_and_replays_without_non_determinism() -> None:
+    """Execute ``CodeReviewWorkflow`` end-to-end and replay its recorded history.
+
+    This is the baseline the issue asks for: a ``WorkflowEnvironment``-driven
+    execute + replay round-trip against today's sequential (pre-parallelization)
+    workflow, so a later change to the tail passes (architecture-consistency,
+    side-effect-impact) has a real replay-determinism guard instead of only the
+    activity-level orchestration replica ``_run_activity_pipeline`` exercises
+    above. Unlike that helper, this drives the actual ``CodeReviewWorkflow.run``
+    coroutine through a real Temporal worker and sandbox, so it is the one test
+    that would catch a ``workflow.patched`` ordering regression.
+
+    Uses the REAL activities (not hand-written fakes) against the ``dummy`` LLM
+    harness this suite already runs under (``tests/conftest.py`` sets
+    ``LLM_PROVIDER=dummy``), so prepare -> map -> verify -> gate -> narrative
+    executes for real, just fast and deterministically.
+
+    ``WorkflowEnvironment.start_time_skipping()`` downloads (and thereafter
+    caches) a small ephemeral test-server binary from ``temporal.download`` on
+    first use in an environment -- unlike an activity/worker connecting to a
+    deployed Temporal server, this needs one-time outbound network access, so
+    the test skips (rather than fails) when that download is unreachable (e.g.
+    a network-restricted sandbox), while still running for real wherever that
+    egress is allowed (a normal dev machine or CI runner).
+
+    Marked ``integration`` (run with ``-m integration``): standing up the
+    embedded test server is heavier than this file's other pure-Python tests,
+    matching this suite's existing convention for that marker.
+    """
+    import concurrent.futures
+
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-replay-test"
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[CodeReviewWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            async with worker:
+                result = await env.client.execute_workflow(
+                    CodeReviewWorkflow.run,
+                    review_input.model_dump(mode="json"),
+                    id=workflow_id,
+                    task_queue=TASK_QUEUE,
+                )
+
+            history = await env.client.get_workflow_handle(workflow_id).fetch_history()
+
+    # Sanity check: the durable path produced the same verdict shape the
+    # activity-level pipeline test above asserts against `run_coordinator`.
+    assert result["approved"] is True
+    assert result["summary"]
+
+    # The property this issue exists to guard: replaying the just-recorded
+    # history against the same workflow code must not raise a non-determinism
+    # error.
+    await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)

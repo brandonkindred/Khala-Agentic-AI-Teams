@@ -536,6 +536,14 @@ def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_pat
     cancelled (via the real _fail_activity) and returns a FAIL DTO; heartbeat stopped."""
     import importlib
 
+    # Force blog_writing_process_v2's first import (if not already loaded) before
+    # patching rpj._is_external_cancellation below. It does `from
+    # agents.blogging.shared.run_pipeline_job import _is_external_cancellation`,
+    # a name binding resolved once at import time; importing it while that name
+    # is monkeypatched would permanently poison v2's own binding for every test
+    # that runs afterward in this process, well past this test's teardown.
+    v2_mod = _v2()
+
     acts, _ = _patch_context(monkeypatch, tmp_path)
     rpj = importlib.import_module("agents.blogging.shared.run_pipeline_job")
     hb = _FakeHeartbeat()
@@ -548,7 +556,7 @@ def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_pat
     def boom(c):
         raise RuntimeError("wrapped cancel")
 
-    monkeypatch.setattr(_v2(), "run_planning_stage", boom)
+    monkeypatch.setattr(v2_mod, "run_planning_stage", boom)
     out = acts.plan_stage_activity("j1", {"brief": "x"})
     assert out["status"] == "FAIL"
     assert marked == {"job": "j1"}
