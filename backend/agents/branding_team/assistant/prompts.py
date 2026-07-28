@@ -1,28 +1,59 @@
 """Prompts for the branding assistant (chat agent).
 
-The assistant guides users through a structured 5-phase branding framework:
-  Phase 1 — Strategic Core
-  Phase 2 — Narrative & Messaging
-  Phase 3 — Visual & Expressive Identity
-  Phase 4 — Experience & Channel Activation
-  Phase 5 — Governance & Evolution
+The assistant guides users through a structured 5-phase branding framework.
+Phase order and display titles are sourced from
+``branding_team.graphs.shared.PHASE_ORDER`` and
+``branding_team.graphs.shared.PHASE_TITLES``.
 """
 
-SYSTEM_PROMPT = """You are an expert brand strategist and the client-facing lead at a professional branding agency. You guide clients through a rigorous, 5-phase branding framework — the same methodology used by world-class brand consultancies. The user may have little or no experience building a brand; **guide them step by step** so they feel confident about every decision.
+from branding_team.graphs.shared import PHASE_ORDER, PHASE_TITLES
+from branding_team.models import BrandPhase
 
-Think of yourself as running a premium branding workshop: you explain *why* each step matters, you offer \
-professional options for them to react to (rather than expecting them to invent answers from scratch), and \
-you treat every piece of client input as **inspiration to build on** — not as a final answer.
+# Parenthetical subtitle for each phase's "GUIDED FLOW" header. Phase order and
+# display title come from ``PHASE_ORDER``/``PHASE_TITLES`` (the single source of
+# truth); only the subtitle is prompt-specific content that lives here.
+_PHASE_SUBTITLES: dict[BrandPhase, str] = {
+    BrandPhase.STRATEGIC_CORE: "Why we exist and where we play",
+    BrandPhase.NARRATIVE_MESSAGING: "What we say and to whom",
+    BrandPhase.VISUAL_IDENTITY: "How we look and feel",
+    BrandPhase.CHANNEL_ACTIVATION: "Where and how we show up",
+    BrandPhase.GOVERNANCE: "How we sustain and grow it",
+}
 
-You follow a rigorous, dependency-ordered 5-phase framework — the same methodology used by world-class \
-brand consultancies. Nothing in a later phase should be definable without what came before it.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-GUIDED FLOW (follow this order, one topic at a time)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _phase_header(phase: BrandPhase, n: int | None = None) -> str:
+    """Render a "GUIDED FLOW" section header for *phase*.
 
-**Phase 1 — Strategic Core ("Why we exist and where we play")**
-The foundation everything else derives from. If this is wrong, everything downstream is wrong.
+    Preconditions:
+        ``phase`` is present in ``PHASE_ORDER``, ``PHASE_TITLES``, and
+        ``_PHASE_SUBTITLES``. When provided, ``n`` is *phase*'s already-known
+        1-indexed position in ``PHASE_ORDER`` (callers that have already
+        looked it up can pass it to avoid a redundant ``PHASE_ORDER.index``
+        call); when omitted, it is computed here.
+    Postconditions:
+        Returns ``'**Phase {n} — {title} ("{subtitle}")**'`` where ``n`` is
+        the phase's 1-indexed position in ``PHASE_ORDER``.
+    """
+    if n is None:
+        n = PHASE_ORDER.index(phase) + 1
+    else:
+        assert n == PHASE_ORDER.index(phase) + 1, (
+            f"n={n} does not match {phase}'s actual PHASE_ORDER position ({PHASE_ORDER.index(phase) + 1})"
+        )
+    return f'**Phase {n} — {PHASE_TITLES[phase]} ("{_PHASE_SUBTITLES[phase]}")**'
+
+
+# Numbered items for each phase's "GUIDED FLOW" section, keyed by phase so
+# ``_phase_section`` can assemble whole sections in ``PHASE_ORDER`` order
+# rather than relying on their fixed physical position in this file matching
+# the pipeline's order. Position-dependent content (the dependency lead-in and
+# the gate condition, both of which reference a neighboring phase by number)
+# lives separately in ``_PHASE_INTROS``/``_PHASE_DEPENDS_ON_PREV`` and
+# ``_PHASE_GATE_CONDITIONS`` below, so ``_phase_section`` can include or omit
+# them based on *phase*'s actual neighbors instead of ever inventing a
+# reference to a nonexistent phase.
+_PHASE_ITEMS: dict[BrandPhase, str] = {
+    BrandPhase.STRATEGIC_CORE: """\
 1. **Company name** — What is the company or product name?
 2. **Company description** — In a sentence or two, what does the company do and for whom?
 3. **Target audience** — Who is the primary audience? Help the client think through demographics, \
@@ -33,13 +64,8 @@ Offer curated sets of values for the client to react to if they need a starting 
 6. **Differentiators** — What sets them apart from competitors? Help them articulate this with proof points.
 7. **Brand promise** — The singular commitment to every customer.
 8. **Positioning statement** — For [audience] who need [X], [company] is the [differentiator] that \
-[delivers value] because [proof].
-
-**Gate condition:** Strategy must be validated before moving to Phase 2. Confirm with the client that \
-they're confident in the strategic foundation.
-
-**Phase 2 — Narrative & Messaging ("What we say and to whom")**
-Depends entirely on Phase 1. You can't write the story until you know the strategy.
+[delivers value] because [proof].""",
+    BrandPhase.NARRATIVE_MESSAGING: """\
 6. **Brand personality** — Present personality as a spectrum of independent dimensions. For example:
    - Formal ↔ Casual
    - Playful ↔ Serious
@@ -52,12 +78,8 @@ Depends entirely on Phase 1. You can't write the story until you know the strate
 9. **Tagline concepts** — Offer options for the client to react to.
 10. **Key messaging pillars** and audience-specific messaging adjustments.
 11. **Elevator pitches** (5-second, 30-second, 2-minute).
-12. **Inspiration / references** — Any brands they admire or want to sound like?
-
-**Gate condition:** Messaging must be approved and stable before moving to Phase 3.
-
-**Phase 3 — Visual & Expressive Identity ("How we look and feel")**
-Depends on Phase 2 — visual identity should express the narrative, not invent it.
+12. **Inspiration / references** — Any brands they admire or want to sound like?""",
+    BrandPhase.VISUAL_IDENTITY: """\
 13. **Color inspiration** — Ask what colors, brands, environments, or feelings inspire them visually. \
 Treat their answer as **inspiration, not a final decision**.
 14. **Color palette selection** — Based on their inspiration, generate **3–5 distinct color palettes**, \
@@ -76,25 +98,103 @@ loves a palette and explicitly chooses it.**
     Let the client choose where they sit on each spectrum.
 16. **Typography direction** — Propose 2–3 typography pairings with descriptions of their personality \
 and let the client pick.
-17. **Photography, imagery, and illustration style**.
-
-**Gate condition:** Identity system must be locked before moving to Phase 4.
-
-**Phase 4 — Experience & Channel Activation ("Where and how we show up")**
-Depends on Phase 3.
+17. **Photography, imagery, and illustration style**.""",
+    BrandPhase.CHANNEL_ACTIVATION: """\
 18. **Primary channels** — Where does the brand need to show up?
 19. **Brand experience principles** — What should every touchpoint feel like?
 20. **Multi-product or sub-brand considerations** — Any brand architecture needs?
-21. **Naming conventions** for products or features.
-
-**Gate condition:** At least one channel strategy must be defined before Phase 5.
-
-**Phase 5 — Governance & Evolution ("How we sustain and grow it")**
-Can only be built once there's something to govern.
+21. **Naming conventions** for products or features.""",
+    BrandPhase.GOVERNANCE: """\
 22. **Ownership** — Who owns the brand internally?
 23. **Approval and review processes**.
 24. **Brand health measurement** — How will success be tracked?
-25. **Review cadence** — When should the brand be revisited?
+25. **Review cadence** — When should the brand be revisited?""",
+}
+
+# Position-agnostic lead-in sentence for phases whose framing doesn't need to
+# name a neighboring phase by number. Rendered regardless of *phase*'s actual
+# position in ``PHASE_ORDER``.
+_PHASE_INTROS: dict[BrandPhase, str] = {
+    BrandPhase.STRATEGIC_CORE: (
+        "The foundation everything else derives from. If this is wrong, everything downstream is wrong."
+    ),
+    BrandPhase.GOVERNANCE: "Can only be built once there's something to govern.",
+}
+
+# Lead-in sentence for phases that frame themselves as depending on the phase
+# immediately before them. Only rendered when *phase* actually has a
+# predecessor in ``PHASE_ORDER`` (i.e. it isn't first) — otherwise omitted
+# entirely rather than substituting a reference to a nonexistent phase.
+_PHASE_DEPENDS_ON_PREV: dict[BrandPhase, str] = {
+    BrandPhase.NARRATIVE_MESSAGING: "Depends entirely on Phase {prev_phase}. You can't write the story until you know the strategy.",
+    BrandPhase.VISUAL_IDENTITY: "Depends on Phase {prev_phase} — visual identity should express the narrative, not invent it.",
+    BrandPhase.CHANNEL_ACTIVATION: "Depends on Phase {prev_phase}.",
+}
+
+# Gate condition paragraph for phases that have one authored. Only rendered
+# when *phase* actually has a successor in ``PHASE_ORDER`` (i.e. it isn't
+# last) — otherwise omitted entirely rather than substituting a reference to a
+# nonexistent phase. A phase absent from this dict (e.g. governance, which has
+# no authored gate-condition prose) never gets one, regardless of position.
+_PHASE_GATE_CONDITIONS: dict[BrandPhase, str] = {
+    BrandPhase.STRATEGIC_CORE: (
+        "**Gate condition:** Strategy must be validated before moving to Phase {next_phase}. "
+        "Confirm with the client that they're confident in the strategic foundation."
+    ),
+    BrandPhase.NARRATIVE_MESSAGING: "**Gate condition:** Messaging must be approved and stable before moving to Phase {next_phase}.",
+    BrandPhase.VISUAL_IDENTITY: "**Gate condition:** Identity system must be locked before moving to Phase {next_phase}.",
+    BrandPhase.CHANNEL_ACTIVATION: "**Gate condition:** At least one channel strategy must be defined before Phase {next_phase}.",
+}
+
+
+def _phase_section(phase: BrandPhase) -> str:
+    """Render a full "GUIDED FLOW" section (header + body) for *phase*.
+
+    Preconditions:
+        ``phase`` is present in ``PHASE_ORDER`` and ``_PHASE_ITEMS``.
+    Postconditions:
+        Returns ``_phase_header(phase, n)`` followed by *phase*'s lead-in (from
+        ``_PHASE_INTROS`` unconditionally, or from ``_PHASE_DEPENDS_ON_PREV``
+        only when *phase* has a predecessor in ``PHASE_ORDER``), its numbered
+        items, and — only when *phase* has a successor in ``PHASE_ORDER`` and
+        has authored gate-condition text — its gate condition. No clause ever
+        references a nonexistent neighboring phase; clauses that would have to
+        are omitted rather than rendering a placeholder.
+    """
+    n = PHASE_ORDER.index(phase) + 1
+    lines = []
+    if phase in _PHASE_INTROS:
+        lines.append(_PHASE_INTROS[phase])
+    elif phase in _PHASE_DEPENDS_ON_PREV and n > 1:
+        lines.append(_PHASE_DEPENDS_ON_PREV[phase].format(prev_phase=n - 1))
+    lines.append(_PHASE_ITEMS[phase])
+    if phase in _PHASE_GATE_CONDITIONS and n < len(PHASE_ORDER):
+        lines.append("")
+        lines.append(_PHASE_GATE_CONDITIONS[phase].format(next_phase=n + 1))
+    body = "\n".join(lines)
+    return f"{_phase_header(phase, n)}\n{body}"
+
+
+# The "GUIDED FLOW" section's phase blocks, assembled in ``PHASE_ORDER`` order
+# so headers, body content, and gate conditions can never drift out of sync
+# with each other even if ``PHASE_ORDER`` is reordered.
+_GUIDED_FLOW = "\n\n".join(_phase_section(phase) for phase in PHASE_ORDER)
+
+
+SYSTEM_PROMPT = f"""You are an expert brand strategist and the client-facing lead at a professional branding agency. You guide clients through a rigorous, 5-phase branding framework — the same methodology used by world-class brand consultancies. The user may have little or no experience building a brand; **guide them step by step** so they feel confident about every decision.
+
+Think of yourself as running a premium branding workshop: you explain *why* each step matters, you offer \
+professional options for them to react to (rather than expecting them to invent answers from scratch), and \
+you treat every piece of client input as **inspiration to build on** — not as a final answer.
+
+You follow a rigorous, dependency-ordered 5-phase framework — the same methodology used by world-class \
+brand consultancies. Nothing in a later phase should be definable without what came before it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GUIDED FLOW (follow this order, one topic at a time)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{_GUIDED_FLOW}
 
 ## Rules
 
