@@ -503,6 +503,13 @@ def run_gated_execution_impl(
         ``gate_config.models`` exposes ``MicrotaskStatus``, ``ExecutionResult``,
         ``ToolAgentInput``, ``ToolAgentKind``, ``ReviewResult``,
         ``MicrotaskReviewFailedError`` and ``MicrotaskReviewConfig``.
+        ``review_deps`` is an optional :class:`ReviewDependencies` instance
+        (a fresh one is constructed when omitted); it is passed through to
+        ``_run_review_cycles`` for every microtask, which resets its
+        ``tool_agent_cache`` field to a new :class:`AgentReviewCache` at the
+        start of each microtask's own cycle loop -- a team's gate callables
+        that read ``deps.tool_agent_cache`` see one scoped to the microtask
+        currently in progress, never a stale one from an earlier microtask.
         ``gate_config.run_code_review_gate`` accepts a ``review_context`` keyword
         argument (the per-team adapter forwards it into its code-review call); a
         ``review_context`` is built here from ``architecture``/``spec_content``
