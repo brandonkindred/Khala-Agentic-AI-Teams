@@ -16,6 +16,7 @@ from .models import (
     IntakeResult,
     Phase,
     PlanningResult,
+    ReviewResult,
     ToolAgentInput,
     ToolAgentKind,
     ToolAgentOutput,
@@ -103,6 +104,17 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
         spec_content: str = "",
         job_updater: Optional[Callable[..., None]] = None,
     ) -> AIAgentDevelopmentWorkflowResult:
+        """Run the full AI-agent development workflow for a task.
+
+        Preconditions: ``task.id`` is set; ``repo_path`` points to an existing
+          repository root when execution needs to read source files.
+        Postconditions: returns an ``AIAgentDevelopmentWorkflowResult`` whose
+          ``success``, ``current_phase``, ``failure_reason``, ``summary``, and
+          phase results are populated. Trace events are appended to
+          ``result.trace`` and, when ``job_updater`` is provided, forwarded to it.
+          Exceptions are caught and recorded in the result with
+          ``needs_followup=True``.
+        """
         result = AIAgentDevelopmentWorkflowResult(task_id=task.id, current_phase=Phase.INTAKE)
 
         def _trace(phase: Phase, message: str) -> None:
@@ -166,7 +178,7 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
             )
             result.execution_result = execution
 
-            def _attempt_review_cycle(i: int):
+            def _attempt_review_cycle(i: int) -> Optional[ReviewResult]:
                 """One review/problem-solving iteration for ``_run_bounded_retry_loop``.
 
                 Preconditions: ``execution`` (nonlocal) holds the current
@@ -178,9 +190,11 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                   ``ReviewResult`` when problem-solving resolved the issues
                   (and mutates ``execution.files``/``.summary`` in place so
                   the next iteration re-reviews the patched files); returns
-                  ``None`` (abort signal) when problem-solving could not
-                  resolve the issues, after populating ``result.failure_reason``,
-                  ``result.summary``, and ``result.needs_followup``.
+                  ``None`` (abort signal for ``_run_bounded_retry_loop``; the
+                  helper only invokes ``is_success`` on non-``None`` values)
+                  when problem-solving could not resolve the issues, after
+                  populating ``result.failure_reason``, ``result.summary``, and
+                  ``result.needs_followup``.
                 """
                 iteration = i + 1
                 result.current_phase = Phase.REVIEW
@@ -209,6 +223,8 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                 execution.summary = f"{execution.summary} | {problem_solving.summary}"
                 return review
 
+            # ``None`` from attempt is the explicit abort signal;
+            # ``is_success`` is only invoked on non-``None`` values.
             succeeded, _final_review = self._run_bounded_retry_loop(
                 max_iterations=MAX_REVIEW_ITERATIONS,
                 attempt=_attempt_review_cycle,
