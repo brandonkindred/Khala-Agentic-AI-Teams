@@ -3,12 +3,19 @@
 ``complete_json_via_reasoning`` and ``complete_validated_via_reasoning`` each
 sequence a think=True prose reasoning call (``client.complete``) followed by a
 think=False JSON transcription call (``client.complete_json`` /
-``complete_validated``). These tests lock in the contract the six migrated
-call sites depend on: which parameter feeds which pass (notably the
-``reasoning_temperature`` / ``temperature`` split, whose misbinding is easy to
-reintroduce), that the reasoning prose actually reaches the formatting prompt,
-that ``**kwargs`` (e.g. provider-enforced ``schema=``) route to the formatting
-call only, and that a step-1 failure propagates without invoking step 2.
+``complete_validated``). These tests lock in the contract the migrated call
+sites depend on — ``agent_cognition/rules/reflection.py``,
+``sales_team``'s outreach/proposal critics and ``learning_engine.py``,
+``job_matching_team/agents/ranker.py``, ``soc2_compliance_team/agents.py``'s
+TSC-audit/report/next-steps helpers, and ``deepthought/agent.py`` — namely:
+which parameter feeds which pass (notably the ``reasoning_temperature`` /
+``temperature`` split, whose misbinding is easy to reintroduce), that the
+reasoning prose actually reaches the formatting prompt, that ``**kwargs``
+(e.g. provider-enforced ``schema=``) route to the formatting call only, and
+that a step-1 failure propagates without invoking step 2. Note:
+``investment_team/strategy_lab`` uses its own, separate two-call envelope
+(``_structured_output.invoke_structured_with_schema``) and is not covered by
+these two helpers.
 """
 
 from __future__ import annotations

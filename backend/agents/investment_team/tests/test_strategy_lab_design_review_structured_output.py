@@ -59,7 +59,7 @@ def _spec() -> StrategySpec:
     )
 
 
-_READY = {"ready": True, "rationale": "spec is implementable", "issues": []}
+_SAMPLE_CRITIQUE_RESULT = {"ready": True, "rationale": "spec is implementable", "issues": []}
 
 
 class _ScriptedAgent:
@@ -79,32 +79,52 @@ class _StubClient:
     """Backing ``LLMClient`` stand-in that records every ``complete()``
     (reasoning pass) and ``complete_json()`` (formatting pass) call."""
 
+    _REASONING_PROSE = "reasoning prose"
+
     def __init__(self, result: Dict[str, Any]) -> None:
         self._result = result
         self.calls: List[Dict[str, Any]] = []
         self.reasoning_calls: List[Dict[str, Any]] = []
+        # Records "reasoning" / "formatting" in actual call order, so tests
+        # can assert the reasoning pass ran strictly before the formatting
+        # pass (not just that both ran once).
+        self.call_order: List[str] = []
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
         # invoke_structured_with_schema's think=True reasoning pass, run
         # before the schema-conformant complete_json call below.
+        self.call_order.append("reasoning")
         self.reasoning_calls.append({"prompt": prompt, **kwargs})
-        return "reasoning prose"
+        return self._REASONING_PROSE
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        self.call_order.append("formatting")
         self.calls.append({"prompt": prompt, **kwargs})
         return self._result
 
 
 class _FailingClient:
-    """Backing client stand-in whose ``complete_json`` always raises."""
+    """Backing client stand-in whose ``complete_json`` always raises.
+
+    ``budget``, when set by the test, lets the client snapshot
+    ``budget.calls_made`` at the moment ``complete_json`` runs — proving the
+    structured attempt's two up-front pre-charges landed before the
+    (failing) formatting call, not after.
+    """
 
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
+        self.budget: Any = None
+        self.calls_made_at_formatting_call: int | None = None
+        self.reasoning_ran = False
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
+        self.reasoning_ran = True
         return "reasoning prose"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        if self.budget is not None:
+            self.calls_made_at_formatting_call = self.budget.calls_made
         raise self._exc
 
 
@@ -127,7 +147,7 @@ def _raise_if_agent_built(**_kwargs: Any) -> Any:
 
 
 def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    stub_client = _StubClient(dict(_READY))
+    stub_client = _StubClient(dict(_SAMPLE_CRITIQUE_RESULT))
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
         so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client)
@@ -140,6 +160,10 @@ def test_structured_path_used_when_available_happy_path(monkeypatch: pytest.Monk
     assert critique.rationale == "spec is implementable"
     assert len(stub_client.calls) == 1
     assert len(stub_client.reasoning_calls) == 1
+    # The reasoning pass runs strictly before the formatting pass, and the
+    # formatting call receives the reasoning prose in its prompt.
+    assert stub_client.call_order == ["reasoning", "formatting"]
+    assert stub_client._REASONING_PROSE in stub_client.calls[0]["prompt"]
 
 
 def test_structured_success_logs_outcome_succeeded(
@@ -147,7 +171,7 @@ def test_structured_success_logs_outcome_succeeded(
 ) -> None:
     """The design-review happy path emits an INFO ``outcome=succeeded`` marker
     so the resend-free path is observable in production logs."""
-    stub_client = _StubClient(dict(_READY))
+    stub_client = _StubClient(dict(_SAMPLE_CRITIQUE_RESULT))
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
         so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client)
@@ -165,7 +189,7 @@ def test_structured_success_logs_outcome_succeeded(
 
 
 def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
-    stub_client = _StubClient(dict(_READY))
+    stub_client = _StubClient(dict(_SAMPLE_CRITIQUE_RESULT))
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
         so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(stub_client)
@@ -179,6 +203,9 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     assert call["schema"] == CRITIQUE_SCHEMA
     assert call["system_prompt"] == design_review_mod._SYSTEM_PROMPT
     assert "Review the strategy specification below" in call["prompt"]
+    # Formatting pass: thinking off, deterministic (temperature 0.0).
+    assert call["think"] is False
+    assert call["temperature"] == 0.0
 
     # The reasoning pass is where this prompt is actually reviewed — the
     # formatting call above only re-embeds the same user_prompt alongside the
@@ -192,6 +219,11 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     # JSON instead of prose, defeating the two-call split.
     assert reasoning_call["system_prompt"] == design_review_mod._SYSTEM_PROMPT + so_mod.REASONING_MODE_SUFFIX
     assert reasoning_call["prompt"].endswith(so_mod._REASONING_USER_PROMPT_SUFFIX)
+    # Reasoning pass: thinking on, with the (higher, more exploratory)
+    # reasoning-specific temperature — distinct from the formatting pass.
+    assert reasoning_call["think"] is True
+    assert reasoning_call["temperature"] == so_mod._DEFAULT_REASONING_TEMPERATURE
+    assert reasoning_call["temperature"] != call["temperature"]
 
 
 def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,7 +244,7 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
         captured["agent_key"] = agent_key
         captured["phase"] = phase
         captured["charge"] = charge
-        return dict(_READY)
+        return dict(_SAMPLE_CRITIQUE_RESULT)
 
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(
@@ -220,13 +252,20 @@ def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) 
     )
     monkeypatch.setattr(so_mod, "run_structured_agent", _fake_run_structured_agent)
 
-    DesignReviewAgent().run(_spec(), readiness_results=[])
+    budget = LLMCallBudget(limit=10)
+    with use_budget(budget):
+        DesignReviewAgent().run(_spec(), readiness_results=[])
 
     assert captured["agent_key"] == "strategy_design_review"
     assert captured["phase"] == "design_review_structured"
     # Charging happens once per round via `charge_active_budget()` in `run()`,
     # not inside `_invoke_structured` — unlike DesignAgent's per-attempt loop.
     assert captured["charge"] is False
+    # `run()` charges externally, TWICE, for the structured path (one unit
+    # per provider call `invoke_structured_with_schema` makes) — confirm the
+    # external double-charge actually happened, not just that `charge=False`
+    # was forwarded to `run_structured_agent`.
+    assert budget.calls_made == 2
 
 
 # ---------------------------------------------------------------------------
@@ -239,14 +278,27 @@ def test_real_bedrock_provider_degrades_to_legacy_call(monkeypatch: pytest.Monke
     wiring — not just the ``_structured_output_available`` seam — routes to
     the legacy call for a provider without the capability."""
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+
+    def _raise_if_structured_invoked(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError(
+            "invoke_structured_with_schema must not run for a provider that doesn't "
+            "support structured output"
+        )
+
+    monkeypatch.setattr(so_mod, "invoke_structured_with_schema", _raise_if_structured_invoked)
     agent = _ScriptedAgent(['{"ready": true, "rationale": "spec is implementable", "issues": []}'])
     monkeypatch.setattr(design_review_mod, "get_strands_model", lambda *_a, **_k: object())
     monkeypatch.setattr(design_review_mod, "Agent", lambda **_k: agent)
 
-    critique = DesignReviewAgent().run(_spec(), readiness_results=[])
+    budget = LLMCallBudget(limit=10)
+    with use_budget(budget):
+        critique = DesignReviewAgent().run(_spec(), readiness_results=[])
 
     assert critique.ready is True
     assert agent.calls == 1
+    # No structured-path provider call or pre-charge on this path — only the
+    # legacy call's single charge.
+    assert budget.calls_made == 1
 
 
 # ---------------------------------------------------------------------------
@@ -270,14 +322,24 @@ def test_schema_forced_starvation_degrades_to_legacy_call_and_succeeds(
 
     logger_name = "investment_team.strategy_lab.agents.design_review"
     budget = LLMCallBudget(limit=10)
+    starved_client.budget = budget
     with caplog.at_level(logging.WARNING, logger=logger_name):
         with use_budget(budget):
             critique = DesignReviewAgent().run(_spec(), readiness_results=[])
 
     assert critique.ready is True
+    # The reasoning call succeeded (returned prose) before the schema_forced
+    # formatting call raised — this is a formatting-pass starvation, not a
+    # reasoning-pass one.
+    assert starved_client.reasoning_ran is True
     assert agent.calls == 1
     starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
     assert len(starvation_warnings) == 1
+    # Both of the structured attempt's up-front pre-charges (reasoning +
+    # formatting units) already landed by the time the (failing) formatting
+    # call runs — proving they happen before either provider call, not
+    # interleaved with them.
+    assert starved_client.calls_made_at_formatting_call == 2
     # 3 real provider calls happen on this path (the structured attempt's
     # reasoning + formatting calls, then the legacy fallback's single call) —
     # all 3 must be charged against the per-cycle budget, not just the 2
@@ -295,7 +357,13 @@ def test_reasoning_pass_starvation_also_degrades_to_legacy_call(
     is never reached."""
 
     class _ReasoningStarvingClient:
+        def __init__(self) -> None:
+            self.budget: Any = None
+            self.calls_made_at_reasoning_call: int | None = None
+
         def complete(self, prompt: str, **kwargs: Any) -> str:
+            if self.budget is not None:
+                self.calls_made_at_reasoning_call = self.budget.calls_made
             raise LLMSemanticExhaustionError(
                 "reasoning starved", schema_forced=False, attempts_used=1
             )
@@ -314,6 +382,7 @@ def test_reasoning_pass_starvation_also_degrades_to_legacy_call(
 
     logger_name = "investment_team.strategy_lab.agents.design_review"
     budget = LLMCallBudget(limit=10)
+    starved_client.budget = budget
     with caplog.at_level(logging.WARNING, logger=logger_name):
         with use_budget(budget):
             critique = DesignReviewAgent().run(_spec(), readiness_results=[])
@@ -322,6 +391,10 @@ def test_reasoning_pass_starvation_also_degrades_to_legacy_call(
     assert agent.calls == 1
     starvation_warnings = [r for r in caplog.records if "design-review decode starved" in r.message]
     assert len(starvation_warnings) == 1
+    # Both of the structured attempt's up-front pre-charges already landed by
+    # the time the (failing) reasoning call runs — proving they happen before
+    # either provider call, not interleaved with them.
+    assert starved_client.calls_made_at_reasoning_call == 2
     # Same accounting as the formatting-pass starvation test: 2 pre-charged
     # for the structured attempt (reasoning + formatting units, even though
     # the formatting call itself never ran) plus 1 for the legacy fallback.

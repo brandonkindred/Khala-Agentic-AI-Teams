@@ -393,7 +393,7 @@ def test_structured_success_logs_outcome_succeeded(
     assert "failure_phase=execution" in succeeded[0].message
 
 
-def test_structured_path_issues_fewer_calls_than_fallback(
+def test_structured_path_needs_no_correction_resend_unlike_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Measurable-reduction evidence for the parent structured-output work.
@@ -458,5 +458,9 @@ def test_structured_path_issues_fewer_calls_than_fallback(
     assert fallback_calls == 2
     assert fallback_corrections == 1
 
-    # The structured path is strictly cheaper for the same failure sequence.
+    # Formatting-pass-only calls are fewer (1 vs 2) because the structured
+    # path never needs a correction resend — NOT because its total real
+    # provider-call count is lower (it isn't: 2 either way, once the
+    # reasoning pass is counted on the structured side). See the docstring
+    # above for the accurate accounting.
     assert structured_calls < fallback_calls

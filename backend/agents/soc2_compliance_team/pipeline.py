@@ -11,8 +11,10 @@ job-store or transport concerns. Two thin drivers share these functions:
   which wrap one function per ``@activity.defn`` and fan out across the workflow.
 
 Each step reuses the class-based agents in :mod:`soc2_compliance_team.agents`
-(one clean ``llm.complete_json`` call each) and resolves its LLM client from the
-central provider list via ``get_client("soc2")``.
+(each makes two sequential LLM calls via ``complete_json_via_reasoning`` — a
+prose reasoning pass with ``think=True`` followed by a JSON formatting pass
+with ``think=False`` — rather than one clean ``llm.complete_json`` call) and
+resolves its LLM client from the central provider list via ``get_client("soc2")``.
 
 Invariants:
     - Functions here never mutate their inputs and never touch the job store.

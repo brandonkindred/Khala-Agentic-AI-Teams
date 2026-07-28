@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from deepthought.models import DecompositionStrategy, DeepthoughtRequest
 from deepthought.orchestrator import DeepthoughtOrchestrator
 from deepthought.result_cache import ResultCache
+from llm_service.interface import LLMClient
 
 
 def _make_orchestrator(mock_llm, budget=50, cache=None):
@@ -71,8 +72,8 @@ def test_simple_direct_answer():
     assert len(resp.events) >= 1
 
 
-def test_one_level_decomposition_with_deliberation():
-    """Orchestrator decomposes and synthesises (deliberation skipped: 1 child < 2 threshold)."""
+def test_one_level_decomposition_skips_deliberation_for_single_child():
+    """Orchestrator decomposes and synthesises, skipping deliberation (1 child < 2 threshold)."""
     llm = MagicMock()
     llm.complete_json.side_effect = [
         # Root analysis
@@ -422,6 +423,7 @@ def test_default_llm_exposes_complete_and_complete_json(monkeypatch):
     """
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     orch = DeepthoughtOrchestrator()
+    assert isinstance(orch._llm, LLMClient)
     assert callable(orch._llm.complete)
     assert callable(orch._llm.complete_json)
     # The dummy client must actually answer, not raise.

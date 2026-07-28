@@ -324,6 +324,9 @@ def test_retire_known_target_builds_proposal_without_proposed_rule(
     )
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass
+    # (no compaction — the default input budget is not exceeded here).
+    assert report.llm_calls == 2
     (proposal,) = created
     assert proposal.action == ProposalAction.RETIRE
     assert proposal.target_rule_id == "r1"
@@ -351,6 +354,9 @@ def test_amend_requires_active_target_and_text(monkeypatch: pytest.MonkeyPatch) 
     )
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1 and report.dropped_invalid == 2
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass
+    # (a single reflect() call, regardless of how many proposals it yields).
+    assert report.llm_calls == 2
     (proposal,) = created
     assert proposal.action == ProposalAction.AMEND and proposal.target_rule_id == "r1"
     assert (
@@ -369,6 +375,8 @@ def test_amend_enforced_rule_inherits_mode_and_predicate(monkeypatch: pytest.Mon
     )
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass.
+    assert report.llm_calls == 2
     pr = created[0].proposed_rule
     # Mode/predicate/priority inherited → the enforced guardrail is preserved,
     # not silently downgraded to advisory or dropped for a missing predicate.
@@ -386,6 +394,8 @@ def test_amend_can_change_priority_without_being_noop(monkeypatch: pytest.Monkey
     report = reflection.reflect("a", _NOW)
     # A real priority change is not a no-op → reaches review.
     assert report.proposed == 1 and report.deduped == 0
+    # 2 model calls: the proposal's reasoning pass + JSON formatting pass.
+    assert report.llm_calls == 2
     assert created[0].proposed_rule["priority"] == 7
 
 
@@ -608,7 +618,12 @@ def test_llm_calls_counts_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report.proposed == 1 and len(created) == 1
     # 1 compaction call (input over budget) + the proposal call's reasoning
     # pass (.complete) + formatting pass (.complete_json).
-    assert report.llm_calls == 3 and canned.text_calls
+    # 3 total model calls: compact_text's one text (complete) call, plus the
+    # proposal's reasoning pass (complete, think=True) and formatting pass
+    # (complete_json, think=False) from complete_validated_via_reasoning.
+    assert report.llm_calls == 3
+    assert len(canned.text_calls) == 2
+    assert len(canned.json_calls) == 1
 
 
 def test_priority_out_of_int32_range_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:

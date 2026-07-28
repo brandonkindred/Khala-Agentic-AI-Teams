@@ -107,7 +107,13 @@ class CannedLLMClient(LLMClient):
         # ``self._responses`` keep tracking only the complete_json calls these tests assert on.
         # ``reasoning_calls`` records this pass separately for tests that verify it ran.
         self.reasoning_calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "think": think, "temperature": temperature}
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "temperature": temperature,
+                "objective": objective,
+            }
         )
         return "Reasoning: proceeding as configured by the test fixture."
 
@@ -119,10 +125,17 @@ class CannedLLMClient(LLMClient):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: bool = False,
+        objective: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         self.calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "temperature": temperature, "think": think}
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "temperature": temperature,
+                "think": think,
+                "objective": objective,
+            }
         )
         if not self._responses:
             raise AssertionError(

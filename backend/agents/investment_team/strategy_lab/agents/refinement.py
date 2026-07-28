@@ -248,7 +248,7 @@ class RefinementAgent:
                     charge=True,
                     objective="strategy refinement (structured)",
                     logger=logger,
-                    reasoning_system_prompt=system_prompt + so.REASONING_MODE_SUFFIX,
+                    reasoning_system_prompt=so.build_reasoning_system_prompt(system_prompt),
                 )
             except StrategyLabLLMError as exc:
                 cause = exc.cause

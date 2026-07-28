@@ -79,6 +79,23 @@ re-asserts the prose requirement last, where the conflicting directive
 would otherwise win."""
 
 
+def build_reasoning_system_prompt(base_system_prompt: str) -> str:
+    """Build the reasoning-pass system prompt from a call site's base system prompt.
+
+    Centralizes the ``base_system_prompt + REASONING_MODE_SUFFIX`` concatenation
+    so all four call sites (``design.py`` x2, ``design_review.py``,
+    ``refinement.py``) apply the exact same transformation, and so a future
+    change to how the suffix is combined (e.g. a separator, or a
+    replace-rather-than-append policy) only needs to change here.
+
+    Preconditions: ``base_system_prompt`` is a non-empty string.
+    Postconditions: returns ``base_system_prompt`` with :data:`REASONING_MODE_SUFFIX`
+    appended — suitable for :func:`invoke_structured_with_schema`'s
+    ``reasoning_system_prompt`` argument. Pure string concatenation; never raises.
+    """
+    return base_system_prompt + REASONING_MODE_SUFFIX
+
+
 def structured_output_available() -> bool:
     """Whether the active LLM provider supports provider-enforced schema-conformant decoding.
 
@@ -144,18 +161,28 @@ def invoke_structured_with_schema(
     ``system_prompt`` / ``user_prompt`` / ``phase`` / ``objective`` /
     ``reasoning_system_prompt`` are non-empty strings; ``schema`` is a
     non-empty mapping.
-    Postconditions: returns the parsed JSON dict on success. Any exception
-    either pass raises propagates out of ``_call`` and is wrapped by
-    :func:`run_structured_agent`'s envelope as
-    :class:`~..exceptions.StrategyLabLLMError` (``.cause`` is the original).
-    When either pass starves with :class:`~llm_service.interface.LLMSemanticExhaustionError`,
-    ``.cause`` carries it with ``schema_forced=True`` — a reasoning-pass
-    starvation is re-raised as a **new** receipt with that flag set (the
-    original preserved as its own ``.cause``) so it degrades identically to a
-    formatting-pass starvation; before this split only the formatting call
-    could produce this signal. ``ValueError`` (also wrapped in
-    ``StrategyLabLLMError``) when :func:`extract_json_object` cannot recover a
-    balanced JSON object from the response.
+    Postconditions: returns the parsed JSON dict on success. Whatever
+    propagates out of ``_call`` — the exception either pass raised directly,
+    or (see below) the new receipt substituted for a reasoning-pass
+    starvation — is wrapped by :func:`run_structured_agent`'s envelope as
+    :class:`~..exceptions.StrategyLabLLMError`, whose ``.cause`` is exactly
+    that propagated exception. For most exceptions, and for a
+    formatting-pass :class:`~llm_service.interface.LLMSemanticExhaustionError`
+    (already ``schema_forced=True`` natively — the formatting call is
+    schema-constrained, so a starvation there is never re-wrapped),
+    ``StrategyLabLLMError.cause`` IS that original exception. For a
+    reasoning-pass ``LLMSemanticExhaustionError`` specifically — the
+    reasoning call is unconstrained, so the client raises it with
+    ``schema_forced=False`` — ``_call`` catches it and raises a **new**
+    receipt with ``schema_forced=True`` in its place (see the comment at its
+    catch site), so ``StrategyLabLLMError.cause`` is that new receipt, and
+    the original starvation exception is one level deeper, at
+    ``StrategyLabLLMError.cause.cause``. Either way, callers' degrade gate —
+    ``isinstance(exc.cause, LLMSemanticExhaustionError) and exc.cause.schema_forced``
+    — sees ``schema_forced=True`` for both pass's starvations, by
+    construction. ``ValueError`` (also wrapped in ``StrategyLabLLMError``)
+    when :func:`extract_json_object` cannot recover a balanced JSON object
+    from the response.
     """
     if not structured_output_available():
         raise ValueError(

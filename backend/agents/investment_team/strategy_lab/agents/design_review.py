@@ -536,7 +536,7 @@ class DesignReviewAgent:
                         charge=False,
                         objective="strategy design review (structured)",
                         logger=logger,
-                        reasoning_system_prompt=_SYSTEM_PROMPT + so.REASONING_MODE_SUFFIX,
+                        reasoning_system_prompt=so.build_reasoning_system_prompt(_SYSTEM_PROMPT),
                     )
                 except StrategyLabLLMError as exc:
                     cause = exc.cause

@@ -482,7 +482,23 @@ class DesignAgent:
         availability; only the unparseable-JSON
         (``build_json_correction_prompt``) resend is eliminated on the
         structured happy path.
+
+        Timeout/retry tradeoff: ``so.invoke_structured_with_schema`` keeps
+        both of its sub-calls (reasoning then formatting) under the SAME
+        single charge/timeout/retry envelope as the pre-split single call —
+        a transport-level retry re-runs both sub-calls together, not just
+        the one that (may have) failed. This is a deliberate tradeoff to
+        keep the existing envelope plumbing untouched rather than threading
+        two independent retry budgets through it; see that function's own
+        docstring for the timeout-doubling math this implies.
         """
+        # ``user_prompt`` (built from ``_DESIGN_USER_TEMPLATE``) ends with a
+        # "Return ONLY a JSON object" directive that would otherwise outrank
+        # the reasoning-pass system prompt's prose-only instruction. That
+        # conflict is resolved centrally, not here: ``invoke_structured_with_schema``
+        # appends ``_REASONING_USER_PROMPT_SUFFIX`` to this same ``user_prompt``
+        # for its internal reasoning-pass call only, re-asserting prose-only
+        # last (see that constant's docstring in ``_structured_output.py``).
         try:
             parsed = so.invoke_structured_with_schema(
                 "strategy_design",
@@ -493,7 +509,7 @@ class DesignAgent:
                 charge=True,
                 objective="strategy design (structured)",
                 logger=logger,
-                reasoning_system_prompt=system_prompt + so.REASONING_MODE_SUFFIX,
+                reasoning_system_prompt=so.build_reasoning_system_prompt(system_prompt),
             )
         except StrategyLabLLMError as exc:
             cause = exc.cause
@@ -768,8 +784,8 @@ class DesignAgent:
                     charge=True,
                     objective="strategy design review (structured)",
                     logger=logger,
-                    reasoning_system_prompt=(
-                        _get_self_review_system_prompt() + so.REASONING_MODE_SUFFIX
+                    reasoning_system_prompt=so.build_reasoning_system_prompt(
+                        _get_self_review_system_prompt()
                     ),
                 )
             except StrategyLabLLMError as exc:

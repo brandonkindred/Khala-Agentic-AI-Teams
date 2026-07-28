@@ -451,6 +451,9 @@ def test_conversation_history_in_prompt(root_spec, mock_llm):
     assert "Mars is the 4th planet." not in format_input
     assert "User: Tell me about Mars" not in format_input
     assert "Assistant: Mars is the 4th planet." not in format_input
+    # Positive check: the reasoning pass's prose (not the raw history) is
+    # what actually reaches the formatting call.
+    assert mock_llm.complete.return_value in format_input
 
 
 # ------------------------------------------------------------------
@@ -558,7 +561,12 @@ def test_analysis_llm_error_fallback(root_spec, mock_llm, failing_call):
         mock_llm.complete.side_effect = RuntimeError("LLM unavailable")
     else:
         mock_llm.complete_json.side_effect = RuntimeError("LLM unavailable")
-        mock_llm.complete.return_value = "Fallback answer"
+        # Distinct values for the analysis reasoning call vs. the
+        # _force_direct_answer fallback's own .complete() call, so the
+        # assertion below can only pass if the fallback call actually ran —
+        # a shared .return_value would let echoed reasoning prose masquerade
+        # as the fallback answer.
+        mock_llm.complete.side_effect = ["Reasoning prose (not the answer)", "Fallback answer"]
 
     agent = _make_agent(root_spec, mock_llm)
     result = agent.execute(max_depth=10)

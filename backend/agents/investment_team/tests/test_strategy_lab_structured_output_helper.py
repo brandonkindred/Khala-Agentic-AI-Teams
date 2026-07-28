@@ -211,6 +211,58 @@ def test_invoke_structured_with_schema_doubles_timeout_for_two_calls(
     assert captured["timeout_s"] == pytest.approx(60.0)
 
 
+def test_invoke_structured_with_schema_charges_twice_up_front_and_forwards_charge_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``invoke_structured_with_schema(charge=True)`` charges the active
+    budget TWICE, both before ``run_structured_agent`` runs (i.e. before
+    either provider call), and always forwards ``charge=False`` to
+    ``run_structured_agent`` itself — the two-provider-call accounting lives
+    entirely in this helper, never delegated to the inner envelope.
+    """
+    client = _StubClient({"ready": True, "rationale": "ok", "issues": []})
+    monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
+    monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
+
+    charge_calls = 0
+    charged_before_run_structured_agent: List[int] = []
+
+    def _counting_charge() -> None:
+        nonlocal charge_calls
+        charge_calls += 1
+
+    monkeypatch.setattr(so_mod, "charge_active_budget", _counting_charge)
+
+    captured: Dict[str, Any] = {}
+    real_run_structured_agent = so_mod.run_structured_agent
+
+    def _spy_run_structured_agent(*args: Any, charge: bool, **kwargs: Any) -> Any:
+        captured["charge"] = charge
+        # Snapshot how many pre-charges already happened by the time the
+        # envelope (and therefore either provider call) actually runs.
+        charged_before_run_structured_agent.append(charge_calls)
+        return real_run_structured_agent(*args, charge=charge, **kwargs)
+
+    monkeypatch.setattr(so_mod, "run_structured_agent", _spy_run_structured_agent)
+
+    result = so_mod.invoke_structured_with_schema(
+        "strategy_design_review",
+        "sys",
+        "user",
+        phase="design_review_structured",
+        schema={"type": "object"},
+        charge=True,
+        objective="strategy design review (structured)",
+        logger=logging.getLogger("test.so"),
+        reasoning_system_prompt="sys" + so_mod.REASONING_MODE_SUFFIX,
+    )
+
+    assert result == {"ready": True, "rationale": "ok", "issues": []}
+    assert charge_calls == 2
+    assert captured["charge"] is False
+    assert charged_before_run_structured_agent == [2]
+
+
 def test_invoke_structured_with_schema_requires_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

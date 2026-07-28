@@ -283,7 +283,11 @@ def complete_json_via_reasoning(
         temperature: Temperature for the formatting call (default 0.0 —
             pure transcription).
         **kwargs: Forwarded to the formatting ``client.complete_json`` call
-            (e.g. ``schema=`` for provider-enforced decoding).
+            (e.g. ``schema=`` for provider-enforced decoding) — EXCEPT
+            ``think``, which is popped and managed internally: the reasoning
+            call always uses ``think=True`` and the formatting call always
+            uses ``think=False``, regardless of any ``think`` passed in
+            ``**kwargs``.
     """
     if not objective:
         raise ValueError("objective must be non-empty")
@@ -343,7 +347,11 @@ def complete_validated_via_reasoning(
     Postconditions/failure semantics: see :func:`complete_json_via_reasoning`;
     the formatting call additionally retries up to ``correction_attempts``
     times on a parse/validation failure, exactly as :func:`complete_validated`
-    does today.
+    does today. ``**kwargs`` is forwarded to :func:`complete_validated` (and
+    therefore to the formatting ``client.complete_json`` call) EXCEPT
+    ``think``, which is popped and managed internally — the reasoning call
+    always uses ``think=True`` and the formatting call always uses
+    ``think=False``, regardless of any ``think`` passed in ``**kwargs``.
     """
     if not objective:
         raise ValueError("objective must be non-empty")
