@@ -33,7 +33,11 @@ from typing import Dict, List, Optional, Tuple
 from software_engineering_team.shared.deduplication import dedupe_strings
 
 from .false_positive_filter import CodebaseIndex
-from .function_boundaries import enclosing_construct, enclosing_construct_start_heuristic
+from .function_boundaries import (
+    enclosing_construct,
+    enclosing_construct_start_heuristic,
+    strip_numbered_prefixes,
+)
 from .models import CodeReviewIssue
 
 _SIDE_EFFECT_CATEGORY = "side-effects"
@@ -103,18 +107,25 @@ class _ConstructResolver:
             - Python files (``.py``/``.pyi``) resolve via the exact AST-based
               ``enclosing_construct``; every other extension resolves via the
               coarser ``enclosing_construct_start_heuristic`` (start line only).
+            - Content carrying the PR-review path's ``"N: "``-prefixed hunk
+              annotations is normalized (prefixes stripped, ``line`` remapped
+              to its physical index) before resolution, exactly as
+              ``find_function_at_line`` does, so a pre-numbered excerpt
+              parses correctly instead of failing (Python) or spuriously
+              treating every prefixed line as column-0 (heuristic).
         """
         if not file_path or not line or line < 1:
             return None
         content = self._content(file_path)
         if not content:
             return None
+        stripped, physical, _mapper = strip_numbered_prefixes(content, line)
         _, ext = os.path.splitext(file_path)
         if ext.lower() in _PYTHON_EXTS:
-            construct = enclosing_construct(content, line)
+            construct = enclosing_construct(stripped, physical)
             start = construct.start_line if construct is not None else None
         else:
-            start = enclosing_construct_start_heuristic(content, line)
+            start = enclosing_construct_start_heuristic(stripped, physical)
         if start is None:
             return None
         return (file_path, start)
@@ -169,15 +180,24 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
         file_counts[fp] = file_counts.get(fp, 0) + 1
     majority_file = max(file_counts, key=lambda fp: file_counts[fp])
 
-    lines = sorted(
-        {
-            issue.line
-            for issue in group
-            if (issue.file_path or "") == majority_file and issue.line is not None
-        }
-    )
-    line = lines[-1] if lines else None
-    start_line = lines[0] if len(lines) > 1 else None
+    # A member issue may already carry its own multi-line range
+    # (start_line..line); use each member's effective start (its own
+    # start_line, falling back to its line for a single-line issue) so a
+    # merge doesn't collapse an already-multi-line member down to just its
+    # end line.
+    starts = [
+        issue.start_line if issue.start_line is not None else issue.line
+        for issue in group
+        if (issue.file_path or "") == majority_file and issue.line is not None
+    ]
+    ends = [
+        issue.line
+        for issue in group
+        if (issue.file_path or "") == majority_file and issue.line is not None
+    ]
+    line = max(ends) if ends else None
+    earliest_start = min(starts) if starts else None
+    start_line = earliest_start if earliest_start is not None and earliest_start != line else None
 
     best = min(group, key=lambda i: _severity_rank(i.severity))
 

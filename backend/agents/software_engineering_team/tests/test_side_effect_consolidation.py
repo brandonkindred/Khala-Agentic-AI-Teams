@@ -205,6 +205,52 @@ def test_pre_existing_true_only_when_all_members_are() -> None:
     assert result2[0].pre_existing is True
 
 
+def test_merge_preserves_earliest_start_of_multi_line_members() -> None:
+    content = "\n".join(
+        [
+            "def foo():",  # 1
+            "    a = 1",  # 2
+            "    b = 2",  # 3
+            "    c = 3",  # 4
+            "    d = 4",  # 5
+            "    e = 5",  # 6
+            "    f = 6",  # 7
+            "    return a",  # 8
+            "",
+        ]
+    )
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(line=4, start_line=2, description="first multi-line symptom"),
+        _issue(line=8, start_line=6, description="second multi-line symptom"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert result[0].start_line == 2
+    assert result[0].line == 8
+
+
+def test_construct_resolution_normalizes_pre_numbered_hunks() -> None:
+    # Mirrors the PR-review path's render_annotated_hunks output: every line
+    # prefixed with its original file line number.
+    content = "\n".join(
+        [
+            "100: def foo():",
+            "101:     return 1",
+            "102: ",
+            "103: def bar():",
+            "104:     return foo() + 1",
+        ]
+    )
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(line=101, description="foo's return value changed"),
+        _issue(line=104, description="bar breaks because of app/foo.py:101 (foo's old contract)"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+
+
 def test_majority_file_wins_for_multi_file_group() -> None:
     foo_content = "def foo():\n    return 1\n"
     other_content = "def other():\n    return foo() + bar()\n"
