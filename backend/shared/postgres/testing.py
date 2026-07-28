@@ -213,11 +213,13 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     fixture, so plain pytest runs work even when pytest-xdist is not installed
     or its plugin is disabled.
 
-    A drop-in replacement for the per-team hand-rolled version of this pattern
-    (see ``branding_team/tests/test_store_real_postgres.py``'s ``_branding_schema``
-    fixture): any team's ``conftest.py`` or test module can do
-    ``_my_schema = real_postgres_schema(SCHEMA)`` instead of re-deriving the
-    skip/register/truncate boilerplate.
+A drop-in replacement for the per-team hand-rolled version of this pattern
+(see the former ``branding_team/tests/test_store_real_postgres.py``
+``_branding_schema`` fixture, now expressed as
+``real_postgres_schema(BRANDING_SCHEMA)``): any team's ``conftest.py`` or
+test module can do
+``_my_schema = real_postgres_schema(SCHEMA)`` instead of re-deriving the
+skip/register/truncate boilerplate.
 
     Not itself wired into any team's tests yet — callers opt in explicitly.
     """

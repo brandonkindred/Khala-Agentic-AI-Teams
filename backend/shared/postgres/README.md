@@ -193,7 +193,7 @@ The returned fixture always has `autouse=True`, so assigning it is enough —
 tests in scope do not need to request it by name. It wraps the same
 `register_team_schemas` / `truncate_team_tables` calls every hand-rolled
 real-Postgres test fixture in this repo already makes (see
-`branding_team/tests/test_store_real_postgres.py`'s `_branding_schema`), so a
+`branding_team/tests/test_store.py`'s `_branding_schema`), so a
 team can opt a test module into real Postgres with one line instead of
 re-deriving the skip/register/truncate boilerplate:
 

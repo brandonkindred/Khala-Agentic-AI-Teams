@@ -265,18 +265,14 @@ which wraps `shared.postgres.get_conn` with `_fetch_one`/`_fetch_all`/`_execute`
 3. **Chat conversations + messages + mission + latest output** —
    `BrandingConversationStore` (`assistant/store.py:161`).
 
-Unit tests run against `tests/_fake_postgres.py`, an in-memory fake that
-matches the SQL emitted by each store by prefix, so the test suites stay
-independent without a live database. `real_postgres`-marked tests
-(`tests/test_store_real_postgres.py`) exercise representative `BrandingStore`
-and `BrandingConversationStore` paths — `create_client`, `create_brand`,
-`update_brand`, `append_brand_version`, `attach_conversation`, `append_message`
-— against a live Postgres instance in the `test-branding` CI job, but not
-every method (e.g. `BrandingConversationStore.update_mission`/`update_output`
-run only against the fake), so this is representative coverage, not a
-guarantee against drift for every query. `BrandingSessionStore`'s create/get/
-save queries are currently validated only against the fake — that table is
-truncated for isolation but its own queries aren't exercised live.
+`BrandingStore` tests (`tests/test_store.py`) run against live Postgres via
+`shared.postgres.testing.real_postgres_schema` (skip when `POSTGRES_HOST` is
+unset). Other suites still use `tests/_fake_postgres.py`, an in-memory fake
+that matches SQL by prefix. `tests/test_store_real_postgres.py` keeps a
+distinct `BrandingConversationStore` check (`append_message` / LEFT JOIN load /
+list aggregate) until that store migrates off the fake. Methods such as
+`BrandingConversationStore.update_mission`/`update_output` and
+`BrandingSessionStore` create/get/save currently run only against the fake.
 
 ### Postgres schema
 

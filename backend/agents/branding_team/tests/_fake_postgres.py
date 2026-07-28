@@ -7,11 +7,12 @@ Matching contract (read before changing store SQL):
     stores emit* — a wording, column-order, or clause change in a store query
     must be mirrored here or the cursor raises ``AssertionError("unexpected
     SQL")``. The matcher is intentionally NOT a SQL parser; that fragility is
-    accepted because the authoritative correctness check is
-    ``tests/test_store_real_postgres.py`` (the ``real_postgres`` marker), which
-    runs the real queries against a live Postgres in the integration job. Keep
-    the two in sync: when you add/alter store SQL, update a handler here and add
-    real-Postgres coverage there.
+    accepted because the authoritative correctness check for ``store.py`` SQL is
+    ``tests/test_store.py`` (live Postgres via ``real_postgres_schema``);
+    conversation-only coverage remains in ``tests/test_store_real_postgres.py``.
+    Keep handlers here in sync for suites that still use this fake until it is
+    retired: when you add/alter store SQL those suites hit, update a handler
+    here and ensure real-Postgres coverage exists.
 
 Boilerplate (``FakeCursor`` / ``FakeConn`` / normalize / install) lives in
 ``shared.postgres.fake`` (re-exported from ``shared.postgres.testing``); this module owns only the branding SQL→handler

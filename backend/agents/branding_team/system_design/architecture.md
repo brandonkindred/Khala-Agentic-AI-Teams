@@ -229,10 +229,10 @@ Postgres-backed state without any file-based coordination.
 `branding_conversations`, `branding_conv_messages`) registered via
 `shared.postgres.register_team_schemas` at FastAPI startup, via the
 `postgres_schema` argument to `create_team_app()` (`api/main.py:132-139`).
-Unit tests run against an in-memory fake
-(`tests/_fake_postgres.py`) that emulates this schema, and
-`real_postgres`-marked tests exercise the same SQL against a live
-Postgres in CI.
+`BrandingStore` tests (`tests/test_store.py`) run against live Postgres via
+`shared.postgres.testing.real_postgres_schema`; other suites still use the
+in-memory fake (`tests/_fake_postgres.py`), with a distinct conversation-SQL
+check in `tests/test_store_real_postgres.py`.
 
 ### 5. Why market research and design are adapters, not imports
 
