@@ -17,18 +17,26 @@ from branding_team import (
     WorkflowStatus,
 )
 from branding_team.models import (
+    AudienceSegment,
+    AudienceSegmentsOutput,
     BrandCheckRequest,
+    BrandDiscoveryAuditOutput,
     BrandHealthKPI,
     ChannelActivationOutput,
     ChannelGuideline,
     ColorEntry,
     CompetitiveSnapshot,
     CoreValue,
+    CoreValuesOutput,
     CreativeRefinementDecision,
     DesignSystemDefinition,
+    DifferentiationPillar,
+    DifferentiationPillarsOutput,
     GovernanceOutput,
     MoodBoardConcept,
     NarrativeMessagingOutput,
+    PositioningOutput,
+    PurposeVisionOutput,
     StrategicCoreOutput,
     TypographySpec,
     VisualIdentityOutput,
@@ -482,6 +490,163 @@ def test_phase_absorbed_fields_populated() -> None:
     # Wiki backlog absorbed into governance
     assert result.governance.wiki_backlog
     assert result.governance.wiki_backlog[0].title
+
+
+def test_extract_phase_output_uses_structured_output_when_present() -> None:
+    """Agents built with ``structured_output=`` populate ``AgentResult.structured_output``
+    rather than the message's text blocks; extraction must check that field before
+    falling back to text or it silently discards the agent's real output."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = PositioningOutput(
+        positioning_statement=(
+            "For enterprise product leaders who need cohesive digital experiences, "
+            "Northstar Labs is the hands-on partner that delivers clarity."
+        ),
+        brand_promise="Every customer touchpoint will feel cohesive, useful, and unmistakably aligned.",
+    )
+
+    node_result = MagicMock()
+    node_result.get_agent_results.return_value = [agent_result]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.positioning_statement == agent_result.structured_output.positioning_statement
+    assert output.brand_promise == agent_result.structured_output.brand_promise
+
+
+def _phase1_leaf_node(structured_output) -> MagicMock:
+    """A mock NodeResult for a single Phase 1 fan-out/fan-in leaf agent."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = structured_output
+    node = MagicMock()
+    node.get_agent_results.return_value = [agent_result]
+    return node
+
+
+def test_extract_phase_output_merges_every_phase1_fragment() -> None:
+    """Phase 1 wraps six agents as one top-level node; get_agent_results()[-1] only
+    ever sees the synthesizer, so the five specialists' fragments must be merged
+    in separately or their data is silently discarded (see PR review discussion)."""
+    positioning_leaf = _phase1_leaf_node(
+        PositioningOutput(
+            positioning_statement="For enterprise leaders who need clarity, we deliver it.",
+            brand_promise="Every touchpoint feels cohesive.",
+        )
+    )
+    nested_results = {
+        "discovery_auditor": _phase1_leaf_node(
+            BrandDiscoveryAuditOutput(
+                current_brand_perception="Seen as reliable but generic.",
+                market_position="Mid-market challenger.",
+                strengths=["Delivery speed"],
+                weaknesses=["Low brand recall"],
+                opportunities=["Category consolidating"],
+                threats=["Bigger competitors out-spending"],
+                stakeholder_insights=["Sales wants sharper differentiation"],
+            )
+        ),
+        "purpose_vision_writer": _phase1_leaf_node(
+            PurposeVisionOutput(
+                brand_purpose="Why we exist.",
+                mission_statement="What we do for customers.",
+                vision_statement="Where the brand is headed.",
+            )
+        ),
+        "values_articulator": _phase1_leaf_node(
+            CoreValuesOutput(
+                core_values=[
+                    CoreValue(value="Clarity"),
+                    CoreValue(value="Trust"),
+                    CoreValue(value="Momentum"),
+                ]
+            )
+        ),
+        "audience_segmenter": _phase1_leaf_node(
+            AudienceSegmentsOutput(
+                target_audience_segments=[AudienceSegment(name="Enterprise product leaders")]
+            )
+        ),
+        "differentiation_mapper": _phase1_leaf_node(
+            DifferentiationPillarsOutput(
+                differentiation_pillars=[
+                    DifferentiationPillar(pillar="Execution speed"),
+                    DifferentiationPillar(pillar="Hands-on partnership"),
+                ]
+            )
+        ),
+        "positioning_synthesizer": positioning_leaf,
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    # Matches real Strands semantics: get_agent_results() on the outer node
+    # flattens to every nested agent, in completion order (synthesizer last).
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.brand_discovery.current_brand_perception == "Seen as reliable but generic."
+    assert output.brand_discovery.stakeholder_insights == ["Sales wants sharper differentiation"]
+    assert output.brand_purpose == "Why we exist."
+    assert output.mission_statement == "What we do for customers."
+    assert output.vision_statement == "Where the brand is headed."
+    assert [v.value for v in output.core_values] == ["Clarity", "Trust", "Momentum"]
+    assert [s.name for s in output.target_audience_segments] == ["Enterprise product leaders"]
+    assert [p.pillar for p in output.differentiation_pillars] == [
+        "Execution speed",
+        "Hands-on partnership",
+    ]
+    assert output.positioning_statement == "For enterprise leaders who need clarity, we deliver it."
+    assert output.brand_promise == "Every touchpoint feels cohesive."
+
+
+def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
+    """A node whose nested result isn't Phase 1's known node-id set (e.g. every
+    other phase) must fall through to the existing single-agent-result logic
+    unchanged — _merge_phase1_fragments is additive, never a regression."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = PositioningOutput(
+        positioning_statement="Fallback statement.",
+        brand_promise="Fallback promise.",
+    )
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = {"some_other_phase_node": MagicMock()}
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [agent_result]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    output = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert isinstance(output, StrategicCoreOutput)
+    assert output.positioning_statement == "Fallback statement."
+    assert output.brand_promise == "Fallback promise."
 
 
 def test_gather_integrations_market_research_failure_returns_none() -> None:
