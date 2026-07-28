@@ -71,12 +71,14 @@ def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeRevi
 
 
 class _VerdictStub(DummyLLMClient):
-    """Returns canned verdicts for the verification call; rejects on chunk review.
+    """Returns canned verdicts for the verification call.
 
-    ``complete_json`` branches on the prompt: the verification user prompt
-    contains the anchor "verdicts" (the contract asks for a ``verdicts`` array),
-    so the stub can serve both the chunk reviewer and the verifier from one
-    injected client in an end-to-end coordinator run.
+    Optionally serves a configured chunk-review response when ``chunk_issues`` is
+    supplied; otherwise delegates to the base client (which rejects) for
+    chunk-review prompts. ``complete_json`` branches on the prompt: the
+    verification user prompt contains the anchor "verdicts" (the contract asks
+    for a ``verdicts`` array), so the stub can serve both the chunk reviewer and
+    the verifier from one injected client in an end-to-end coordinator run.
     """
 
     def __init__(self, verdicts: List[Dict[str, Any]], chunk_issues: Optional[List[Dict]] = None):
@@ -624,6 +626,26 @@ def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
     assert "wire up foo" in prompt  # task description
     assert "X" * 50 in prompt  # full file body, not truncated
     assert "first 10 characters" not in prompt
+
+
+def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
+    """Task description and acceptance criteria are capped at ``_CONTEXT_FIELD_CHARS``."""
+    from code_review_agent.false_positive_filter import _CONTEXT_FIELD_CHARS
+
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    huge = "T" * (_CONTEXT_FIELD_CHARS + 50)
+    huge_ac = "A" * (_CONTEXT_FIELD_CHARS + 10)
+    inp = CodeReviewInput(
+        files={"app/main.py": "x = 1\n"},
+        task_description=huge,
+        acceptance_criteria=[huge_ac, "short ok"],
+    )
+    prompt = _build_group_prompt(idx, "app/main.py", [_issue()], inp, max_inline_chars=10)
+    assert "T" * _CONTEXT_FIELD_CHARS in prompt
+    assert "T" * (_CONTEXT_FIELD_CHARS + 1) not in prompt
+    assert "... (truncated)" in prompt
+    assert "A" * _CONTEXT_FIELD_CHARS in prompt
+    assert "short ok" in prompt
 
 
 def test_group_prompt_caps_manifest_and_notes_overflow() -> None:

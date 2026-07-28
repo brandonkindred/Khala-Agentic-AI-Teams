@@ -80,6 +80,8 @@ def test_resolve_code_review_verify_model_pins_ollama_failover_candidates(monkey
     backing = MagicMock(name="failover_client")
     base = LLMClientModel(backing, agent_key="code_review_verify", model_id="heavy:cloud")
     pinned_backing = MagicMock(name="pinned_failover")
+    pin = AGENT_DEFAULT_MODELS["code_review_verify"]
+    pinned_backing.model = pin  # Ollama path: active .model matches the pin
     pin_calls: list[tuple[Any, str]] = []
 
     def _fake_get_strands_model(*_args: Any, **_kwargs: Any) -> Any:
@@ -95,11 +97,38 @@ def test_resolve_code_review_verify_model_pins_ollama_failover_candidates(monkey
     monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
 
     result = model_resolution.resolve_code_review_verify_model(MagicMock())
-    assert pin_calls == [(backing, AGENT_DEFAULT_MODELS["code_review_verify"])]
+    assert pin_calls == [(backing, pin)]
     assert isinstance(result, LLMClientModel)
     assert result.client is pinned_backing
-    assert result.get_config()["model_id"] == AGENT_DEFAULT_MODELS["code_review_verify"]
+    assert result.get_config()["model_id"] == pin
     assert result.get_config()["agent_key"] == "code_review_verify"
+
+
+def test_resolve_code_review_verify_model_preserves_model_id_for_claude_active(
+    monkeypatch,
+) -> None:
+    """When the active failover candidate is Claude, keep the adapter model_id.
+
+    ``with_model_override`` leaves Claude candidates on their configured model;
+    relabeling ``model_id`` to the Ollama pin would mis-report observability.
+    """
+    backing = MagicMock(name="failover_client")
+    base = LLMClientModel(
+        backing, agent_key="code_review_verify", model_id="claude-sonnet-4-5"
+    )
+    pinned_backing = MagicMock(name="pinned_failover")
+    pinned_backing.model = "claude-sonnet-4-5"  # Claude path: pin ignored
+
+    monkeypatch.setattr(model_resolution, "get_strands_model", lambda *_a, **_k: base)
+    monkeypatch.setattr(
+        model_resolution, "with_model_override", lambda client, _model: pinned_backing
+    )
+    monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
+
+    result = model_resolution.resolve_code_review_verify_model(MagicMock())
+    assert isinstance(result, LLMClientModel)
+    assert result.client is pinned_backing
+    assert result.get_config()["model_id"] == "claude-sonnet-4-5"
 
 
 def test_code_review_verify_model_pin_prefers_per_agent_env(monkeypatch) -> None:

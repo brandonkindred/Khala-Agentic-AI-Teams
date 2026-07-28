@@ -100,6 +100,11 @@ def _apply_code_review_verify_model_pin(
     Non-Ollama (e.g. Claude) candidates keep their configured model — same
     contract as the factory helper. A Dummy / non-failover backing is unchanged.
 
+    The adapter ``model_id`` is updated to the pin only when the pinned
+    backing's active ``.model`` matches the pin (the Ollama path). When Claude
+    (or another non-Ollama candidate) is active, the original ``model_id`` is
+    preserved so observability does not report the Ollama pin for a Claude call.
+
     Preconditions: ``model`` is a strands ``LLMClientModel`` or an LLM client.
     Postconditions: returns a ready-to-use model; ``model`` is never mutated.
     """
@@ -108,8 +113,12 @@ def _apply_code_review_verify_model_pin(
         pinned_backing = with_model_override(model.client, pin)
         if pinned_backing is model.client:
             return model
-        cfg = model.get_config()
-        cfg["model_id"] = pin
+        # Defensive copy: ``get_config`` already returns a fresh dict today, but
+        # the postcondition forbids mutating ``model`` regardless of that.
+        cfg = dict(model.get_config())
+        active_model = getattr(pinned_backing, "model", None)
+        if isinstance(active_model, str) and active_model.strip() == pin:
+            cfg["model_id"] = pin
         return LLMClientModel(pinned_backing, **cfg)
     return with_model_override(model, pin)
 
