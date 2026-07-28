@@ -1156,6 +1156,27 @@ class TestReviewEndpoint:
         # And it preserved the cause in the job store for diagnosis.
         assert "body blew up past its own handler" in (job.get("error") or "")
 
+    def test_run_pr_review_survives_setup_exception(self, review_app, monkeypatch) -> None:
+        """Setup failures before the body (e.g. RUNNING ``update_job``) must also
+        honor the "never raises" contract via the widened outer guard."""
+        import software_engineering_team.api.coding_team_main as main_mod
+        from software_engineering_team.models import JobStatus
+
+        real_update_job = main_mod.update_job
+
+        def _update_job(job_id: str, **kw: Any) -> None:
+            if kw.get("status") == JobStatus.RUNNING.value:
+                raise RuntimeError("job service unreachable during RUNNING update")
+            return real_update_job(job_id, **kw)
+
+        monkeypatch.setattr(main_mod, "update_job", _update_job)
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "job service unreachable" in (job.get("error") or "")
+
     def test_body_failure_scrubs_token_from_log_and_outage(
         self, review_app, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -3129,6 +3150,25 @@ class TestWholeFileReview:
         # not raise.
         assert _fetch_head_files(object(), "o", "r", files, "sha1") == {}
 
+    def test_fetch_head_files_scrubs_token_from_fetch_warning(
+        self, review_app, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from software_engineering_team.api.pr_review import _fetch_head_files
+
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                raise RuntimeError(f"fetch failed: {secret_url}")
+
+        with caplog.at_level("WARNING"):
+            assert _fetch_head_files(_C(), "o", "r", files, "sha1") == {}
+
+        [record] = [r for r in caplog.records if "could not fetch head content" in r.getMessage()]
+        assert "ghp_LEAKEDTOKEN" not in record.getMessage()
+        assert "https://***@" in record.getMessage()
+
     def test_fetch_head_files_concurrent_fetches_do_not_corrupt_results(self, review_app) -> None:
         """_fetch_head_files fans per-file GETs out across a thread pool; each
         worker's (filename, content) pair must land under its own key, never a
@@ -3708,6 +3748,24 @@ class TestSafeCommentUnit:
 
         assert _safe_comment(_C(), "o", "r", 7, "body") is True
         assert posted == [(7, "body")]
+
+    def test_scrubs_token_from_failure_warning(
+        self, review_app, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from software_engineering_team.api.pr_review import _safe_comment
+
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+
+        class _C:
+            def add_issue_comment(self, o, r, n, body):
+                raise RuntimeError(f"comment failed: {secret_url}")
+
+        with caplog.at_level("WARNING"):
+            assert _safe_comment(_C(), "o", "r", 7, "body") is False
+
+        [record] = [r for r in caplog.records if "Failed to comment on issue" in r.getMessage()]
+        assert "ghp_LEAKEDTOKEN" not in record.getMessage()
+        assert "https://***@" in record.getMessage()
 
 
 # ---------------------------------------------------------------------------

@@ -91,6 +91,17 @@ class TestRunningReviewForPrUnit:
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [_job()])
         assert pr_review._running_review_for_pr("acme", "widgets", 7) == "job-1"
 
+    def test_string_pr_number_in_store_still_matches(self, monkeypatch) -> None:
+        """Store round-trips may leave ``pr_number`` as a string; coerce before ==."""
+        monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [_job(pr_number="7")])
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) == "job-1"
+
+    def test_non_numeric_pr_number_in_store_is_skipped(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            main, "list_jobs", lambda active_only=True: [_job(pr_number="not-a-number")]
+        )
+        assert pr_review._running_review_for_pr("acme", "widgets", 7) is None
+
     def test_owner_repo_match_is_case_insensitive(self, monkeypatch) -> None:
         monkeypatch.setattr(
             main, "list_jobs", lambda active_only=True: [_job(owner="Acme", repo="Widgets")]
@@ -577,3 +588,32 @@ class TestRunReviewerUnit:
 
         with pytest.raises(AssertionError):
             pr_review._run_reviewer(provider, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# _finalize_review
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeReviewUnit:
+    def test_rejects_non_terminal_status(self, monkeypatch) -> None:
+        from software_engineering_team.models import JobStatus
+
+        monkeypatch.setattr(main, "update_job", lambda *a, **kw: None)
+        monkeypatch.setattr(main, "update_review", lambda *a, **kw: None)
+
+        with pytest.raises(AssertionError, match="COMPLETED or FAILED"):
+            pr_review._finalize_review("job-1", JobStatus.RUNNING)
+
+    def test_accepts_completed(self, monkeypatch) -> None:
+        from software_engineering_team.models import JobStatus
+
+        jobs: List[Dict[str, Any]] = []
+        reviews: List[Dict[str, Any]] = []
+        monkeypatch.setattr(main, "update_job", lambda job_id, **kw: jobs.append(kw))
+        monkeypatch.setattr(main, "update_review", lambda job_id, **kw: reviews.append(kw))
+
+        pr_review._finalize_review("job-1", JobStatus.COMPLETED, phase="completed")
+
+        assert jobs[0]["status"] == JobStatus.COMPLETED.value
+        assert reviews[0]["completed"] is True

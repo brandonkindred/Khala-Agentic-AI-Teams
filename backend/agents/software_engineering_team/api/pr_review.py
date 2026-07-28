@@ -96,14 +96,16 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
         is a positive PR number.
     Postconditions: returns the job_id of a non-terminal review job whose
         ``github_context`` matches (owner, repo, pr_number) — owner/repo
-        case-insensitively, as GitHub treats them — and whose heartbeat is live per
-        :func:`_review_job_heartbeat_live`; ``None`` when no such job exists. A matching
-        job whose heartbeat went stale (its worker crashed before terminalizing it) is
-        NOT returned — it must not block new reviews of the PR forever — and is
-        best-effort marked ``failed`` so it stops surfacing as a zombie running review;
-        a failure to mark it never propagates. Only review jobs carry ``pr_number`` in
-        ``github_context`` (issue runs carry ``issue_number``), so matching on it never
-        collides with an issue run. Raises only if the job-service scan itself fails.
+        case-insensitively, as GitHub treats them, and ``pr_number`` via ``int()``
+        coercion so a string-typed store value still matches — and whose heartbeat
+        is live per :func:`_review_job_heartbeat_live`; ``None`` when no such job
+        exists. A matching job whose heartbeat went stale (its worker crashed before
+        terminalizing it) is NOT returned — it must not block new reviews of the PR
+        forever — and is best-effort marked ``failed`` so it stops surfacing as a
+        zombie running review; a failure to mark it never propagates. Only review
+        jobs carry ``pr_number`` in ``github_context`` (issue runs carry
+        ``issue_number``), so matching on it never collides with an issue run.
+        Raises only if the job-service scan itself fails.
 
     Cross-worker by construction: the scan reads the shared central job service (the same
     store ``_running_job_for_issue`` uses), so a review already running under a *different*
@@ -116,41 +118,45 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     """
     for j in _main.list_jobs(active_only=True):
         ctx = (j or {}).get("github_context") or {}
-        if (
+        try:
+            stored_pr = int(ctx.get("pr_number"))
+        except (TypeError, ValueError):
+            continue
+        if stored_pr != pr_number:
+            continue
+        if not (
             str(ctx.get("owner") or "").casefold() == owner.casefold()
             and str(ctx.get("repo") or "").casefold() == repo.casefold()
-            and ctx.get("pr_number") == pr_number
         ):
-            job_id = j.get("job_id")
-            if _review_job_heartbeat_live(j):
-                return job_id
-            # Crash-orphaned: no worker has heartbeated it within the cutoff. Unblock
-            # new reviews and terminalize the zombie (best-effort — the unblock matters,
-            # the cleanup is cosmetic).
-            logger.warning(
-                "review job %s for %s/%s#%s has a stale heartbeat; treating as dead and marking failed",
-                job_id,
-                owner,
-                repo,
-                pr_number,
-            )
-            if job_id:
-                try:
-                    _main.update_job(
-                        job_id,
-                        status=JobStatus.FAILED.value,
-                        error="review worker heartbeat went stale (process died mid-review)",
-                    )
-                    _main.update_review(
-                        job_id,
-                        status=JobStatus.FAILED.value,
-                        error="review worker heartbeat went stale (process died mid-review)",
-                        completed=True,
-                    )
-                except Exception:  # noqa: BLE001 - unblocking admission must not depend on cleanup
-                    logger.warning(
-                        "could not mark stale review job %s failed", job_id, exc_info=True
-                    )
+            continue
+        job_id = j.get("job_id")
+        if _review_job_heartbeat_live(j):
+            return job_id
+        # Crash-orphaned: no worker has heartbeated it within the cutoff. Unblock
+        # new reviews and terminalize the zombie (best-effort — the unblock matters,
+        # the cleanup is cosmetic).
+        logger.warning(
+            "review job %s for %s/%s#%s has a stale heartbeat; treating as dead and marking failed",
+            job_id,
+            owner,
+            repo,
+            pr_number,
+        )
+        if job_id:
+            try:
+                _main.update_job(
+                    job_id,
+                    status=JobStatus.FAILED.value,
+                    error="review worker heartbeat went stale (process died mid-review)",
+                )
+                _main.update_review(
+                    job_id,
+                    status=JobStatus.FAILED.value,
+                    error="review worker heartbeat went stale (process died mid-review)",
+                    completed=True,
+                )
+            except Exception:  # noqa: BLE001 - unblocking admission must not depend on cleanup
+                logger.warning("could not mark stale review job %s failed", job_id, exc_info=True)
     return None
 
 
@@ -336,7 +342,10 @@ def _fetch_head_files(
             content = client.get_file_contents(owner, repo, f.filename, head_sha)
         except Exception as e:  # noqa: BLE001 - a fetch failure degrades to hunk rendering, never fails review
             logger.warning(
-                "PR review: could not fetch head content for %s@%s: %s", f.filename, head_sha, e
+                "PR review: could not fetch head content for %s@%s: %s",
+                f.filename,
+                head_sha,
+                scrub_token_from_text(str(e)),
             )
             content = None
         return f.filename, content
@@ -481,78 +490,93 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           job, since the findings still post.)
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
-    # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
-    # provider installed) must fail the job immediately instead of burning REST
-    # rate budget on PR metadata + diff assembly and then failing anyway.
-    provider = _main.get_engine_provider()
-    if provider is None:
-        logger.error("PR review %s aborted: no engine provider configured", job_id)
-        error = (
-            "code review failed: no engine provider configured — SE's own "
-            "_se_startup() hook must have run, since it installs the engine "
-            "provider at startup"
-        )
-        _main.update_job(job_id, status=JobStatus.FAILED.value, phase="completed", error=error)
-        # error=error (not just status_text) so the Code Review page's error column
-        # is populated on this path exactly as _record_failure does everywhere else.
-        _main.update_review(
-            job_id,
-            status=JobStatus.FAILED.value,
-            status_text="No engine provider configured",
-            error=error,
-            completed=True,
-        )
-        # Tell the PR, not just the job store: the reviewer who invoked @khala-review
-        # is watching the pull request and would otherwise wait forever on a job that
-        # silently failed. The token is already in hand, so post a scrubbed one-liner
-        # (best-effort — a GitHub outage must not turn this into an unhandled raise).
-        try:
-            with _main.GitHubClient(token=token) as client:
-                _main._safe_comment(
-                    client,
-                    owner,
-                    repo,
-                    pr_number,
-                    f"Code review could not run: {scrub_token_from_text(error)}",
-                )
-        except Exception as exc:  # noqa: BLE001 - notification is best-effort
-            logger.warning("PR review %s: failed to post abort notice: %s", job_id, exc)
-        return
-    _main.update_job(
-        job_id,
-        status=JobStatus.RUNNING.value,
-        phase="reviewing",
-        status_text="Reviewing pull request",
-    )
-    _main.update_review(
-        job_id, status=JobStatus.RUNNING.value, status_text="Reviewing pull request"
-    )
-    # Continuous liveness beat for the admission guard: job updates only land at phase
-    # transitions, and a single review LLM call can run for minutes — without this, a
-    # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
-    # The context manager guarantees the beat stops on every exit path; on_error keeps
-    # a job-service blip from killing the beat thread (or the review).
-    from shared.concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
-
-    review_hb = BackgroundHeartbeat(
-        lambda: heartbeat_job(job_id),
-        _REVIEW_HEARTBEAT_INTERVAL_S,
-        name=f"review-heartbeat-{job_id}",
-        beat_first=True,
-        on_error=lambda exc: logger.warning("review heartbeat error for job %s: %s", job_id, exc),
-    )
-    # ``_run_pr_review_body`` already marks the job failed for exceptions raised
-    # inside the review itself. This outer guard is the last line of defense for
-    # anything that escapes it — heartbeat setup/teardown, or the body's own
-    # last-resort finalize failing — so this function honors its "never raises"
-    # contract and a hook exception can never leave the job wedged in "running".
+    # Outer guard covers provider resolution, RUNNING updates, heartbeat setup,
+    # and the body: anything that escapes must still mark the job failed (scrubbed)
+    # and never raise, so the daemon-thread hook cannot leave a job wedged.
     # Fully self-protected: the fallback finalize is best-effort and swallowed.
     try:
+        # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
+        # provider installed) must fail the job immediately instead of burning REST
+        # rate budget on PR metadata + diff assembly and then failing anyway.
+        provider = _main.get_engine_provider()
+        if provider is None:
+            logger.error("PR review %s aborted: no engine provider configured", job_id)
+            error = (
+                "code review failed: no engine provider configured — SE's own "
+                "_se_startup() hook must have run, since it installs the engine "
+                "provider at startup"
+            )
+            _main.update_job(job_id, status=JobStatus.FAILED.value, phase="completed", error=error)
+            # error=error (not just status_text) so the Code Review page's error column
+            # is populated on this path exactly as _record_failure does everywhere else.
+            _main.update_review(
+                job_id,
+                status=JobStatus.FAILED.value,
+                status_text="No engine provider configured",
+                error=error,
+                completed=True,
+            )
+            # Tell the PR, not just the job store: the reviewer who invoked @khala-review
+            # is watching the pull request and would otherwise wait forever on a job that
+            # silently failed. The token is already in hand, so post a scrubbed one-liner
+            # (best-effort — a GitHub outage must not turn this into an unhandled raise).
+            try:
+                with _main.GitHubClient(token=token) as client:
+                    _main._safe_comment(
+                        client,
+                        owner,
+                        repo,
+                        pr_number,
+                        f"Code review could not run: {scrub_token_from_text(error)}",
+                    )
+            except Exception as exc:  # noqa: BLE001 - notification is best-effort
+                logger.warning(
+                    "PR review %s: failed to post abort notice: %s",
+                    job_id,
+                    scrub_token_from_text(str(exc)),
+                )
+            return
+        _main.update_job(
+            job_id,
+            status=JobStatus.RUNNING.value,
+            phase="reviewing",
+            status_text="Reviewing pull request",
+        )
+        _main.update_review(
+            job_id, status=JobStatus.RUNNING.value, status_text="Reviewing pull request"
+        )
+        # Continuous liveness beat for the admission guard: job updates only land at phase
+        # transitions, and a single review LLM call can run for minutes — without this, a
+        # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
+        # The context manager guarantees the beat stops on every exit path; on_error keeps
+        # a job-service blip from killing the beat thread (or the review).
+        from shared.concurrency import BackgroundHeartbeat  # noqa: I001, PLC0415 - keep module import light
+
+        review_hb = BackgroundHeartbeat(
+            lambda: heartbeat_job(job_id),
+            _REVIEW_HEARTBEAT_INTERVAL_S,
+            name=f"review-heartbeat-{job_id}",
+            beat_first=True,
+            on_error=lambda exc: logger.warning(
+                "review heartbeat error for job %s: %s",
+                job_id,
+                scrub_token_from_text(str(exc)),
+            ),
+        )
+        # ``_run_pr_review_body`` already marks the job failed for exceptions raised
+        # inside the review itself. This outer guard is the last line of defense for
+        # anything that escapes it — heartbeat setup/teardown, or the body's own
+        # last-resort finalize failing — so this function honors its "never raises"
+        # contract and a hook exception can never leave the job wedged in "running".
         with review_hb:
             _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
     except Exception as exc:  # noqa: BLE001 - the daemon thread must never die with the job left running
-        logger.exception("PR review %s: unhandled exception escaped the review body", job_id)
         scrubbed_error = scrub_token_from_text(str(exc))
+        logger.exception(
+            "PR review %s: unhandled exception escaped the review body: %s",
+            job_id,
+            scrubbed_error,
+        )
         try:
             # phase="completed" (terminal), matching the success and provider-abort
             # paths — a failed job must not keep a mid-review "reviewing" phase.
@@ -610,6 +634,9 @@ def _finalize_review(
           ``.value`` for both (a single conversion point for both consumers);
           ``update_review`` additionally receives ``completed=True``.
     """
+    assert status in (JobStatus.COMPLETED, JobStatus.FAILED), (
+        f"_finalize_review requires COMPLETED or FAILED, got {status!r}"
+    )
     job_kwargs: Dict[str, Any] = {"status": status.value}
     review_kwargs: Dict[str, Any] = {"status": status.value, "completed": True}
     if status_text is not None:
@@ -1724,12 +1751,13 @@ def _safe_comment(
     Body is scrubbed to redact tokens that might have leaked from git stderr.
 
     Postconditions:
-        - Returns True when the comment was posted, False when GitHub rejected it.
+        - Returns True when the comment was posted, False on any failure (GitHub
+          API rejection or any other exception from ``add_issue_comment``).
           Never raises — callers that must not drop a finding inspect the result.
     """
     try:
         client.add_issue_comment(owner, repo, number, scrub_token_from_text(body))
         return True
     except Exception as e:  # noqa: BLE001 - comment is best-effort, never fails the job
-        logger.warning("Failed to comment on issue #%s: %s", number, e)
+        logger.warning("Failed to comment on issue #%s: %s", number, scrub_token_from_text(str(e)))
         return False
