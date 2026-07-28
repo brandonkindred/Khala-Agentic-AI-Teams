@@ -348,10 +348,12 @@ def format_comment_body(
         - Returns a bolded title heading (the finding's own ``title``, or one
           derived from ``description`` when blank) tagged with severity and
           category, followed by the problem description and, when a suggestion
-          is present, a ``**Suggested fix:**`` paragraph. When
-          ``existing_reference`` is given, a trailing note links it — so a
-          reviewer sees this finding was already raised and is still open,
-          rather than reading it as a brand-new duplicate.
+          is present, a ``**Suggested fix:**`` paragraph. When the description
+          is short enough that its derived title reproduces it verbatim, the
+          description paragraph is omitted rather than repeating the same text
+          twice. When ``existing_reference`` is given, a trailing note links
+          it — so a reviewer sees this finding was already raised and is still
+          open, rather than reading it as a brand-new duplicate.
     """
     severity = (getattr(issue, "severity", "") or "info").upper()
     category = getattr(issue, "category", "") or "general"
@@ -360,7 +362,7 @@ def format_comment_body(
     title = (getattr(issue, "title", "") or "").strip() or _fallback_title(description)
     heading = f"**{title}**" if title else f"**[{severity}] {category}**"
     body = f"{heading}\n_[{severity}] {category}_"
-    if description:
+    if description and description.strip() != title:
         body += f"\n\n{description}"
     if suggestion:
         body += f"\n\n**Suggested fix:** {suggestion}"

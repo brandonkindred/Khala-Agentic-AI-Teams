@@ -294,6 +294,13 @@ def test_format_comment_body_no_suggestion() -> None:
     assert "Suggested fix" not in body
 
 
+def test_format_comment_body_omits_description_when_it_equals_derived_title() -> None:
+    # A short description becomes its own derived title verbatim; the body must
+    # not then repeat that exact text a second time as the description paragraph.
+    body = format_comment_body(_Issue(title="", description="leftover one"))
+    assert body.count("leftover one") == 1
+
+
 def test_format_comment_body_falls_back_to_derived_title_when_blank() -> None:
     body = format_comment_body(
         _Issue(title="", description="The UserListComponent does not paginate results.")
