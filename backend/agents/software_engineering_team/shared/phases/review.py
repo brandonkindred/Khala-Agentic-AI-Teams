@@ -1,9 +1,10 @@
 """
 Shared review-phase implementations for the code-v2 teams.
 
-``run_code_review_phase_impl`` runs the first quality gate after coding: build
-verification, then an optional lint pass, then the (already-shared)
-code-review step.
+``run_code_review_phase_impl`` runs the first quality gate after coding: the
+(already-shared) code-review step. Build verification and linting run
+elsewhere (the team's own pre-review quality gate, or the separate
+``run_review``/``run_microtask_review`` path) — not as part of this phase.
 
 ``run_qa_testing_phase_impl`` / ``run_security_testing_phase_impl`` share one
 parameterised testing-phase body (``_run_agent_testing_phase``) for the QA and
@@ -25,7 +26,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import AgentReviewCache
@@ -35,8 +36,6 @@ from software_engineering_team.shared.v2_models import Phase, ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
     _code_review_step,
-    _lint_passed,
-    _lint_severity,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,39 +48,31 @@ def run_code_review_phase_impl(
     microtask: Any,
     repo_path: Path,
     files: Dict[str, str],
-    build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
     code_review_agent: Any = None,
-    linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
     config: ReviewConfig,
     llm_review_fn: Callable[..., Any],
-    build_verify_fn: Callable[..., Tuple[bool, str]],
     phase_review_result_cls: Callable[..., Any],
 ) -> Any:
-    """Run the code-review-only phase: build verification + lint + code review.
+    """Run the code-review-only phase: the code-review step.
 
     This is the first phase after coding, focusing on code quality, syntax,
     and adherence to coding standards.
 
     Preconditions:
         - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
-        - ``config`` is the team's :class:`ReviewConfig`; only ``lint_agent_type``
-          and ``lint_severity_remap`` (via ``_lint_severity``) are read here.
+        - ``config`` is the team's :class:`ReviewConfig`.
         - ``llm_review_fn`` is the team's chunking/prompt/parse reviewer,
           forwarded verbatim to the shared ``_code_review_step``.
-        - ``build_verify_fn`` is the team's build-verification runner. Callers
-          must pass their own module-global reference (not a value captured at
-          import time) so that patching it on the caller's module still takes
-          effect on the next call.
         - ``phase_review_result_cls`` constructs the team's phase-result type
           from ``passed``/``issues``/``summary``/``phase_name``/``raw_issue_count``.
 
     Postconditions:
         - Returns a ``phase_review_result_cls`` instance whose ``passed`` is
-          build success AND lint success AND no critical/high issue. Never
+          true iff no critical/high code-review issue was found. Never
           raises: every failure path is contained to a synthetic issue or a
           logged warning, mirroring ``_code_review_step``'s existing containment.
     """
@@ -90,62 +81,11 @@ def run_code_review_phase_impl(
     issues: List[ReviewIssue] = []
 
     logger.info(
-        "[%s] Code review phase for %s (%d files). Next step -> Build verification, lint, code review",
+        "[%s] Code review phase for %s (%d files). Next step -> Code review",
         task_id,
         microtask_id,
         len(files),
     )
-
-    if detail_callback:
-        detail_callback("Running build verification...")
-    build_ok, build_msg = build_verify_fn(repo_path, build_verifier, task_id)
-    if not build_ok:
-        issues.append(
-            ReviewIssue(
-                source="build",
-                severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg}",
-                recommendation="Fix build errors before proceeding.",
-            )
-        )
-
-    lint_ok = True
-    if linting_tool_agent is not None:
-        if detail_callback:
-            detail_callback("Running linter...")
-        try:
-            from software_engineering_team.linting_tool_agent.models import (
-                LintToolInput as _LintInput,
-            )
-
-            lint_result = linting_tool_agent.run(
-                _LintInput(
-                    repo_path=str(repo_path),
-                    agent_type=config.lint_agent_type,
-                    task_id=task_id,
-                    task_description=f"Microtask: {microtask.title or microtask_id}",
-                )
-            )
-            if lint_result and not _lint_passed(lint_result):
-                lint_ok = False
-                for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
-                    file_path = getattr(li, "file_path", "")
-                    if files and file_path and file_path not in files:
-                        continue
-                    sev = getattr(li, "severity", "medium")
-                    issues.append(
-                        ReviewIssue(
-                            source="lint",
-                            severity=_lint_severity(config, sev),
-                            description=getattr(li, "message", str(li)),
-                            file_path=file_path,
-                            recommendation="",
-                        )
-                    )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Linting tool agent failed for microtask %s: %s", task_id, microtask_id, exc
-            )
 
     if detail_callback:
         detail_callback("Running code review...")
@@ -169,11 +109,10 @@ def run_code_review_phase_impl(
     issues.extend(cr_out.issues)
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]
-    passed = build_ok and lint_ok and len(critical_or_high) == 0
+    passed = len(critical_or_high) == 0
 
     summary = (
-        f"Code review phase for {microtask_id}: build={'OK' if build_ok else 'FAIL'}, "
-        f"lint={'OK' if lint_ok else 'FAIL'}, {len(issues)} issues "
+        f"Code review phase for {microtask_id}: {len(issues)} issues "
         f"({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
     )
     logger.info("[%s] %s", task_id, summary)
