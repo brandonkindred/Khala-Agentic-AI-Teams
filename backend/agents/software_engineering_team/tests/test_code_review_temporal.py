@@ -10,11 +10,15 @@ Covers the five things testable without a live (deployed) Temporal server:
 4. ``CodeReviewAgent.run``'s Temporal-first dispatch and its fallbacks.
 5. A real ``CodeReviewWorkflow`` execute + replay round-trip, driven by
    ``temporalio.testing.WorkflowEnvironment``'s embedded time-skipping test
-   server (no live/deployed Temporal server needed) — see
+   server (no live/deployed Temporal server needed, though the ephemeral test
+   server binary itself requires a one-time network fetch — see
    ``test_workflow_executes_and_replays_without_non_determinism`` near the
-   bottom of this file. It is marked ``integration`` (run with
-   ``-m integration``) since standing up the embedded server is heavier than
-   this file's other pure-Python tests.
+   bottom of this file) and, complementing it,
+   ``test_workflow_gathers_tail_pass_activities_concurrently``, which inspects
+   the recorded history to confirm the three tail-pass activities are
+   scheduled together rather than one after another. Both are marked
+   ``integration`` (run with ``-m integration``) since standing up the
+   embedded server is heavier than this file's other pure-Python tests.
 """
 
 from __future__ import annotations
@@ -1091,4 +1095,78 @@ async def test_workflow_executes_and_replays_without_non_determinism() -> None:
     # The property this issue exists to guard: replaying the just-recorded
     # history against the same workflow code must not raise a non-determinism
     # error.
+    await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
+    """The three tail-pass activities are scheduled together, not one at a time.
+
+    Complements ``test_workflow_executes_and_replays_without_non_determinism``:
+    that test's output alone can't distinguish a concurrent ``asyncio.gather``
+    from the old sequential awaits, since ``DummyLLMClient`` contributes no
+    architecture/side-effect findings either way. This inspects the recorded
+    history directly: ``filter_false_positives_activity``,
+    ``find_architecture_and_redundancy_activity``, and
+    ``find_side_effect_impact_activity`` must all be scheduled by the SAME
+    workflow task (``workflow_task_completed_event_id``) -- proof they were
+    fanned out together. Under the old sequential-await code, each later
+    activity could only be scheduled by a NEW workflow task triggered after
+    the previous one's ``ActivityTaskCompletedEvent``, so their scheduling
+    events would carry different ``workflow_task_completed_event_id``s.
+
+    Also replays the recorded history, the same non-determinism guard as the
+    baseline test above, and marked ``integration``/skips the same way for the
+    same reason (see that test's docstring).
+    """
+    import concurrent.futures
+
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-concurrent-tail-passes-test"
+    tail_pass_activity_names = {
+        "code_review_verify_false_positives",
+        "code_review_architecture_consistency",
+        "code_review_side_effect_impact",
+    }
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[CodeReviewWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            async with worker:
+                await env.client.execute_workflow(
+                    CodeReviewWorkflow.run,
+                    review_input.model_dump(mode="json"),
+                    id=workflow_id,
+                    task_queue=TASK_QUEUE,
+                )
+
+            history = await env.client.get_workflow_handle(workflow_id).fetch_history()
+
+    scheduling_workflow_task_ids = {
+        event.activity_task_scheduled_event_attributes.workflow_task_completed_event_id
+        for event in history.events
+        if event.activity_task_scheduled_event_attributes.activity_type.name
+        in tail_pass_activity_names
+    }
+    assert len(scheduling_workflow_task_ids) == 1, (
+        "expected all three tail-pass activities to be scheduled by the same "
+        f"workflow task (gathered together); got {scheduling_workflow_task_ids}"
+    )
+
     await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)

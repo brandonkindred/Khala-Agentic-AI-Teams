@@ -1,11 +1,16 @@
 """Durable code review workflow: map-reduce review as a Temporal workflow.
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
-resumable computation. It orchestrates the review as a sequence of activities —
-prepare → map fan-out → false-positive verify → architecture-consistency /
-redundancy pass → side-effect / blast-radius pass → deterministic gate →
+resumable computation. It orchestrates the review as: prepare → map fan-out →
+three tail passes run concurrently (false-positive verify, architecture-
+consistency / redundancy, side-effect / blast-radius) → deterministic gate →
 (conditional) narrative synthesis — so a worker restart mid-review re-runs only
 the unfinished activities instead of re-reviewing the whole submission.
+
+The tail passes have no cross-pass data dependency (each reads only
+``review_input`` and/or the map phase's aggregated ``issues``, never another
+pass's output), mirroring ``coordinator._run_tail_passes``'s identical
+concurrent fan-out in thread mode.
 
 The verdict is behavior-identical to thread mode because every phase calls the
 same underlying coordinator functions (through :mod:`.activities`): the map unit
@@ -60,24 +65,29 @@ _LLM_RETRY = RetryPolicy(
 # so the sync dispatcher can translate it back into ``CodeReviewUnavailableError``.
 CODE_REVIEW_UNAVAILABLE_TYPE = "CodeReviewUnavailableError"
 
-# Replay-compatibility gate for inserting the architecture-consistency activity
-# between verification and finalization (see ``run``). A ``CodeReviewWorkflow``
-# history recorded before this activity existed has no marker for it, so
-# ``workflow.patched`` returns False on replay and that history's original
-# finalize-next sequence is reproduced exactly; a new execution records the
+# Replay-compatibility gate for running the architecture-consistency activity
+# concurrently with verification and the side-effect pass (see ``run``). A
+# ``CodeReviewWorkflow`` history recorded before this activity existed has no
+# marker for it, so ``workflow.patched`` returns False on replay and that
+# history's original finalize-next sequence is reproduced exactly (the
+# activity is simply omitted from the gather); a new execution records the
 # marker and always takes the new path. Mirrors ``planning_team.temporal.
-# workflows._PER_PHASE_PATCH``'s identical rationale.
+# workflows._PER_PHASE_PATCH``'s identical rationale. Evaluated unconditionally
+# every run, in the same relative order as ``_SIDE_EFFECT_PASS_PATCH`` below,
+# so a pre-migration history's marker sequence still replays correctly even
+# though the two activities' calls are no longer strung together sequentially.
 # TODO: Remove this gate (and always run the architecture pass unconditionally)
 # once no pre-migration CodeReviewWorkflow histories remain open (confirm via
 # the Temporal UI), then deprecate the marker with
 # ``workflow.deprecate_patch(_ARCHITECTURE_PASS_PATCH)`` before deleting it.
 _ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
 
-# Replay-compatibility gate for inserting the side-effect / blast-radius activity
-# between the architecture pass and finalization (see ``run``). Same rationale as
-# ``_ARCHITECTURE_PASS_PATCH``: a history recorded before this activity existed has
-# no marker for it, so ``workflow.patched`` returns False on replay and that
-# history's original finalize-next sequence is reproduced exactly.
+# Replay-compatibility gate for running the side-effect / blast-radius activity
+# concurrently with verification and the architecture pass (see ``run``). Same
+# rationale as ``_ARCHITECTURE_PASS_PATCH``: a history recorded before this
+# activity existed has no marker for it, so ``workflow.patched`` returns False
+# on replay and that history's original finalize-next sequence is reproduced
+# exactly.
 # TODO: Remove this gate (and always run the side-effect pass unconditionally)
 # once no pre-migration CodeReviewWorkflow histories remain open (confirm via
 # the Temporal UI), then deprecate the marker with
@@ -241,7 +251,28 @@ class CodeReviewWorkflow:
             )
 
         self._advance("verifying", 0.92)
-        verified = await workflow.execute_activity(
+
+        async def _no_findings() -> List[Dict[str, Any]]:
+            # Replaces an unpatched (legacy-replay) tail pass in the gather below:
+            # no activity is scheduled, so a pre-migration history's original
+            # finalize-next sequence still replays exactly as it did before this
+            # pass existed.
+            return []
+
+        # The three tail passes are once-per-submission, additive-only, read-only
+        # checks with no cross-pass data dependency (each reads only
+        # ``review_input`` and/or the map phase's aggregated ``issues``, never
+        # another pass's output — mirrors coordinator._run_tail_passes's identical
+        # concurrent fan-out in thread mode), so they run concurrently via
+        # asyncio.gather rather than one after another. workflow.patched is still
+        # called unconditionally, in the same relative order as before this
+        # change, so an in-flight/pre-migration history's marker sequence keeps
+        # replaying correctly even though the gated activities' calls are no
+        # longer strung together sequentially.
+        run_architecture_pass = workflow.patched(_ARCHITECTURE_PASS_PATCH)
+        run_side_effect_pass = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+
+        filter_coro = workflow.execute_activity(
             A.filter_false_positives_activity,
             args=[
                 review_input,
@@ -252,44 +283,39 @@ class CodeReviewWorkflow:
             start_to_close_timeout=timedelta(minutes=30),
             retry_policy=_LLM_RETRY,
         )
-
-        has_architecture_findings = False
-        if workflow.patched(_ARCHITECTURE_PASS_PATCH):
-            # Architecture-consistency / cross-codebase-redundancy pass: additive,
-            # once per submission (not once per chunk), matching thread mode's
-            # run_coordinator (see coordinator.py's identical call ordering — after
-            # false-positive verification, before the final dedupe/gate). Gated by
-            # workflow.patched so a pre-migration history (recorded before this
-            # activity existed) replays its original finalize-next sequence exactly.
-            architecture_findings = await workflow.execute_activity(
+        architecture_coro = (
+            workflow.execute_activity(
                 A.find_architecture_and_redundancy_activity,
                 args=[review_input],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=_LLM_RETRY,
             )
-            if architecture_findings:
-                verified = [*verified, *architecture_findings]
-                has_architecture_findings = True
-
-        has_side_effect_findings = False
-        if workflow.patched(_SIDE_EFFECT_PASS_PATCH):
-            # Side-effect / blast-radius pass: additive, once per submission (not
-            # once per chunk), matching thread mode's run_coordinator (see
-            # coordinator.py's identical call ordering — after the architecture
-            # pass, before the final dedupe/gate). Gated by workflow.patched so a
-            # pre-migration history (recorded before this activity existed)
-            # replays its original finalize-next sequence exactly.
-            side_effect_findings = await workflow.execute_activity(
+            if run_architecture_pass
+            else _no_findings()
+        )
+        side_effect_coro = (
+            workflow.execute_activity(
                 A.find_side_effect_impact_activity,
                 args=[review_input],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=_LLM_RETRY,
             )
-            if side_effect_findings:
-                verified = [*verified, *side_effect_findings]
-                has_side_effect_findings = True
+            if run_side_effect_pass
+            else _no_findings()
+        )
+        verified, architecture_findings, side_effect_findings = await asyncio.gather(
+            filter_coro, architecture_coro, side_effect_coro
+        )
+
+        has_architecture_findings = bool(architecture_findings)
+        if architecture_findings:
+            verified = [*verified, *architecture_findings]
+
+        has_side_effect_findings = bool(side_effect_findings)
+        if side_effect_findings:
+            verified = [*verified, *side_effect_findings]
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(
