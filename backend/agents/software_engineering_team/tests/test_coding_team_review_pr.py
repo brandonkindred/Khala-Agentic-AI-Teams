@@ -905,6 +905,19 @@ class TestReviewEndpoint:
             sum(job["review_summary"]["severity_counts"].values())
             == job["review_summary"]["total_issues"]
         )
+        # The pre-existing bug is excluded from the counts because it's routed to a
+        # proposal, not silently dropped: it must show up there and never as any kind
+        # of PR comment.
+        proposal = job["review_summary"]["pending_issue_proposals"][0]
+        assert proposal["description"] == "pre-existing bug"
+        assert proposal["file_path"] == "unchanged.py"
+        gh = review_app["github"]["client"]
+        all_comment_bodies = (
+            [c["body"] for rev in gh.submitted_reviews for c in rev.get("comments", [])]
+            + [c.get("body", "") for c in gh.review_comments]
+            + [body for _n, body in gh.comments]
+        )
+        assert not any("pre-existing bug" in body for body in all_comment_bodies)
 
     def test_review_summary_excludes_unknown_and_blank_severities(self, review_app) -> None:
         # A finding whose severity is unrecognized ("bogus") or blank ("") is counted
@@ -946,6 +959,29 @@ class TestReviewEndpoint:
         assert "https://***@" in review["body"]
         assert "ghp_SECRETTOKEN" not in review["comments"][0]["body"]
 
+    def test_file_level_and_standalone_comments_are_token_scrubbed(self, review_app) -> None:
+        # The line-anchored/review-body path is covered above; this covers the
+        # other two comment paths this PR touches -- a file-level comment (an
+        # off-diff line on a changed file) and a standalone comment (a file
+        # absent from the diff entirely) -- so a leaked credential can't slip
+        # through either one unscrubbed.
+        secret_url = "https://x:ghp_SECRETTOKEN@github.com/o/r.git"
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("low", line=999, description=f"leak {secret_url} here"),
+                _FakeReviewIssue(
+                    "low", line=4, file_path="not_in_diff.py", description=f"leak {secret_url} too"
+                ),
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert "ghp_SECRETTOKEN" not in gh.review_comments[0]["body"]
+        assert "https://***@" in gh.review_comments[0]["body"]
+        assert "ghp_SECRETTOKEN" not in gh.comments[0][1]
+        assert "https://***@" in gh.comments[0][1]
+
     def test_multiple_off_diff_findings_each_get_own_file_comment(self, review_app) -> None:
         # The core contract: every finding produces its OWN comment and no comment
         # lists more than one finding (never batched). Both findings cite off-diff
@@ -976,10 +1012,14 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 2
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_leftover_finding_anchored_as_file_level_review_comment(self, review_app) -> None:
-        # A finding whose file is not in the PR diff is re-anchored as a file-level
-        # inline review comment on the first changed file ("a.py"), rather than
-        # posted as a standalone conversation comment.
+    def test_off_diff_finding_without_tag_becomes_standalone_comment(self, review_app) -> None:
+        # A finding whose file is not in the PR diff, and which the reviewer did NOT
+        # tag pre_existing, is still an in-scope PR finding (round 2): forcing every
+        # off-diff-file finding into proposals would silently drop a real,
+        # PR-blocking finding like "this PR references module X but never added
+        # it". Since it cannot be anchored to any diff location, it is posted as
+        # its own standalone conversation comment naming its own file -- never
+        # dropped, and never misattributed to an unrelated changed file.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("low", line=4, file_path="not_in_diff.py", description="orphan")
@@ -988,16 +1028,22 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
-        # The finding is re-anchored as a file-level comment on "a.py", posted via
-        # the dedicated endpoint — no standalone conversation comments for findings.
-        assert gh.comments == []
-        file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
-        assert len(file_comments) >= 1
-        assert file_comments[0]["path"] == "a.py"
+        # Never a file-level comment (would misattribute it to the changed a.py).
+        assert gh.review_comments == []
+        for review in gh.reviews:
+            for c in review.get("comments", []):
+                assert "orphan" not in c.get("body", "")
+        # Posted as its own standalone comment naming its own file.
+        assert len(gh.comments) == 1
+        assert gh.comments[0][0] == 7
+        assert "orphan" in gh.comments[0][1]
+        assert "`not_in_diff.py`" in gh.comments[0][1]
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["file_comments"] >= 1
-        assert job["review_summary"]["comment_findings"] == 0
+        assert job["review_summary"]["file_comments"] == 0
+        assert job["review_summary"]["comment_findings"] == 1
+        # Never routed to a proposal -- only an explicit pre_existing=True tag does that.
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_reviewer_none_output_fails_job(self, review_app) -> None:
         # A provider that returns None WITHOUT raising must fail the job, never
@@ -1047,8 +1093,10 @@ class TestReviewEndpoint:
             if "could not complete and did not post findings" in body
         ]
         assert len(outage_notes) == 1
-        # No pull request review is created on the outage path.
+        # No pull request review or file-level comment is created on the outage
+        # path -- the exception happens before any finding-posting is attempted.
         assert gh.reviews == []
+        assert gh.review_comments == []
 
     def test_reviewer_bare_timeout_error_records_type_name_not_empty_string(
         self, review_app
@@ -1470,6 +1518,14 @@ class TestReviewEndpoint:
 
     def test_review_422_retries_then_succeeds(self, review_app) -> None:
         gh = review_app["github"]["client"]
+        # Explicit file_path so this stays an off-diff *line in a changed file*
+        # (-> file-level review comment) even if the fixture default ever changes.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=2, description="in-diff finding"),
+                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff line"),
+            ]
+        )
         gh.review_fail_times = 1  # first submit 422s, retry as COMMENT succeeds
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1492,6 +1548,14 @@ class TestReviewEndpoint:
         # re-submitted (here, via the bisection path) so they stay inline — no
         # standalone conversation comments.
         gh = review_app["github"]["client"]
+        # Explicit file_path so this stays an off-diff *line in a changed file*
+        # (-> file-level review comment) even if the fixture default ever changes.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=2, description="in-diff finding"),
+                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff line"),
+            ]
+        )
         gh.review_fail_times = 2  # both full-batch attempts 422; bisection then succeeds
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1572,10 +1636,12 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 2
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_leftover_finding_posted_as_inline_not_standalone(self, review_app) -> None:
-        # After the fix, a finding whose file is not in the diff is re-anchored as a
-        # file-level inline review comment, not posted as a standalone conversation
-        # comment. The job succeeds and no add_issue_comment is called for the finding.
+    def test_off_diff_finding_without_tag_becomes_standalone_not_inline(self, review_app) -> None:
+        # A finding whose file is not in the diff, without a pre_existing tag,
+        # cannot be anchored to any diff location -- it must never be posted
+        # line-anchored or file-level, but (round 2) it must still be posted, as
+        # its own standalone comment, rather than dropped to a proposal. The
+        # in-diff finding is unaffected.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=2, description="inline"),
@@ -1587,22 +1653,26 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # The review carries the line-anchored inline for "inline"; the leftover
-        # is a file-level comment (re-anchored to "a.py") on the dedicated endpoint.
+        # The review carries only the line-anchored inline for "inline"; the
+        # out-of-diff finding is never line- or file-level anchored.
         assert len(gh.reviews) == 1
         line_comments = [c for c in gh.reviews[0]["comments"] if c.get("side") == "RIGHT"]
         file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(line_comments) == 1  # the in-diff finding
-        assert len(file_comments) == 1  # the re-anchored leftover
-        assert file_comments[0]["path"] == "a.py"
-        # No standalone comments — the leftover is a file-level review comment now.
-        assert gh.comments == []
-        assert job["review_summary"]["comment_findings"] == 0
+        assert file_comments == []  # the out-of-diff finding is never file-anchored
+        # Instead it is posted as its own standalone conversation comment,
+        # naming its own file rather than the unrelated in-diff file.
+        assert len(gh.comments) == 1
+        assert "leftover" in gh.comments[0][1]
+        assert "missing.py" in gh.comments[0][1]
+        assert job["review_summary"]["comment_findings"] == 1
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
-    def test_multiple_leftover_findings_all_anchored_inline(self, review_app) -> None:
-        # All three findings name files absent from the diff; after the fix they are
-        # each re-anchored as file-level inline review comments on "a.py" (the first
-        # changed file). No add_issue_comment calls; job succeeds.
+    def test_multiple_off_diff_findings_each_get_own_standalone_comment(self, review_app) -> None:
+        # All three findings name files absent from the diff, with no pre_existing
+        # tag -- none can be anchored to any diff location, so each becomes its own
+        # standalone conversation comment: never dropped, never merged, and never
+        # misattributed to an unrelated changed file.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
                 _FakeReviewIssue("high", line=1, file_path="gone.py", description="leftover one"),
@@ -1615,17 +1685,23 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # All three leftovers became file-level comments on the dedicated endpoint.
-        file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
-        assert len(file_comments) == 3
-        bodies = [c["body"] for c in file_comments]
-        assert any("leftover one" in b for b in bodies)
-        assert any("leftover two" in b for b in bodies)
-        assert any("leftover three" in b for b in bodies)
-        # No standalone comments.
-        assert gh.comments == []
-        assert job["review_summary"]["comment_findings"] == 0
-        assert job["review_summary"]["file_comments"] == 3
+        # None became a file-level comment (would misattribute them to a.py).
+        assert gh.review_comments == []
+        for review in gh.reviews:
+            for c in review.get("comments", []):
+                assert "leftover" not in c.get("body", "")
+        # Each got its own standalone comment; none were merged or dropped.
+        assert len(gh.comments) == 3
+        bodies = [body for _n, body in gh.comments]
+        assert sum("leftover one" in b for b in bodies) == 1
+        assert sum("leftover two" in b for b in bodies) == 1
+        assert sum("leftover three" in b for b in bodies) == 1
+        for b in bodies:
+            assert b.count("leftover") == 1  # no comment carries more than one finding
+            assert "gone.py" in b  # each standalone comment still names its own file
+        assert job["review_summary"]["comment_findings"] == 3
+        assert job["review_summary"]["file_comments"] == 0
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_non_api_error_marks_job_failed_not_stuck(self, review_app) -> None:
         # A non-GitHubAPIError during submit must be caught by the broad outer
@@ -1658,12 +1734,13 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         # No file-level comment landed; the finding fell through to add_issue_comment.
         assert gh.review_comments == []
-        assert len(gh.comments) >= 1, (
-            f"Expected at least one standalone fallback comment, got gh.comments={gh.comments}"
+        assert len(gh.comments) == 1, (
+            f"Expected exactly one standalone fallback comment, got gh.comments={gh.comments}"
         )
-        assert any("dropped finding" in body for _n, body in gh.comments), (
+        assert "dropped finding" in gh.comments[0][1], (
             f"Fallback comment missing finding text: gh.comments={gh.comments}"
         )
+        assert "could not complete and did not post findings" not in gh.comments[0][1]
         assert job["review_summary"]["comment_findings"] == 1
 
     def test_standalone_fallback_failure_marks_job_failed(self, review_app) -> None:
@@ -1681,12 +1758,15 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
         assert job["review_summary"]["comments_failed"] == 1
+        # The "incomplete" notice actually reached the PR, not just the job store.
+        assert any(
+            "1 of 1 finding comment(s) could not be posted" in body for _n, body in gh.comments
+        )
 
     def test_summary_only_review_failure_does_not_fail_job(self, review_app) -> None:
-        # With no line-anchored findings, _submit_review posts only the summary
-        # body. That courtesy review carries no findings, so its failure must NOT
-        # fail the job — the file-level findings still post on the dedicated
-        # endpoint. (Regression guard for the empty-line-comments path.)
+        # With a file-level finding but no line-anchored diff comments, the review
+        # body is summary-only; its failure must NOT fail the job because the
+        # file-level comment still posts on the dedicated endpoint.
         gh = review_app["github"]["client"]
         gh.review_fail_times = 1  # the lone summary-only review attempt 422s
         review_app["github"]["agent_output"] = _FakeOutput(
@@ -1758,6 +1838,17 @@ class TestReviewEndpoint:
         assert gh.reactions == []
         assert gh.comments == []
         assert job["review_summary"]["comment_findings"] == 0
+        # The finding was actually posted (as a line-anchored inline comment,
+        # since line=2 on a.py is in-diff) -- not silently dropped, which would
+        # also produce no reaction/comments and pass the assertions above.
+        line_anchored = [
+            c
+            for rev in gh.reviews
+            for c in rev.get("comments", [])
+            if c.get("path") == "a.py" and c.get("line") == 2
+        ]
+        assert len(line_anchored) == 1
+        assert "a finding" in line_anchored[0]["body"]
 
     def test_clean_review_reaction_failure_still_completes(self, review_app) -> None:
         # The +1 reaction is a best-effort courtesy: a failure adding it (rate
@@ -2018,16 +2109,44 @@ class TestReviewPersistence:
 # BUG CONDITION REGRESSION TESTS
 #
 # These tests started as exploratory red tests and now serve as regression
-# guards for the exact counterexamples that proved the original bug.
+# guards for the exact counterexamples that proved the original bug(s).
 #
-# Bug: findings whose file is NOT in the PR diff are posted via add_issue_comment
-# (standalone top-level PR conversation comment) instead of being bundled as
-# file-level inline review comments (subject_type="file") under the single review.
+# Bug (original): findings whose file is NOT in the PR diff were posted via
+# add_issue_comment (standalone top-level PR conversation comment) -- fine in
+# principle, but at the time nothing guaranteed the comment was well-formed or
+# that it was the only comment for the finding.
 #
-# Property 1 (design.md): For any code-review run that produces ≥1 finding, the
-# fixed _run_pr_review SHALL NOT call add_issue_comment for any individual
-# finding.  Every finding SHALL appear as a line-anchored OR file-level inline
-# review comment under the single PR review submission.
+# Bug (deterministic mis-anchor, superseded): an interim fix re-anchored
+# such "leftover" findings onto the FIRST changed file in the diff and posted
+# them there as a file-level review comment -- wrong, because the finding is
+# about a file this PR never touched at all.
+#
+# Bug (round 1, superseded -- Codex-flagged regression): a later fix forced
+# EVERY finding whose file is absent from the diff into pending_issue_proposals,
+# regardless of the reviewer's own pre_existing tag. That silently dropped a
+# real, common, PR-blocking finding: "this PR imports/references module X but
+# never added it" -- exactly the class of finding false_positive_filter.py
+# deliberately keeps rather than treats as noise.
+#
+# Current, correct behavior (round 2, _partition_review_issues in
+# api/pr_review.py): routing to preexisting_issues/proposals is driven ONLY by
+# the reviewer's own pre_existing tag (overridden back to a PR finding when
+# is_within_diff proves it lies on a line the PR actually added) -- never by
+# diff/file membership alone. A finding naming a file absent from the diff,
+# WITHOUT a pre_existing tag, therefore stays a PR finding: since it cannot be
+# anchored to any line- or file-level location in the diff, it is posted as
+# its own standalone conversation comment (via format_issue_comment /
+# partition.standalone_comments) naming its own file_path -- never dropped,
+# and never misattributed to an unrelated changed file. A finding EXPLICITLY
+# tagged pre_existing=True (and not proven is_within_diff) still routes to
+# pending_issue_proposals, unchanged.
+#
+# Property 1 (round 2): For any code-review run that produces ≥1 finding, the
+# fixed _run_pr_review SHALL NOT post more than one comment per finding, SHALL
+# NEVER anchor an off-diff-file finding to an unrelated changed file, and SHALL
+# route such a finding to pending_issue_proposals ONLY when the reviewer
+# explicitly tagged it pre_existing=True (and it is not proven is_within_diff);
+# otherwise the finding is posted as its own standalone conversation comment.
 #
 # Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5
 # ---------------------------------------------------------------------------
@@ -2036,54 +2155,61 @@ class TestReviewPersistence:
 class TestBugConditionExploration:
     """Exploration tests written BEFORE the fix as part of the bugfix workflow (Task 1).
 
-    These tests encode the CORRECT / EXPECTED behavior post-fix, but were originally
-    written to FAIL against the unfixed code — that failure acted as proof the bug
-    existed.  They now pass and serve as regression guards for the specific bug
-    conditions identified during exploration (file-not-in-diff leftovers and 422-dropped
-    comments reposted as standalone).
+    Originally encoded round-1 "route every off-diff-file finding to a proposal"
+    behavior; updated for round 2 (see the module-level comment above) to encode
+    the correct behavior instead: an off-diff-file finding WITHOUT an explicit
+    pre_existing tag becomes its own standalone conversation comment -- never a
+    proposal, and never a comment mis-anchored to an unrelated changed file.
 
     Why keep these alongside TestReviewEndpoint?
-    - TestReviewEndpoint tests are the canonical integration suite.  They cover the same
-      scenarios but were updated (task 3.4) as part of the fix landing.
-    - TestBugConditionExploration tests preserve the exact assertions written against the
-      unfixed code, including the counterexample documentation, so future readers can see
-      precisely what the bug looked like and what condition each test was designed to catch.
-    - If a regression reintroduces standalone posting for any of these specific inputs,
-      both suites will catch it; the exploration tests' error messages include
-      "BUG CONFIRMED" to make the failure immediately recognisable.
+    - TestReviewEndpoint tests are the canonical integration suite.  They cover the
+      same scenarios.
+    - TestBugConditionExploration tests preserve the exact counterexample
+      documentation from the original bugfix workflow, so future readers can see
+      precisely what each historical bug looked like and what condition each test
+      was designed to catch.
+    - test_422_dropped_comments_reanchored_not_standalone is untouched by the
+      round-2 change (it concerns only in-diff findings dropped by a failed 422
+      review submission, not off-diff-file routing) and still guards that
+      regression exactly as before.
+    - If a regression reintroduces mis-anchored file-level posting, or silently
+      drops an untagged off-diff finding to a proposal, both suites will catch
+      it; the exploration tests' error messages include "BUG CONFIRMED" to make
+      the failure immediately recognisable.
 
     Counterexamples captured on unfixed code (Task 1 documentation):
-      - test_leftover_finding_not_posted_as_standalone_comment:
-          gh.comments = [(7, '`src/config.py` — **[LOW] logic** — Security issue ...')]
-          review_summary["comment_findings"] = 1
-          review["comments"] = []  (no subject_type="file" entry)
+      - test_leftover_finding_becomes_standalone_comment_not_misanchored:
+          (interim-fix bug) review_comments carried a subject_type="file" entry
+          anchored to "a.py" (the PR's only changed file), not the finding's own
+          "src/config.py" -- misattributing the finding to unrelated code.
+          (round-1 bug) the finding was silently routed to pending_issue_proposals
+          instead of being posted at all.
 
-      - test_empty_file_path_finding_anchored_not_standalone:
-          gh.comments = [(7, '**[LOW] logic** — No file path finding')]
-          review_summary["comment_findings"] = 1
+      - test_empty_file_path_finding_becomes_standalone_not_misanchored:
+          same two bugs, for a finding with no file_path at all.
 
       - test_422_dropped_comments_reanchored_not_standalone:
           gh.comments contains bodies from inline_comment_to_timeline_body(c)
           review_summary["comment_findings"] = 2  (both inline findings dropped)
 
-      - test_multiple_leftovers_no_standalone_comments:
-          gh.comments = [(7, '`gone1.py` — ...'), (7, '`gone2.py` — ...')]
-          review_summary["comment_findings"] = 2
+      - test_multiple_leftovers_each_get_their_own_standalone_comment:
+          same two bugs, for two findings sharing no changed file.
     """
 
-    def test_leftover_finding_not_posted_as_standalone_comment(self, review_app) -> None:
-        """A finding whose file_path is NOT in the PR diff MUST NOT produce a standalone
-        add_issue_comment call.  It must instead appear in the submitted review as a
-        file-level inline comment (subject_type="file"), anchored to the first changed
-        file in valid_by_path.
+    def test_leftover_finding_becomes_standalone_comment_not_misanchored(self, review_app) -> None:
+        """A finding whose file_path is NOT in the PR diff, and which the reviewer did
+        NOT tag pre_existing, is an in-scope PR finding (round 2): since it cannot be
+        anchored to any diff location, it must be posted as its own standalone
+        conversation comment naming its own file. It must NEVER be re-anchored as a
+        file-level review comment against an unrelated changed file (the interim
+        "anchor to first file" bug), and it must NEVER be silently dropped to a
+        proposal either (the round-1 regression Codex flagged).
 
-        On UNFIXED code this test FAILS:
-          - gh.comments is non-empty (add_issue_comment was called for the finding)
-          - review["comments"] is empty (no subject_type="file" entry exists)
-          - review_summary["comment_findings"] == 1  (not 0)
-
-        Counterexample:
-          gh.comments = [(7, '`src/config.py` — **[LOW] logic** — Security issue ...')]
+        On code with EITHER now-fixed bug this test FAILS:
+          - review_comments carries a subject_type="file" entry mis-anchored to
+            "a.py" (the PR's only changed file, not the finding's own file), OR
+          - the finding was silently routed to pending_issue_proposals instead of
+            being posted as a standalone comment.
         """
         # The PR diff only touches "a.py" (set up by _FakeReviewClient.files).
         # The finding names "src/config.py" which is absent from the diff.
@@ -2102,35 +2228,36 @@ class TestBugConditionExploration:
 
         gh = review_app["github"]["client"]
 
-        # EXPECTED (correct) behavior: no standalone comment for the finding.
-        # ACTUAL (buggy) behavior on unfixed code: gh.comments is non-empty.
-        assert gh.comments == [], (
-            f"BUG CONFIRMED — finding posted as standalone comment: gh.comments = {gh.comments}"
-        )
-
-        # The finding must be posted as a file-level comment on the dedicated endpoint.
+        # Never mis-anchored to an unrelated changed file.
         file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
-        assert len(file_level) >= 1, (
-            f"BUG CONFIRMED — no file-level review comment: review_comments = {gh.review_comments}"
+        assert file_level == [], (
+            f"BUG CONFIRMED — out-of-diff finding mis-anchored as a file-level "
+            f"comment: review_comments = {gh.review_comments}"
         )
 
-        # comment_findings must be 0: the finding was NOT posted as a standalone comment.
+        # Posted as its own standalone comment naming its own file, never dropped.
+        assert len(gh.comments) == 1, (
+            f"BUG CONFIRMED — finding not posted as a standalone comment: gh.comments = {gh.comments}"
+        )
+        assert "Security issue in config" in gh.comments[0][1]
+        assert "`src/config.py`" in gh.comments[0][1]
+
         job = review_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["review_summary"]["comment_findings"] == 0, (
-            f"BUG CONFIRMED — comment_findings = {job['review_summary']['comment_findings']}, expected 0"
-        )
+        assert job["review_summary"]["comment_findings"] == 1
+        # Never routed to a proposal -- only an explicit pre_existing=True tag does that.
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
-    def test_empty_file_path_finding_anchored_not_standalone(self, review_app) -> None:
-        """A finding with an empty or None file_path MUST NOT produce a standalone
-        add_issue_comment call.  It must be anchored to the first changed file in the
-        diff as a file-level inline review comment.
+    def test_empty_file_path_finding_becomes_standalone_not_misanchored(self, review_app) -> None:
+        """A finding with an empty or None file_path cannot resolve into the diff at
+        all, but (round 2) is still an in-scope PR finding absent an explicit
+        pre_existing tag: it must become its own standalone comment, never anchored
+        to the first changed file in the diff as a file-level comment, and never
+        silently dropped to a proposal.
 
-        On UNFIXED code this test FAILS:
-          - gh.comments is non-empty (add_issue_comment was called)
-          - review_summary["comment_findings"] == 1  (not 0)
-
-        Counterexample:
-          gh.comments = [(7, '**[LOW] logic** — No file path finding')]
+        On code with EITHER now-fixed bug this test FAILS:
+          - review_comments carries a subject_type="file" entry for the finding, OR
+          - the finding was silently routed to pending_issue_proposals instead of
+            being posted as a standalone comment.
         """
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -2147,33 +2274,35 @@ class TestBugConditionExploration:
 
         gh = review_app["github"]["client"]
 
-        # EXPECTED: no standalone comment for the finding.
-        assert gh.comments == [], (
-            f"BUG CONFIRMED — finding with empty file_path posted as standalone: gh.comments = {gh.comments}"
+        # Never posted as a file-level comment.
+        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
+        assert file_level == [], (
+            f"BUG CONFIRMED — empty-file_path finding mis-anchored as a file-level "
+            f"comment: review_comments = {gh.review_comments}"
         )
 
-        # The finding should be posted as a file-level comment on the dedicated endpoint.
-        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
-        assert len(file_level) >= 1, (
-            f"BUG CONFIRMED — no file-level comment for empty-path finding: review_comments = {gh.review_comments}"
+        # Posted as a standalone comment (no file location prefix, since file_path
+        # is empty), never dropped to a proposal.
+        assert len(gh.comments) == 1, (
+            f"BUG CONFIRMED — finding not posted as a standalone comment: gh.comments = {gh.comments}"
         )
+        assert "No file path finding" in gh.comments[0][1]
+        assert not gh.comments[0][1].startswith("`")
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["review_summary"]["comment_findings"] == 0, (
-            f"BUG CONFIRMED — comment_findings = {job['review_summary']['comment_findings']}, expected 0"
-        )
+        assert job["review_summary"]["comment_findings"] == 1
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
-    def test_multiple_leftovers_no_standalone_comments(self, review_app) -> None:
-        """Multiple findings whose files are not in the PR diff MUST each appear as a
-        file-level inline review comment — zero standalone add_issue_comment calls.
+    def test_multiple_leftovers_each_get_their_own_standalone_comment(self, review_app) -> None:
+        """Multiple findings whose files are not in the PR diff, without a
+        pre_existing tag, must each become their OWN standalone comment -- never
+        mis-anchored to the same first changed file, never merged into one comment,
+        and never silently dropped to a proposal.
 
-        On UNFIXED code this test FAILS:
-          - gh.comments has 2 entries (one per leftover finding)
-          - review_summary["comment_findings"] == 2  (not 0)
-
-        Counterexample:
-          gh.comments = [(7, '`gone1.py` — **[HIGH] logic** — issue one'),
-                         (7, '`gone2.py` — **[LOW] logic** — issue two')]
+        On code with EITHER now-fixed bug this test FAILS:
+          - review_comments carries subject_type="file" entries for the findings, OR
+          - the findings were silently routed to pending_issue_proposals instead of
+            being posted as standalone comments.
         """
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
@@ -2186,23 +2315,27 @@ class TestBugConditionExploration:
 
         gh = review_app["github"]["client"]
 
-        # EXPECTED: no standalone comments for findings.
-        assert gh.comments == [], (
-            f"BUG CONFIRMED — {len(gh.comments)} standalone comment(s) posted for leftover findings: "
-            f"gh.comments = {gh.comments}"
+        # Neither finding may appear as a file-level comment.
+        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
+        assert file_level == [], (
+            f"BUG CONFIRMED — out-of-diff findings mis-anchored as file-level "
+            f"comments: review_comments = {gh.review_comments}"
         )
 
-        # Both findings must appear as file-level comments on the dedicated endpoint.
-        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
-        assert len(file_level) == 2, (
-            f"BUG CONFIRMED — expected 2 file-level comments, got {len(file_level)}: "
-            f"review_comments = {gh.review_comments}"
+        # Each finding gets its own standalone comment; neither is dropped or merged.
+        assert len(gh.comments) == 2, (
+            f"BUG CONFIRMED — {len(gh.comments)} standalone comment(s) posted for leftover "
+            f"findings (expected 2): gh.comments = {gh.comments}"
         )
+        bodies = [body for _n, body in gh.comments]
+        assert sum("issue one" in b for b in bodies) == 1
+        assert sum("issue two" in b for b in bodies) == 1
+        for b in bodies:
+            assert not ("issue one" in b and "issue two" in b)
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["review_summary"]["comment_findings"] == 0, (
-            f"BUG CONFIRMED — comment_findings = {job['review_summary']['comment_findings']}, expected 0"
-        )
+        assert job["review_summary"]["comment_findings"] == 2
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_422_dropped_comments_reanchored_not_standalone(self, review_app) -> None:
         """When the full-batch review 422s on both the event and COMMENT attempts,
@@ -2382,6 +2515,23 @@ class TestPreservationProperties:
             f"PRESERVATION BROKEN — comment body does not contain description. "
             f"body={line_anchored[0]['body']!r}, expected to contain {description!r}"
         )
+        # In-diff line-anchored findings must NOT also be posted as file-level
+        # comments -- check both the dedicated file-comment endpoint and any
+        # file-level entry embedded in a submitted review's own comments array.
+        duplicate_file_level = [
+            c
+            for c in gh.review_comments
+            if c.get("subject_type") == "file" and c.get("path") == "a.py"
+        ] + [
+            c
+            for rev in gh.reviews
+            for c in rev.get("comments", [])
+            if c.get("subject_type") == "file" and c.get("path") == "a.py"
+        ]
+        assert len(duplicate_file_level) == 0, (
+            f"PRESERVATION BROKEN — in-diff line-anchored finding also produced a "
+            f"file-level comment: {duplicate_file_level}"
+        )
 
     # ------------------------------------------------------------------
     # PBT B — File-level routing preserved (Req 3.2)
@@ -2452,6 +2602,21 @@ class TestPreservationProperties:
         assert description in file_level[0]["body"], (
             f"PRESERVATION BROKEN — comment body does not contain description. "
             f"body={file_level[0]['body']!r}, expected to contain {description!r}"
+        )
+        # The same finding must not ALSO show up as a line-anchored comment —
+        # file-level routing must be exclusive, not additive.
+        all_comments = []
+        for rev in gh.reviews:
+            all_comments.extend(rev.get("comments", []))
+        if line is None:
+            line_anchored = [c for c in all_comments if c.get("path") == "a.py" and "line" in c]
+        else:
+            line_anchored = [
+                c for c in all_comments if c.get("path") == "a.py" and c.get("line") == line
+            ]
+        assert len(line_anchored) == 0, (
+            f"PRESERVATION BROKEN — off-diff finding should not also produce a "
+            f"line-anchored comment, but found {line_anchored}."
         )
 
     # ------------------------------------------------------------------
@@ -2615,7 +2780,9 @@ class TestPreservationProperties:
 
         Property: when findings include both in-diff (file_path in valid_by_path)
         and out-of-diff paths, the routing of the in-diff finding is byte-for-byte
-        identical to routing it in isolation.
+        identical to routing it in isolation, and no extra comment is created on
+        the in-diff path (guarding against an out-of-diff finding being
+        re-anchored onto it).
 
         Concretely:
           1. Submit ONLY the in-diff finding → capture its review comment shape.
@@ -2636,9 +2803,8 @@ class TestPreservationProperties:
         _r1, gh1, _j1 = self._post_review(review_app, solo_issues)
 
         # A finding is routed to either the review (line-anchored) or the dedicated
-        # file-comment endpoint (file-level); aggregate both to see its routing.
-        # Line-anchored (review) comments come first so a line match wins over a
-        # same-path file-level re-anchor of an unrelated finding.
+        # file-comment endpoint (file-level); aggregate both so we can locate its
+        # comment regardless of which endpoint was used.
         all_comments_solo: list = []
         for rev in gh1.reviews:
             all_comments_solo.extend(rev.get("comments", []))
@@ -2666,7 +2832,7 @@ class TestPreservationProperties:
             _FakeReviewIssue(
                 sev,
                 line=ln,
-                file_path=fp if fp is not None else "",
+                file_path=fp,
                 description=desc,
             )
             for sev, ln, fp, desc in out_of_diff_specs
@@ -2691,10 +2857,33 @@ class TestPreservationProperties:
                 or (c.get("subject_type") == "file" and "line" not in c)
             )
         ]
-        assert len(in_diff_mixed) >= 1, (
-            f"[{description}] Mixed run: no comment found for in-diff finding "
-            f"(path={in_path!r}, line={in_line}). all_comments={all_comments_mixed}"
+        assert len(in_diff_mixed) == 1, (
+            f"[{description}] Mixed run: expected exactly 1 comment for in-diff finding "
+            f"(path={in_path!r}, line={in_line}), got {len(in_diff_mixed)}. "
+            f"all_comments={all_comments_mixed}"
         )
+        # No extra comment on the in-diff path either -- guards against an
+        # out-of-diff finding being re-anchored onto in_path under a different
+        # line/shape that the filter above wouldn't otherwise catch.
+        mixed_on_path = [c for c in all_comments_mixed if c.get("path") == in_path]
+        solo_on_path = [c for c in all_comments_solo if c.get("path") == in_path]
+        assert len(mixed_on_path) == len(solo_on_path), (
+            f"[{description}] Mixed run created extra comments on in-diff path {in_path!r}: "
+            f"solo={solo_on_path}, mixed={mixed_on_path}"
+        )
+        # Each out-of-diff finding (none tagged pre_existing here) must have
+        # landed as its own standalone conversation comment naming its own
+        # file, and never leaked into the review/file-level comments checked
+        # above.
+        for issue in out_issues:
+            assert any(issue.description in body for _n, body in gh2.comments), (
+                f"[{description}] out-of-diff finding {issue.description!r} missing from "
+                f"standalone comments: {gh2.comments}"
+            )
+            assert not any(issue.description in c.get("body", "") for c in all_comments_mixed), (
+                f"[{description}] out-of-diff finding {issue.description!r} leaked into "
+                f"review/file-level comments: {all_comments_mixed}"
+            )
         mixed_shape = {
             "path": in_diff_mixed[0].get("path"),
             "side": in_diff_mixed[0].get("side"),
@@ -2712,104 +2901,30 @@ class TestPreservationProperties:
 
 
 # ---------------------------------------------------------------------------
-# Task 3.5 — Unit tests for anchor_to_first_file pure helper
-# ---------------------------------------------------------------------------
-
-
-class TestAnchorToFirstFileUnit:
-    """Unit tests for the anchor_to_first_file pure helper."""
-
-    def test_returns_first_key_of_valid_by_path(self) -> None:
-        """The first key in insertion order is used as the anchor path (Python 3.7+)."""
-        from software_engineering_team.github_source import anchor_to_first_file
-
-        finding = _FakeReviewIssue("low", line=1, file_path="not_here.py", description="x")
-        valid_by_path = {"first_file.py": {1}, "second_file.py": {2}, "third_file.py": {3}}
-        result = anchor_to_first_file(finding, valid_by_path)
-        assert result is not None
-        assert result["path"] == "first_file.py"
-
-    def test_single_entry_valid_by_path(self) -> None:
-        """Single-entry valid_by_path → anchors to that one file, no line key."""
-        from software_engineering_team.github_source import anchor_to_first_file
-
-        finding = _FakeReviewIssue("high", line=10, file_path="gone.py", description="gone")
-        valid_by_path = {"only_file.py": {5, 6, 7}}
-        result = anchor_to_first_file(finding, valid_by_path)
-        assert result is not None
-        assert result["path"] == "only_file.py"
-        assert result["subject_type"] == "file"
-        assert result.get("line") is None  # no line key for file-level comments
-
-    # ------------------------------------------------------------------
-    # Task 3.5 — explicitly-named unit tests (required by spec)
-    # ------------------------------------------------------------------
-
-    def test_anchor_to_first_file_returns_file_level_comment(self) -> None:
-        """Finding absent from diff → returned dict has path == first key of
-        valid_by_path and subject_type == "file".
-
-        Validates: Requirements 2.2, 2.5
-        """
-        from software_engineering_team.github_source import anchor_to_first_file
-
-        finding = _FakeReviewIssue("low", line=4, file_path="src/config.py", description="issue")
-        valid_by_path = {"src/api.py": {1, 2, 3}, "src/utils.py": {5, 6}}
-        result = anchor_to_first_file(finding, valid_by_path)
-        assert result is not None
-        assert result["path"] == "src/api.py"  # must be the FIRST key
-        assert result["subject_type"] == "file"
-
-    def test_anchor_to_first_file_empty_valid_by_path_returns_none(self) -> None:
-        """Empty valid_by_path → anchor_to_first_file returns None.
-
-        Validates: Requirements 2.2, 2.5
-        """
-        from software_engineering_team.github_source import anchor_to_first_file
-
-        finding = _FakeReviewIssue("low", line=4, file_path="missing.py", description="issue")
-        assert anchor_to_first_file(finding, {}) is None
-
-    def test_anchor_to_first_file_body_matches_format_comment_body(self) -> None:
-        """The body field of the returned dict exactly equals format_comment_body(finding).
-
-        Validates: Requirements 2.2, 2.5
-        """
-        from software_engineering_team.github_source import (
-            anchor_to_first_file,
-            format_comment_body,
-        )
-
-        finding = _FakeReviewIssue(
-            "high", line=5, file_path="src/config.py", description="Security issue"
-        )
-        valid_by_path = {"src/api.py": {1, 2, 3}}
-        result = anchor_to_first_file(finding, valid_by_path)
-        assert result is not None
-        assert result["body"] == format_comment_body(finding)
-
-
-# ---------------------------------------------------------------------------
 # Task 3.5 — Integration tests for fixed _run_pr_review
 # ---------------------------------------------------------------------------
 
 
 class TestFixedRunPrReview:
-    """Integration tests verifying the fixed _run_pr_review behaviour for
-    leftover findings and for the 'no standalone comments' invariant.
+    """Integration tests verifying _run_pr_review's handling of out-of-diff
+    findings: never mis-anchored to an unrelated changed file, never dropped,
+    and routed to a proposal ONLY when the reviewer explicitly tagged the
+    finding pre_existing=True (round 2; see the module comment above
+    TestBugConditionExploration for the full history).
 
     Validates: Requirements 2.1, 2.2, 2.4, 2.5
     """
 
-    def test_leftover_finding_anchored_as_file_level_inline(self, review_app) -> None:
-        """Full _run_pr_review with a leftover finding: the review carries an entry
-        with subject_type="file" and gh.add_issue_comment is NOT called for the
-        finding.
+    def test_off_diff_finding_without_tag_never_misanchored(self, review_app) -> None:
+        """Full _run_pr_review with a finding naming a file outside the PR's diff,
+        and no pre_existing tag: it is never posted as a file-level comment
+        mis-anchored to an unrelated changed file, and it is never silently
+        dropped -- it is posted as its own standalone conversation comment.
 
         A finding whose file_path is NOT in the PR diff (valid_by_path only
-        contains "a.py") must be re-anchored as a file-level inline review
-        comment on the first changed file — it must never appear as a standalone
-        top-level PR conversation comment.
+        contains "a.py") cannot be anchored to any diff location, so it must
+        surface as a standalone comment naming its own file, not as a proposal
+        and not mis-anchored onto "a.py".
 
         Validates: Requirements 2.1, 2.2, 2.5
         """
@@ -2828,38 +2943,44 @@ class TestFixedRunPrReview:
 
         gh = review_app["github"]["client"]
 
-        # gh.add_issue_comment must NOT be called for the finding.
-        assert gh.comments == [], (
-            f"add_issue_comment was called for the leftover finding: gh.comments = {gh.comments}"
-        )
-
-        # The finding must be posted as a file-level comment on the dedicated endpoint.
+        # The finding must NOT be posted as a file-level comment — "a.py" is an
+        # unrelated file the finding never named.
         file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
-        assert len(file_level) >= 1, (
-            f"Expected at least 1 file-level review comment, got 0. "
-            f"review_comments = {gh.review_comments}"
+        assert file_level == [], (
+            f"Expected 0 file-level review comments for the out-of-diff finding, "
+            f"got {len(file_level)}. review_comments = {gh.review_comments}"
         )
-        # The anchor path must be the first changed file ("a.py").
-        assert file_level[0]["path"] == "a.py", (
-            f"Expected anchor path 'a.py', got {file_level[0]['path']!r}"
+        # Nor mis-anchored as a line comment on the unrelated changed file.
+        assert not any(
+            "leftover finding" in c.get("body", "")
+            for review in gh.reviews
+            for c in review.get("comments", [])
+        ), f"Out-of-diff finding was mis-anchored as a line comment: {gh.reviews}"
+
+        # Instead it is posted as its own standalone conversation comment.
+        assert len(gh.comments) == 1, (
+            f"Expected the finding to be posted as a standalone comment, got gh.comments = {gh.comments}"
         )
+        assert "leftover finding" in gh.comments[0][1]
+        assert "`not_in_diff.py`" in gh.comments[0][1]
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["comment_findings"] == 0
+        assert job["review_summary"]["comment_findings"] == 1
+        assert job["review_summary"]["file_comments"] == 0
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
-    def test_no_standalone_comments_for_any_findings(self, review_app) -> None:
-        """Mix of on-diff, off-diff-line, and off-diff-file findings → gh.comments == []
-        after the full flow.
+    def test_off_diff_file_finding_posted_standalone_alongside_others(self, review_app) -> None:
+        """Mix of on-diff, off-diff-line, and off-diff-file findings: each is
+        routed to the right shape and none is dropped.
 
         Three findings are submitted:
           1. On-diff (file="a.py", line=2)  → line-anchored inline comment.
-          2. Off-diff-line (file="a.py", line=999) → file-level inline comment.
-          3. Off-diff-file (file="not_in_diff.py", line=1) → re-anchored file-level
-             inline comment on "a.py".
-
-        After the full _run_pr_review flow, gh.comments (add_issue_comment calls)
-        must be empty — every finding rode on the single PR review submission.
+          2. Off-diff-line (file="a.py", line=999) → file-level inline comment
+             (the file itself is in the diff, only the cited line is not).
+          3. Off-diff-file (file="not_in_diff.py", line=1), no pre_existing tag →
+             cannot be anchored to any diff location, so it is posted as its own
+             standalone conversation comment.
 
         Validates: Requirements 2.1, 2.2, 2.4, 2.5
         """
@@ -2882,14 +3003,7 @@ class TestFixedRunPrReview:
 
         gh = review_app["github"]["client"]
 
-        # Core assertion: no standalone comments for any finding.
-        assert gh.comments == [], (
-            f"Expected gh.comments == [] (no standalone comments), but got {gh.comments}"
-        )
-
-        # All three findings must be present: one inline on the review, two on the
-        # dedicated file-comment endpoint.
-        assert len(gh.reviews) >= 1
+        assert len(gh.reviews) == 1
         line_comments = [c for c in gh.reviews[0].get("comments", []) if c.get("side") == "RIGHT"]
         file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
 
@@ -2900,15 +3014,88 @@ class TestFixedRunPrReview:
         )
         assert line_comments[0]["line"] == 2
 
-        # off-diff-line + off-diff-file → both file-level on the dedicated endpoint
-        assert len(file_comments) == 2, (
-            f"Expected 2 file-level comments (off-diff-line + off-diff-file), "
-            f"got {len(file_comments)}. review_comments = {gh.review_comments}"
+        # off-diff-line (same file, off-diff line) → file-level; off-diff-file
+        # is never file-anchored, so exactly one file-level comment, not two.
+        assert len(file_comments) == 1, (
+            f"Expected 1 file-level comment (off-diff-line only; off-diff-file must "
+            f"never be file-anchored), got {len(file_comments)}. review_comments = {gh.review_comments}"
         )
+        assert "off-diff-line finding" in file_comments[0]["body"]
+        assert not any("off-diff-file finding" in c.get("body", "") for c in gh.review_comments)
+
+        # off-diff-file finding → its own standalone conversation comment.
+        assert len(gh.comments) == 1, (
+            f"Expected the off-diff-file finding to be posted standalone, got gh.comments = {gh.comments}"
+        )
+        assert "off-diff-file finding" in gh.comments[0][1]
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["comment_findings"] == 0
+        assert job["review_summary"]["comment_findings"] == 1
+        assert job["review_summary"]["pending_issue_proposals"] == []
+
+    def test_out_of_diff_finding_routing_depends_on_pre_existing_tag(self, review_app) -> None:
+        """Routing of an off-diff-file finding is driven ONLY by the reviewer's own
+        pre_existing tag, never by diff/file membership alone: explicitly tagged
+        pre_existing=True (and not proven is_within_diff) routes to a proposal and
+        is never posted; left at its default False, the same finding is an
+        in-scope PR finding and is posted as its own standalone comment.
+        """
+        # pre_existing=True: routed to a proposal, never posted.
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=3,
+                    file_path="outside_the_diff.py",
+                    description="out-of-scope bug (tagged)",
+                    pre_existing=True,
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert gh.comments == [], f"tagged pre_existing: standalone comment posted: {gh.comments}"
+        assert gh.review_comments == [], (
+            f"tagged pre_existing: file-level comment posted: {gh.review_comments}"
+        )
+        for review in gh.reviews:
+            for c in review.get("comments", []):
+                assert "out-of-scope bug" not in c.get("body", ""), (
+                    f"tagged pre_existing: posted inline: {c}"
+                )
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert len(proposals) == 1
+        assert proposals[0]["description"] == "out-of-scope bug (tagged)"
+
+        # pre_existing left False (default): an in-scope PR finding, posted
+        # standalone, never a proposal.
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=3,
+                    file_path="outside_the_diff.py",
+                    description="out-of-scope bug (untagged)",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert gh.review_comments == [], (
+            f"untagged: file-level comment posted: {gh.review_comments}"
+        )
+        assert len(gh.comments) == 1, f"untagged: expected a standalone comment, got {gh.comments}"
+        assert "out-of-scope bug (untagged)" in gh.comments[0][1]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -3014,6 +3201,18 @@ class TestWholeFileReview:
         assert captured.get("files") is None
         assert captured["pre_numbered"] is True
         assert captured["code"]  # the hunk-rendered blob
+        # Hunk mode now carries the same "tag pre-existing findings" focus note as
+        # whole-file mode (previously it passed pr.body verbatim, with no tagging
+        # instruction at all) -- see _hunk_review_focus.
+        from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
+
+        assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
+        # Content assertions beyond the shared prefix: both whole-file and
+        # hunk-mode notes start with REVIEW_FOCUS_NOTE_PREFIX, so that check
+        # alone wouldn't catch _hunk_review_focus regressing into an alias of
+        # _whole_file_focus. Assert on the hunk-specific wording too.
+        assert "pre_existing" in captured["task_requirements"]
+        assert "diff hunks" in captured["task_requirements"]
 
     def test_whole_file_mode_appends_focus_note(self, review_app, monkeypatch) -> None:
         gh = review_app["github"]["client"]  # default: single reviewable file a.py
@@ -3031,9 +3230,14 @@ class TestWholeFileReview:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
-        from software_engineering_team.api.pr_review import WHOLE_FILE_FOCUS_NOTE_PREFIX
+        from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
-        assert WHOLE_FILE_FOCUS_NOTE_PREFIX in captured["task_requirements"]
+        assert REVIEW_FOCUS_NOTE_PREFIX in captured["task_requirements"]
+        # Whole-file-specific wording, and NOT the hunk-mode wording -- so a
+        # regression collapsing _whole_file_focus into _hunk_review_focus (or
+        # vice versa) can't hide behind the shared prefix check above.
+        assert "complete file contents" in captured["task_requirements"]
+        assert "diff hunks" not in captured["task_requirements"]
 
     def test_partial_head_fetch_reviews_fetched_subset_whole_and_missing_subset_via_hunks(
         self, review_app, monkeypatch
@@ -3067,14 +3271,20 @@ class TestWholeFileReview:
         assert whole_call["pre_numbered"] is False
 
         from software_engineering_team.api.pr_review import (
-            WHOLE_FILE_FOCUS_NOTE_PREFIX,
+            REVIEW_FOCUS_NOTE_PREFIX,
         )
 
-        assert WHOLE_FILE_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
+        assert REVIEW_FOCUS_NOTE_PREFIX in whole_call["task_requirements"]
         assert not hunk_call.get("files")
         assert hunk_call["pre_numbered"] is True
         assert "b.py" in hunk_call["code"]
         assert "a.py" not in hunk_call["code"]
+        # Hunk call must also carry the focus note, and with hunk-specific
+        # wording -- not just the prefix shared with the whole-file note,
+        # which alone wouldn't catch a hunk/whole-file mode mixup.
+        assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
+        assert "pre_existing" in hunk_call["task_requirements"]
+        assert "diff hunks" in hunk_call["task_requirements"]
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
@@ -3542,6 +3752,10 @@ class TestPreExistingFindings:
                 assert "old latent bug" not in c.get("body", "")
         assert all("old latent bug" not in b for _n, b in gh.comments)
         assert all("old latent bug" not in rc.get("body", "") for rc in gh.review_comments)
+        # Nor did it leak into the submitted review's own top-level body.
+        assert all(
+            "old latent bug" not in review.get("body", "") for review in gh.submitted_reviews
+        )
         # It is stored as a proposal instead.
         proposals = summary["pending_issue_proposals"]
         assert len(proposals) == 1
@@ -3569,6 +3783,9 @@ class TestPreExistingFindings:
         assert summary["total_issues"] == 0
         assert gh.submitted_reviews and gh.submitted_reviews[0]["event"] == "COMMENT"
         assert gh.reactions and gh.reactions[0][1] == "+1"
+        # The suppressed narrative never leaked the pre-existing finding into
+        # the submitted review's own top-level body either.
+        assert all("latent" not in review.get("body", "") for review in gh.submitted_reviews)
         # But the pre-existing bug is still surfaced as a proposal.
         assert len(summary["pending_issue_proposals"]) == 1
 
@@ -3714,6 +3931,11 @@ class TestPreExistingFindings:
         title = resp.json()["created"][0]["title"]
         assert "secrettoken" not in title
         assert "https://***@" in title
+        # The scrub must happen before the GitHub API call itself, not only in
+        # the HTTP response -- check what was actually sent to the fake client.
+        gh = review_app["github"]["client"]
+        assert "secrettoken" not in gh.created_issues[0]["title"]
+        assert "https://***@" in gh.created_issues[0]["title"]
 
     def test_create_issues_is_idempotent(self, review_app) -> None:
         """Filing the same proposal twice opens exactly one GitHub issue."""
@@ -3812,10 +4034,10 @@ class TestPreExistingFindings:
 
 
 class TestDuplicateProposalDetection:
-    """A pre-existing finding matched to an already-open GitHub issue is offered
-    pre-linked to that issue, not as a fresh "create issue" candidate."""
+    """A pre-existing finding matched to an already-open GitHub issue is already
+    tracked, so it is dropped entirely rather than offered to the user."""
 
-    def test_matching_open_issue_marks_proposal_matched_and_prelinked(self, review_app) -> None:
+    def test_matching_open_issue_is_dropped_from_proposals(self, review_app) -> None:
         gh = review_app["github"]["client"]
         gh.open_issues = [
             Issue(
@@ -3839,11 +4061,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
-        proposals = job["review_summary"]["pending_issue_proposals"]
-        assert len(proposals) == 1
-        assert proposals[0]["matched_existing"] is True
-        assert proposals[0]["issue_number"] == 42
-        assert proposals[0]["issue_url"] == "https://example/issues/42"
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_unrelated_open_issue_does_not_mark_proposal_matched(self, review_app) -> None:
         gh = review_app["github"]["client"]
@@ -3944,8 +4162,9 @@ class TestDuplicateProposalDetection:
         assert proposal["issue_url"] is None
 
     def test_create_review_issues_never_refiles_a_matched_proposal(self, review_app) -> None:
-        """A proposal pre-linked to an existing issue can never be filed as a new,
-        duplicate GitHub issue via the create-issues endpoint."""
+        """A matched finding is dropped before it ever becomes a filable candidate,
+        so requesting its (nonexistent) proposal id via the create-issues endpoint
+        is a no-op rather than filing a new, duplicate GitHub issue."""
         gh = review_app["github"]["client"]
         gh.open_issues = [
             Issue(
@@ -3969,6 +4188,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
+        assert job["review_summary"]["pending_issue_proposals"] == []
         resp = review_app["client"].post(
             f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
         )
@@ -3976,7 +4196,7 @@ class TestDuplicateProposalDetection:
         data = resp.json()
         assert data["created"] == []
         assert gh.created_issues == []
-        assert data["proposals"][0]["issue_url"] == "https://example/issues/42"
+        assert data["proposals"] == []
 
     def test_duplicate_check_only_considers_open_issues_up_to_the_cap(
         self, review_app, monkeypatch: pytest.MonkeyPatch
@@ -4025,7 +4245,8 @@ class TestDuplicateProposalDetection:
     def test_duplicate_check_env_override_widens_the_cap(
         self, review_app, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Raising the cap via env var lets a later-listed matching issue be found."""
+        """Raising the cap via env var lets a later-listed matching issue be found,
+        so the finding is dropped as already-tracked instead of offered."""
         monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "3")
         gh = review_app["github"]["client"]
         gh.open_issues = [
@@ -4060,9 +4281,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
-        proposal = job["review_summary"]["pending_issue_proposals"][0]
-        assert proposal["matched_existing"] is True
-        assert proposal["issue_url"] == "https://example/issues/99"
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
 
 class TestDetectDuplicateProposalsUnit:
@@ -4396,11 +4615,16 @@ class TestPartitionReviewIssuesUnit:
         assert result.pr_issues == []
         assert result.addressed_issues == [issue]
 
-    def test_leftover_finding_is_reanchored_to_first_file(self) -> None:
+    def test_out_of_diff_finding_without_tag_becomes_standalone(self) -> None:
         from software_engineering_team.api import pr_review
 
-        # file_path not present in valid_by_path -> map_issues_to_comments
-        # cannot place it directly, so it must be re-anchored.
+        # file_path not present in valid_by_path, and no pre_existing tag (round
+        # 2): the finding stays a PR finding -- routing to preexisting_issues is
+        # driven ONLY by the reviewer's own tag, never by diff/file membership
+        # alone (forcing this to preexisting would silently drop a real, in-scope
+        # finding like "this PR references module X but never added it"). Since
+        # it cannot resolve to any path in the diff, map_issues_to_comments
+        # returns it as a leftover, rendered into standalone_comments.
         issue = _FakeReviewIssue("high", line=1, file_path="missing.py")
         output = _FakeOutput(issues=[issue])
         valid_by_path = {"a.py": [1, 2]}
@@ -4416,12 +4640,19 @@ class TestPartitionReviewIssuesUnit:
             def get_resolved_review_thread_comment_ids(self, o, r, n):
                 return set()
 
+            def list_open_issues(self, o, r):
+                return iter(())
+
         result = pr_review._partition_review_issues(
             output, _C(), "o", "r", 7, valid_by_path, changed_by_path
         )
+        assert result.pr_issues == [issue]
+        assert result.preexisting_issues == []
+        assert result.proposals == []
         assert result.line_comments == []
-        assert len(result.file_comments) == 1
-        assert result.file_comments[0]["path"] == "a.py"
+        assert result.file_comments == []
+        assert len(result.standalone_comments) == 1
+        assert "missing.py" in result.standalone_comments[0]
 
 
 class TestPostReviewCommentsUnit:
@@ -4438,6 +4669,7 @@ class TestPostReviewCommentsUnit:
             addressed_issues=[],
             line_comments=[],
             file_comments=[],
+            standalone_comments=[],
         )
         base.update(overrides)
         return ReviewIssuePartition(**base)
@@ -4516,6 +4748,61 @@ class TestPostReviewCommentsUnit:
         assert result.comment_findings == 1
         assert result.comments_failed == 1
 
+    def test_github_api_error_tolerated_when_only_standalone_comments_remain(self) -> None:
+        # No line- or file-level comments, but a standalone comment (an
+        # off-diff-file finding, per _partition_review_issues) is still to post:
+        # the summary submission's failure must be tolerated, same as when a
+        # file-level comment alone remains.
+        from software_engineering_team.api import pr_review
+
+        client = _FakeReviewClient()
+        client.review_exc = GitHubAPIError(500, "summary submit failed")
+        partition = self._partition(
+            pr_issues=[object()],
+            standalone_comments=["`missing.py` — **[HIGH] logic** — orphan finding"],
+        )
+        output = _FakeOutput(issues=[])
+
+        result = pr_review._post_review_comments(
+            client, "o", "r", 7, _mode_pr(), "khala-bot", output, partition
+        )
+        assert result.inline_count == 0
+        assert result.file_comment_count == 0
+        assert result.comment_findings == 1
+        assert result.comments_failed == 0
+        assert client.comments == [(7, "`missing.py` — **[HIGH] logic** — orphan finding")]
+
+    def test_partition_standalone_comments_merge_with_422_demoted_standalone(self) -> None:
+        # standalone_bodies combines TWO sources: findings GitHub itself rejected
+        # as file-level comments (422-demoted), and partition.standalone_comments
+        # (findings whose file was never in the diff at all). Both must post and
+        # both must count toward comment_findings.
+        from software_engineering_team.api import pr_review
+
+        client = _FakeReviewClient()
+        client.review_comment_fail_paths = {"a.py"}  # forces demotion to standalone
+        file_comment = {
+            "path": "a.py",
+            "line": 2,
+            "body": "demoted finding",
+            "subject_type": "file",
+        }
+        partition = self._partition(
+            pr_issues=[object(), object()],
+            file_comments=[file_comment],
+            standalone_comments=["`missing.py` — off-diff finding"],
+        )
+        output = _FakeOutput(issues=[])
+
+        result = pr_review._post_review_comments(
+            client, "o", "r", 7, _mode_pr(), "khala-bot", output, partition
+        )
+        assert result.comment_findings == 2
+        assert result.comments_failed == 0
+        bodies = [body for _n, body in client.comments]
+        assert any("demoted finding" in b for b in bodies)
+        assert any("off-diff finding" in b for b in bodies)
+
 
 class TestFinalizeReviewOutcomeUnit:
     """Direct unit tests for _finalize_review_outcome, extracted from
@@ -4531,6 +4818,7 @@ class TestFinalizeReviewOutcomeUnit:
             addressed_issues=[],
             line_comments=[],
             file_comments=[],
+            standalone_comments=[],
         )
         base.update(overrides)
         return ReviewIssuePartition(**base)

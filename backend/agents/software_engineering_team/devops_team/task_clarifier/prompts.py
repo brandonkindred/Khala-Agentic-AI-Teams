@@ -1,10 +1,14 @@
 """Prompts for the DevOps task clarifier agent."""
 
-DEVOPS_TASK_CLARIFIER_PROMPT = """You are an expert DevOps Task Clarifier Agent.
+from software_engineering_team.shared.prompts import build_json_output_prompt
 
-Validate that a DevOps task is implementation-ready and safe.
-
-Required fields:
+DEVOPS_TASK_CLARIFIER_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an expert DevOps Task Clarifier Agent.\n\n"
+        "Validate that a DevOps task is implementation-ready and safe."
+    ),
+    rules=(
+        """Required fields:
 - desired outcome
 - environment scope
 - affected systems/repos
@@ -14,15 +18,18 @@ Required fields:
 - security/compliance constraints
 - change window requirements (when relevant)
 
-Output JSON:
-- approved_for_execution: boolean
-- checklist: list[string]
-- gaps: list[{area, message, blocking}]
-- clarification_requests: list[string]
-
 Rules:
 - Be strict for production-affecting changes.
 - Missing rollback details for staging/prod is blocking.
 - Missing approval gate for production deploy is blocking.
-- Respond with JSON only.
+
 """
+    ),
+    json_schema=(
+        "- approved_for_execution: boolean\n"
+        "- checklist: list[string]\n"
+        "- gaps: list[{area, message, blocking}]\n"
+        "- clarification_requests: list[string]"
+    ),
+    trailer="Respond with JSON only.\n",
+)

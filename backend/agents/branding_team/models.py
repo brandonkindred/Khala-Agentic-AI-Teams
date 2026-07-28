@@ -181,7 +181,13 @@ class DifferentiationPillar(BaseModel):
 
 
 class BrandDiscoveryAudit(BaseModel):
-    """Brand discovery and audit findings."""
+    """Brand discovery and audit findings.
+
+    Fields default to empty rather than being required: this model also
+    backs ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
+    must construct successfully with no arguments. ``discovery_auditor``'s own
+    agent-facing schema is the stricter ``BrandDiscoveryAuditOutput`` below.
+    """
 
     current_brand_perception: str = ""
     market_position: str = ""
@@ -190,6 +196,72 @@ class BrandDiscoveryAudit(BaseModel):
     opportunities: List[str] = Field(default_factory=list)
     threats: List[str] = Field(default_factory=list)
     stakeholder_insights: List[str] = Field(default_factory=list)
+
+
+class BrandDiscoveryAuditOutput(BaseModel):
+    """Agent-facing brand discovery schema (see ``PurposeVisionOutput`` on required fields).
+
+    Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
+    model so this one can require real content without breaking
+    ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
+    """
+
+    current_brand_perception: str = Field(min_length=1)
+    market_position: str = Field(min_length=1)
+    strengths: List[str] = Field(min_length=1)
+    weaknesses: List[str] = Field(min_length=1)
+    opportunities: List[str] = Field(min_length=1)
+    threats: List[str] = Field(min_length=1)
+    stakeholder_insights: List[str] = Field(min_length=1)
+
+
+class PurposeVisionOutput(BaseModel):
+    """Brand purpose, mission, and vision statements.
+
+    Fields are required and non-empty: unlike ``StrategicCoreOutput`` (a
+    merge target whose fields must default so partial per-agent fragments
+    validate against it), this is the agent's *own* structured-output
+    schema — an empty/omitted field here should fail Strands' validation and
+    trigger a retry rather than silently accepting a blank statement.
+    """
+
+    brand_purpose: str = Field(min_length=1)
+    mission_statement: str = Field(min_length=1)
+    vision_statement: str = Field(min_length=1)
+
+
+class CoreValuesOutput(BaseModel):
+    """A set of brand core values (see ``PurposeVisionOutput`` on required fields).
+
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
+    """
+
+    core_values: List[CoreValue] = Field(min_length=3, max_length=5)
+
+
+class AudienceSegmentsOutput(BaseModel):
+    """A set of target audience segments (see ``PurposeVisionOutput`` on required fields).
+
+    ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
+    """
+
+    target_audience_segments: List[AudienceSegment] = Field(min_length=1, max_length=3)
+
+
+class DifferentiationPillarsOutput(BaseModel):
+    """A set of competitive differentiation pillars (see ``PurposeVisionOutput`` on required fields).
+
+    ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
+    """
+
+    differentiation_pillars: List[DifferentiationPillar] = Field(min_length=2, max_length=4)
+
+
+class PositioningOutput(BaseModel):
+    """Synthesised positioning statement and brand promise (see ``PurposeVisionOutput`` on required fields)."""
+
+    positioning_statement: str = Field(min_length=1)
+    brand_promise: str = Field(min_length=1)
 
 
 class StrategicCoreOutput(BaseModel):
@@ -539,13 +611,14 @@ class TeamOutput(BaseModel):
     """Aggregate output of a branding run: status, phase artifacts, and cross-cutting results.
 
     Invariants:
-        - ``degraded_phases`` lists only phases whose structured output could not
-          be parsed from the LLM's response and was defaulted to a bare
-          ``model_class()`` instance; an empty list (the default) means every
-          populated phase output reflects a successfully parsed LLM response.
-          This field is not self-maintaining — a call site that defaults a
-          phase output on parse failure (e.g. ``orchestrator._extract_phase_output``)
-          must append that phase here itself.
+        - ``degraded_phases`` is intended to list phases whose structured output
+          could not be parsed from the LLM's response and was defaulted to a bare
+          ``model_class()`` instance. This is currently aspirational: no call site
+          populates it yet — ``orchestrator._extract_phase_output`` silently
+          defaults to ``model_class()`` on parse failure without appending the
+          phase here. Until that's wired up, an empty list carries no
+          guarantee that every phase output reflects a successfully parsed LLM
+          response.
     """
 
     status: WorkflowStatus

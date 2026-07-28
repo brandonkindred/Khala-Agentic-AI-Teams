@@ -243,22 +243,68 @@ class TestInferReviewLanguageUnit:
 class TestWholeFileFocusUnit:
     def test_blank_body_returns_note_alone(self) -> None:
         result = pr_review._whole_file_focus("")
-        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
-        assert "\n\n" not in result[: len(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX) + 1]
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
+        assert "\n\n" not in result[: len(pr_review.REVIEW_FOCUS_NOTE_PREFIX) + 1]
 
     def test_whitespace_only_body_returns_note_alone(self) -> None:
         result = pr_review._whole_file_focus("   \n")
-        assert result.startswith(pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX)
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
         assert "   " not in result
 
     def test_non_blank_body_is_prefixed_to_note(self) -> None:
         result = pr_review._whole_file_focus("Fixes the flaky retry loop.")
         assert result.startswith("Fixes the flaky retry loop.\n\n")
-        assert pr_review.WHOLE_FILE_FOCUS_NOTE_PREFIX in result
+        assert pr_review.REVIEW_FOCUS_NOTE_PREFIX in result
 
     def test_note_instructs_pre_existing_field(self) -> None:
         result = pr_review._whole_file_focus("body")
-        assert "pre_existing" in result
+        # Both directions of the tag, not just the bare field name -- a note
+        # that only ever said "do not set pre_existing" would still contain
+        # the word "pre_existing" but would fail this.
+        assert "pre_existing: false" in result
+        assert "pre_existing: true" in result
+
+
+# ---------------------------------------------------------------------------
+# _hunk_review_focus
+# ---------------------------------------------------------------------------
+
+
+class TestHunkReviewFocusUnit:
+    def test_blank_body_returns_note_alone(self) -> None:
+        result = pr_review._hunk_review_focus("")
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
+        assert "\n\n" not in result[: len(pr_review.REVIEW_FOCUS_NOTE_PREFIX) + 1]
+
+    def test_whitespace_only_body_returns_note_alone(self) -> None:
+        result = pr_review._hunk_review_focus("   \n")
+        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
+        assert "   " not in result
+
+    def test_non_blank_body_is_prefixed_to_note(self) -> None:
+        result = pr_review._hunk_review_focus("Fixes the flaky retry loop.")
+        assert result.startswith("Fixes the flaky retry loop.\n\n")
+        assert pr_review.REVIEW_FOCUS_NOTE_PREFIX in result
+
+    def test_note_instructs_pre_existing_field(self) -> None:
+        result = pr_review._hunk_review_focus("body")
+        # Both directions of the tag, not just the bare field name -- a note
+        # that only ever said "do not set pre_existing" would still contain
+        # the word "pre_existing" but would fail this.
+        assert "pre_existing: false" in result
+        assert "pre_existing: true" in result
+
+    def test_differs_from_whole_file_focus_with_hunk_specific_wording(self) -> None:
+        # Guards against _hunk_review_focus regressing into a plain alias of
+        # _whole_file_focus: the two must produce different text, and the hunk
+        # note must mention hunks specifically (not just the shared
+        # "pre_existing" tagging instructions the two modes share).
+        hunk_result = pr_review._hunk_review_focus("body")
+        whole_result = pr_review._whole_file_focus("body")
+        assert hunk_result != whole_result
+        assert "pre_existing" in hunk_result
+        assert "hunk" in hunk_result.lower()
+        assert "hunk" not in whole_result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +352,11 @@ class TestJoinNonblankUnit:
 
 
 class _FakeOutput:
+    """Minimal stand-in for a reviewer output object: `issues` is whatever list
+    the test wants merged/returned verbatim (not necessarily real issue objects),
+    `summary`/`spec_compliance_notes` are the free-text fields _MergedReviewerOutput
+    joins across attempts."""
+
     def __init__(self, issues, summary, spec_compliance_notes) -> None:
         self.issues = issues
         self.summary = summary
@@ -356,6 +407,8 @@ class _RecordingProvider:
 
 
 def _run_reviewer_kwargs(**overrides: Any) -> Dict[str, Any]:
+    """Base kwargs for calling `pr_review._run_reviewer`, with sensible defaults
+    for every parameter; pass any of them as a keyword to override."""
     base = dict(
         client=object(),
         owner="acme",
@@ -405,6 +458,10 @@ class TestRunReviewerUnit:
         assert call["pre_numbered"] is False
         assert call["files"] == {"a.py": "content"}
         assert call["task_requirements"] == pr_review._whole_file_focus("PR body")
+        # Content assertions so a simultaneous regression in _run_reviewer and
+        # _whole_file_focus cannot hide behind the equality check above.
+        assert "PR body" in call["task_requirements"]
+        assert "pre_existing" in call["task_requirements"]
 
     def test_only_code_runs_one_hunk_call(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
@@ -419,7 +476,17 @@ class TestRunReviewerUnit:
         call = provider.calls[0]
         assert call["pre_numbered"] is True
         assert call["code"] == "### a.py ###\n1: x = 1"
-        assert call["task_requirements"] == "PR body"
+        # Hunk mode now appends the same "tag pre-existing findings" focus note as
+        # whole-file mode (previously it passed the PR body verbatim with no
+        # tagging instruction) -- see _hunk_review_focus.
+        assert call["task_requirements"] == pr_review._hunk_review_focus("PR body")
+        # Content assertions (not just equality with _hunk_review_focus's own
+        # output): guard against _run_reviewer regressing to pass the body
+        # verbatim, which would make the equality check above vacuously true
+        # only if _hunk_review_focus also regressed in lockstep.
+        assert "PR body" in call["task_requirements"]
+        assert "pre_existing" in call["task_requirements"]
+        assert "diff hunks" in call["task_requirements"]
 
     def test_both_sources_run_two_calls_and_merge(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
@@ -434,10 +501,19 @@ class TestRunReviewerUnit:
         # Whole-file attempt dispatched before the hunk attempt.
         assert provider.calls[0]["pre_numbered"] is False
         assert provider.calls[1]["pre_numbered"] is True
+        # Each attempt gets its own focus note and its own content, so a
+        # regression that swaps the whole-file/hunk wiring (or drops the
+        # hunk-mode pre_existing note) can't hide behind the flags above.
+        assert provider.calls[0]["task_requirements"] == pr_review._whole_file_focus("PR body")
+        assert provider.calls[0]["files"] == {"a.py": "content"}
+        assert provider.calls[1]["task_requirements"] == pr_review._hunk_review_focus("PR body")
+        assert "pre_existing" in provider.calls[1]["task_requirements"]
+        assert "diff hunks" in provider.calls[1]["task_requirements"]
+        assert provider.calls[1]["code"] == "### b.py ###\n1: y = 2"
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["whole-issue", "hunk-issue"]
 
-    def test_none_body_coerces_to_blank_task_requirements(self, monkeypatch) -> None:
+    def test_none_body_coerces_to_hunk_focus_note_alone(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([_FakeOutput([], "", "")])
         kwargs = _run_reviewer_kwargs(
@@ -446,7 +522,14 @@ class TestRunReviewerUnit:
 
         pr_review._run_reviewer(provider, **kwargs)
 
-        assert provider.calls[0]["task_requirements"] == ""
+        # A blank body still gets the hunk-mode focus note appended (the note
+        # alone, since there is no body to prefix).
+        assert provider.calls[0]["task_requirements"] == pr_review._hunk_review_focus("")
+        # Content assertions alongside the equality check above, so a
+        # simultaneous regression in _hunk_review_focus (e.g. back to
+        # returning the body verbatim) can't hide behind both sides matching.
+        assert "pre_existing" in provider.calls[0]["task_requirements"]
+        assert "diff hunks" in provider.calls[0]["task_requirements"]
 
     def test_first_attempt_error_records_outage_and_stops(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)

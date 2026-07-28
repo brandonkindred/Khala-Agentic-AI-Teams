@@ -164,7 +164,6 @@ from software_engineering_team.github_source import (  # noqa: F401
     GitHubClient,
     Issue,
     NotAnIssueError,
-    anchor_to_first_file,
     build_review_body,
     choose_event,
     inline_comment_to_timeline_body,

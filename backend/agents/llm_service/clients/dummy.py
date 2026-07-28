@@ -293,6 +293,14 @@ class DummyLLMClient(LLMClient, Model):
         # because loose single-word branches (``"pipeline"``, ``"security"``)
         # cross-contaminated other teams' prompts that happened to mention
         # those words in their persona text.
+        #
+        # Exception: the branding Phase 1 branches further down DO anchor on
+        # ``system_prompt`` (see ``system_lowered``) — every Phase 1 agent
+        # receives the same serialized ``BrandingMission`` as its user
+        # message, so only each agent's own system_prompt (its required
+        # output field names) can distinguish which one is asking. Those
+        # anchors are multi-token combinations unique to one agent's prompt,
+        # not the loose single words that caused the earlier revert.
         lowered = prompt.lower()
         DummyLLMClient._call_counter += 1
         self._request_count += 1
@@ -761,6 +769,102 @@ class DummyLLMClient(LLMClient, Model):
                     "suggested_format_change": None,
                 },
                 "plan_version": 1,
+            }
+        # Branding team — Phase 1 "Strategic Core" agents (built with
+        # structured_output=, see agents.py). Anchored on system_prompt
+        # rather than the user prompt: every Phase 1 agent receives the same
+        # serialized BrandingMission as its user message, so only the
+        # agent-specific system_prompt (each agent's required output field
+        # names) can distinguish which one is asking. All six have required
+        # fields with no defaults, so the generic fallback below would fail
+        # Strands' structured-output validation and exhaust its forced retry.
+        system_lowered = (system_prompt or "").lower()
+        if (
+            "current_brand_perception" in system_lowered
+            and "stakeholder_insights" in system_lowered
+        ):
+            return {
+                "current_brand_perception": "Seen as a capable but generic vendor (dummy).",
+                "market_position": "Mid-market challenger without a distinct point of view (dummy).",
+                "strengths": ["Responsive delivery", "Deep domain expertise"],
+                "weaknesses": ["Inconsistent messaging", "Low brand recall"],
+                "opportunities": [
+                    "Category is consolidating",
+                    "Buyers want a clear category leader",
+                ],
+                "threats": ["Larger competitors out-spending on brand"],
+                "stakeholder_insights": [
+                    "Sales wants sharper differentiation",
+                    "Customers want proof points",
+                ],
+            }
+        elif "brand_purpose" in system_lowered and "vision_statement" in system_lowered:
+            return {
+                "brand_purpose": "Dummy Co. exists to help teams ship cohesive brand experiences (dummy).",
+                "mission_statement": "We turn brand strategy into consistent day-to-day execution (dummy).",
+                "vision_statement": "A world where every customer touchpoint feels intentional (dummy).",
+            }
+        elif "behavioral_definition" in system_lowered and "observable_behaviors" in system_lowered:
+            return {
+                "core_values": [
+                    {
+                        "value": "Clarity",
+                        "behavioral_definition": "We communicate plainly and avoid jargon (dummy).",
+                        "observable_behaviors": ["Write short docs", "Avoid buzzwords"],
+                    },
+                    {
+                        "value": "Trust",
+                        "behavioral_definition": "We keep commitments and are transparent (dummy).",
+                        "observable_behaviors": [
+                            "Disclose tradeoffs",
+                            "Follow through on promises",
+                        ],
+                    },
+                    {
+                        "value": "Momentum",
+                        "behavioral_definition": "We execute with discipline and speed (dummy).",
+                        "observable_behaviors": ["Ship in small increments", "Unblock quickly"],
+                    },
+                ]
+            }
+        elif "decision_drivers" in system_lowered and "pain_points" in system_lowered:
+            return {
+                "target_audience_segments": [
+                    {
+                        "name": "Enterprise product leaders",
+                        "description": "Leaders responsible for cohesive digital experiences (dummy).",
+                        "pain_points": ["Inconsistent branding", "Slow execution"],
+                        "goals": ["Ship cohesive experiences", "Move faster"],
+                        "decision_drivers": ["Proven track record", "Clear communication"],
+                    }
+                ]
+            }
+        elif "competitive_context" in system_lowered and "proof_points" in system_lowered:
+            return {
+                "differentiation_pillars": [
+                    {
+                        "pillar": "Execution speed",
+                        "proof_points": ["Ships weekly", "Small dedicated team"],
+                        "competitive_context": "Competitors rely on slow agency handoffs (dummy).",
+                    },
+                    {
+                        "pillar": "Hands-on partnership",
+                        "proof_points": [
+                            "Direct access to strategists",
+                            "No account-manager layer",
+                        ],
+                        "competitive_context": "Competitors route through account managers (dummy).",
+                    },
+                ]
+            }
+        elif "positioning_statement" in system_lowered and "brand_promise" in system_lowered:
+            return {
+                "positioning_statement": (
+                    "For enterprise product leaders who need cohesive digital experiences, Dummy Co. "
+                    "is the hands-on partner that delivers clarity because execution speed sets us "
+                    "apart (dummy)."
+                ),
+                "brand_promise": "Every customer touchpoint will feel cohesive and intentional (dummy).",
             }
         return {"output": "Dummy response", "status": "ok"}
 
