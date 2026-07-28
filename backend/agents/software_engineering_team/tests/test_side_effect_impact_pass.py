@@ -38,6 +38,7 @@ from llm_service.clients.dummy import DummyLLMClient
 # from architecture_consistency_pass's own anchor so a DummyLLMClient subclass
 # can route between the two passes' calls without collision.
 _SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
+_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
 
 
 def _input(files: Optional[Dict[str, str]] = None) -> CodeReviewInput:
@@ -545,6 +546,7 @@ def test_returns_empty_for_non_code_review_profile() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
@@ -680,20 +682,20 @@ def test_finds_caller_impact_across_the_repository() -> None:
 
 
 def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
-    calls = {"side_effect_pass": 0, "chunk_review": 0}
+    calls = {"merged_pass": 0, "chunk_review": 0}
 
     class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
-                calls["side_effect_pass"] += 1
-                return {"findings": []}
+            if _MERGED_PASS_ANCHOR in prompt:
+                calls["merged_pass"] += 1
+                return {"architecture_findings": [], "side_effect_findings": []}
             calls["chunk_review"] += 1
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
     run_coordinator(_CountingClient(), CodeReviewInput(files=files))
 
-    assert calls["side_effect_pass"] == 1
+    assert calls["merged_pass"] == 1
 
 
 def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
@@ -703,9 +705,10 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
 
     class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in prompt:
                 return {
-                    "findings": [
+                    "architecture_findings": [],
+                    "side_effect_findings": [
                         {
                             "severity": "medium",
                             "category": "side-effects",
@@ -715,6 +718,7 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
                                 "app/caller.py line 4 does `bar() + 1` and will raise TypeError"
                             ),
                             "suggestion": "update app/caller.py to handle bar()'s new return value",
+                            "pre_existing": False,
                         },
                         {
                             "severity": "low",
@@ -723,8 +727,9 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
                             "description": "bar()'s docstring claims it returns an int, but it "
                             "returns None",
                             "suggestion": "correct bar()'s docstring to match its implementation",
+                            "pre_existing": False,
                         },
-                    ]
+                    ],
                 }
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -745,6 +750,7 @@ def test_coordinator_skips_pass_for_non_default_profile() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
             return {
                 "index": 0,
                 "is_real_issue": True,

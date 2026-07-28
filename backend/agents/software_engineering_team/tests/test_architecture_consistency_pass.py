@@ -36,6 +36,7 @@ from software_engineering_team.shared.models import ArchitectureComponent, Syste
 # false-positive filter's established rationale for avoiding system-prompt
 # scanning cross-contamination).
 _ARCH_PASS_ANCHOR = '"findings" array as instructed'
+_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
 
 
 def _arch(
@@ -621,13 +622,13 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
 
 def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
     """The pass fires exactly once per submission, regardless of chunk count."""
-    calls = {"arch_pass": 0, "chunk_review": 0}
+    calls = {"merged_pass": 0, "chunk_review": 0}
 
     class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
-                calls["arch_pass"] += 1
-                return {"findings": []}
+            if _MERGED_PASS_ANCHOR in prompt:
+                calls["merged_pass"] += 1
+                return {"architecture_findings": [], "side_effect_findings": []}
             calls["chunk_review"] += 1
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -636,7 +637,7 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
     files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
     run_coordinator(_CountingClient(), CodeReviewInput(files=files, architecture=_arch()))
 
-    assert calls["arch_pass"] == 1
+    assert calls["merged_pass"] == 1
 
 
 def test_coordinator_merges_architecture_findings_into_final_output() -> None:
@@ -646,9 +647,9 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
 
     class _FindingsClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in prompt:
                 return {
-                    "findings": [
+                    "architecture_findings": [
                         {
                             "severity": "medium",
                             "category": "refactor",
@@ -656,7 +657,8 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
                             "description": "duplicates the existing HttpClient wrapper",
                             "suggestion": "reuse shared.http_client.HttpClient",
                         }
-                    ]
+                    ],
+                    "side_effect_findings": [],
                 }
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -671,7 +673,7 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
 
 
 def test_coordinator_runs_pass_with_no_architecture() -> None:
-    """No architecture on the input -> the standalone arch pass still runs
+    """No architecture on the input -> the merged additive pass still runs
     (document is optional); it must not be short-circuited before the LLM call.
     Uses ``files=`` (not ``code=``) so ``CodebaseIndex`` has readable submission
     files — the same shape production reviews use for this pass."""
@@ -679,11 +681,9 @@ def test_coordinator_runs_pass_with_no_architecture() -> None:
 
     class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in prompt:
                 prompts.append(prompt)
-                return {"findings": []}
-            if '"side-effects"/"documentation" findings array' in prompt:
-                return {"findings": []}
+                return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = run_coordinator(

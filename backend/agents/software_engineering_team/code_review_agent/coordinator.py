@@ -5,13 +5,11 @@ Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 recovery and the map-phase cache (``mapping``) → false-positive verification
 (each genuine finding is re-checked against the *whole* submission, since a
 chunk reviewer saw only a slice, and confirmed false positives are dropped — see
-``false_positive_filter``) → architecture-consistency / cross-codebase-redundancy
-pass (a single additive, whole-repository check for architecture contradictions
-and duplicated capabilities the per-chunk view cannot see — see
-``architecture_consistency_pass``) → side-effect / blast-radius pass (a single
-additive, whole-repository check for behavior changes that break a caller
-elsewhere in the codebase, or ship undocumented — see
-``side_effect_impact_pass``) → deterministic merge (dedupe, severity gate,
+``false_positive_filter``) → merged architecture-consistency + side-effect /
+blast-radius pass (a single additive LLM call covering architecture
+contradictions, cross-codebase redundancy, and caller-impact / documentation
+mismatches the per-chunk view cannot see — see
+``merged_architecture_side_effect_pass``) → deterministic merge (dedupe, severity gate,
 safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
@@ -100,7 +98,7 @@ from software_engineering_team.shared.context_sizing import (
     parse_env_int,
 )
 
-from .architecture_consistency_pass import find_architecture_and_redundancy_issues
+from .merged_architecture_side_effect_pass import find_architecture_and_side_effect_issues
 from .architecture_context import render_architecture_context as _render_architecture_context
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
@@ -144,7 +142,6 @@ from .models import (
     notify_review_progress,
 )
 from .repo_reader import RepoReader
-from .side_effect_impact_pass import find_side_effect_impact_issues
 from .synthesis import synthesize_review_findings
 
 logger = logging.getLogger(__name__)
@@ -420,16 +417,15 @@ def _run_tail_passes(
     repo_reader: Optional[RepoReader],
     shared_index: CodebaseIndex,
 ) -> _TailPassResult:
-    """Run the false-positive / architecture / side-effect tail passes.
+    """Run the false-positive filter and the merged architecture/side-effect pass.
 
-    All three are once-per-submission, additive-only, read-only checks over
-    the same shared ``CodebaseIndex`` (built once by the caller): false-positive
-    verification re-checks each genuine chunk finding against the whole
-    submission and drops confirmed false positives; the architecture-consistency
-    pass flags architecture contradictions and cross-codebase redundancy the
-    per-chunk view cannot see; the side-effect pass flags a changed function's
-    blast radius on callers elsewhere in the codebase. None of the three reads
-    another's output, so they are independent of call order.
+    Both are once-per-submission, read-only checks over the same shared
+    ``CodebaseIndex`` (built once by the caller): false-positive verification
+    re-checks each genuine chunk finding against the whole submission and drops
+    confirmed false positives; the merged pass runs architecture-consistency and
+    side-effect / blast-radius checks in a single LLM call and returns the two
+    finding lists separately. Neither reads the other's output, so they are
+    independent of call order.
 
     Preconditions:
         - ``genuine_issues`` is the deduped set of genuine chunk findings
@@ -441,27 +437,16 @@ def _run_tail_passes(
         - Returns a :class:`_TailPassResult` whose ``issues`` is the
           false-positive-filtered (or, when ``input_data.skip_false_positive_filter``
           is set, unfiltered) ``genuine_issues``, followed by the architecture
-          pass's findings, followed by the side-effect pass's findings — the
-          same order the caller's merge produced before this fan-out existed,
-          regardless of which pass's underlying call actually completes first —
-          and whose ``has_additive_findings`` is True iff the architecture
-          and/or side-effect pass contributed at least one finding.
+          findings, followed by the side-effect findings — the same order the
+          caller's merge produced before this fan-out existed — and whose
+          ``has_additive_findings`` is True iff either half of the merged pass
+          contributed at least one finding.
         - When ``llm`` is (or wraps) a ``DummyLLMClient`` (see
-          ``_tail_passes_run_sequentially`` — such doubles use a shared
-          non-thread-safe scripted response index), fewer than two passes are
-          scheduled, or ``_map_parallelism()`` resolves to <= 1 (the operator
-          set ``CODE_REVIEW_MAP_PARALLELISM=1``, e.g. because the configured
-          provider cannot accept concurrent requests — the false-positive
-          filter's own internal verification workers are sized from this same
-          knob via ``_verify_parallelism()``, so running the filter fanned out
-          alongside the architecture/side-effect passes would silently exceed
-          it), the passes run sequentially in the order below, exactly as
-          before this fan-out existed. Otherwise they run concurrently via
-          ``parallel_map`` against the same shared, read-only index/repo_reader,
-          producing byte-identical results to the sequential path since none of
-          the three passes has a cross-pass dependency.
+          ``_tail_passes_run_sequentially``), fewer than two passes are
+          scheduled, or ``_map_parallelism()`` resolves to <= 1, the passes run
+          sequentially. Otherwise they run concurrently via ``parallel_map``.
     """
-    calls: List[Tuple[str, Callable[[], List[CodeReviewIssue]]]] = []
+    calls: List[Tuple[str, Callable[[], object]]] = []
     if not input_data.skip_false_positive_filter:
         calls.append(
             (
@@ -473,16 +458,8 @@ def _run_tail_passes(
         )
     calls.append(
         (
-            "architecture",
-            lambda: find_architecture_and_redundancy_issues(
-                llm, input_data, repo_reader=repo_reader, index=shared_index
-            ),
-        )
-    )
-    calls.append(
-        (
-            "side_effect",
-            lambda: find_side_effect_impact_issues(
+            "merged",
+            lambda: find_architecture_and_side_effect_issues(
                 llm, input_data, repo_reader=repo_reader, index=shared_index
             ),
         )
@@ -503,8 +480,7 @@ def _run_tail_passes(
         results = {name: output for (name, _), output in zip(calls, outputs)}
 
     verified = results.get("filter", genuine_issues)
-    architecture_findings = results["architecture"]
-    side_effect_findings = results["side_effect"]
+    architecture_findings, side_effect_findings = results["merged"]
     if architecture_findings:
         verified = [*verified, *architecture_findings]
     if side_effect_findings:

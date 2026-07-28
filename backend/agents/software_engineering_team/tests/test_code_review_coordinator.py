@@ -2818,12 +2818,12 @@ def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> No
         received_indexes.append(index)
         return issues
 
-    def _arch_spy(llm, input_data, repo_reader=None, index=None):
+    def _merged_spy(llm, input_data, repo_reader=None, index=None):
         received_indexes.append(index)
-        return []
+        return [], []
 
     monkeypatch.setattr(coord, "filter_false_positives", _filter_spy)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch_spy)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged_spy)
 
     run_coordinator(
         DummyLLMClient(),
@@ -2850,7 +2850,9 @@ def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> Non
         description="Duplicates the existing `Widget` service.",
     )
     monkeypatch.setattr(
-        coord, "find_architecture_and_redundancy_issues", lambda *a, **kw: [arch_issue]
+        coord,
+        "find_architecture_and_side_effect_issues",
+        lambda *a, **kw: ([arch_issue], []),
     )
 
     synth_calls: list = []
@@ -2889,7 +2891,9 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
         description="bar() no longer raises ValueError; app/caller.py still catches it.",
     )
     monkeypatch.setattr(
-        coord, "find_side_effect_impact_issues", lambda *a, **kw: [side_effect_issue]
+        coord,
+        "find_architecture_and_side_effect_issues",
+        lambda *a, **kw: ([], [side_effect_issue]),
     )
 
     synth_calls: list = []
@@ -2981,7 +2985,7 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
 
     arrivals: list[str] = []
     lock = threading.Lock()
-    barrier = threading.Barrier(3, timeout=5)
+    barrier = threading.Barrier(2, timeout=5)
 
     def _record(name: str) -> None:
         with lock:
@@ -2992,19 +2996,13 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
         barrier.wait()
         return list(issues)
 
-    def _arch(llm, input_data, repo_reader=None, index=None):
-        _record("architecture")
+    def _merged(llm, input_data, repo_reader=None, index=None):
+        _record("merged")
         barrier.wait()
-        return []
-
-    def _side_effect(llm, input_data, repo_reader=None, index=None):
-        _record("side_effect")
-        barrier.wait()
-        return []
+        return [], []
 
     monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
-    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
 
     stand_in = _NonDummyLLMClient(DummyLLMClient())
     try:
@@ -3019,7 +3017,7 @@ def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None
         barrier.abort()
 
     assert isinstance(result, CodeReviewOutput)
-    assert sorted(arrivals) == ["architecture", "filter", "side_effect"]
+    assert sorted(arrivals) == ["filter", "merged"]
 
 
 def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch) -> None:
@@ -3053,17 +3051,12 @@ def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch
         _track()
         return list(issues)
 
-    def _arch(llm, input_data, repo_reader=None, index=None):
+    def _merged(llm, input_data, repo_reader=None, index=None):
         _track()
-        return []
-
-    def _side_effect(llm, input_data, repo_reader=None, index=None):
-        _track()
-        return []
+        return [], []
 
     monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
-    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
 
     stand_in = _NonDummyLLMClient(DummyLLMClient())
     result = run_coordinator(
@@ -3100,15 +3093,11 @@ def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypa
     def _filter(llm, input_data, issues, repo_reader=None, index=None):
         return list(issues)
 
-    def _arch(llm, input_data, repo_reader=None, index=None):
-        return [arch_issue]
-
-    def _side_effect(llm, input_data, repo_reader=None, index=None):
-        return [side_effect_issue]
+    def _merged(llm, input_data, repo_reader=None, index=None):
+        return [arch_issue], [side_effect_issue]
 
     monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch)
-    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
 
     script = [
         {
