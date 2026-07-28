@@ -772,6 +772,54 @@ def test_truncate_team_tables_rejects_quote_in_name(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# real_postgres_schema fixture factory
+# ---------------------------------------------------------------------------
+
+
+def test_real_postgres_schema_body_skips_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared.postgres.testing import _real_postgres_schema_body
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    gen = _real_postgres_schema_body(schema)
+    with pytest.raises(pytest.skip.Exception, match="POSTGRES_HOST"):
+        next(gen)
+
+
+def test_real_postgres_schema_body_registers_then_truncates_on_teardown(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared.postgres import testing as testing_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(testing_mod, "register_team_schemas", lambda s: calls.append(f"register:{s.team}"))
+    monkeypatch.setattr(testing_mod, "truncate_team_tables", lambda s: calls.append(f"truncate:{s.team}"))
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    gen = testing_mod._real_postgres_schema_body(schema)
+
+    next(gen)  # advances to the yield: register must have run, truncate must not have
+    assert calls == ["register:demo"]
+
+    with pytest.raises(StopIteration):
+        next(gen)  # drives past the yield: teardown truncate must now have run
+    assert calls == ["register:demo", "truncate:demo"]
+
+
+def test_real_postgres_schema_returns_configured_pytest_fixture():
+    from shared.postgres.testing import real_postgres_schema
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    fixture = real_postgres_schema(schema, scope="session")
+
+    # The private marker attribute's name has moved across pytest major versions
+    # (``_pytestfixturefunction`` pre-9, ``_fixture_function_marker`` on 9.x); accept
+    # either so this test doesn't pin us to one pytest release.
+    marker = getattr(fixture, "_fixture_function_marker", None) or getattr(fixture, "_pytestfixturefunction")
+    assert marker.scope == "session"
+    assert marker.autouse is True
+
+
+# ---------------------------------------------------------------------------
 # drop_team_tables
 # ---------------------------------------------------------------------------
 

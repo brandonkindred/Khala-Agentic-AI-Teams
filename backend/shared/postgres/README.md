@@ -132,7 +132,7 @@ from shared.postgres import (
     dict_row,                # psycopg.rows.dict_row re-export for cursor(row_factory=...)
     timed_query,             # @timed_query decorator for store methods
 )
-from shared.postgres.testing import truncate_team_tables, truncate_all_teams
+from shared.postgres.testing import truncate_team_tables, truncate_all_teams, real_postgres_schema
 ```
 
 ## In-memory fake (unit tests)
@@ -182,6 +182,32 @@ SCHEMA = TeamSchema(
 
 Test fixtures then call `truncate_team_tables(SCHEMA)` between tests —
 no fragile regex parsing of the DDL.
+
+## Real-Postgres pytest fixture
+
+`shared.postgres.testing.real_postgres_schema(schema, *, scope="module")`
+builds a ready-to-use pytest fixture for a team's `TeamSchema`: it skips the
+test when `POSTGRES_HOST` is unset, registers the schema, yields, then
+truncates the schema's tables on teardown. It wraps the same
+`register_team_schemas` / `truncate_team_tables` calls every hand-rolled
+real-Postgres test fixture in this repo already makes (see
+`branding_team/tests/test_store_real_postgres.py`'s `_branding_schema`), so a
+team can opt a test module into real Postgres with one line instead of
+re-deriving the skip/register/truncate boilerplate:
+
+```python
+from branding_team.postgres import SCHEMA as BRANDING_SCHEMA
+from shared.postgres.testing import real_postgres_schema
+
+pytestmark = pytest.mark.integration
+
+_branding_schema = real_postgres_schema(BRANDING_SCHEMA)  # module-scoped, autouse
+```
+
+Like every other real-Postgres test in this repo, it assumes Postgres is
+already reachable via `POSTGRES_HOST` — a CI `services:` container or a local
+`docker compose -f docker/docker-compose.yml up -d postgres` — it does not
+spin up a Postgres server itself (no `testcontainers` dependency).
 
 ## Observability
 
