@@ -91,6 +91,7 @@ from collections import OrderedDict
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
+from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
@@ -144,6 +145,7 @@ from .models import (
     notify_review_progress,
 )
 from .repo_reader import RepoReader
+from .side_effect_consolidation import consolidate_side_effect_issues
 from .side_effect_impact_pass import find_side_effect_impact_issues
 from .synthesis import synthesize_review_findings
 
@@ -184,6 +186,11 @@ __all__ = [
     "_surface_by_path",
     "_symbol_surface",
 ]
+
+# Default-on toggle: an explicit ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION=false``/``0``/``no``
+# disables merging of related "side-effects" findings (see docs/ENV_VARS.md). Any other
+# value (or unset) leaves consolidation enabled.
+_SIDE_EFFECT_CONSOLIDATION_ENV = "CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION"
 
 
 # Process-global submission-level short-circuit cache (see module docstring).
@@ -765,6 +772,13 @@ def run_coordinator(
         shared_index=shared_index,
     )
     tail_pass_issues = tail_pass_result.issues
+    # Merge related "side-effects" findings (same enclosing function, or one
+    # citing another's) into single consolidated issues before the exact-match
+    # dedupe below -- see side_effect_consolidation's own docstring for the
+    # grouping rules. Additive-only inputs in, fewer-but-richer issues out;
+    # every other category passes through untouched.
+    if env_flag_enabled(_SIDE_EFFECT_CONSOLIDATION_ENV):
+        tail_pass_issues = consolidate_side_effect_issues(tail_pass_issues, shared_index)
 
     notify_review_progress(
         progress_callback,

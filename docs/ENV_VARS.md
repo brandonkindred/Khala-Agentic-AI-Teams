@@ -917,6 +917,21 @@ remaining gap is a Temporal review with no reader and no reachable
 own files via `search_codebase` — the same conservative (keep-more) behavior
 the other two passes already have in that case.
 
+### CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION
+Default-on toggle for consolidating related `side-effects` findings from the
+pass above. Two (or more) `side-effects` issues are merged into one when they
+are anchored inside the same enclosing function/method/class, or when one
+finding's description/suggestion cites a `path:line` that falls inside another
+finding's own enclosing construct — grouping is transitive, so a chain of
+findings that each reference or share a construct with the next all collapse
+into a single issue. Every other category (including this same pass's own
+`documentation` findings) passes through unchanged. Runs after the side-effect
+pass and before the coordinator's exact-match dedupe, using the same
+`shared_index` (no extra LLM calls; pure source analysis — AST-based for
+Python, a column-0 heuristic for other languages). Set to `false`/`0`/`no` to
+disable consolidation (any other value, or unset, leaves it enabled) — this
+only turns off merging, the underlying findings are unaffected.
+
 Any setup or LLM failure is fail-safe: it is logged and yields no additional
 findings, so a broken pass never blocks or changes the rest of the review. Set
 to `false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
