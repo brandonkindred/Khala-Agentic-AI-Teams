@@ -304,7 +304,7 @@ def test_get_llm_for_agent_global_fallback(_ollama_provider_list) -> None:
 
 
 def test_get_llm_for_agent_uses_default_when_no_env(_ollama_provider_list) -> None:
-    """When no env overrides, the agent default (e.g. deepseek-v4-pro:cloud for backend) is used."""
+    """When no env overrides, the agent default (e.g. kimi-k2.7-code:cloud for backend) is used."""
     clear_client_cache()
     with patch.dict(
         os.environ,
@@ -317,7 +317,7 @@ def test_get_llm_for_agent_uses_default_when_no_env(_ollama_provider_list) -> No
     ):
         client = get_client("backend")
         assert isinstance(unwrap_client(client), FailoverLLMClient)
-        assert client.model == "deepseek-v4-pro:cloud"
+        assert client.model == "kimi-k2.7-code:cloud"
 
 
 def test_get_client_resolves_same_model_across_calls(_ollama_provider_list) -> None:
