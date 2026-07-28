@@ -1064,7 +1064,7 @@ class TestDevOpsTestValidationAgent:
 class TestChangeReviewAgent:
     # The gate now routes through the shared code-review engine with the
     # ``devops_maintainability`` profile, so stubs return the engine's flat
-    # issue shape ({approved, issues, summary}); the adapter maps those issues
+    # issue shape ({approved, issues, summary, spec_compliance_notes}); the adapter maps those issues
     # to ``ReviewFinding`` and re-derives approval from blocking severities.
 
     def test_requires_client(self) -> None:
@@ -1113,8 +1113,17 @@ class TestChangeReviewAgent:
         assert out.findings == []
 
     def test_blocks_on_high_severity_finding(self) -> None:
-        """A high-severity engine issue maps to a blocking ReviewFinding and the
-        blocking rule overrides the engine's approved flag."""
+        """A high-severity engine issue maps to a blocking ReviewFinding.
+
+        This used to stub a deliberately buggy engine reply (``approved=True``
+        alongside a high-severity issue) to prove the gate's own blocking rule
+        overrides the engine's flag. ``ChunkReviewLLMResponse``'s consistency
+        validator now rejects that exact contradiction at the schema layer, so
+        it can no longer be produced through the stub at all -- the reply must
+        be schema-valid (``approved=False``) here. The gate's blocking rule is
+        still exercised: it is what turns the high-severity finding into a
+        blocking ``ReviewFinding`` and an unapproved verdict.
+        """
         from software_engineering_team.devops_team.change_review_agent import (
             ChangeReviewAgent,
             ChangeReviewInput,
@@ -1122,17 +1131,18 @@ class TestChangeReviewAgent:
 
         client = _StubClient(
             {
-                "approved": True,  # engine flag is overridden by the blocking rule
+                "approved": False,
                 "issues": [
                     {
                         "severity": "high",
-                        "category": "brittle-automation",
+                        "category": "maintainability",
                         "file_path": "Dockerfile",
                         "description": "latest tag pinned nowhere",
                         "suggestion": "pin a digest",
                     }
                 ],
                 "summary": "blocked",
+                "spec_compliance_notes": "",
             }
         )
         agent = ChangeReviewAgent(client)
@@ -1190,7 +1200,8 @@ class TestChangeReviewAgent:
                 raise TypeError("boom")
 
         monkeypatch.setattr(
-            "software_engineering_team.devops_team.change_review_agent.agent.CodeReviewAgent", _RaisingEngine()
+            "software_engineering_team.devops_team.change_review_agent.agent.CodeReviewAgent",
+            _RaisingEngine(),
         )
         agent = ChangeReviewAgent(_StubClient({}))
         with pytest.raises(TypeError):
@@ -1233,6 +1244,7 @@ class TestChangeReviewAgent:
                     }
                 ],
                 "summary": "fyi",
+                "spec_compliance_notes": "",
             }
         )
         agent = ChangeReviewAgent(client)
