@@ -225,13 +225,25 @@ class DeepthoughtAgent:
         """Ask the LLM whether we can answer directly or need sub-agents.
 
         Two-pass structured-output flow via :func:`complete_json_via_reasoning`:
-        a ``think=True`` reasoning pass (``reasoning_temperature=0.3``) that
-        analyses the question in structured prose against
-        ``ANALYSIS_SYSTEM_PROMPT_REASONING``, followed by a ``think=False``
-        formatting pass that transcribes that prose into the ``QueryAnalysis``
-        JSON shape via ``ANALYSIS_FORMAT_INSTRUCTIONS``. Either pass failing
-        falls back to a forced direct answer at confidence 0.3 rather than
-        raising.
+        a ``think=True`` reasoning pass (at the helper's default
+        ``reasoning_temperature``) that analyses the question in structured
+        prose against ``ANALYSIS_SYSTEM_PROMPT_REASONING``, followed by a
+        ``think=False`` formatting pass that transcribes that prose into the
+        ``QueryAnalysis`` JSON shape via ``ANALYSIS_FORMAT_INSTRUCTIONS``.
+        Either pass failing falls back to a forced direct answer at confidence
+        0.3 rather than raising.
+
+        Preconditions:
+            * ``self.llm`` implements the reasoning-capable client interface
+              expected by :func:`complete_json_via_reasoning` (``complete``
+              with ``think=True`` and ``complete_json`` with ``think=False``).
+            * ``max_depth`` is the recursion ceiling already resolved by the
+              caller; ``self.spec`` and ``self.original_query`` are populated.
+        Postconditions:
+            * Always returns a ``QueryAnalysis`` — never raises. On success it
+              reflects the model's parsed judgement; on any failure of either
+              LLM pass it is a forced-direct-answer fallback at
+              ``confidence=0.3`` with no sub-agent skill requirements.
         """
         strategy_key = self.decomposition_strategy.value
         strategy_instruction = STRATEGY_INSTRUCTIONS.get(
@@ -251,7 +263,7 @@ class DeepthoughtAgent:
             if self.parent_question
             else "Top-level query"
         )
-        user = ANALYSIS_USER_PROMPT.format(
+        reasoning_user = ANALYSIS_USER_PROMPT.format(
             context=context_text,
             conversation_context=format_conversation_history(self.conversation_history),
             question=self.spec.focus_question,
@@ -260,10 +272,9 @@ class DeepthoughtAgent:
         try:
             data = complete_json_via_reasoning(
                 self.llm,
-                reasoning_prompt=user,
+                reasoning_prompt=reasoning_user,
                 reasoning_system_prompt=reasoning_system,
                 formatting_instructions=ANALYSIS_FORMAT_INSTRUCTIONS,
-                reasoning_temperature=0.3,
                 objective="analyze specialist question",
             )
             return self._parse_analysis(data)

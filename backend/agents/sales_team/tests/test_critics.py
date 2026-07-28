@@ -79,7 +79,15 @@ class CannedLLMClient(LLMClient):
         # verdict-producing complete_json calls these tests assert on. Recorded
         # separately in ``self.reasoning_calls`` for tests that need to inspect
         # the reasoning-pass prompt itself.
-        self.reasoning_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        self.reasoning_calls.append(
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "think": think,
+                "temperature": temperature,
+                "objective": objective,
+            }
+        )
         return "Reasoning: proceeding as configured by the test fixture."
 
     def complete_json(
@@ -90,10 +98,17 @@ class CannedLLMClient(LLMClient):
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: bool = False,
+        objective: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         self.calls.append(
-            {"prompt": prompt, "system_prompt": system_prompt, "temperature": temperature}
+            {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "temperature": temperature,
+                "think": think,
+                "objective": objective,
+            }
         )
         if not self._responses:
             raise AssertionError(
@@ -256,6 +271,10 @@ class TestOutreachCriticAgent:
         assert llm.reasoning_calls and "Outreach Reviewer" in (
             llm.reasoning_calls[0]["system_prompt"] or ""
         )
+        # Locks in the two-pass contract: the reasoning pass runs with
+        # think=True, the formatting pass with think=False.
+        assert llm.reasoning_calls[0]["think"] is True
+        assert llm.calls and llm.calls[0]["think"] is False
 
     def test_fail_with_fabricated_citation(
         self,

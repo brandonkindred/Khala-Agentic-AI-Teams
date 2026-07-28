@@ -277,7 +277,18 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
     description="Returns current status and, when completed, the full SOC2 audit result.",
 )
 def get_audit_status(job_id: str) -> AuditStatusResponse:
-    """Get the status and result of an audit job."""
+    """Get the status and result of an audit job.
+
+    Preconditions:
+        - ``job_id`` is a job id previously returned by ``POST /soc2-audit/run``.
+    Postconditions:
+        - Returns the job's current ``status`` (``pending``/``running``/
+          ``completed``/``failed``), ``current_stage``, and ``error`` as last
+          persisted in the job store. ``result`` is populated (parsed as
+          :class:`SOC2AuditResult`) only once the job has produced one; it is
+          ``None`` for a job still pending or running.
+        - Raises ``HTTPException(404)`` if no job with ``job_id`` exists.
+    """
     job = job_store._job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")

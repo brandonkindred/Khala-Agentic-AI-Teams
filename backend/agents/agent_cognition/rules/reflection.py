@@ -72,7 +72,10 @@ _PG_INT32_MAX = 2**31 - 1
 # drive rule learning and the month/week/day window already spans it.
 _REFLECTION_SCALES: tuple[Scale, ...] = (Scale.MONTH, Scale.WEEK, Scale.DAY)
 
-_REFLECTION_SYSTEM_PROMPT = (
+# Shared faculty framing for both the combined (single-call) prompt and the
+# reasoning-only variant below — kept as one constant so the two can't drift
+# apart accidentally; only the trailing sentence differs per variant.
+_REFLECTION_FACULTY_FRAMING = (
     "You are the reflection faculty of an autonomous agent. You read the "
     "agent's recent memory summaries and its current operating rules, then "
     "propose changes to those rules: ADD a new guardrail, RETIRE one that no "
@@ -82,8 +85,10 @@ _REFLECTION_SYSTEM_PROMPT = (
     "would have prevented a real mistake. Do not restate rules that already "
     "exist. Be conservative: an empty proposal list is the correct answer when "
     "nothing in memory warrants a change. Every proposal is reviewed by a human "
-    "before it can take effect. Return only the requested JSON object."
+    "before it can take effect."
 )
+
+_REFLECTION_SYSTEM_PROMPT = _REFLECTION_FACULTY_FRAMING + " Return only the requested JSON object."
 
 _TASK_INSTRUCTION = (
     "--- TASK ---\n"
@@ -113,18 +118,7 @@ _TASK_INSTRUCTION = (
 # transcribes this prose into the _ReflectionResult schema, guided by
 # _REFLECTION_SYSTEM_PROMPT + _TASK_INSTRUCTION (the original combined
 # prompt) as its system prompt.
-_REFLECTION_SYSTEM_PROMPT_REASONING = (
-    "You are the reflection faculty of an autonomous agent. You read the "
-    "agent's recent memory summaries and its current operating rules, then "
-    "propose changes to those rules: ADD a new guardrail, RETIRE one that no "
-    "longer serves, or AMEND one that should change. Propose a rule only when "
-    "the memory shows concrete, recurring evidence for it — repeated failures, "
-    "conflicting decisions, an emergent best practice, or a constraint that "
-    "would have prevented a real mistake. Do not restate rules that already "
-    "exist. Be conservative: an empty proposal list is the correct answer when "
-    "nothing in memory warrants a change. Every proposal is reviewed by a human "
-    "before it can take effect."
-)
+_REFLECTION_SYSTEM_PROMPT_REASONING = _REFLECTION_FACULTY_FRAMING
 
 _TASK_INSTRUCTION_REASONING = (
     "--- TASK ---\n"
@@ -141,7 +135,9 @@ _TASK_INSTRUCTION_REASONING = (
     "amend that keeps an enforced rule enforced, state explicitly only if you're changing it.\n"
     "- The rationale: a short why, citing what in the memory motivates it.\n"
     "- The priority: higher applies first (add default 0; on amend, state explicitly only if "
-    "changing it from the existing priority)."
+    "changing it from the existing priority).\n"
+    "Write your answer as prose, not as JSON, code, or a key-value list — the field names "
+    "above describe what to cover, not how to format it."
 )
 
 

@@ -308,7 +308,7 @@ def test_validated_via_reasoning_splits_temperature_between_passes() -> None:
 def test_validated_via_reasoning_reasoning_temperature_default_is_independent() -> None:
     """A caller passing only ``temperature=0.0`` (the pre-split idiom for "be
     deterministic") leaves the reasoning pass at the helper's own default —
-    the regression the six migrated call sites had to fix explicitly."""
+    the regression the migrated call sites had to fix explicitly."""
     client = _RecordingClient({"status": "PASS", "score": 1.0})
 
     complete_validated_via_reasoning(

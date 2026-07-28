@@ -157,9 +157,11 @@ class OutreachCriticAgent:
     ) -> OutreachCriticReport:
         """Evaluate ``sequence`` and return a :class:`OutreachCriticReport`.
 
-        On any LLM exception (parse failure after corrective retries, network
-        error, schema rejection) the critic returns a fail-closed FAIL report
-        so the orchestrator's one-shot refinement budget gets used.
+        On any exception raised while producing the report — an LLM failure
+        (parse failure after corrective retries, network error, schema
+        rejection) or anything else the call raises — the critic returns a
+        fail-closed FAIL report so the orchestrator's one-shot refinement
+        budget gets used.
         """
         prompt = self._build_prompt(sequence, dossier, icp)
         try:
