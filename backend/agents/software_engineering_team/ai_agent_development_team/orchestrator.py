@@ -9,10 +9,13 @@ from typing import Callable, Dict, Optional
 from llm_service import LLMClient
 from shared.repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.team_lead_base import BaseTeamLead
 
 from .models import (
     AIAgentDevelopmentWorkflowResult,
+    IntakeResult,
     Phase,
+    PlanningResult,
     ToolAgentInput,
     ToolAgentKind,
     ToolAgentOutput,
@@ -29,11 +32,27 @@ logger = logging.getLogger(__name__)
 MAX_REVIEW_ITERATIONS = 15
 
 
-class AIAgentDevelopmentTeamLead:
-    """Orchestrates intake -> planning -> execution -> review -> problem-solving -> deliver."""
+class AIAgentDevelopmentTeamLead(BaseTeamLead):
+    """Orchestrates intake -> planning -> execution -> review -> problem-solving -> deliver.
+
+    Intake and planning run as gated phases via ``BaseTeamLead._run_gated_phases``;
+    execution/review/problem-solving/deliver remain hand-rolled below the gate call
+    pending a later migration (their phase shape — a whole-result review/problem-
+    solving retry loop with no git/branch concerns — does not fit the code-v2 teams'
+    ``BaseV2DevelopmentAgent`` state machine, mirroring why ``devops_team`` also
+    does not use it). Does not use ``BaseTeamLead``'s per-repo briefing cache
+    (:meth:`BaseTeamLead._repo_context_cache_for`), so ``__init__`` passes empty
+    extension/exclude-dir sets and a zero char budget for that unused feature.
+    """
 
     def __init__(self, llm_client: LLMClient) -> None:
-        self.llm = llm_client
+        BaseTeamLead.__init__(
+            self,
+            llm_client,
+            extensions=frozenset(),
+            exclude_dirs=frozenset(),
+            max_chars=0,
+        )
 
     def _build_tool_runners(
         self,
@@ -93,17 +112,45 @@ class AIAgentDevelopmentTeamLead:
 
         logger.info("[%s] AI Agent Development workflow started", task.id)
 
-        try:
+        # Phase outputs shared with the still-hand-rolled execution/review/deliver
+        # tail below (set by the gated phase callables).
+        intake: Optional[IntakeResult] = None
+        planning: Optional[PlanningResult] = None
+
+        def _phase_intake() -> Optional[AIAgentDevelopmentWorkflowResult]:
+            """Intake gate: normalize mission/constraints via run_intake.
+
+            Preconditions: none (first phase).
+            Postconditions: sets nonlocal ``intake`` and ``result.intake_result``;
+              always returns None today (run_intake has no soft-failure branch —
+              exceptions propagate to run_workflow's outer try/except unchanged).
+            """
+            nonlocal intake
             _trace(Phase.INTAKE, "Starting intake")
             intake = run_intake(llm=self.llm, task=task, spec_content=spec_content)
             result.intake_result = intake
+            return None
 
+        def _phase_planning() -> Optional[AIAgentDevelopmentWorkflowResult]:
+            """Planning gate: derive microtasks via run_planning.
+
+            Preconditions: ``_phase_intake`` has run (``intake`` is set).
+            Postconditions: sets nonlocal ``planning`` and ``result.planning_result``;
+              always returns None today (see _phase_intake docstring).
+            """
+            nonlocal planning
             result.current_phase = Phase.PLANNING
             _trace(Phase.PLANNING, "Planning microtasks")
             planning = run_planning(
                 llm=self.llm, task=task, intake_result=intake, spec_content=spec_content
             )
             result.planning_result = planning
+            return None
+
+        try:
+            gate_failure = self._run_gated_phases([_phase_intake, _phase_planning])
+            if gate_failure is not None:
+                return gate_failure
 
             result.current_phase = Phase.EXECUTION
             _trace(Phase.EXECUTION, "Executing microtasks")
