@@ -127,6 +127,7 @@ def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
     assert result["approved"] is True
     assert result["issues"] == []
     assert "summary" in result
+    assert "spec_compliance_notes" in result
 
 
 def test_chunk_review_agent_run_returns_chunk_review_output() -> None:
@@ -218,8 +219,10 @@ def test_review_guardrails_note_is_in_every_prompt() -> None:
     agent.run(_chunk_input())
     prompt = client.prompts[0]
     assert "**Review guardrails" in prompt
-    assert "COMPLETE" in prompt  # units shown are complete -> no phantom truncation
-    assert "does not exist" in prompt  # don't flag existing files as missing
+    # Full sentences, not bare substrings, so a stray unrelated occurrence of
+    # "COMPLETE" or "does not exist" elsewhere in the prompt can't false-pass.
+    assert "The code shown below is COMPLETE." in prompt
+    assert "Do NOT claim that a file, module, or symbol referenced here 'does not exist'" in prompt
     assert "from .models import" in prompt  # relative imports are conventional
 
 

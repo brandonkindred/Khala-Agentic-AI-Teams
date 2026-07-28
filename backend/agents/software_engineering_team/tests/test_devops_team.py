@@ -1064,7 +1064,7 @@ class TestDevOpsTestValidationAgent:
 class TestChangeReviewAgent:
     # The gate now routes through the shared code-review engine with the
     # ``devops_maintainability`` profile, so stubs return the engine's flat
-    # issue shape ({approved, issues, summary}); the adapter maps those issues
+    # issue shape ({approved, issues, summary, spec_compliance_notes}); the adapter maps those issues
     # to ``ReviewFinding`` and re-derives approval from blocking severities.
 
     def test_requires_client(self) -> None:

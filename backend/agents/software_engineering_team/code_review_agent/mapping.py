@@ -292,9 +292,10 @@ def _is_content_failure(exc: BaseException) -> bool:
           might fix, or that a human can be asked to review manually.
           ``json.JSONDecodeError`` is retained defensively: no current call path
           raises it directly (the chunk reviewer now routes through
-          ``complete_json_with_continuation``, which raises
-          ``LLMJsonParseError`` instead), but any future bare ``json.loads``
-          reachable from this call chain would still classify correctly here.
+          ``llm_service.complete_validated``, which raises
+          ``LLMJsonParseError``/``LLMSchemaValidationError`` instead), but any
+          future bare ``json.loads`` reachable from this call chain would
+          still classify correctly here.
         - Returns False for everything else (e.g. ``KeyError``/``TypeError`` from
           a bug in the reviewer code), so unexpected defects fail closed instead
           of being masked as a not-reviewed finding.

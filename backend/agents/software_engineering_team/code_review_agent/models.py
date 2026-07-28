@@ -436,12 +436,10 @@ class ChunkReviewIssueLLM(BaseModel):
 class ChunkReviewLLMResponse(BaseModel):
     """Narrow LLM-authored shape for one chunk-review call's response.
 
-    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
-    ``generate_structured``. Today that function hand-parses this exact
-    shape out of a ``complete_json_with_continuation`` reply via bare
-    ``.get()``/``str()``/``bool()`` coercions (chunk_reviewer.py). This model
-    documents and validates that contract; wiring it into an actual
-    ``generate_structured`` call is a separate, follow-up change.
+    ``chunk_reviewer._run_chunk_review`` validates every chunk-review reply
+    against this model via ``llm_service.complete_validated``, replacing the
+    hand-rolled ``.get()``/``str()``/``bool()`` coercions the reviewer used to
+    apply to a raw ``complete_json_with_continuation`` reply.
 
     All four fields are required, not defaulted: the chunk-review prompt's
     own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in
