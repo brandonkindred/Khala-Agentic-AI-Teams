@@ -633,17 +633,30 @@ class MergedArchitectureSideEffectResponse(BaseModel):
     the coordinator's ``_run_tail_passes``, or the Temporal workflow/activity
     — those wire-up changes belong to implementing the parent consolidation
     (tracked separately), not to this schema design.
+
+    Both fields are required, not defaulted — mirroring
+    :class:`ChunkReviewLLMResponse`'s identical rationale. The merged
+    prompt's own output-contract instructs the model to always return both
+    keys, so a reply missing one is a truncated/malformed response, not a
+    legitimately empty part: defaulting it here would silently reinterpret
+    "the model never ran (or truncated) this half of the check" as "the
+    model ran this half and found nothing," hiding every finding that half
+    would have reported. Requiring both keys instead fails validation on
+    omission and drives ``complete_validated``'s corrective retry, giving
+    the model a chance to actually complete the omitted half — while an
+    explicit empty list for either key remains a valid, expected "found
+    nothing" outcome.
     """
 
     architecture_findings: List[ArchitectureConsistencyFindingLLM] = Field(
-        default_factory=list,
         description="Findings from the architecture-consistency / cross-codebase-redundancy check "
-        "(Part 1 of the merged prompt). Empty when that part found nothing.",
+        "(Part 1 of the merged prompt). Empty list when that part found nothing; the key itself "
+        "is still required.",
     )
     side_effect_findings: List[SideEffectImpactFindingLLM] = Field(
-        default_factory=list,
         description="Findings from the side-effect / blast-radius impact check (Part 2 of the "
-        "merged prompt). Empty when that part found nothing.",
+        "merged prompt). Empty list when that part found nothing; the key itself is still "
+        "required.",
     )
 
 

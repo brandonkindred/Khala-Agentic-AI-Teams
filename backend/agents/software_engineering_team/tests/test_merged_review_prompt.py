@@ -94,10 +94,23 @@ def test_merged_schema_round_trips_both_finding_types():
     assert isinstance(parsed.side_effect_findings[0], SideEffectImpactFindingLLM)
 
 
-def test_merged_schema_defaults_both_keys_to_empty_list():
-    parsed = MergedArchitectureSideEffectResponse.model_validate({})
+def test_merged_schema_accepts_explicit_empty_lists_but_requires_both_keys():
+    """Both keys are required (a reply missing one is a truncated/malformed
+    response, not a legitimately empty part -- see the schema's docstring),
+    but an explicit empty list for either key is still a valid "found
+    nothing" outcome."""
+    parsed = MergedArchitectureSideEffectResponse.model_validate(
+        {"architecture_findings": [], "side_effect_findings": []}
+    )
     assert parsed.architecture_findings == []
     assert parsed.side_effect_findings == []
+
+    with pytest.raises(ValidationError):
+        MergedArchitectureSideEffectResponse.model_validate({"side_effect_findings": []})
+    with pytest.raises(ValidationError):
+        MergedArchitectureSideEffectResponse.model_validate({"architecture_findings": []})
+    with pytest.raises(ValidationError):
+        MergedArchitectureSideEffectResponse.model_validate({})
 
 
 def test_merged_schema_rejects_cross_part_category():
