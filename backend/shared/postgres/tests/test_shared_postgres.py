@@ -848,6 +848,25 @@ def test_real_postgres_schema_returns_configured_pytest_fixture():
     assert marker.autouse is True
 
 
+def test_real_postgres_schema_fixture_worker_id_param_has_no_default():
+    """Regression guard: pytest's fixture-argument discovery skips injecting a real
+    fixture value for parameters that carry a default (verified via a standalone
+    ``-n 2`` repro: a defaulted ``worker_id="master"`` always resolves to the literal
+    default, never xdist's actual per-worker id). If ``worker_id`` ever gains a
+    default again, every xdist worker silently takes the "master" teardown-truncate
+    path — reintroducing the exact cross-worker race this fixture exists to avoid."""
+    import inspect
+
+    from shared.postgres.testing import real_postgres_schema
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    fixture = real_postgres_schema(schema)
+    inner = fixture.__wrapped__ if hasattr(fixture, "__wrapped__") else fixture
+    params = inspect.signature(inner).parameters
+    assert "worker_id" in params
+    assert params["worker_id"].default is inspect.Parameter.empty
+
+
 # ---------------------------------------------------------------------------
 # drop_team_tables
 # ---------------------------------------------------------------------------

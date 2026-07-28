@@ -160,7 +160,15 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     Not itself wired into any team's tests yet — callers opt in explicitly.
     """
 
-    def _fixture(worker_id="master"):
+    def _fixture(worker_id):
+        # No default here: pytest's fixture-argument discovery skips injecting a
+        # real fixture value for parameters that carry a default, so a defaulted
+        # `worker_id="master"` would silently never receive xdist's actual
+        # per-worker id and every worker would (wrongly) take the "master"
+        # teardown-truncate path — reintroducing the exact cross-worker race
+        # this fixture exists to avoid. Verified via a standalone repro: a
+        # defaulted parameter always sees "master" under `-n`, a required one
+        # sees "gw0"/"gw1"/etc.
         yield from _real_postgres_schema_body(schema, worker_id=worker_id)
 
     _fixture.__name__ = f"real_postgres_schema_{schema.team}"
