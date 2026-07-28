@@ -215,8 +215,8 @@ class _ChunkOutcome:
 def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
     """Yield ``exc`` and its ``__cause__``/``__context__`` ancestors.
 
-    Strands (and the failover client) wrap the originating LLM error, so a chunk
-    failure must be classified by walking the chain, not just its top type. Prefers
+    The LLM client or caller wrappers may wrap the originating LLM error, so a
+    chunk failure must be classified by walking the chain, not just its top type. Prefers
     an explicit ``__cause__`` (``raise ... from``) over the implicit ``__context__``,
     dedups by ``id()``, and stops after 10 hops.
 
@@ -243,8 +243,9 @@ def _is_infra_failure(exc: BaseException) -> bool:
     succeed on a smaller or repeated input.
 
     Postconditions:
-        - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
-          client error) up to a bounded depth; never raises.
+        - Walks the ``__cause__``/``__context__`` chain (the client or caller
+          code may wrap the originating error) up to a bounded depth; never
+          raises.
     """
     for current in _exception_chain(exc):
         if isinstance(current, (LLMJsonParseError, LLMSchemaValidationError)):
@@ -262,9 +263,10 @@ def _is_infra_failure(exc: BaseException) -> bool:
 # degraded to a not-reviewed finding. Any other exception is treated as an
 # unexpected defect and fails closed. ``json.JSONDecodeError`` is retained
 # defensively: no current call path raises it directly anymore (the chunk
-# reviewer now routes through ``complete_json_with_continuation``, which raises
-# ``LLMJsonParseError`` instead), but any future bare ``json.loads`` reachable
-# from this call chain would still classify correctly here. ``LLMTruncatedError``
+# reviewer now routes through ``llm_service.complete_validated``, which raises
+# ``LLMJsonParseError`` or ``LLMSchemaValidationError`` instead), but any future
+# bare ``json.loads`` reachable from this call chain would still classify
+# correctly here. ``LLMTruncatedError``
 # (finish_reason=length) is recoverable for the same reason bisection exists:
 # a smaller chunk yields a smaller review, so a half that no longer exhausts the
 # output-token budget parses cleanly; a chunk that still truncates at the
@@ -299,8 +301,9 @@ def _is_content_failure(exc: BaseException) -> bool:
         - Returns False for everything else (e.g. ``KeyError``/``TypeError`` from
           a bug in the reviewer code), so unexpected defects fail closed instead
           of being masked as a not-reviewed finding.
-        - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
-          client error) up to a bounded depth; never raises.
+        - Walks the ``__cause__``/``__context__`` chain (the client or caller
+          code may wrap the originating error) up to a bounded depth; never
+          raises.
     """
     return any(isinstance(c, _CONTENT_FAILURE_TYPES) for c in _exception_chain(exc))
 
@@ -368,7 +371,13 @@ def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _Chun
           contributes one synthesized ``high`` issue built from that summary —
           applied per sub-review because at the merged level other chunks'
           findings would mask the empty-issues condition and the minor-only
-          auto-approve net would silently discard the rejection.
+          auto-approve net would silently discard the rejection. For a real
+          LLM-produced ``output``, ``ChunkReviewLLMResponse``'s own consistency
+          validator now rejects that exact shape (``approved=False`` with no
+          actionable issue) at the schema layer before it ever reaches this
+          function, so this synthesis is a defensive fallback for a
+          directly-constructed ``ChunkReviewOutput`` rather than a normal part
+          of the LLM call path.
     """
     issues = _issues_from_chunk_output(chunk, output.issues)
     if not output.approved and not issues and output.summary and output.summary.strip():
@@ -632,9 +641,10 @@ def _review_chunk_with_recovery(
     # forced OFF. This turns the common "the model thought but never answered" case
     # (including a ladder-spent reasoning loop) into a real review instead of a
     # not-reviewed range, which is what makes the degraded finding rare. Gated by env
-    # and only possible on the production path (an injected strands ``Model`` can't
-    # have its thinking level re-resolved, so tests skip this and keep their call
-    # counts). Any failure here falls through to the degrade below.
+    # and by ``thinking_override_supported(reviewer.llm)`` (an injected test
+    # ``LLMClient`` that doesn't support a thinking-level override, so tests skip
+    # this and keep their call counts). Any failure here falls through to the
+    # degrade below.
     if (
         _thinking_off_retry_enabled()
         and thinking_override_supported(reviewer.llm)
@@ -737,6 +747,7 @@ _TS_EXPORT_RE = re.compile(
     re.MULTILINE,
 )
 _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
+
 
 def _symbol_surface(content: str) -> List[str]:
     """Extract a file's top-level defined/exported symbol names.
@@ -1079,10 +1090,10 @@ def _map_chunks(
 
     Preconditions:
         - ``chunk_reviewer`` is safe for concurrent ``run`` calls: the agent is
-          stateless and ``_run_chunk_review`` builds a fresh strands agent and
-          model per call, so the only object shared across workers is the
-          injected LLM client, whose central implementations guard their own
-          state (clients injected here must support concurrent calls).
+          stateless and ``_run_chunk_review`` invokes the injected ``LLMClient``
+          directly, so the only object shared across workers is that injected
+          LLM client, whose central implementations guard their own state
+          (clients injected here must support concurrent calls).
         - ``context_fp`` is the run's ``_context_fingerprint``; each chunk is
           reviewed through ``_cached_review_chunk``, which reuses a prior
           map-phase outcome when the chunk's LLM input and this fingerprint are

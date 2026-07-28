@@ -82,8 +82,7 @@ class _StubClient(DummyLLMClient):
     Constraints:
       - Always returns the same ``response`` dict regardless of prompt/kwargs
       - Does not validate temperature, tools, or other call parameters
-      - Routes through the Strands adapter path (``chat_json_round`` →
-        ``StructuredOutputTool`` detection → ``complete_json``)
+      - Directly implements ``complete_json`` and returns the canned dict
     """
 
     def __init__(self, response: Dict[str, Any]) -> None:
