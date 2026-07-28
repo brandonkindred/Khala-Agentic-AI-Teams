@@ -411,6 +411,21 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         write_changes: bool,
         subdir: str = "",
     ) -> DevOpsTeamResult:
+        """Sequence the 5 DevOps phases via the shared gated-phase framework.
+
+        Each phase's logic lives in a standalone function under ``phases/``
+        (or ``debug_patch.py`` for Phase 3); this method is a thin adapter
+        that builds the small closures below (to thread shared nonlocal state
+        between phases) and sequences them with ``self._run_gated_phases``,
+        the generic ``BaseTeamLead`` sequencing helper (run in order, stop at
+        the first non-``None`` failure). This intentionally does not use
+        ``BaseV2DevelopmentAgent._run_development_workflow``: that method is
+        a fixed Pre-flight/Planning/microtask-review-gated-Execution/
+        Documentation/Deliver state machine built for the code-v2 teams'
+        LLM-planning contract, and this team's phases (env-policy gating,
+        3-way parallel design fan-out, a debug-patch retry loop, gate-name
+        tracking) don't share that shape.
+        """
         self._report_status(
             "start",
             detail=f"DevOps team pipeline: starting task {task_spec.task_id}",
