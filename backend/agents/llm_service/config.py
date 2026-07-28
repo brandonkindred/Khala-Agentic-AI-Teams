@@ -283,6 +283,11 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "backend": "deepseek-v4-pro:cloud",
     "frontend": "deepseek-v4-pro:cloud",
     "code_review": "deepseek-v4-pro:cloud",
+    # Narrower, bounded code-review sub-passes (false-positive verify, narrative
+    # synthesis) rather than the open-ended main review; same model family as
+    # code_review keeps the already-validated JSON-mode/reasoning-effort behavior,
+    # with a lighter AGENT_DEFAULT_THINK pin below.
+    "code_review_verify": "deepseek-v4-pro:cloud",
     "repair": "deepseek-v4-pro:cloud",
     "devops": "deepseek-v4-pro:cloud",
     "dbc_comments": "deepseek-v4-pro:cloud",
@@ -336,6 +341,9 @@ AGENT_DEFAULT_THINK: dict[str, str] = {
     # it defaults to the reduced "high" tier — DeepSeek's other true wire tier —
     # which opens the content channel far more reliably.
     "code_review": "high",
+    # code_review_verify covers the narrower, bounded verify/synthesis sub-passes
+    # (not open-ended review), so it defaults one tier below code_review's "high".
+    "code_review_verify": "low",
 }
 
 

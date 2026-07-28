@@ -56,6 +56,38 @@ def resolve_code_review_model(
     return get_strands_model("code_review", think=think)
 
 
+def resolve_code_review_verify_model(
+    llm: "Union[LLMClient, _StrandsModel]", think: Optional[Union[bool, str]] = None
+) -> "Union[LLMClient, _StrandsModel]":
+    """Resolve the strands model for code-review's narrower verify/synthesis sub-passes.
+
+    Same shape as :func:`resolve_code_review_model`, but keyed on the
+    ``code_review_verify`` agent key (its own ``AGENT_DEFAULT_MODELS`` /
+    ``AGENT_DEFAULT_THINK`` entries) instead of ``code_review`` — for bounded
+    tasks like false-positive verification and narrative synthesis, as opposed
+    to open-ended chunk review.
+
+    Preconditions:
+        - ``llm`` is an ``LLMClient`` or an object implementing the strands
+          ``Model`` interface.
+        - ``think`` is ``None`` (use the model's default thinking level), or an
+          explicit override applied only on the production path.
+
+    Postconditions:
+        - Returns ``llm`` itself when it already implements the strands ``Model``
+          interface (the test path injects such a client); ``think`` is ignored
+          for it (see ``thinking_override_supported``). Otherwise returns
+          ``get_strands_model("code_review_verify", think=think)`` (or without
+          ``think`` when it is ``None``), safe to share across concurrent
+          ``Agent`` calls.
+    """
+    if isinstance(llm, _StrandsModel):
+        return llm
+    if think is None:
+        return get_strands_model("code_review_verify")
+    return get_strands_model("code_review_verify", think=think)
+
+
 def thinking_override_supported(llm: "Union[LLMClient, _StrandsModel]") -> bool:
     """Whether the chunk reviewer can override the thinking level for ``llm``.
 

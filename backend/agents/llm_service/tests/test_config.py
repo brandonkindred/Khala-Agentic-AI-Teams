@@ -43,6 +43,25 @@ def test_resolve_agent_default_think_code_review_is_reduced() -> None:
     assert "high" in config.KNOWN_MODEL_THINKING_LEVELS["deepseek-v4-pro:cloud"]
 
 
+def test_resolve_model_code_review_verify_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """code_review_verify has its own AGENT_DEFAULT_MODELS entry, independent of
+    (and not affecting) code_review's."""
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
+    monkeypatch.delenv("LLM_MODEL_code_review", raising=False)
+    assert config.resolve_model("code_review_verify") == "deepseek-v4-pro:cloud"
+    assert config.resolve_model("code_review") == "deepseek-v4-pro:cloud"
+
+
+def test_resolve_agent_default_think_code_review_verify_is_lighter() -> None:
+    """code_review_verify pins a lighter tier than code_review's "high", for the
+    narrower, bounded verify/synthesis sub-passes."""
+    assert config.resolve_agent_default_think("code_review_verify") == "low"
+    assert "low" in config.KNOWN_MODEL_THINKING_LEVELS["deepseek-v4-pro:cloud"]
+    # code_review's own resolution is unaffected by the new key.
+    assert config.resolve_agent_default_think("code_review") == "high"
+
+
 def test_resolve_agent_default_think_unlisted_and_none_are_none() -> None:
     """Unlisted agents (and a None key) get no override — the model's platform
     default tier is left intact."""
