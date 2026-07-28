@@ -739,6 +739,27 @@ def test_resolve_path_exact_suffix_and_misses() -> None:
     )
 
 
+def test_resolve_preserves_hidden_file_basename() -> None:
+    """Bare-name normalization must not strip the leading dot from ``.env``."""
+    idx = CodebaseIndex(files={"config/.env": "SECRET=1\n"})
+    assert idx.resolve_path(".env") == "config/.env"
+    assert idx.resolve_path("./.env") == "config/.env"
+    assert idx.read_file(".env") == "SECRET=1\n"
+
+
+def test_ambiguous_submission_does_not_fall_through_to_reader() -> None:
+    """Multiple submission suffix hits must not resolve via a same-basename repo file."""
+    reader = _FakeReader({"helpers.py": "REPO"})
+    idx = CodebaseIndex(
+        files={"a/helpers.py": "A", "b/helpers.py": "B"},
+        repo_reader=reader,  # type: ignore[arg-type]
+    )
+    assert idx.resolve_path("helpers.py") is None
+    msg = idx.read_file("helpers.py")
+    assert "ambiguous" in msg
+    assert "REPO" not in msg
+
+
 def test_filter_removes_confirmed_false_positive() -> None:
     """A finding with an explicit high-confidence false verdict is dropped; a real one is kept."""
     keep = _issue(description="real bug", line=5)

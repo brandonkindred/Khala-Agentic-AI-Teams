@@ -297,9 +297,14 @@ class CodebaseIndex:
             return key, []
         # Bare-name fallback: the model often cites ``main.py`` for
         # ``app/services/main.py``. Match every stored path whose final
-        # ``/``-segment equals ``key`` (a leading ``./`` ignored); a unique hit
-        # resolves, and the full list lets ``read_file`` distinguish ambiguity.
-        normalized = key.lstrip("./")
+        # ``/``-segment equals ``key`` (a leading ``./`` or ``/`` stripped
+        # without mangling hidden names like ``.env``); a unique hit resolves,
+        # and the full list lets ``read_file`` distinguish ambiguity.
+        normalized = key
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        if normalized.startswith("/"):
+            normalized = normalized[1:]
         hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
         return (hits[0] if len(hits) == 1 else None), hits
 
@@ -315,18 +320,24 @@ class CodebaseIndex:
               names it and a non-blank excerpt exists.
             - Returns an exact file key, or the sole suffix match (``main.py`` →
               ``app/main.py``).
-            - Falls through to the repo reader: when the submission cannot
-              resolve the path but the reader can read it, returns the cited path
-              verbatim (so a finding about an existing-but-unchanged repo file is
-              still grouped and verified rather than skipped).
-            - Returns None for a blank, absent, or ambiguous path with no reader
-              hit — the verifier would have no single primary file to read, so the
-              caller keeps the finding rather than verify it.
+            - When the submission has multiple suffix hits for the cited bare
+              name, returns None (ambiguous) and does **not** consult the repo
+              reader — findings about one of several same-basename submission
+              files must not silently resolve to a repository file.
+            - Falls through to the repo reader only when the submission has
+              zero matches: if the reader can read the cited path, returns it
+              verbatim (so a finding about an existing-but-unchanged repo file
+              is still grouped and verified rather than skipped).
+            - Returns None for a blank, absent, or ambiguous path with no
+              eligible reader hit — the verifier would have no single primary
+              file to read, so the caller keeps the finding rather than verify it.
         """
         key = (path or "").strip()
-        resolved, _ = self._resolve(key)
+        resolved, hits = self._resolve(key)
         if resolved is not None:
             return resolved
+        if len(hits) > 1:
+            return None
         if key and self._reader_read(key) is not None:
             return key
         return None
@@ -339,6 +350,11 @@ class CodebaseIndex:
         returned string) and ``read_file_or_none`` (internal-facing: collapses
         ``error_message`` to ``None`` so a real file's content can never be
         mistaken for a sentinel string, however it happens to start).
+
+        Resolution order: exact / existing-codebase / unique suffix match;
+        then ambiguous submission hits as an error (before any repo-reader
+        lookup); then repo-reader fallback for absent submission paths;
+        then missing-excerpt / not-found errors.
         """
         key = (path or "").strip()
         if not key:
@@ -348,22 +364,21 @@ class CodebaseIndex:
             return self.existing_codebase, None
         if resolved is not None:
             return self.files[resolved], None
-        # Not in the submission — fall through to the repo reader so an
-        # existing-but-unchanged file (absent from the diff) is still readable.
-        # This is what lets the verifier confirm a file a finding calls "missing"
-        # actually exists in the repository.
-        reader_content = self._reader_read(key)
-        if reader_content is not None:
-            return reader_content, None
-        # Resolution failed — give the tool a message that distinguishes an
-        # ambiguous citation from an absent one (and a missing excerpt).
-        if key == self.EXISTING_CODEBASE_PATH:
-            return None, "Error: no existing-codebase excerpt available."
         if len(hits) > 1:
             return None, (
                 f"Error: path '{path}' is ambiguous; it matches "
                 f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
             )
+        # Not in the submission — fall through to the repo reader so an
+        # existing-but-unchanged file (absent from the diff) is still readable.
+        # This is what lets the verifier confirm a file a finding calls "missing"
+        # actually exists in the repository. Ambiguous submission hits never
+        # reach here.
+        reader_content = self._reader_read(key)
+        if reader_content is not None:
+            return reader_content, None
+        if key == self.EXISTING_CODEBASE_PATH:
+            return None, "Error: no existing-codebase excerpt available."
         return None, f"Error: file not found: {path}. Use list_files() to see available paths."
 
     def read_file(self, path: str) -> str:
@@ -374,10 +389,13 @@ class CodebaseIndex:
             - The ``<existing codebase>`` pseudo-path returns the existing-code
               excerpt.
             - A path that uniquely matches one file by suffix (the model often
-              cites ``main.py`` for ``app/main.py``) returns that file; an
-              ambiguous or absent path returns an ``Error: ...`` string (never
-              raises) so a bad tool argument degrades to a message rather than
-              aborting the verification.
+              cites ``main.py`` for ``app/main.py``) returns that file.
+            - An ambiguous submission suffix match returns an ``Error: ...``
+              string and never falls through to the repo reader.
+            - An absent submission path may fall through to the repo reader; if
+              that also misses, returns an ``Error: ...`` string (never raises)
+              so a bad tool argument degrades to a message rather than aborting
+              the verification.
         """
         content, error = self._read(path)
         return error if content is None else content
