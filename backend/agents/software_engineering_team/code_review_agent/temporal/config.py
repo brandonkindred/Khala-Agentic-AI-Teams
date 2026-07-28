@@ -147,8 +147,9 @@ def resolve_execute_timeout_s() -> float:
     Postconditions:
         - Returns ``CODE_REVIEW_EXECUTE_TIMEOUT_S`` when it parses to an int
           >= :data:`_MIN_EXECUTE_TIMEOUT_S`, else :data:`DEFAULT_EXECUTE_TIMEOUT_S`
-          (unset, garbage, or below the floor all fall back to the default),
-          via the shared ``env_int`` parser. Never raises.
+          (unset or unparseable falls back to the default; a parseable value
+          below the floor is clamped up to the floor, not reset to the
+          default), via the shared ``env_int`` parser. Never raises.
     """
     return float(
         env_int(
@@ -228,8 +229,9 @@ def resolve_max_concurrent_activities() -> int:
     Postconditions:
         - Returns ``CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES`` when it parses to
           a positive int, else :data:`DEFAULT_MAX_CONCURRENT_ACTIVITIES`
-          (unset, garbage, or <= 0 all fall back to the default), via the
-          shared ``env_int`` parser (which warns on a set-but-unparseable
+          (unset or unparseable falls back to the default; a parseable value
+          <= 0 is clamped up to the floor of 1, not reset to the default), via
+          the shared ``env_int`` parser (which warns on a set-but-unparseable
           value). Never raises.
     """
     return env_int(

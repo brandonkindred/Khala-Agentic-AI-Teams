@@ -658,26 +658,28 @@ shared resolver both read from):
    (`code_review_agent/temporal/worker.py`).
 2. The validated-capacity ceiling for each individual review's own **adaptive**
    map-phase fan-out width (`config.resolve_temporal_fanout_width`, computed
-   once per review inside `code_review_prepare` and applied in
+   once per review inside `prepare_review_activity` and applied in
    `CodeReviewWorkflow.run` via an `asyncio.Semaphore` bounding how many of
    that review's own `review_chunk_activity` calls are in flight at once): the
-   value actually used per review is `min(CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES,
-   chunk_count)`, mirroring `CODE_REVIEW_MAP_PARALLELISM`'s in-process
+   value actually used per review is `max(1, min(CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES,
+   chunk_count))`, mirroring `CODE_REVIEW_MAP_PARALLELISM`'s in-process
    `min(ceiling, LLM_MAX_CONCURRENCY, chunk_count)` formula (collapsed to two
-   terms here because, for Temporal, the ceiling and the validated-capacity
-   gate are the same knob) — a small review (few chunks) never requests more
-   activity slots than it has chunks, and a large review can never request
-   more than the worker's own provisioned capacity, so this cannot reintroduce
-   the 4→8 timeout incident: raising this var still raises worker capacity as
-   before, and no single review can now request more of that capacity than was
+   terms plus a floor here because, for Temporal, the ceiling and the
+   validated-capacity gate are the same knob, and a review is never given
+   zero workers) — a small review (few chunks) never requests more activity
+   slots than it has chunks, and a large review can never request more than
+   the worker's own provisioned capacity, so this cannot reintroduce the 4→8
+   timeout incident: raising this var still raises worker capacity as before,
+   and no single review can now request more of that capacity than was
    actually validated. With the default (`8`), a large PR (dozens of chunks,
    per `code_review_agent/docs/CODE_REVIEW_CHUNK_COUNT_TELEMETRY.md`'s
    ~20-50-chunk "large PR" band) requests exactly `8` concurrent slots rather
    than scheduling every chunk unconditionally, leaving the remaining worker
    capacity available to other concurrently-running reviews.
 
-Parsed via the shared `env_int` (unset/garbage/`<=0` → default, with a warning
-on a set-but-unparseable value).
+Parsed via the shared `env_int` (unset/garbage → default; a parsed value
+`<=0` is clamped up to the floor of 1, not reset to the default, with a
+warning logged only for the set-but-unparseable case).
 
 ### CODE_REVIEW_EXECUTE_TIMEOUT_S
 Int seconds (default `21600` = 6h, floor `60`). Ceiling on how long
