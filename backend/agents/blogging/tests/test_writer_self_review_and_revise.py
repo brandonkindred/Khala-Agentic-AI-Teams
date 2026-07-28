@@ -187,11 +187,11 @@ def test_writer_llm_self_review_numeric_citation_before_array_applies_fixes(monk
 def test_writer_llm_self_review_unrelated_dict_array_before_issues_applies_fixes(
     monkeypatch,
 ) -> None:
-    """An unrelated dict array (e.g. a `references` list) must not be mistaken for issues.
+    """A fenced JSON object containing an unrelated dict array must not hide a later issues array.
 
-    Regression test: a non-empty list of dicts that doesn't match the issues
-    schema (no ``issue`` key) is syntactically valid JSON, but the scanner must
-    keep looking for the real issues array instead of short-circuiting on it.
+    Regression test: the scanner must not stop at the fenced object (or its nested
+    ``references`` list, which lacks ``issue`` keys) and must keep looking for the
+    real issues array instead of short-circuiting on it.
     """
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
@@ -229,6 +229,57 @@ def test_writer_llm_self_review_mixed_array_keeps_valid_dict_issue(monkeypatch) 
     review_payload = (
         "Here are the issues: "
         '[{"location": "intro", "issue": "vague", "fix": "be specific"}, "malformed"]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_direct_list_without_issue_key_returns_draft(monkeypatch) -> None:
+    """A clean top-level JSON array whose objects lack an ``issue`` key is treated as no issues.
+
+    Regression test: when ``extract_json_from_response`` parses the whole response
+    directly into a list (no rescan involved), elements missing the required
+    ``issue`` key must be filtered out just like the prose-rescan fallback does
+    via ``required_keys``, not passed through to the fix prompt as-is.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    calls = {"n": 0}
+
+    def fake(self, prompt, system_prompt=""):
+        calls["n"] += 1
+        return '[{"title": "source"}, {"title": "other"}]'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert out == "draft text"
+    assert calls["n"] == 1
+
+
+def test_writer_llm_self_review_direct_list_drops_entries_without_issue_key(monkeypatch) -> None:
+    """A direct-parsed list keeps only elements with an ``issue`` key, applying fixes for those.
+
+    Regression test: a mix of a valid issue dict and an unrelated dict (no
+    ``issue`` key) parsed directly as a top-level array must still surface the
+    real issue instead of either dropping it or passing the unrelated dict
+    through to the fix prompt.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        '[{"title": "unrelated"}, {"location": "intro", "issue": "vague", "fix": "be specific"}]'
     )
 
     def fake(self, prompt, system_prompt=""):

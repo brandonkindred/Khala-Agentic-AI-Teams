@@ -638,6 +638,10 @@ class BlogWriterAgent(_BlogAgentBase):
             - If the response's JSON parses to a value that is not a list of issue
               dicts (e.g. a top-level object, or salvaged prose residue with no
               recoverable issues array), returns the original ``draft`` unchanged.
+            - List elements lacking a truthy ``"issue"`` key are discarded before
+              use (whether the list came directly from ``extract_json_from_response``
+              or from the prose-rescan fallback); if none remain, returns the
+              original ``draft`` unchanged.
             - On soft-fail (``LLMError`` excluding types re-raised below, or
               ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
               logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -665,7 +669,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 issues = _extract_json_array_from_text(cleaned, required_keys=("issue",))
             else:
                 if isinstance(parsed, list):
-                    issues = parsed
+                    issues = [iss for iss in parsed if isinstance(iss, dict) and iss.get("issue")]
                 elif _looks_like_top_level_json_object(cleaned):
                     logger.info("LLM self-review: no issues found (response was not a JSON array)")
                     return draft
