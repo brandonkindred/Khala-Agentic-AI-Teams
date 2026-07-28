@@ -787,7 +787,7 @@ def test_real_postgres_schema_body_skips_when_disabled(monkeypatch):
 
 
 def test_real_postgres_schema_body_registers_then_truncates_on_teardown(monkeypatch):
-    # worker_id="master" (the default): single-worker/no-xdist path, teardown truncates.
+    # worker_id="master" (the default): xdist-inactive path (no -n at all), teardown truncates.
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
     from shared.postgres import testing as testing_mod
 
@@ -807,11 +807,12 @@ def test_real_postgres_schema_body_registers_then_truncates_on_teardown(monkeypa
 
 
 def test_real_postgres_schema_body_skips_teardown_truncate_under_xdist_worker(monkeypatch):
-    # worker_id != "master": running under pytest-xdist with multiple workers. A
-    # sibling worker's module-scoped fixture instance for the same schema could
-    # still be mid-test, so this worker must NOT truncate on teardown (would race
-    # and wipe the sibling's rows) — register still runs (idempotent CREATE TABLE
-    # IF NOT EXISTS), but truncate must not be called at all.
+    # worker_id != "master": running under pytest-xdist at all (even -n 1 is
+    # worker "gw0", never "master"). A sibling worker's module-scoped fixture
+    # instance for the same schema could still be mid-test, so this worker must
+    # NOT truncate on teardown (would race and wipe the sibling's rows) —
+    # register still runs (idempotent CREATE TABLE IF NOT EXISTS), but truncate
+    # must not be called at all.
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
     from shared.postgres import testing as testing_mod
 

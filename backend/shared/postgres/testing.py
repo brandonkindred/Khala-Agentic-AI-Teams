@@ -121,18 +121,32 @@ def _real_postgres_schema_body(schema: TeamSchema, *, worker_id: str = "master")
     sequence is directly unit-testable (drive the generator with ``next()``)
     without going through pytest's fixture machinery.
 
-    ``worker_id`` is pytest-xdist's per-worker identifier ("master" when not
-    running under ``-n``). Module/session-scoped fixtures are instantiated
-    independently *per worker process* — under ``-n > 1`` a sibling worker may
-    still be exercising this schema's tables (in an unrelated test module also
-    using it) when this worker's fixture instance tears down. An uncoordinated
-    ``TRUNCATE ... CASCADE`` at that point would wipe rows the sibling worker is
-    mid-test against, so teardown truncation only runs on the single-worker
-    ("master") path; under multiple workers it's skipped and logged. Tests
-    sharing a schema across xdist workers must isolate via unique row
-    identifiers instead (the existing convention — see
+    ``worker_id`` is pytest-xdist's per-worker identifier: ``"master"`` only
+    when pytest-xdist is inactive (no ``-n`` flag at all — not even ``-n 1``,
+    which still runs as worker ``"gw0"``); ``"gw0"``, ``"gw1"``, etc. whenever
+    it's active. Module/session-scoped fixtures are instantiated independently
+    *per worker process*, and pytest-xdist's default scheduling does not
+    guarantee every test in one module lands on the same worker, so under any
+    active ``-n`` a sibling worker may still be exercising this schema's
+    tables (in an unrelated test — possibly even one from the same module)
+    when this worker's fixture instance tears down. An uncoordinated
+    ``TRUNCATE ... CASCADE`` at that point would wipe rows the sibling worker
+    is mid-test against, so teardown truncation only runs on the
+    ``worker_id == "master"`` (xdist-inactive) path; it's skipped under any
+    ``-n`` invocation, logged at DEBUG.
+
+    Coordinating a single truncate *after every xdist worker has finished*
+    would need a real ``pytest_sessionfinish`` hook registered from a
+    ``conftest.py`` — that hook fires once in the xdist controller process,
+    after all workers report done — and a bare fixture (which only ever runs
+    inside a worker, never the controller) can't reach that on a caller's
+    behalf. Until a team actually needs that guarantee, tests sharing a
+    schema under ``-n > 1`` should isolate via unique row identifiers instead
+    (the existing convention — see
     ``branding_team/tests/test_store_real_postgres.py``'s ``uuid4``-suffixed
-    data), not via inter-module truncation.
+    data), not rely on inter-test truncation; expect rows to accumulate
+    across repeated ``-n > 1`` runs against a persistent local Postgres (a
+    non-issue in CI, where the Postgres container is thrown away per job).
     """
     if not is_postgres_enabled():
         pytest.skip(f"real Postgres tests require POSTGRES_HOST (team={schema.team})")
@@ -153,14 +167,18 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     """Build a pytest fixture that provisions ``schema`` against a live Postgres.
 
     Registers ``schema`` once per fixture instance (per ``scope``), yields, then
-    truncates its tables on teardown via :func:`truncate_team_tables` — so tests
-    within the scope run against real DDL without accumulating rows across runs.
-    Skips the test (rather than raising) when ``POSTGRES_HOST`` is unset, matching
-    every other real-Postgres fixture in this repo.
+    truncates its tables on teardown via :func:`truncate_team_tables` when
+    running without pytest-xdist — so a plain (non-``-n``) run always sees a
+    clean table between fixture instances. Skips the test (rather than
+    raising) when ``POSTGRES_HOST`` is unset, matching every other
+    real-Postgres fixture in this repo.
 
-    Under pytest-xdist (``-n > 1``), teardown truncation is skipped on every
-    worker but "master" — see :func:`_real_postgres_schema_body` for why an
-    uncoordinated cross-worker truncate is unsafe.
+    Under pytest-xdist (any ``-n``, including ``-n 1``), teardown truncation
+    is skipped entirely rather than attempted per-worker — see
+    :func:`_real_postgres_schema_body` for why an uncoordinated cross-worker
+    truncate is unsafe, and why safely coordinating it after every worker
+    finishes isn't something this fixture factory can do without a caller
+    also wiring up a ``conftest.py``-level hook.
 
     ``scope`` is passed straight through to ``pytest.fixture(scope=...)`` —
     valid values are ``"session"``, ``"package"``, ``"module"`` (the default),
