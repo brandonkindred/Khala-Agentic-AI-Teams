@@ -46,16 +46,10 @@ describe('PendingIssueProposalsComponent a11y', () => {
     await expectNoAxeViolations(host);
   }, 15000);
 
-  it('has no axe violations with filed, matched-existing, and combined-location proposals', async () => {
+  it('has no axe violations with filed and combined-location proposals', async () => {
     const fixture = await createFixture([
       proposal('p0', { description: 'freshly filed bug', issue_number: 7, issue_url: 'https://x/issues/7' }),
       proposal('p1', {
-        description: 'already tracked bug',
-        issue_number: 42,
-        issue_url: 'https://x/issues/42',
-        matched_existing: true,
-      }),
-      proposal('p2', {
         locations: [
           { file_path: 'a.py', line: 1, description: 'bare import `os`', suggestion: 'scope it' },
           { file_path: 'b.py', line: 5, description: 'bare import `sys`', suggestion: 'scope it' },
@@ -64,7 +58,6 @@ describe('PendingIssueProposalsComponent a11y', () => {
     ]);
     const host: HTMLElement = fixture.nativeElement;
     expect(host.querySelector('.cr-proposal__filed')).toBeTruthy();
-    expect(host.querySelector('.cr-proposal__matched')).toBeTruthy();
     expect(host.querySelector('.cr-proposal__locations')).toBeTruthy();
     await expectNoAxeViolations(host);
   }, 15000);

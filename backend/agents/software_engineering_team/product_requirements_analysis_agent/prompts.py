@@ -1257,8 +1257,8 @@ SOP_ARCHITECTURE_ANALYSIS_PROMPT = build_json_output_prompt(
     }}
   ],
   "diagrams": {{
-    "system_overview": "```mermaid\\ngraph TD\\n  Client[Web Browser] --> LB[Load Balancer]\\n  LB --> API[API Server]\\n  API --> DB[(PostgreSQL)]\\n  API --> Cache[(Redis)]\\n```\\n\\n**Textual Description:** The system follows a 3-tier architecture. Client browsers connect through a load balancer to the API server tier. The API tier communicates with PostgreSQL for persistent storage and Redis for caching and session management.",
-    "data_flow": "```mermaid\\nsequenceDiagram\\n  Client->>API: HTTP Request\\n  API->>Cache: Check cache\\n  Cache-->>API: Cache miss\\n  API->>DB: Query data\\n  DB-->>API: Return results\\n  API->>Cache: Update cache\\n  API-->>Client: Response\\n```\\n\\n**Textual Description:** Requests flow from the client to the API layer, which first checks the Redis cache. On cache miss, data is fetched from PostgreSQL, cached in Redis, and returned to the client."
+    "system_overview": "graph TD\\n  Client[Web Browser] --> LB[Load Balancer]\\n  LB --> API[API Server]\\n  API --> DB[(PostgreSQL)]\\n  API --> Cache[(Redis)]\\n\\nTextual Description: The system follows a 3-tier architecture. Client browsers connect through a load balancer to the API server tier. The API tier communicates with PostgreSQL for persistent storage and Redis for caching and session management.",
+    "data_flow": "sequenceDiagram\\n  Client->>API: HTTP Request\\n  API->>Cache: Check cache\\n  Cache-->>API: Cache miss\\n  API->>DB: Query data\\n  DB-->>API: Return results\\n  API->>Cache: Update cache\\n  API-->>Client: Response\\n\\nTextual Description: Requests flow from the client to the API layer, which first checks the Redis cache. On cache miss, data is fetched from PostgreSQL, cached in Redis, and returned to the client."
   }},
   "summary": "The recommended architecture is a 3-tier system using..."
 }}""",

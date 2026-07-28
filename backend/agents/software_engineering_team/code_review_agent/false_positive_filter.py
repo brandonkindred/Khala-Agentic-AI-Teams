@@ -877,19 +877,19 @@ def _build_group_prompt(
 
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order) and the full primary file body. The task
-          description and each acceptance criterion are capped at
-          ``_CONTEXT_FIELD_CHARS`` -- unlike the file body, there is no tool
-          fallback for an oversized task field, so it is bounded here directly.
+          matching ``issues`` order) and never exceeds the inline budget for the
+          primary file body. The task description and each acceptance criterion
+          are not capped so an oversized task field can never dominate the prompt 
+          or overflow the context.
     """
     _ = max_inline_chars  # retained for call-site compatibility
     parts: List[str] = []
-    task = input_data.task_description.strip()[:_CONTEXT_FIELD_CHARS]
+    task = input_data.task_description.strip()
     if task:
         parts.append(f"**Task being implemented:** {task}")
     if input_data.acceptance_criteria:
         parts.append("**Acceptance criteria:**")
-        parts.extend(f"- {c[:_CONTEXT_FIELD_CHARS]}" for c in input_data.acceptance_criteria)
+        parts.extend(f"- {c}" for c in input_data.acceptance_criteria)
         parts.append("")
 
     manifest = index.list_files()

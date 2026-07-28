@@ -78,7 +78,7 @@ def _merge_spec_cleanup_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
 
     cleaned_parts = []
     for r in results:
-        if r.get("is_valid") is False:
+        if not _coerce_bool(r.get("is_valid", True)):
             merged["is_valid"] = False
         if isinstance(r.get("validation_issues"), list):
             merged["validation_issues"].extend(r["validation_issues"])
@@ -486,6 +486,22 @@ def run_spec_cleanup(
     return parse_spec_cleanup_response(raw, spec_content)
 
 
+def _coerce_bool(value: Any) -> bool:
+    """Coerce an untrusted LLM/JSON-recovery field to a bool.
+
+    Preconditions: none.
+    Postconditions: returns ``value`` unchanged if it is already a bool;
+        for a string, returns True iff it matches a recognized truthy
+        token ("true"/"yes"/"1", case-insensitive), else False; any other
+        type returns False. Never raises.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return False
+
+
 def parse_spec_cleanup_response(
     raw: Any,
     fallback_spec: str,
@@ -504,7 +520,7 @@ def parse_spec_cleanup_response(
         )
 
     return SpecCleanupResult(
-        is_valid=bool(raw.get("is_valid", True)),
+        is_valid=_coerce_bool(raw.get("is_valid", True)),
         validation_issues=list(raw.get("validation_issues", []))
         if isinstance(raw.get("validation_issues"), list)
         else [],
