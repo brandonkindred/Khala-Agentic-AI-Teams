@@ -280,9 +280,9 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
 # ---------------------------------------------------------------------------
 
 AGENT_DEFAULT_MODELS: dict[str, str] = {
-    "backend": "deepseek-v4-pro:cloud",
-    "frontend": "deepseek-v4-pro:cloud",
-    "code_review": "deepseek-v4-pro:cloud",
+    "backend": "kimi-k2.7-code:cloud",
+    "frontend": "kimi-k2.7-code:cloud",
+    "code_review": "kimi-k2.7-code:cloud",
     "repair": "deepseek-v4-pro:cloud",
     "devops": "deepseek-v4-pro:cloud",
     "dbc_comments": "deepseek-v4-pro:cloud",
