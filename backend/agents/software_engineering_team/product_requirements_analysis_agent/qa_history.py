@@ -125,7 +125,7 @@ def extract_answer_from_qa_history(
     # ### Question text
     # **Answer:** Answer text
     # **Rationale:** Optional rationale
-    # *(Auto-answered with X% confidence)* or *(Default applied)*
+    # *Auto-answered with X% confidence* or *(Default applied)*
 
     # Split into Q&A blocks by "### " headers
     blocks = re.split(r"\n###\s+", qa_history)
@@ -153,12 +153,16 @@ def extract_answer_from_qa_history(
 
             for line in lines[1:]:
                 if line.startswith("**Answer:**"):
-                    answer_lines = [line.replace("**Answer:**", "").strip()]
+                    answer_lines = [line.removeprefix("**Answer:**").strip()]
                     current_field = answer_lines
                 elif line.startswith("**Rationale:**"):
-                    rationale_lines = [line.replace("**Rationale:**", "").strip()]
+                    rationale_lines = [line.removeprefix("**Rationale:**").strip()]
                     current_field = rationale_lines
-                elif line.startswith("*") or line.startswith("###") or line.startswith("##"):
+                elif (
+                    line.startswith("###")
+                    or line.startswith("##")
+                    or line.startswith(("*Auto-answered", "*Custom text:*", "*(Default applied)*"))
+                ):
                     current_field = None
                 elif current_field is not None:
                     current_field.append(line)
@@ -229,7 +233,7 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
                 block_lines.append(next_line)
                 stripped = next_line.strip()
                 if stripped.startswith("**Answer:**"):
-                    answer_lines = [next_line.replace("**Answer:**", "").strip()]
+                    answer_lines = [next_line.removeprefix("**Answer:**").strip()]
                     current_field = answer_lines
                 elif stripped.startswith(
                     ("**Rationale:**", "*Auto-answered", "*Custom text:*", "*(Default applied)*")
@@ -287,7 +291,8 @@ def record_answers(
     cannot leave ``qa_history.md`` truncated or partially overwritten.
 
     Preconditions: ``repo_path`` is a repository root; ``answered_questions`` is a
-        list of :class:`AnsweredQuestion`; ``iteration`` is a positive int.
+        list of :class:`AnsweredQuestion`; ``iteration`` is a non-negative int (SOP
+        discovery flows pass ``0``).
     Postconditions: ``qa_history.md`` exists and ends with the new iteration's
         block; blocks the new answers supersede are removed.
     """

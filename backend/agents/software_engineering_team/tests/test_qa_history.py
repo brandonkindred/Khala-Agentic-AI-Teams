@@ -72,6 +72,40 @@ def test_extract_answer_preserves_multiline_rationale(tmp_path: Path) -> None:
     assert result.rationale == rationale
 
 
+def test_extract_answer_preserves_bullet_in_multiline_answer_and_rationale(tmp_path: Path) -> None:
+    question_text = "What migration strategy should we use for the users table?"
+    answer = "Line one\n* Bullet\nLine three"
+    rationale = "Rationale one\n* Bullet rationale\nRationale three"
+    record_answers(
+        tmp_path,
+        [_answered_question(question_text, answer, rationale=rationale)],
+        iteration=1,
+    )
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.selected_answer == answer
+    assert result.rationale == rationale
+
+
+def test_extract_answer_preserves_answer_containing_marker_substring(tmp_path: Path) -> None:
+    question_text = "How should we document the answer format in the runbook?"
+    answer = "The runbook should state **Answer:** followed by the decision text."
+    record_answers(tmp_path, [_answered_question(question_text, answer)], iteration=1)
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.selected_answer == answer
+
+
 def test_extract_answer_single_line_still_works() -> None:
     qa_history = (
         "# Q&A History\n\n"
@@ -123,6 +157,39 @@ def test_parse_qa_history_blocks_preserves_multiline_answer() -> None:
     assert iteration == 1
     assert question_text == "What retry policy should the payment worker use?"
     assert answer == "Exponential backoff starting at 1s.\nCap retries at 5 attempts."
+
+
+def test_parse_qa_history_blocks_preserves_bullet_in_multiline_answer() -> None:
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### What rollout plan should the migration use?\n"
+        "**Answer:** Roll out in three phases.\n"
+        "* Phase one: canary\n"
+        "Phase two: full rollout\n"
+        "**Rationale:** Reduces blast radius of a bad migration.\n\n"
+    )
+
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, _question_text, answer, _full_block = blocks[0]
+    assert answer == "Roll out in three phases.\n* Phase one: canary\nPhase two: full rollout"
+
+
+def test_parse_qa_history_blocks_preserves_answer_containing_marker_substring() -> None:
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### How should the runbook document answers?\n"
+        "**Answer:** Prefix every entry with **Answer:** before the decision text.\n\n"
+    )
+
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, _question_text, answer, _full_block = blocks[0]
+    assert answer == "Prefix every entry with **Answer:** before the decision text."
 
 
 def test_parse_qa_history_blocks_single_line_still_works() -> None:
