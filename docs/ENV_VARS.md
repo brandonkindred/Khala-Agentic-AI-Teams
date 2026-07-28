@@ -654,8 +654,9 @@ shared resolver both read from):
    timing out its whole-review client wait (`CODE_REVIEW_EXECUTE_TIMEOUT_S`
    below) even though it was still executing durably. `8` mirrors
    `SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES` and
-   `INVESTMENT_MAX_CONCURRENT_ACTIVITIES`. Only read at worker boot
-   (`code_review_agent/temporal/worker.py`).
+   `INVESTMENT_MAX_CONCURRENT_ACTIVITIES`. The worker boot code
+   (`code_review_agent/temporal/worker.py`) reads this via
+   `resolve_max_concurrent_activities` to size the activity slot pool.
 2. The validated-capacity ceiling for each individual review's own **adaptive**
    map-phase fan-out width (`config.resolve_temporal_fanout_width`, computed
    once per review inside `prepare_review_activity` and applied in
@@ -674,8 +675,12 @@ shared resolver both read from):
    actually validated. With the default (`8`), a large PR (dozens of chunks,
    per `code_review_agent/docs/CODE_REVIEW_CHUNK_COUNT_TELEMETRY.md`'s
    ~20-50-chunk "large PR" band) requests exactly `8` concurrent slots rather
-   than scheduling every chunk unconditionally, leaving the remaining worker
-   capacity available to other concurrently-running reviews.
+   than scheduling every chunk unconditionally — the same worker ceiling
+   already bounded the old unconstrained `asyncio.gather`, so the benefit for
+   a review this size is bounded, replay-safe scheduling (via the
+   `workflow.patched` gate; see `temporal/workflows.py`), not freed-up
+   capacity for other reviews: a review with `chunk_count >= 8` still uses
+   the worker's full provisioned capacity while its own chunks are in flight.
 
 Parsed via the shared `env_int` (unset/garbage → default; a parsed value
 `<=0` is clamped up to the floor of 1, not reset to the default, with a
