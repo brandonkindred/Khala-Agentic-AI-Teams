@@ -3124,6 +3124,7 @@ def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypa
                 }
             ],
             "summary": "One issue found.",
+            "spec_compliance_notes": "",
         }
     ]
     input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t")
