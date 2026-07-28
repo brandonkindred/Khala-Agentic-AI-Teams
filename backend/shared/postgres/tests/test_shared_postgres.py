@@ -727,13 +727,13 @@ def test_truncate_team_tables_issues_truncate(monkeypatch):
     from shared.postgres import testing as testing_mod
 
     executed: list[str] = []
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = False
+    cursor.execute.side_effect = lambda sql: executed.append(sql)
 
     @contextmanager
     def fake_get_conn(database=None):
-        cursor = MagicMock()
-        cursor.__enter__ = lambda self: cursor
-        cursor.__exit__ = lambda self, *a: None
-        cursor.execute.side_effect = lambda sql: executed.append(sql)
         conn = MagicMock()
         conn.cursor.return_value = cursor
         yield conn
@@ -751,6 +751,7 @@ def test_truncate_team_tables_issues_truncate(monkeypatch):
     assert '"demo_a"' in executed[0]
     assert '"demo_b"' in executed[0]
     assert "RESTART IDENTITY CASCADE" in executed[0]
+    cursor.__enter__.assert_called_once()
 
 
 def test_truncate_team_tables_raises_when_disabled(monkeypatch):
@@ -772,6 +773,121 @@ def test_truncate_team_tables_rejects_quote_in_name(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# real_postgres_schema fixture factory
+# ---------------------------------------------------------------------------
+
+
+def test_real_postgres_schema_body_skips_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared.postgres.testing import _real_postgres_schema_body
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    gen = _real_postgres_schema_body(schema)
+    with pytest.raises(pytest.skip.Exception, match="POSTGRES_HOST"):
+        next(gen)
+
+
+def test_real_postgres_schema_body_registers_then_truncates_on_teardown(monkeypatch):
+    # worker_id="master" (the default): xdist-inactive path (no -n at all), teardown truncates.
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared.postgres import testing as testing_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(testing_mod, "register_team_schemas", lambda s: calls.append(f"register:{s.team}"))
+    monkeypatch.setattr(testing_mod, "truncate_team_tables", lambda s: calls.append(f"truncate:{s.team}"))
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    gen = testing_mod._real_postgres_schema_body(schema)
+
+    yielded = next(gen)  # advances to the yield: register must have run, truncate must not have
+    # Bare `yield` by design: the fixture built from this body is autouse-only
+    # (register/truncate side effects), never requested by name for its value.
+    assert yielded is None
+    assert calls == ["register:demo"]
+
+    with pytest.raises(StopIteration):
+        next(gen)  # drives past the yield: teardown truncate must now have run
+    assert calls == ["register:demo", "truncate:demo"]
+
+
+def test_real_postgres_schema_body_skips_teardown_truncate_under_xdist_worker(monkeypatch):
+    # worker_id != "master": running under pytest-xdist at all (even -n 1 is
+    # worker "gw0", never "master"). A sibling worker's module-scoped fixture
+    # instance for the same schema could still be mid-test, so this worker must
+    # NOT truncate on teardown (would race and wipe the sibling's rows) —
+    # register still runs (idempotent CREATE TABLE IF NOT EXISTS), but truncate
+    # must not be called at all.
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared.postgres import testing as testing_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(testing_mod, "register_team_schemas", lambda s: calls.append(f"register:{s.team}"))
+    monkeypatch.setattr(
+        testing_mod,
+        "truncate_team_tables",
+        lambda s: (_ for _ in ()).throw(AssertionError("must not truncate under a non-master xdist worker")),
+    )
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    gen = testing_mod._real_postgres_schema_body(schema, worker_id="gw0")
+
+    next(gen)
+    assert calls == ["register:demo"]
+
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert calls == ["register:demo"]  # unchanged — no truncate call was made
+
+
+def test_real_postgres_schema_returns_configured_pytest_fixture():
+    from shared.postgres.testing import real_postgres_schema
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    fixture = real_postgres_schema(schema, scope="session")
+
+    # The private marker attribute's name has moved across pytest major versions
+    # (``_pytestfixturefunction`` pre-9, ``_fixture_function_marker`` on 9.x); accept
+    # either so this test doesn't pin us to one pytest release.
+    marker = getattr(fixture, "_fixture_function_marker", None) or getattr(fixture, "_pytestfixturefunction")
+    assert marker.scope == "session"
+    assert marker.autouse is True
+
+
+def test_real_postgres_schema_rejects_invalid_scope():
+    from shared.postgres.testing import real_postgres_schema
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    with pytest.raises(ValueError, match="invalid scope"):
+        real_postgres_schema(schema, scope="moduel")
+
+
+def test_real_postgres_schema_fixture_reads_worker_id_from_request_config():
+    """Worker id comes from ``request.config.workerinput``, not xdist's ``worker_id``
+    fixture — so plain pytest (xdist absent/disabled) still resolves to ``"master"``
+    instead of failing fixture setup looking up an undeclared ``worker_id``."""
+    import inspect
+
+    from shared.postgres.testing import _xdist_worker_id, real_postgres_schema
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    fixture = real_postgres_schema(schema)
+    inner = fixture.__wrapped__ if hasattr(fixture, "__wrapped__") else fixture
+    params = inspect.signature(inner).parameters
+    assert "request" in params
+    assert "worker_id" not in params
+
+    class _Cfg:
+        pass
+
+    request = MagicMock()
+    request.config = _Cfg()  # no workerinput → master
+    assert _xdist_worker_id(request) == "master"
+
+    request.config.workerinput = {"workerid": "gw1"}
+    assert _xdist_worker_id(request) == "gw1"
+
+
+# ---------------------------------------------------------------------------
 # drop_team_tables
 # ---------------------------------------------------------------------------
 
@@ -789,13 +905,13 @@ def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
     from shared.postgres import testing as testing_mod
 
     executed: list[str] = []
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = False
+    cursor.execute.side_effect = lambda sql: executed.append(sql)
 
     @contextmanager
     def fake_get_conn(database=None):
-        cursor = MagicMock()
-        cursor.__enter__ = lambda self: cursor
-        cursor.__exit__ = lambda self, *a: None
-        cursor.execute.side_effect = lambda sql: executed.append(sql)
         conn = MagicMock()
         conn.cursor.return_value = cursor
         yield conn
@@ -808,6 +924,7 @@ def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
     assert len(executed) == 2  # one DROP per table, not one combined statement
     assert 'DROP TABLE IF EXISTS "demo_a" CASCADE' == executed[0]
     assert 'DROP TABLE IF EXISTS "demo_b" CASCADE' == executed[1]
+    cursor.__enter__.assert_called_once()
 
 
 def test_drop_team_tables_raises_when_disabled(monkeypatch):
