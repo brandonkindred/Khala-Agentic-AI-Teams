@@ -26,7 +26,7 @@ import threading
 
 from . import config as llm_config
 
-_DEFAULT_MAX_CONCURRENCY = 4
+_DEFAULT_MAX_CONCURRENCY = 8
 
 _llm_semaphore: "threading.BoundedSemaphore | None" = None
 _semaphore_lock = threading.Lock()
@@ -37,7 +37,7 @@ def _resolve_limit() -> int:
 
     Postconditions:
         - Returns ``max(1, int(LLM_MAX_CONCURRENCY))``; a missing, empty, or
-          non-integer value falls back to ``_DEFAULT_MAX_CONCURRENCY`` (4), and a
+          non-integer value falls back to ``_DEFAULT_MAX_CONCURRENCY`` (8), and a
           zero/negative value is floored to 1 (a gate of 0 would deadlock every
           call). Never raises.
     """
