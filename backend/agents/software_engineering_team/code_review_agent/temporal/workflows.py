@@ -7,16 +7,20 @@ redundancy pass → side-effect / blast-radius pass → deterministic gate →
 (conditional) narrative synthesis — so a worker restart mid-review re-runs only
 the unfinished activities instead of re-reviewing the whole submission.
 
-The verdict is behavior-identical to thread mode because every phase calls the
-same underlying coordinator functions (through :mod:`.activities`): the map unit
-is ``mapping._cached_review_chunk``, verification is
-``false_positive_filter.filter_false_positives``, the additive architecture pass
-is ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
+Phases call the same underlying coordinator functions (through
+:mod:`.activities`): the map unit is ``mapping._cached_review_chunk``,
+verification is ``false_positive_filter.filter_false_positives``, the additive
+architecture pass is
+``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
 additive side-effect pass is
 ``side_effect_impact_pass.find_side_effect_impact_issues``, the gate is
 ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
 ``synthesis.synthesize_review_findings`` with the same deterministic-concat
-fallback.
+fallback. One intentional divergence from thread mode: the durable reduce always
+folds ``not_reviewed_issues`` into the approval gate as blocking findings and
+does not return ``not_reviewed_ranges``, whereas ``run_coordinator`` only blocks
+on unreviewed chunks when ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` is set (see
+``agent.py``'s dispatch-mode note and ``activities.finalize_review_activity``).
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
@@ -166,9 +170,15 @@ class CodeReviewWorkflow:
             - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict.
 
         Postconditions:
-            - Returns a ``CodeReviewOutput`` dict whose verdict matches what
-              ``run_coordinator`` would produce for the same input (the same
-              deterministic gate and narrative fallback are applied).
+            - Returns a ``CodeReviewOutput`` dict produced by the same
+              deterministic gate and narrative fallback as ``run_coordinator``,
+              except for the intentional Temporal-dispatch difference documented
+              in ``agent.py``: unreviewable chunks are always merged as blocking
+              findings (``finalize_review_activity`` does not honor
+              ``CODE_REVIEW_BLOCK_ON_UNREVIEWED``), and ``not_reviewed_ranges`` is
+              omitted from the returned dict. With default env settings, the same
+              input can therefore yield ``approved=False`` here while
+              ``run_coordinator`` returns ``approved=True``.
         """
         self._advance("preparing", 0.05)
         prep = await workflow.execute_activity(

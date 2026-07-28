@@ -1225,6 +1225,7 @@ async def test_workflow_fails_on_verify_failure_without_leaking_sibling_passes(
     cause = exc_info.value.cause
     assert cause is not None
     assert "verify boom" in str(cause)
+    assert completed == {"architecture", "side_effect"}
 
 
 @pytest.mark.integration
@@ -1300,4 +1301,4 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
     assert "architecture boom" in str(cause)
     assert "TypeError" not in str(cause)
     assert completed == {"side_effect"}
-    assert completed == {"architecture", "side_effect"}
+    assert "architecture" not in completed
