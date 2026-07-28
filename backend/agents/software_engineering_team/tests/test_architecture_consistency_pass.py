@@ -436,10 +436,25 @@ def test_returns_empty_when_disabled_via_env(monkeypatch: pytest.MonkeyPatch) ->
     assert result == []
 
 
-def test_returns_empty_when_no_architecture_document_or_overview() -> None:
+def test_runs_when_no_architecture_document_or_overview() -> None:
+    """Blank overview/document must not skip the pass — architecture review
+    can use established repository structure without a formal document."""
     arch = SystemArchitecture(overview="", architecture_document="")
-    result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=arch))
+    prompts: list = []
+
+    class _EmptyFindings(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _EmptyFindings(), _input(architecture=arch)
+    )
     assert result == []
+    assert len(prompts) == 1
+    assert "no formal" in prompts[0].lower() or "not provided" in prompts[0].lower()
 
 
 def test_runs_when_only_components_present_with_no_overview_or_document() -> None:
@@ -466,9 +481,21 @@ def test_runs_when_only_components_present_with_no_overview_or_document() -> Non
     assert "auth-service" in prompts[0]
 
 
-def test_returns_empty_when_no_architecture_at_all() -> None:
-    result = find_architecture_and_redundancy_issues(DummyLLMClient(), _input(architecture=None))
+def test_runs_when_no_architecture_at_all() -> None:
+    prompts: list = []
+
+    class _EmptyFindings(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _EmptyFindings(), _input(architecture=None)
+    )
     assert result == []
+    assert len(prompts) == 1
 
 
 def test_returns_empty_when_submission_has_no_readable_files() -> None:
@@ -643,17 +670,28 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
     )
 
 
-def test_coordinator_skips_pass_with_no_architecture() -> None:
-    """No architecture on the input -> the pass contributes nothing (no extra
-    LLM call beyond the ordinary map-phase chunk review)."""
+def test_coordinator_runs_pass_with_no_architecture() -> None:
+    """No architecture on the input -> the standalone arch pass still runs
+    (document is optional); it must not be short-circuited before the LLM call.
+    Uses ``files=`` (not ``code=``) so ``CodebaseIndex`` has readable submission
+    files — the same shape production reviews use for this pass."""
+    prompts: list = []
 
-    class _FailIfAskedClient(DummyLLMClient):
+    class _CountingClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            if '"side-effects"/"documentation" findings array' in prompt:
+                return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
-    result = run_coordinator(_FailIfAskedClient(), CodeReviewInput(code="def f():\n    return 1\n"))
+    result = run_coordinator(
+        _CountingClient(),
+        CodeReviewInput(files={"app/main.py": "def f():\n    return 1\n"}),
+    )
     assert result.approved
+    assert len(prompts) == 1
 
 
 def test_run_pass_inlines_full_arch_doc_without_shrinking_code_budget(

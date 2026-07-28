@@ -76,35 +76,51 @@ _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
 def _build_prompt(
     index: CodebaseIndex,
-    architecture: SystemArchitecture,
+    architecture: Optional[SystemArchitecture],
     max_inline_chars: int,
 ) -> str:
     """Render the single user prompt for this pass.
 
     Postconditions:
-        - Inlines the architecture document in full (folding in the rendered
-          ``overview``/``components``/``decisions`` alongside it, or in its
-          place when no full document is set) -- no tool exposes the document
-          itself, so unlike the changed files below it is never truncated --
-          then the submission's changed files up to a ``max_inline_chars``
-          budget; any file content beyond that budget is named as reachable
-          via the attached tools rather than silently dropped.
+        - When architecture context is present, inlines the architecture
+          document in full (folding in the rendered ``overview``/
+          ``components``/``decisions`` alongside it, or in its place when no
+          full document is set) -- no tool exposes the document itself, so
+          unlike the changed files below it is never truncated.
+        - When no formal architecture document/context is present, states that
+          explicitly so the model relies on repository structure/patterns.
+        - Then inlines the submission's changed files up to a
+          ``max_inline_chars`` budget; any file content beyond that budget is
+          named as reachable via the attached tools rather than silently
+          dropped.
     """
     parts: List[str] = []
 
-    arch_doc = "\n\n".join(
-        p
-        for p in (
-            (architecture.architecture_document or "").strip(),
-            render_architecture_context(architecture),
+    if architecture is None:
+        arch_doc = ""
+    else:
+        arch_doc = "\n\n".join(
+            p
+            for p in (
+                (architecture.architecture_document or "").strip(),
+                render_architecture_context(architecture),
+            )
+            if p
         )
-        if p
-    )
-    doc_fence = _code_fence_for(arch_doc)
-    parts.append("**Architecture document:**")
-    parts.append(doc_fence)
-    parts.append(arch_doc or "(no architecture document provided)")
-    parts.append(doc_fence)
+    if arch_doc:
+        doc_fence = _code_fence_for(arch_doc)
+        parts.append("**Architecture document:**")
+        parts.append(doc_fence)
+        parts.append(arch_doc)
+        parts.append(doc_fence)
+    else:
+        parts.append("**Architecture document:**")
+        parts.append(
+            "No formal architecture document was provided for this review. "
+            "Derive architecture expectations from the repository's established "
+            "structure and patterns via list_files()/read_file(); do not invent "
+            "a phantom document."
+        )
     parts.append("")
 
     changed_files = list(index.files.items())
@@ -142,8 +158,9 @@ def _build_prompt(
     parts.append(
         "Use list_files()/read_file() to inspect the REST of the repository (files not shown "
         "above) before flagging a cross-codebase duplicate -- search_codebase only searches the "
-        "files shown in this prompt, not the wider repository. Use read_file() to confirm any "
-        "architecture contradiction against the document above."
+        "files shown in this prompt, not the wider repository. When an architecture document is "
+        "present above, use read_file() / the document to confirm contradictions; when none was "
+        "provided, confirm contradictions against established repository structure/patterns."
     )
     parts.append(
         'Return a single JSON object with a "findings" array as instructed. Return '
@@ -348,10 +365,10 @@ def find_architecture_and_redundancy_issues(
           ``AcceptanceVerifierAgent`` treats any unattributed issue as an
           unmet criterion, so letting this pass run under that profile could
           spuriously fail acceptance verification even when every criterion
-          is satisfied), when ``input_data.architecture`` is absent or
-          carries none of an ``architecture_document``, ``overview``,
-          ``components``, or ``decisions`` (nothing to check a contradiction
-          against), or when the submission has no readable files.
+          is satisfied), or when the submission has no readable files.
+        - An architecture document is optional: when absent or empty, the pass
+          still runs and the user prompt states that no formal document was
+          provided so the model can use established repository structure.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"architecture"`` or ``"refactor"`` only, each with its cited
           ``line`` bounds-checked against the real file (a hallucinated
@@ -367,14 +384,8 @@ def find_architecture_and_redundancy_issues(
         return []
     if input_data.profile != ReviewProfile.CODE_REVIEW:
         return []
-    architecture = input_data.architecture
-    if architecture is None or not (
-        (architecture.architecture_document or "").strip()
-        or render_architecture_context(architecture).strip()
-    ):
-        return []
     try:
-        return _run_pass(llm, input_data, architecture, repo_reader, index)
+        return _run_pass(llm, input_data, input_data.architecture, repo_reader, index)
     except Exception as exc:  # noqa: BLE001 - fail-safe: this pass must never break the review
         logger.warning(
             "ArchitectureConsistencyPass: failed (%s: %s); returning no additional findings",
@@ -387,7 +398,7 @@ def find_architecture_and_redundancy_issues(
 def _run_pass(
     llm: LLMClient,
     input_data: CodeReviewInput,
-    architecture: SystemArchitecture,
+    architecture: Optional[SystemArchitecture],
     repo_reader: Optional[RepoReader],
     index: Optional[CodebaseIndex] = None,
 ) -> List[CodeReviewIssue]:
@@ -401,14 +412,13 @@ def _run_pass(
 
     Postconditions:
         - Same contract as :func:`find_architecture_and_redundancy_issues`,
-          minus the env-toggle/no-architecture-document early returns the
-          caller already handled.
+          minus the env-toggle early returns the caller already handled.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
     if not index.files:
         # No readable submission files: there is nothing to check for
-        # architecture fit or redundancy against the architecture document.
+        # architecture fit or redundancy.
         return []
 
     model = resolve_code_review_model(llm)

@@ -863,20 +863,19 @@ pass. After the false-positive filter runs, this pass makes exactly one
 additional LLM call for the whole submission (never once per chunk) with
 read access to the rest of the repository (the same `read_file`/`list_files`/
 `search_codebase`/`find_function_at_line` tools the false-positive filter
-uses), given the full architecture document. It can only ADD findings, in
-two categories: `architecture` (the change contradicts a stated boundary/
-pattern/decision in a way that would break integration) and `refactor` (the
-change duplicates a capability that already exists elsewhere in the
-repository, tool-verified before it is flagged — never guessed from naming
-alone). It never removes or alters any finding the map phase or the
-false-positive filter already produced. Requires
-`CodeReviewInput.architecture` to carry an `architecture_document`,
-`overview`, `components`, or `decisions` — the pass renders whichever of
-these are present; runs as a no-op (no LLM call) when none are. Any setup
-or LLM failure is fail-safe: it is logged and yields no additional findings,
-so a broken pass never blocks or changes the rest of the review. Set to
-`false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
-enabled).
+uses). An architecture document on `CodeReviewInput.architecture` is optional:
+when present (document, overview, components, and/or decisions), it is inlined
+in full; when absent, the pass still runs and the model must derive
+expectations from established repository structure and patterns. It can only
+ADD findings, in two categories: `architecture` (the change contradicts a
+stated or established boundary/pattern/decision in a way that would break
+integration) and `refactor` (the change duplicates a capability that already
+exists elsewhere in the repository, tool-verified before it is flagged — never
+guessed from naming alone). It never removes or alters any finding the map
+phase or the false-positive filter already produced. Any setup or LLM failure
+is fail-safe: it is logged and yields no additional findings, so a broken pass
+never blocks or changes the rest of the review. Set to `false`/`0`/`no` to
+disable the pass (any other value, or unset, leaves it enabled).
 
 ### CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS
 Default-on toggle for the side-effect / blast-radius pass. After the
