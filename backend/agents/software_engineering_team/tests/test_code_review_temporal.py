@@ -1320,11 +1320,22 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
 
             history = await env.client.get_workflow_handle(workflow_id).fetch_history()
 
-    scheduling_workflow_task_ids = {
-        event.activity_task_scheduled_event_attributes.workflow_task_completed_event_id
+    tail_pass_events = [
+        event
         for event in history.events
         if event.activity_task_scheduled_event_attributes.activity_type.name
         in tail_pass_activity_names
+    ]
+    # A regression that skips scheduling one of the three (e.g. a stub
+    # coroutine silently replacing a real activity call) could still leave a
+    # single shared workflow_task_completed_event_id below, so the count must
+    # be checked independently of the "same task" assertion.
+    assert len(tail_pass_events) == 3, (
+        f"expected three tail-pass activity scheduled events, got {len(tail_pass_events)}"
+    )
+    scheduling_workflow_task_ids = {
+        event.activity_task_scheduled_event_attributes.workflow_task_completed_event_id
+        for event in tail_pass_events
     }
     assert len(scheduling_workflow_task_ids) == 1, (
         "expected all three tail-pass activities to be scheduled by the same "

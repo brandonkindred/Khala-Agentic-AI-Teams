@@ -25,7 +25,9 @@ fallback.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
-no I/O, time, or randomness — only ``execute_activity`` calls and pure list
+no I/O, time, or randomness — only ``execute_activity`` calls,
+``asyncio.gather`` for deterministic concurrent fan-out of independent
+activities (the map-phase chunks and the tail passes), and pure list
 aggregation over JSON-native dicts.
 """
 
@@ -398,9 +400,13 @@ class CodeReviewWorkflow:
         Mirrors ``coordinator._merge_narrative``: a single sub-review with no
         additive-pass findings (architecture/redundancy or side-effect/blast-radius)
         is used verbatim (no synthesis call); otherwise attempts a synthesis
-        activity and falls back to deterministic concatenation on failure, so a
-        blocking additive-pass finding is never silently absent from the
-        narrative attached to a single-chunk review.
+        activity so the narrative can reflect those findings too. On synthesis
+        failure, falls back to deterministic concatenation of only the
+        per-chunk ``summaries``/``spec_notes`` — the architecture/redundancy
+        and side-effect/blast-radius passes contribute findings via ``issues``,
+        not summaries, so their findings can be absent from this concatenated
+        narrative text on that failure path (they are never absent from the
+        returned ``issues`` list itself, only from this prose summary).
         """
         if len(summaries) == 1 and not has_additive_pass_findings:
             return summaries[0], (spec_notes[0] if spec_notes else "")
