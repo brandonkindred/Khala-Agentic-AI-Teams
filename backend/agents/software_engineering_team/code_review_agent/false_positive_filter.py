@@ -86,12 +86,6 @@ _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 # receive plain code and a physical (1-based) line index.
 _LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
 
-# Cap on the task-description and each acceptance-criterion text inlined into the
-# verification prompt. The file body already has its own ``max_inline_chars``
-# bound; this keeps an unbounded task/criteria field from dominating the prompt
-# or overflowing context. Normal task text is far below this.
-_CONTEXT_FIELD_CHARS = 4_000
-
 # Default per-group verification call timeout (seconds); see
 # ``_verify_timeout_seconds`` below.
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 60
@@ -871,16 +865,16 @@ def _build_group_prompt(
         - The returned text contains one indexed block per finding (index 0..n-1
           matching ``issues`` order) and never exceeds the inline budget for the
           primary file body. The task description and each acceptance criterion
-          are capped at ``_CONTEXT_FIELD_CHARS`` so an oversized task field can
-          never dominate the prompt or overflow context.
+          are not capped so an oversized task field can never dominate the prompt 
+          or overflow the context.
     """
     parts: List[str] = []
-    task = input_data.task_description.strip()[:_CONTEXT_FIELD_CHARS]
+    task = input_data.task_description.strip()
     if task:
         parts.append(f"**Task being implemented:** {task}")
     if input_data.acceptance_criteria:
         parts.append("**Acceptance criteria:**")
-        parts.extend(f"- {c[:_CONTEXT_FIELD_CHARS]}" for c in input_data.acceptance_criteria)
+        parts.extend(f"- {c}" for c in input_data.acceptance_criteria)
         parts.append("")
 
     manifest = index.list_files()
