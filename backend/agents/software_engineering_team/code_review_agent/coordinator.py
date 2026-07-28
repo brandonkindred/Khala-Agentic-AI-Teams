@@ -98,7 +98,6 @@ from software_engineering_team.shared.context_sizing import (
     parse_env_int,
 )
 
-from .merged_architecture_side_effect_pass import find_architecture_and_side_effect_issues
 from .architecture_context import render_architecture_context as _render_architecture_context
 from .chunk_reviewer import ChunkReviewAgent
 from .chunking import (
@@ -133,6 +132,7 @@ from .mapping import (
     _symbol_surface,
     clear_chunk_outcome_cache,
 )
+from .merged_architecture_side_effect_pass import find_architecture_and_side_effect_issues
 from .models import (
     CodeReviewInput,
     CodeReviewIssue,
