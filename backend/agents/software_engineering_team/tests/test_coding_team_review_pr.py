@@ -1093,8 +1093,10 @@ class TestReviewEndpoint:
             if "could not complete and did not post findings" in body
         ]
         assert len(outage_notes) == 1
-        # No pull request review is created on the outage path.
+        # No pull request review or file-level comment is created on the outage
+        # path -- the exception happens before any finding-posting is attempted.
         assert gh.reviews == []
+        assert gh.review_comments == []
 
     def test_reviewer_bare_timeout_error_records_type_name_not_empty_string(
         self, review_app
@@ -1732,12 +1734,13 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         # No file-level comment landed; the finding fell through to add_issue_comment.
         assert gh.review_comments == []
-        assert len(gh.comments) >= 1, (
-            f"Expected at least one standalone fallback comment, got gh.comments={gh.comments}"
+        assert len(gh.comments) == 1, (
+            f"Expected exactly one standalone fallback comment, got gh.comments={gh.comments}"
         )
-        assert any("dropped finding" in body for _n, body in gh.comments), (
+        assert "dropped finding" in gh.comments[0][1], (
             f"Fallback comment missing finding text: gh.comments={gh.comments}"
         )
+        assert "could not complete and did not post findings" not in gh.comments[0][1]
         assert job["review_summary"]["comment_findings"] == 1
 
     def test_standalone_fallback_failure_marks_job_failed(self, review_app) -> None:
@@ -1755,12 +1758,15 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
         assert job["review_summary"]["comments_failed"] == 1
+        # The "incomplete" notice actually reached the PR, not just the job store.
+        assert any(
+            "1 of 1 finding comment(s) could not be posted" in body for _n, body in gh.comments
+        )
 
     def test_summary_only_review_failure_does_not_fail_job(self, review_app) -> None:
-        # With no line-anchored findings, _submit_review posts only the summary
-        # body. That courtesy review carries no findings, so its failure must NOT
-        # fail the job — the file-level findings still post on the dedicated
-        # endpoint. (Regression guard for the empty-line-comments path.)
+        # With a file-level finding but no line-anchored diff comments, the review
+        # body is summary-only; its failure must NOT fail the job because the
+        # file-level comment still posts on the dedicated endpoint.
         gh = review_app["github"]["client"]
         gh.review_fail_times = 1  # the lone summary-only review attempt 422s
         review_app["github"]["agent_output"] = _FakeOutput(
@@ -1832,6 +1838,17 @@ class TestReviewEndpoint:
         assert gh.reactions == []
         assert gh.comments == []
         assert job["review_summary"]["comment_findings"] == 0
+        # The finding was actually posted (as a line-anchored inline comment,
+        # since line=2 on a.py is in-diff) -- not silently dropped, which would
+        # also produce no reaction/comments and pass the assertions above.
+        line_anchored = [
+            c
+            for rev in gh.reviews
+            for c in rev.get("comments", [])
+            if c.get("path") == "a.py" and c.get("line") == 2
+        ]
+        assert len(line_anchored) == 1
+        assert "a finding" in line_anchored[0]["body"]
 
     def test_clean_review_reaction_failure_still_completes(self, review_app) -> None:
         # The +1 reaction is a best-effort courtesy: a failure adding it (rate
@@ -2498,10 +2515,17 @@ class TestPreservationProperties:
             f"PRESERVATION BROKEN — comment body does not contain description. "
             f"body={line_anchored[0]['body']!r}, expected to contain {description!r}"
         )
-        # In-diff line-anchored findings must NOT also be posted as file-level comments.
+        # In-diff line-anchored findings must NOT also be posted as file-level
+        # comments -- check both the dedicated file-comment endpoint and any
+        # file-level entry embedded in a submitted review's own comments array.
         duplicate_file_level = [
             c
             for c in gh.review_comments
+            if c.get("subject_type") == "file" and c.get("path") == "a.py"
+        ] + [
+            c
+            for rev in gh.reviews
+            for c in rev.get("comments", [])
             if c.get("subject_type") == "file" and c.get("path") == "a.py"
         ]
         assert len(duplicate_file_level) == 0, (
@@ -2808,7 +2832,7 @@ class TestPreservationProperties:
             _FakeReviewIssue(
                 sev,
                 line=ln,
-                file_path=fp if fp is not None else "",
+                file_path=fp,
                 description=desc,
             )
             for sev, ln, fp, desc in out_of_diff_specs
@@ -2847,6 +2871,19 @@ class TestPreservationProperties:
             f"[{description}] Mixed run created extra comments on in-diff path {in_path!r}: "
             f"solo={solo_on_path}, mixed={mixed_on_path}"
         )
+        # Each out-of-diff finding (none tagged pre_existing here) must have
+        # landed as its own standalone conversation comment naming its own
+        # file, and never leaked into the review/file-level comments checked
+        # above.
+        for issue in out_issues:
+            assert any(issue.description in body for _n, body in gh2.comments), (
+                f"[{description}] out-of-diff finding {issue.description!r} missing from "
+                f"standalone comments: {gh2.comments}"
+            )
+            assert not any(issue.description in c.get("body", "") for c in all_comments_mixed), (
+                f"[{description}] out-of-diff finding {issue.description!r} leaked into "
+                f"review/file-level comments: {all_comments_mixed}"
+            )
         mixed_shape = {
             "path": in_diff_mixed[0].get("path"),
             "side": in_diff_mixed[0].get("side"),

@@ -205,9 +205,12 @@ def map_issues_to_comments(
           file-level ``{"path", "subject_type": "file", "body"}``. Every other
           finding (no resolvable file) is returned as a leftover so the caller
           can post it as its own standalone conversation comment. Nothing is
-          dropped, and no comment carries more than one finding. A finding with
-          an entry in ``existing_by_issue`` has its body annotated with a
-          reference to that existing comment (see ``format_comment_body``).
+          dropped, and no comment carries more than one finding. A finding that
+          becomes a ``review_comments`` entry and has an entry in
+          ``existing_by_issue`` has its body annotated with a reference to that
+          existing comment (see ``format_comment_body``); leftover issues are
+          returned unchanged, without that annotation, for the caller to render
+          via ``format_issue_comment``.
     """
     review_comments: list[dict[str, Any]] = []
     leftover: list[Any] = []

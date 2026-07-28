@@ -552,6 +552,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
     except Exception as exc:  # noqa: BLE001 - the daemon thread must never die with the job left running
         logger.exception("PR review %s: unhandled exception escaped the review body", job_id)
+        scrubbed_error = scrub_token_from_text(str(exc))
         try:
             # phase="completed" (terminal), matching the success and provider-abort
             # paths — a failed job must not keep a mid-review "reviewing" phase.
@@ -559,11 +560,27 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 job_id,
                 JobStatus.FAILED,
                 phase="completed",
-                error=scrub_token_from_text(str(exc)),
+                error=scrubbed_error,
             )
         except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
             logger.exception(
                 "PR review %s: last-resort finalize failed after escaped exception", job_id
+            )
+        # Tell the PR too, same as the no-engine-provider path above: whoever
+        # triggered the review is watching it, not the job store, and this is
+        # the last line of defense — a GitHub outage here must not raise.
+        try:
+            with _main.GitHubClient(token=token) as client:
+                _main._safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review failed: {scrubbed_error}",
+                )
+        except Exception:  # noqa: BLE001 - notification is best-effort
+            logger.warning(
+                "PR review %s: failed to post failure notice after escaped exception", job_id
             )
 
 
