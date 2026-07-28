@@ -465,13 +465,16 @@ class CodeReviewWorkflow:
         Mirrors ``coordinator._merge_narrative``: a single sub-review with no
         additive-pass findings (architecture/redundancy or side-effect/blast-radius)
         is used verbatim (no synthesis call); otherwise attempts a synthesis
-        activity so the narrative can reflect those findings too. On synthesis
-        failure, falls back to deterministic concatenation of only the
-        per-chunk ``summaries``/``spec_notes`` — the architecture/redundancy
-        and side-effect/blast-radius passes contribute findings via ``issues``,
-        not summaries, so their findings can be absent from this concatenated
-        narrative text on that failure path (they are never absent from the
-        returned ``issues`` list itself, only from this prose summary).
+        activity so the narrative can reflect those findings too. When the
+        activity returns ``None`` (soft synthesis failure — see
+        ``synthesize_findings_activity``), falls back to deterministic
+        concatenation of only the per-chunk ``summaries``/``spec_notes`` — the
+        architecture/redundancy and side-effect/blast-radius passes contribute
+        findings via ``issues``, not summaries, so their findings can be absent
+        from this concatenated narrative text on that path (they are never
+        absent from the returned ``issues`` list itself, only from this prose
+        summary). An exhausted activity retry / infrastructure failure from
+        ``execute_activity`` still propagates and fails the workflow.
         """
         if len(summaries) == 1 and not has_additive_pass_findings:
             return summaries[0], (spec_notes[0] if spec_notes else "")

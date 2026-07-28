@@ -1243,13 +1243,14 @@ async def test_workflow_executes_and_replays_without_non_determinism() -> None:
     """Execute ``CodeReviewWorkflow`` end-to-end and replay its recorded history.
 
     This is the baseline the issue asks for: a ``WorkflowEnvironment``-driven
-    execute + replay round-trip against today's sequential (pre-parallelization)
-    workflow, so a later change to the tail passes (architecture-consistency,
-    side-effect-impact) has a real replay-determinism guard instead of only the
-    activity-level orchestration replica ``_run_activity_pipeline`` exercises
-    above. Unlike that helper, this drives the actual ``CodeReviewWorkflow.run``
-    coroutine through a real Temporal worker and sandbox, so it is the one test
-    that would catch a ``workflow.patched`` ordering regression.
+    execute + replay round-trip against the current ``CodeReviewWorkflow``,
+    including its concurrent tail-pass activities (false-positive verify,
+    architecture consistency, side-effect impact), so a regression in that
+    concurrent gather / ``workflow.patched`` ordering has a real
+    replay-determinism guard instead of only the activity-level orchestration
+    replica ``_run_activity_pipeline`` exercises above. Unlike that helper,
+    this drives the actual ``CodeReviewWorkflow.run`` coroutine through a real
+    Temporal worker and sandbox.
 
     Marked ``integration`` (run with ``-m integration``): standing up the
     embedded test server is heavier than this file's other pure-Python tests,
