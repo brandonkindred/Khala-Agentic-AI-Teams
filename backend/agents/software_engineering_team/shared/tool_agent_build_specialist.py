@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import List
 
 from software_engineering_team.shared.tool_agent_base import (
-    ReviewToolAgent,
+    BaseReviewToolAgent,
     SingleIssueProblemSolveMixin,
 )
 from software_engineering_team.shared.v2_models import ReviewIssue
@@ -189,11 +189,11 @@ def run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     return issues
 
 
-class BuildSpecialistToolAgentBase(SingleIssueProblemSolveMixin, ReviewToolAgent):
+class BuildSpecialistToolAgentBase(SingleIssueProblemSolveMixin, BaseReviewToolAgent):
     """Shared base for the per-stack build-specialist tool agents.
 
     ``review`` runs the configured :attr:`build_runner` over the resolved
-    ``repo_path`` (inherited from :class:`ReviewToolAgent`); ``problem_solve``
+    ``repo_path`` (inherited from :class:`BaseReviewToolAgent`); ``problem_solve``
     fixes the reported build issues one at a time. Concrete profiles must set
     :attr:`build_runner` (a ``staticmethod``), :attr:`build_review_noun`,
     :attr:`problem_solving_prompt`, and :attr:`_parse_single_issue`.

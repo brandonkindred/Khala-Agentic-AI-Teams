@@ -458,7 +458,7 @@ class TestBackendTestingQA:
     def test_execute_returns_stub(self):
         a, _ = self._agent()
         out = a.execute(_be_tool_input())
-        assert "Testing/QA execute" in out.summary or "QA" in out.summary
+        assert "Testing/QA execute" in out.summary
 
     def test_plan(self):
         a, _ = self._agent()
@@ -577,6 +577,7 @@ class TestFrontendDocumentation:
             )
         )
         assert stub.calls
+        assert "TypeScript conventions" in stub.calls[0]
 
 
 # ---------------------------------------------------------------------------

@@ -431,9 +431,10 @@ def test_base_review_tool_agent_has_no_problem_solve():
     assert not hasattr(BaseReviewToolAgent, "problem_solve_sources")
 
 
-def test_engine_review_problem_solve_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A demo agent that opts into SingleIssueProblemSolveMixin still fixes
-    engine-produced issues one at a time, keyed on ``source``."""
+def test_problem_solve_works_on_engine_review_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A review agent that opts into SingleIssueProblemSolveMixin can still fix
+    a matching issue one at a time, keyed on ``source`` — regardless of
+    whether that agent's ``review`` uses the engine or the one-shot path."""
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = None

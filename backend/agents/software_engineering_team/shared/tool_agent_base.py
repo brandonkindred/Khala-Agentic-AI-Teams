@@ -176,9 +176,10 @@ class SingleIssueProblemSolveMixin:
         Preconditions: ``inp`` exposes ``review_issues`` (each with ``source``)
         and ``current_files``; the attributes listed in this mixin's
         class-level Preconditions are supplied by the combining class.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput` whose ``files``
-        is the merged file set after applying each successful single-issue fix
-        (unchanged when there is no LLM or no matching issues). A single
+        Postconditions: returns a :class:`ToolAgentPhaseOutput`. When there is
+        no LLM or no matching issues, ``files`` is empty (the default) and
+        ``current_files`` is left untouched; otherwise ``files`` is the merged
+        file set after applying each successful single-issue fix. A single
         issue's fix failure is logged and does not abort the remaining issues.
         """
         if not self._model:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from software_engineering_team.shared.tool_agent_base import ReviewToolAgent
+from software_engineering_team.shared.tool_agent_base import BaseReviewToolAgent
 
 from ...output_templates import parse_review_template
 from ...prompts import SECURITY_TOOL_AGENT_REVIEW_PROMPT
@@ -12,7 +12,7 @@ from ...prompts import SECURITY_TOOL_AGENT_REVIEW_PROMPT
 MAX_RELEVANT_CODE_CHARS = 8_000
 
 
-class SecurityToolAgent(ReviewToolAgent):
+class SecurityToolAgent(BaseReviewToolAgent):
     """Security tool agent: finds security issues in review; reports them for the coding agent to fix."""
 
     name = "Security"

@@ -249,6 +249,73 @@ def test_fe_run_problem_solving_with_tool_agents(monkeypatch):
     assert "b.ts" in out.files
 
 
+def _fe_review_only_tool_agents_do_not_consult_problem_solve(monkeypatch, kind, agent_cls):
+    """Shared body: a review-only frontend tool agent wired into ``tool_agents``
+    is never asked for a fix, because the real class has no ``problem_solve`` —
+    ``spec=agent_cls`` makes the mock reject that attribute exactly like the
+    real class would, unlike a bare ``MagicMock()`` (which fakes every attribute
+    and would pass this assertion regardless of the real class's contract)."""
+    from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
+    from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (
+        run_problem_solving,
+    )
+
+    assert not hasattr(agent_cls, "problem_solve")
+
+    resp = (
+        "## FILE a.ts ##\nfixed\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    tool_agent = MagicMock(spec=agent_cls)
+
+    out = run_problem_solving(
+        llm=MagicMock(),
+        task=_task(),
+        review_result=_review_result([_issue(source=kind.value)]),
+        current_files={"a.ts": "old"},
+        tool_agents={kind: tool_agent},
+    )
+    assert not hasattr(tool_agent, "problem_solve")
+    assert out.files["a.ts"] == "fixed"
+
+
+def test_fe_run_problem_solving_accessibility_tool_agent_has_no_problem_solve(monkeypatch):
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.tool_agents.accessibility.agent import (
+        AccessibilityToolAgent,
+    )
+
+    _fe_review_only_tool_agents_do_not_consult_problem_solve(
+        monkeypatch, ToolAgentKind.ACCESSIBILITY, AccessibilityToolAgent
+    )
+
+
+def test_fe_run_problem_solving_performance_tool_agent_has_no_problem_solve(monkeypatch):
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.tool_agents.performance.agent import (
+        PerformanceToolAgent,
+    )
+
+    _fe_review_only_tool_agents_do_not_consult_problem_solve(
+        monkeypatch, ToolAgentKind.PERFORMANCE, PerformanceToolAgent
+    )
+
+
+def test_fe_run_problem_solving_ux_usability_tool_agent_has_no_problem_solve(monkeypatch):
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.tool_agents.ux_usability.agent import (
+        UxUsabilityToolAgent,
+    )
+
+    _fe_review_only_tool_agents_do_not_consult_problem_solve(
+        monkeypatch, ToolAgentKind.UX_USABILITY, UxUsabilityToolAgent
+    )
+
+
 def test_fe_run_problem_solving_for_microtask(monkeypatch):
     from software_engineering_team.frontend_code_v2_team.phases import problem_solving as ps_mod
     from software_engineering_team.frontend_code_v2_team.phases.problem_solving import (

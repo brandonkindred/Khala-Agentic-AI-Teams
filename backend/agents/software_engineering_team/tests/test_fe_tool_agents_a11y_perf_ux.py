@@ -359,7 +359,7 @@ class TestUxUsability:
 
 
 class _ModelRecordingAgent:
-    """Captures the ``model`` kwarg of every ``Agent(...)`` construction."""
+    """Callable agent stub that always returns the fixed ``response`` given at construction."""
 
     def __init__(self, response):
         self._response = response
@@ -369,6 +369,7 @@ class _ModelRecordingAgent:
 
 
 def _patch_recording(monkeypatch, mod, response):
+    """Patch ``mod.Agent`` and record the ``model`` kwarg passed to each construction."""
     calls: list = []
 
     def fake_agent(*args, **kwargs):

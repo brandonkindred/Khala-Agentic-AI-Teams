@@ -205,8 +205,10 @@ class DocumentationToolAgentBase(ReviewToolAgent):
 
         Preconditions: ``inp`` exposes ``review_issues``/``current_files``/
         ``language``; the profile prompt/parser hooks are set.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput`; ``files`` carries
-        the merged file set after applying each successful single-issue fix.
+        Postconditions: returns a :class:`ToolAgentPhaseOutput`. When there is
+        no LLM or no matching documentation issues, ``files`` is empty (the
+        default); otherwise ``files`` carries the merged file set after
+        applying each successful single-issue fix.
         """
         if not self._model:
             return ToolAgentPhaseOutput(summary="Documentation problem_solve skipped (no LLM).")
