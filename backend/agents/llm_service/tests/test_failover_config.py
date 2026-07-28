@@ -28,13 +28,13 @@ def test_window_defaults_and_overrides(monkeypatch):
     override; non-positive or unparseable overrides fall back to the default."""
     monkeypatch.delenv("LLM_FAILOVER_RATE_WINDOW_S", raising=False)
     monkeypatch.delenv("LLM_FAILOVER_WEEKLY_WINDOW_S", raising=False)
-    assert llm_config.failover_rate_window_seconds() == 3600.0
+    assert llm_config.failover_rate_window_seconds() == 300.0
     assert llm_config.failover_weekly_window_seconds() == 7 * 24 * 3600.0
     monkeypatch.setenv("LLM_FAILOVER_RATE_WINDOW_S", "900")
     assert llm_config.failover_rate_window_seconds() == 900.0
     # Non-positive / garbage falls back to the default.
     monkeypatch.setenv("LLM_FAILOVER_RATE_WINDOW_S", "-5")
-    assert llm_config.failover_rate_window_seconds() == 3600.0
+    assert llm_config.failover_rate_window_seconds() == 300.0
     monkeypatch.setenv("LLM_FAILOVER_WEEKLY_WINDOW_S", "garbage")
     assert llm_config.failover_weekly_window_seconds() == 7 * 24 * 3600.0
 
