@@ -316,7 +316,21 @@ class CodeReviewWorkflow:
                 calls.append(_architecture())
             if run_side_effect:
                 calls.append(_side_effect())
-            results_iter = iter(await asyncio.gather(*calls))
+            # return_exceptions=True: wait for every tail pass to finish
+            # (success or failure) instead of asyncio.gather's default of
+            # raising as soon as the first exception surfaces and leaving
+            # the others un-awaited -- that default would (a) discard a
+            # sibling's completed result with no chance to use it, and (b)
+            # pick whichever exception happens to resolve first in real
+            # time, which is not guaranteed to match on replay. Re-raising
+            # the first exception found in `calls`' fixed verify /
+            # architecture / side-effect order below reproduces sequential
+            # execution's deterministic error precedence instead.
+            results = await asyncio.gather(*calls, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            results_iter = iter(results)
             verified = next(results_iter)
             if run_architecture:
                 architecture_findings = next(results_iter)

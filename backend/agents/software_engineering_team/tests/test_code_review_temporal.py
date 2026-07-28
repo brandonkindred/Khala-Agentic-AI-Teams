@@ -1092,3 +1092,104 @@ async def test_workflow_executes_and_replays_without_non_determinism() -> None:
     # history against the same workflow code must not raise a non-determinism
     # error.
     await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)
+
+
+# ---------------------------------------------------------------------------
+# 7. Concurrent tail-pass error-handling semantics (asyncio.gather)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gather_return_exceptions_reproduces_sequential_error_precedence() -> None:
+    """The exact idiom ``CodeReviewWorkflow.run`` uses for its concurrent tail
+    passes -- ``asyncio.gather(*calls, return_exceptions=True)`` followed by a
+    fixed-order scan that re-raises the first exception found -- must always
+    surface the earliest-listed failure (matching sequential execution's
+    verify -> architecture -> side-effect precedence) regardless of which
+    awaitable actually finishes first in real time, and must let every
+    awaitable run to completion instead of abandoning the others."""
+    import asyncio
+
+    completed: list[str] = []
+
+    async def _ok(name: str, delay: float) -> str:
+        await asyncio.sleep(delay)
+        completed.append(name)
+        return name
+
+    async def _fail(name: str, delay: float, exc: Exception) -> None:
+        await asyncio.sleep(delay)
+        completed.append(name)
+        raise exc
+
+    verify_exc = RuntimeError("verify failed")
+    # side_effect resolves fastest and also fails, but verify is listed first
+    # and must still be the exception that wins.
+    calls = [
+        _fail("verify", 0.03, verify_exc),
+        _ok("architecture", 0.02),
+        _fail("side_effect", 0.0, RuntimeError("side_effect failed")),
+    ]
+
+    results = await asyncio.gather(*calls, return_exceptions=True)
+
+    # Every awaitable ran to completion -- nothing was abandoned once the
+    # first exception in the list resolved.
+    assert set(completed) == {"verify", "architecture", "side_effect"}
+
+    raised: Exception | None = None
+    for result in results:
+        if isinstance(result, BaseException):
+            raised = result
+            break
+    assert raised is verify_exc
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_fails_on_verify_failure_without_leaking_sibling_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A false-positive-verify failure must abort the whole durable review --
+    the same total-failure outcome sequential execution produces (verify was
+    always the pass whose failure aborts everything; architecture/side-effect
+    are internally fail-safe and never raise). This guards that the concurrent
+    ``asyncio.gather(..., return_exceptions=True)`` path reproduces that
+    outcome instead of hanging or leaking the sibling activities."""
+    import concurrent.futures
+
+    from code_review_agent import false_positive_filter
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.client import WorkflowFailureError
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Worker
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("verify boom")
+
+    monkeypatch.setattr(false_positive_filter, "filter_false_positives", _boom)
+
+    review_input = _input()
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[CodeReviewWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            async with worker:
+                with pytest.raises(WorkflowFailureError):
+                    await env.client.execute_workflow(
+                        CodeReviewWorkflow.run,
+                        review_input.model_dump(mode="json"),
+                        id="code-review-workflow-verify-failure-test",
+                        task_queue=TASK_QUEUE,
+                    )
