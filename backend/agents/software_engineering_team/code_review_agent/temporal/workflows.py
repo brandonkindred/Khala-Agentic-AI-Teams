@@ -36,9 +36,10 @@ Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
 no I/O, time, or randomness — only ``execute_activity`` calls,
 ``asyncio.gather(..., return_exceptions=True)`` for deterministic concurrent
-fan-out of independent activities (the map-phase chunks and the tail passes),
-a fixed-order scan over the gathered results to enforce deterministic error
-precedence, and pure list aggregation over JSON-native dicts.
+fan-out of the tail passes, a fixed-order scan over those gathered results to
+enforce deterministic error precedence, and pure list aggregation over
+JSON-native dicts. (Map-phase chunk fan-out still uses default
+``asyncio.gather`` without ``return_exceptions``.)
 """
 
 from __future__ import annotations
