@@ -689,10 +689,8 @@ class MergedArchitectureSideEffectResponse(BaseModel):
     same way each pass's own ``_coerce_finding`` does today) without having
     to re-derive which pass a given category value came from.
 
-    Design-only: this schema is not yet consumed by ``generate_structured``,
-    the coordinator's ``_run_tail_passes``, or the Temporal workflow/activity
-    — those wire-up changes belong to implementing the parent consolidation
-    (tracked separately), not to this schema design.
+    Consumed by ``merged_architecture_side_effect_pass`` for the in-process
+    coordinator path. Temporal workflow/activity wire-up remains separate.
 
     Both fields are required, not defaulted — mirroring
     :class:`ChunkReviewLLMResponse`'s identical rationale. The merged

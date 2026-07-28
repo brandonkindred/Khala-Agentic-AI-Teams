@@ -47,6 +47,9 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from .side_effect_impact_pass import (  # noqa: F401
         find_side_effect_impact_issues,
     )
+    from .merged_architecture_side_effect_pass import (  # noqa: F401
+        find_architecture_and_side_effect_issues,
+    )
 
 _LAZY_EXPORTS = {
     "CodeReviewAgent": "agent",
@@ -55,6 +58,7 @@ _LAZY_EXPORTS = {
     "filter_false_positives": "false_positive_filter",
     "find_architecture_and_redundancy_issues": "architecture_consistency_pass",
     "find_side_effect_impact_issues": "side_effect_impact_pass",
+    "find_architecture_and_side_effect_issues": "merged_architecture_side_effect_pass",
     "ChunkReviewInput": "models",
     "ChunkReviewOutput": "models",
     "CodeReviewInput": "models",
@@ -91,4 +95,5 @@ __all__ = [
     "filter_false_positives",
     "find_architecture_and_redundancy_issues",
     "find_side_effect_impact_issues",
+    "find_architecture_and_side_effect_issues",
 ]
