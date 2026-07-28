@@ -3,6 +3,15 @@
 ``CODE_REVIEW_PROMPT`` is derived from
 :func:`code_review_agent.profiles.build_review_system_prompt` so review profiles
 remain the single source of truth for the default reviewer checklist.
+
+``ARCHITECTURE_CONSISTENCY_PROMPT`` and ``SIDE_EFFECT_IMPACT_PROMPT`` are each
+built from a reusable instruction body plus their own pass-specific
+output-format section. ``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT`` reuses both
+bodies verbatim under "Part 1"/"Part 2" sections and adds a merged two-key
+output-format section, so the two passes' individual instructions can never
+drift when combined into one call. See
+:class:`code_review_agent.models.MergedArchitectureSideEffectResponse` for the
+corresponding merged output schema.
 """
 
 from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
