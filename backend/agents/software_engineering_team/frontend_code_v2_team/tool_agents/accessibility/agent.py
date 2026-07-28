@@ -1,4 +1,4 @@
-"""Accessibility tool agent for frontend-code-v2: WCAG 2.2 compliance review and fixes."""
+"""Accessibility tool agent for frontend-code-v2: WCAG 2.2 compliance review."""
 
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ from software_engineering_team.shared.tool_agent_base import (
 )
 
 from ...models import ReviewIssue
-from ...output_templates import parse_problem_solving_single_issue_template
-from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
 MAX_RELEVANT_CODE_CHARS = 8_000
 
@@ -75,28 +73,19 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 
 
 class AccessibilityToolAgent(BaseReviewToolAgent):
-    """Accessibility tool agent: WCAG 2.2 compliance review and fixes one at a time.
-
-    ``review`` runs in JSON mode (``_model_json``) so a prose response is biased
-    toward returning JSON; ``problem_solve`` keeps text mode (``_model``) because
-    its output is a ``## FILE`` marker template that JSON mode would clobber.
-    """
+    """Accessibility tool agent: WCAG 2.2 compliance review; reports issues for the coding agent to fix."""
 
     name = "Accessibility"
     empty_label = "accessibility issues"
     issue_source = "accessibility"
-    problem_solve_sources = ("accessibility", "tool_accessibility")
     review_prompt = ACCESSIBILITY_REVIEW_PROMPT
-    problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "json"
     uses_json_model = True
     review_model_attr = "_model_json"
-    default_recommendation = "Fix the accessibility issue."
     plan_recommendations = [
         "Consider WCAG 2.2 compliance: alt text, labels, keyboard navigation, focus indicators.",
         "Use semantic HTML elements (button, nav, main, header, footer).",
         "Add ARIA attributes where native semantics are insufficient.",
     ]
     plan_summary = "Accessibility planning: WCAG and semantic markup recommendations."
-    _parse_single_issue = staticmethod(parse_problem_solving_single_issue_template)

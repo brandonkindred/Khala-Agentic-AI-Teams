@@ -29,7 +29,8 @@ unrelated changed file. The review body itself never lists findings.
 
 Kept free of any GitHub-client or LLM dependency so it is cheap to unit-test and
 reusable. Findings are duck-typed: any object exposing ``severity``, ``category``,
-``file_path``, ``description``, ``suggestion`` and ``line`` attributes works.
+``file_path``, ``title``, ``description``, ``suggestion`` and ``line`` attributes
+works.
 
 The duplicate-issue-detection/proposal subsystem that used to live here (cluster
 pre-existing findings, match them against open issues, render a GitHub issue) is
@@ -62,9 +63,38 @@ class ReviewFinding(Protocol):
     severity: str
     category: str
     file_path: Optional[str]
+    title: str
     description: str
     suggestion: str
     line: Optional[int]
+
+
+# Mirrors code_review_agent.models.derive_issue_title, kept as a local, pure
+# duplicate rather than an import: this module is deliberately dependency-free
+# (see module docstring) so it stays cheap to unit-test, and code_review_agent
+# transitively imports strands/httpx/boto3 at package-import time.
+_TITLE_MAX_LEN = 80
+
+
+def _fallback_title(description: str) -> str:
+    """Derive a short title from a finding's description when it has none.
+
+    Postconditions:
+        - Returns the description's first line, trimmed to at most
+          ``_TITLE_MAX_LEN`` characters TOTAL (including a trailing "…" when
+          truncated) at a word boundary. Returns "" only when ``description``
+          is blank.
+    """
+    stripped = (description or "").strip()
+    if not stripped:
+        return ""
+    text = stripped.splitlines()[0].strip()
+    if not text or len(text) <= _TITLE_MAX_LEN:
+        return text
+    limit = _TITLE_MAX_LEN - 1  # reserve one character for the trailing ellipsis
+    prefix = text[:limit]
+    truncated = prefix.rsplit(" ", 1)[0].rstrip(",.;:—-") or prefix.rstrip()
+    return f"{truncated}…"
 
 
 class ExistingCommentRef(Protocol):
@@ -307,7 +337,7 @@ def split_review_comments(
 def format_comment_body(
     issue: ReviewFinding, existing_reference: Optional[ExistingCommentRef] = None
 ) -> str:
-    """Render one finding as a review-comment body: what's wrong + the fix (prose).
+    """Render one finding as a review-comment body: a title, the problem, and the fix.
 
     Used for both line-anchored and file-level review comments — the body carries
     no location, so the same rendering serves either anchor.
@@ -317,17 +347,31 @@ def format_comment_body(
           see :class:`ExistingCommentRef`); it names an existing, still-open PR
           comment this same finding duplicates.
     Postconditions:
-        - Returns ``**[SEVERITY] category** — description`` followed by a
-          ``**Suggested fix:**`` paragraph when a suggestion is present, and,
-          when ``existing_reference`` is given, a trailing note linking it —
-          so a reviewer sees this finding was already raised and is still open,
-          rather than reading it as a brand-new duplicate.
+        - Returns a bolded title heading (the finding's own ``title``, or one
+          derived from ``description`` when blank), followed by a
+          ``_[SEVERITY] category_`` tag line, the problem description, and,
+          when a suggestion is present, a ``**Suggested fix:**`` paragraph.
+          When the description is short enough that its derived title
+          reproduces it verbatim, the description paragraph is omitted rather
+          than repeating the same text twice. When both ``title`` and
+          ``description`` are blank, the heading itself falls back to
+          ``**[SEVERITY] category**`` and the separate tag line is omitted, so
+          severity/category is never shown twice. When ``existing_reference``
+          is given, a trailing note links it — so a reviewer sees this finding
+          was already raised and is still open, rather than reading it as a
+          brand-new duplicate.
     """
     severity = (getattr(issue, "severity", "") or "info").upper()
     category = getattr(issue, "category", "") or "general"
     description = getattr(issue, "description", "") or ""
     suggestion = getattr(issue, "suggestion", "") or ""
-    body = f"**[{severity}] {category}** — {description}".rstrip()
+    title = (getattr(issue, "title", "") or "").strip() or _fallback_title(description)
+    if title:
+        body = f"**{title}**\n_[{severity}] {category}_"
+    else:
+        body = f"**[{severity}] {category}**"
+    if description and description.strip() != title:
+        body += f"\n\n{description}"
     if suggestion:
         body += f"\n\n**Suggested fix:** {suggestion}"
     if existing_reference is not None:
@@ -418,6 +462,7 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
           to a "N finding(s) reported" line (so an empty summary never omits that
           change-requesting comments sit on the PR).
     """
+    assert issue_count >= 0, "issue_count must be non-negative"
     if issue_count == 0:
         return "No issues found — the code is of good quality."
     parts: list[str] = []
