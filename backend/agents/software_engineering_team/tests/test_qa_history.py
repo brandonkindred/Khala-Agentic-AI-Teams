@@ -15,6 +15,7 @@ from product_requirements_analysis_agent.models import AnsweredQuestion, OpenQue
 from product_requirements_analysis_agent.qa_history import (
     extract_answer_from_qa_history,
     format_answered_questions_for_prompt,
+    is_same_decision,
     parse_qa_history_blocks,
     record_answers,
 )
@@ -522,3 +523,66 @@ def test_extract_answer_retrieves_answer_at_exactly_the_match_threshold() -> Non
 
     assert result is not None
     assert result.selected_answer == "Recorded answer."
+
+
+# ---------------------------------------------------------------------------
+# is_same_decision content-word matching (pruning safety)
+# ---------------------------------------------------------------------------
+
+
+def test_is_same_decision_rejects_shared_interrogative_boilerplate() -> None:
+    """Questions that only share interrogative/boilerplate words are not the same decision.
+
+    Without content-word filtering, 'What authentication strategy should we use?' and
+    'What strategy should we use for logging?' share enough function words to clear a
+    0.5 raw-overlap bar and would cause record_answers to prune the unrelated history.
+    """
+    assert not is_same_decision(
+        "What authentication strategy should we use?",
+        "What strategy should we use for logging?",
+    )
+
+
+def test_is_same_decision_accepts_shared_content_topic() -> None:
+    """Questions about the same content-bearing topic still match after stopword filtering."""
+    assert is_same_decision(
+        "What authentication strategy for the API?",
+        "What authentication strategy should the API use?",
+    )
+
+
+def test_record_answers_does_not_prune_unrelated_question_with_shared_boilerplate(
+    tmp_path: Path,
+) -> None:
+    """record_answers keeps an unrelated prior block when only interrogative words overlap."""
+    record_answers(
+        tmp_path,
+        [
+            _answered_question(
+                "What authentication strategy should we use?",
+                "OAuth2 with PKCE.",
+            )
+        ],
+        iteration=1,
+    )
+
+    record_answers(
+        tmp_path,
+        [
+            _answered_question(
+                "What strategy should we use for logging?",
+                "Structured JSON to stdout.",
+            )
+        ],
+        iteration=2,
+    )
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 2
+    questions = {question_text for _iteration, question_text, _answer, _full in blocks}
+    assert "What authentication strategy should we use?" in questions
+    assert "What strategy should we use for logging?" in questions

@@ -28,6 +28,81 @@ logger = logging.getLogger(__name__)
 # same underlying decision (duplicate-answer lookup and supersede detection).
 _QUESTION_MATCH_THRESHOLD = 0.5
 
+# Function/interrogative words excluded from is_same_decision overlap scoring.
+# Without this, questions that only share boilerplate ("what", "should", "we",
+# "use") clear the 0.5 bar and cause record_answers to prune unrelated history.
+_DECISION_STOPWORDS = frozenset(
+    {
+        "",
+        "a",
+        "an",
+        "the",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "where",
+        "when",
+        "why",
+        "how",
+        "we",
+        "you",
+        "they",
+        "i",
+        "it",
+        "our",
+        "your",
+        "their",
+        "this",
+        "that",
+        "these",
+        "those",
+        "should",
+        "would",
+        "could",
+        "can",
+        "will",
+        "shall",
+        "may",
+        "might",
+        "must",
+        "do",
+        "does",
+        "did",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "for",
+        "of",
+        "to",
+        "in",
+        "on",
+        "at",
+        "by",
+        "with",
+        "from",
+        "as",
+        "or",
+        "and",
+        "if",
+        "than",
+        "into",
+        "about",
+        "use",
+        "using",
+        "used",
+        "please",
+    }
+)
+
 # qa_history.md field/section markers. Shared between the writers
 # (format_answered_questions_for_prompt, record_answers) and the readers
 # (extract_answer_from_qa_history, parse_qa_history_blocks via _consume_block_body)
@@ -362,13 +437,30 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
     return blocks_out
 
 
+def _content_words(text: str) -> set[str]:
+    """Return the content-bearing word set of ``text`` for decision matching.
+
+    Strips punctuation, lowercases, and drops :data:`_DECISION_STOPWORDS` so
+    interrogative/boilerplate words cannot dominate the overlap score used by
+    :func:`is_same_decision`.
+
+    Preconditions: ``text`` is a string.
+    Postconditions: returns a (possibly empty) set of lowercase tokens; never raises.
+    """
+    return set(re.sub(r"[^\w\s]", " ", text.lower()).split()) - _DECISION_STOPWORDS
+
+
 def is_same_decision(existing_question: str, new_question: str) -> bool:
     """Return True if the two questions are about the same decision (new answer supersedes old).
 
+    Matching prefers substring containment of the normalized full question text,
+    then falls back to Jaccard overlap of content-bearing words (interrogative and
+    other function words are excluded) against :data:`_QUESTION_MATCH_THRESHOLD`.
+
     Preconditions: both arguments are strings.
     Postconditions: returns ``True`` when one question contains the other or their
-        significant-word overlap is >= 0.5; ``False`` otherwise (including when
-        either is blank).
+        content-word Jaccard overlap is >= 0.5; ``False`` otherwise (including when
+        either is blank or either side has no content words after stopword removal).
     """
     if not existing_question.strip() or not new_question.strip():
         return False
@@ -377,15 +469,11 @@ def is_same_decision(existing_question: str, new_question: str) -> bool:
     if existing_norm in new_norm or new_norm in existing_norm:
         return True
 
-    # Word overlap ratio
-    def words(t: str) -> set:
-        return set(re.sub(r"[^\w\s]", " ", t.lower()).split()) - {"", "the", "a", "an"}
-
-    existing_w = words(existing_question)
-    new_w = words(new_question)
+    existing_w = _content_words(existing_question)
+    new_w = _content_words(new_question)
     if not existing_w or not new_w:
         return False
-    overlap = len(existing_w & new_w) / max(len(existing_w), len(new_w))
+    overlap = len(existing_w & new_w) / len(existing_w | new_w)
     return overlap >= _QUESTION_MATCH_THRESHOLD
 
 
