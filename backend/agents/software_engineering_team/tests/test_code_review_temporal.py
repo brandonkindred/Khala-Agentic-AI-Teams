@@ -1022,6 +1022,168 @@ def test_worker_start_defaults_temporal_address_when_unset(
 # 6. Live workflow execute + replay (WorkflowEnvironment)
 # ---------------------------------------------------------------------------
 
+# Module level (not nested in a test function): a Temporal workflow class must
+# be a plain top-level attribute of its defining module for the SDK's sandbox
+# to resolve it consistently across the real execution and every later replay.
+from code_review_agent.temporal import workflows as _cr_workflows  # noqa: E402
+from temporalio import workflow as _legacy_wf  # noqa: E402 - see comment above
+
+
+@_legacy_wf.defn(name="CodeReviewWorkflow")
+class _LegacySequentialCodeReviewWorkflow:
+    """Pre-#2811 ``CodeReviewWorkflow.run``: tail passes awaited one at a time.
+
+    Exists only to produce, via a real ``WorkflowEnvironment`` execution, a
+    "pre-migration" history whose three tail-pass activities are scheduled one
+    at a time (each in its own workflow task) rather than gathered — see
+    ``test_workflow_replays_pre_migration_sequential_tail_pass_history`` below,
+    which replays that history through the CURRENT ``CodeReviewWorkflow``
+    class to prove ``_CONCURRENT_TAIL_PASS_PATCH`` keeps it replaying
+    correctly. Reuses the real activities and the still-current
+    ``_ARCHITECTURE_PASS_PATCH``/``_SIDE_EFFECT_PASS_PATCH``/
+    ``_ADAPTIVE_FANOUT_PATCH`` markers/retry policies from ``temporal.workflows``
+    so this is a faithful, not hand-waved, reproduction of the old code.
+    """
+
+    def __init__(self) -> None:
+        self._cancel_requested = False
+
+    @_legacy_wf.signal
+    def cancel(self) -> None:
+        self._cancel_requested = True
+
+    @_legacy_wf.query
+    def progress(self) -> Dict[str, Any]:
+        return {"phase": "n/a", "fraction": 0.0, "cancel_requested": self._cancel_requested}
+
+    @_legacy_wf.run
+    async def run(self, review_input: Dict[str, Any]) -> Dict[str, Any]:
+        import asyncio as _asyncio
+        from datetime import timedelta as _timedelta
+
+        A = _cr_workflows.A
+        task_queue = _cr_workflows.TASK_QUEUE
+        prep = await _legacy_wf.execute_activity(
+            A.prepare_review_activity,
+            args=[review_input],
+            task_queue=task_queue,
+            start_to_close_timeout=_timedelta(minutes=30),
+            retry_policy=_cr_workflows._DEFAULT_RETRY,
+        )
+        if prep["no_code"]:
+            return {
+                "approved": True,
+                "issues": prep["skipped_issues"],
+                "summary": "No code to review.",
+                "spec_compliance_notes": "",
+            }
+
+        chunks = prep["chunks"]
+        base_input = prep["base_input"]
+        context_fp = prep["context_fp"]
+        surface_by_path = prep["surface_by_path"]
+        fanout_width = prep.get("fanout_width", 1) or 1
+
+        def _review_one(chunk: Dict[str, Any]) -> Any:
+            return _legacy_wf.execute_activity(
+                A.review_chunk_activity,
+                args=[chunk, base_input, context_fp, surface_by_path],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(hours=1),
+                heartbeat_timeout=_timedelta(minutes=5),
+                retry_policy=_cr_workflows._LLM_RETRY,
+            )
+
+        if _legacy_wf.patched(_cr_workflows._ADAPTIVE_FANOUT_PATCH):
+            semaphore = _asyncio.Semaphore(fanout_width)
+
+            async def _review_one_bounded(chunk: Dict[str, Any]) -> Any:
+                async with semaphore:
+                    return await _review_one(chunk)
+
+            outcomes = await _asyncio.gather(*[_review_one_bounded(chunk) for chunk in chunks])
+        else:
+            outcomes = await _asyncio.gather(*[_review_one(chunk) for chunk in chunks])
+
+        issues, not_reviewed, summaries, spec_notes, approved_flags = ([] for _ in range(5))
+        for outcome in outcomes:
+            issues.extend(outcome["issues"])
+            not_reviewed.extend(outcome["not_reviewed_issues"])
+            summaries.extend(outcome["summaries"])
+            spec_notes.extend(outcome["spec_notes"])
+            approved_flags.extend(outcome["approved_flags"])
+
+        verified = await _legacy_wf.execute_activity(
+            A.filter_false_positives_activity,
+            args=[
+                review_input,
+                issues,
+                bool(review_input.get("skip_false_positive_filter", False)),
+            ],
+            task_queue=task_queue,
+            start_to_close_timeout=_timedelta(minutes=30),
+            retry_policy=_cr_workflows._LLM_RETRY,
+        )
+
+        has_architecture_findings = False
+        if _legacy_wf.patched(_cr_workflows._ARCHITECTURE_PASS_PATCH):
+            architecture_findings = await _legacy_wf.execute_activity(
+                A.find_architecture_and_redundancy_activity,
+                args=[review_input],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(minutes=30),
+                retry_policy=_cr_workflows._LLM_RETRY,
+            )
+            if architecture_findings:
+                verified = [*verified, *architecture_findings]
+                has_architecture_findings = True
+
+        has_side_effect_findings = False
+        if _legacy_wf.patched(_cr_workflows._SIDE_EFFECT_PASS_PATCH):
+            side_effect_findings = await _legacy_wf.execute_activity(
+                A.find_side_effect_impact_activity,
+                args=[review_input],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(minutes=30),
+                retry_policy=_cr_workflows._LLM_RETRY,
+            )
+            if side_effect_findings:
+                verified = [*verified, *side_effect_findings]
+                has_side_effect_findings = True
+
+        gate = await _legacy_wf.execute_activity(
+            A.finalize_review_activity,
+            args=[verified, not_reviewed, prep["skipped_issues"], approved_flags],
+            task_queue=task_queue,
+            start_to_close_timeout=_timedelta(minutes=5),
+            retry_policy=_cr_workflows._DEFAULT_RETRY,
+        )
+        approved = gate["approved"]
+        gated_issues = gate["issues"]
+
+        if len(summaries) == 1 and not (has_architecture_findings or has_side_effect_findings):
+            summary, notes = summaries[0], (spec_notes[0] if spec_notes else "")
+        else:
+            synth = await _legacy_wf.execute_activity(
+                A.synthesize_findings_activity,
+                args=[review_input, approved, gated_issues, summaries, spec_notes],
+                task_queue=task_queue,
+                start_to_close_timeout=_timedelta(minutes=15),
+                retry_policy=_cr_workflows._DEFAULT_RETRY,
+            )
+            if synth is not None:
+                summary, notes = synth["summary"], synth["spec_compliance_notes"]
+            else:
+                summary = "\n\n".join(s for s in summaries if s.strip())
+                notes = "\n\n".join(n for n in spec_notes if n.strip())
+
+        return {
+            "approved": approved,
+            "issues": gated_issues,
+            "summary": summary,
+            "spec_compliance_notes": notes,
+        }
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio
@@ -1170,3 +1332,63 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
     )
 
     await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_workflow_replays_pre_migration_sequential_tail_pass_history() -> None:
+    """A history recorded by the old sequential tail passes still replays.
+
+    ``_CONCURRENT_TAIL_PASS_PATCH`` exists precisely so an in-flight workflow
+    whose history was recorded before this change -- three activities
+    scheduled one at a time, each in its OWN workflow task, only after the
+    previous one completed -- keeps replaying that exact command sequence
+    instead of ``CodeReviewWorkflow`` trying to gather all three into a
+    single workflow task, which would raise a non-determinism error.
+
+    Executes ``_LegacySequentialCodeReviewWorkflow`` (module level, above --
+    a faithful reproduction of the pre-#2811 sequential ``run`` body,
+    registered under the same ``CodeReviewWorkflow`` workflow-type name) to
+    produce a realistic "pre-migration" history, then replays that history
+    through the CURRENT ``CodeReviewWorkflow`` class with ``Replayer`` --
+    proving today's code still reproduces it. Without the
+    ``_CONCURRENT_TAIL_PASS_PATCH`` gate, this test fails with a
+    non-determinism error.
+    """
+    import concurrent.futures
+
+    from code_review_agent.temporal import ACTIVITIES, TASK_QUEUE, CodeReviewWorkflow
+    from temporalio.testing import WorkflowEnvironment
+    from temporalio.worker import Replayer, Worker
+
+    review_input = _input()
+    workflow_id = "code-review-workflow-legacy-sequential-history-test"
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[_LegacySequentialCodeReviewWorkflow],
+                activities=ACTIVITIES,
+                activity_executor=activity_executor,
+            )
+            async with worker:
+                await env.client.execute_workflow(
+                    _LegacySequentialCodeReviewWorkflow.run,
+                    review_input.model_dump(mode="json"),
+                    id=workflow_id,
+                    task_queue=TASK_QUEUE,
+                )
+
+            legacy_history = await env.client.get_workflow_handle(workflow_id).fetch_history()
+
+    # The property _CONCURRENT_TAIL_PASS_PATCH exists to guard: today's
+    # CodeReviewWorkflow must still replay a pre-migration sequential history
+    # without a non-determinism error.
+    await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(legacy_history)

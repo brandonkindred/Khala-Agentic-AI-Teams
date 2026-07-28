@@ -94,6 +94,28 @@ _ARCHITECTURE_PASS_PATCH = "code-review-architecture-consistency-pass"
 # ``workflow.deprecate_patch(_SIDE_EFFECT_PASS_PATCH)`` before deleting it.
 _SIDE_EFFECT_PASS_PATCH = "code-review-side-effect-impact-pass"
 
+# Replay-compatibility gate for running the three tail passes concurrently via
+# asyncio.gather instead of one after another (see ``run``). This is
+# independent of, and evaluated before, ``_ARCHITECTURE_PASS_PATCH`` /
+# ``_SIDE_EFFECT_PASS_PATCH`` above: those gate whether an individual
+# additive activity runs at all, while this one gates the *shape* of how the
+# (already-decided-to-run) activities are scheduled. An in-flight workflow
+# whose history was recorded by the old sequential code has its three
+# schedule commands spread across separate workflow tasks (each one issued
+# only after the previous activity completed); gathering them unconditionally
+# would instead try to issue all three schedule commands in a single
+# workflow task on replay, a command-sequence mismatch that raises a
+# non-determinism error. ``workflow.patched`` returns False on replay for
+# such a history (no marker recorded before this activity existed), so it
+# keeps taking the original sequential branch below and reproduces that
+# exact command sequence; a new execution records the marker and always
+# takes the new concurrent path.
+# TODO: Remove this gate (and always gather the tail passes unconditionally)
+# once no pre-migration CodeReviewWorkflow histories remain open (confirm via
+# the Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_CONCURRENT_TAIL_PASS_PATCH)`` before deleting it.
+_CONCURRENT_TAIL_PASS_PATCH = "code-review-concurrent-tail-passes"
+
 # Replay-compatibility gate for bounding the map-phase fan-out by
 # ``prep["fanout_width"]`` (see ``run``) instead of scheduling every chunk's
 # activity unconditionally. Same rationale as ``_ARCHITECTURE_PASS_PATCH``: a
@@ -252,70 +274,87 @@ class CodeReviewWorkflow:
 
         self._advance("verifying", 0.92)
 
-        async def _no_findings() -> List[Dict[str, Any]]:
-            # Replaces an unpatched (legacy-replay) tail pass in the gather below:
-            # no activity is scheduled, so a pre-migration history's original
-            # finalize-next sequence still replays exactly as it did before this
-            # pass existed.
-            return []
-
         # The three tail passes are once-per-submission, additive-only, read-only
         # checks with no cross-pass data dependency (each reads only
         # ``review_input`` and/or the map phase's aggregated ``issues``, never
         # another pass's output — mirrors coordinator._run_tail_passes's identical
-        # concurrent fan-out in thread mode), so they run concurrently via
-        # asyncio.gather rather than one after another. workflow.patched is still
-        # called unconditionally, in the same relative order as before this
-        # change, so an in-flight/pre-migration history's marker sequence keeps
-        # replaying correctly even though the gated activities' calls are no
-        # longer strung together sequentially.
-        run_architecture_pass = workflow.patched(_ARCHITECTURE_PASS_PATCH)
-        run_side_effect_pass = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+        # concurrent fan-out in thread mode). Building each call as a thunk (not
+        # invoking it yet) lets both branches below share the exact same
+        # activity/args/timeout/retry_policy definitions.
+        def _run_filter() -> Any:
+            return workflow.execute_activity(
+                A.filter_false_positives_activity,
+                args=[
+                    review_input,
+                    issues,
+                    bool(review_input.get("skip_false_positive_filter", False)),
+                ],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=30),
+                retry_policy=_LLM_RETRY,
+            )
 
-        filter_coro = workflow.execute_activity(
-            A.filter_false_positives_activity,
-            args=[
-                review_input,
-                issues,
-                bool(review_input.get("skip_false_positive_filter", False)),
-            ],
-            task_queue=TASK_QUEUE,
-            start_to_close_timeout=timedelta(minutes=30),
-            retry_policy=_LLM_RETRY,
-        )
-        architecture_coro = (
-            workflow.execute_activity(
+        def _run_architecture() -> Any:
+            return workflow.execute_activity(
                 A.find_architecture_and_redundancy_activity,
                 args=[review_input],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=_LLM_RETRY,
             )
-            if run_architecture_pass
-            else _no_findings()
-        )
-        side_effect_coro = (
-            workflow.execute_activity(
+
+        def _run_side_effect() -> Any:
+            return workflow.execute_activity(
                 A.find_side_effect_impact_activity,
                 args=[review_input],
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=_LLM_RETRY,
             )
-            if run_side_effect_pass
-            else _no_findings()
-        )
-        verified, architecture_findings, side_effect_findings = await asyncio.gather(
-            filter_coro, architecture_coro, side_effect_coro
-        )
 
-        has_architecture_findings = bool(architecture_findings)
-        if architecture_findings:
-            verified = [*verified, *architecture_findings]
+        async def _no_findings() -> List[Dict[str, Any]]:
+            return []
 
-        has_side_effect_findings = bool(side_effect_findings)
-        if side_effect_findings:
-            verified = [*verified, *side_effect_findings]
+        if workflow.patched(_CONCURRENT_TAIL_PASS_PATCH):
+            # New concurrent path: gate each additive pass exactly as before
+            # (workflow.patched called unconditionally, same relative order),
+            # then gather whichever activities are enabled in one workflow task.
+            run_architecture_pass = workflow.patched(_ARCHITECTURE_PASS_PATCH)
+            run_side_effect_pass = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
+
+            verified, architecture_findings, side_effect_findings = await asyncio.gather(
+                _run_filter(),
+                _run_architecture() if run_architecture_pass else _no_findings(),
+                _run_side_effect() if run_side_effect_pass else _no_findings(),
+            )
+            has_architecture_findings = bool(architecture_findings)
+            if architecture_findings:
+                verified = [*verified, *architecture_findings]
+
+            has_side_effect_findings = bool(side_effect_findings)
+            if side_effect_findings:
+                verified = [*verified, *side_effect_findings]
+        else:
+            # Pre-migration in-flight history: its three schedule commands were
+            # recorded across separate workflow tasks (each issued only after the
+            # previous activity completed) — reproduce that exact command
+            # sequence rather than gathering, or replay would raise a
+            # non-determinism error (see _CONCURRENT_TAIL_PASS_PATCH).
+            verified = await _run_filter()
+
+            has_architecture_findings = False
+            if workflow.patched(_ARCHITECTURE_PASS_PATCH):
+                architecture_findings = await _run_architecture()
+                if architecture_findings:
+                    verified = [*verified, *architecture_findings]
+                    has_architecture_findings = True
+
+            has_side_effect_findings = False
+            if workflow.patched(_SIDE_EFFECT_PASS_PATCH):
+                side_effect_findings = await _run_side_effect()
+                if side_effect_findings:
+                    verified = [*verified, *side_effect_findings]
+                    has_side_effect_findings = True
 
         self._advance("finalizing", 0.95)
         gate = await workflow.execute_activity(
