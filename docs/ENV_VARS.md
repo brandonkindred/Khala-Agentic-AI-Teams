@@ -138,7 +138,7 @@ reset and used again. `LLM_FAILOVER_FAST_429` (default **on**; `false`/`0`/`no` 
 non-last failover-chain clients with a **zero** in-place 429-retry budget so the hand-off isn't
 delayed by the slow `LLM_RATE_LIMIT_*` backoff above — the **last** provider in the chain keeps the
 configured backoff (nowhere left to fail over to), so a single-entry list behaves exactly as before.
-`LLM_FAILOVER_RATE_WINDOW_S` (default `3600`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
+`LLM_FAILOVER_RATE_WINDOW_S` (default `300`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
 7 days) are the fallback reset windows used to compute `reset_at` only when the 429 carries no
 `Retry-After`; the weekly window is used when the error matches the Ollama weekly-limit message, the
 rate window otherwise. The provider list is the sole source of LLM resolution: with an empty list (or
@@ -628,7 +628,7 @@ single verify activity — see `CODE_REVIEW_VERIFY_TIMEOUT_SECONDS` below), so
 this ceiling still bounds *verification* concurrency in all dispatch modes.
 
 ### CODE_REVIEW_VERIFY_TIMEOUT_SECONDS
-Int (default `60`, floor `1`). Per-group timeout for the false-positive
+Int (default `300`, floor `1`). Per-group timeout for the false-positive
 verification phase's LLM calls (one call per cited file, fanned out across
 `CODE_REVIEW_MAP_PARALLELISM` worker threads when there is more than one
 group). A group whose verification call exceeds this timeout is treated the

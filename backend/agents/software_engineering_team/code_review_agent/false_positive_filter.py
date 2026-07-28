@@ -96,7 +96,7 @@ _LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
 
 # Default per-group verification call timeout (seconds); see
 # ``_verify_timeout_seconds`` below.
-DEFAULT_VERIFY_TIMEOUT_SECONDS = 60
+DEFAULT_VERIFY_TIMEOUT_SECONDS = 300
 
 
 def _verify_timeout_seconds() -> int:
