@@ -1,16 +1,18 @@
 """Prompts for runbook agent."""
 
-DOC_RUNBOOK_PROMPT = """You are DocumentationRunbookAgent.
+from software_engineering_team.shared.prompts import build_json_output_prompt
 
-Create operational handoff artifacts:
+DOC_RUNBOOK_PROMPT = build_json_output_prompt(
+    role_sentence="You are DocumentationRunbookAgent.",
+    rules=(
+        """Create operational handoff artifacts:
 - deployment steps
 - rollback steps
 - required approvals and change windows
 - validation evidence summary
 
-Output JSON:
-- files: object(path -> content)
-- summary: string
-
-Return JSON only.
 """
+    ),
+    json_schema=("- files: object(path -> content)\n- summary: string"),
+    trailer="Return JSON only.\n",
+)

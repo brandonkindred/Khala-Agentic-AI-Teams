@@ -1,10 +1,12 @@
-"""Markdown rendering for the ProspectDossier block embedded in the outreach prompt.
+"""Markdown and JSON rendering for the ProspectDossier block embedded in prompts.
 
 Lives in the prompts package because it shapes prompt-bound text — kept
 deterministic and side-effect-free so prompt diffs stay reviewable.
 """
 
 from __future__ import annotations
+
+import json
 
 from ..models import ProspectDossier
 
@@ -90,3 +92,8 @@ def render_dossier_for_prompt(dossier: ProspectDossier) -> str:
             lines.append(f"- {s}")
 
     return "\n".join(lines)
+
+
+def render_dossier_json_for_prompt(dossier: ProspectDossier) -> str:
+    """Serialize a ``ProspectDossier`` to JSON for the critic prompts, untruncated."""
+    return json.dumps(dossier.model_dump(mode="json"), indent=2)

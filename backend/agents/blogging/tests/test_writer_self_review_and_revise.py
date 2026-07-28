@@ -10,6 +10,7 @@ are tested directly in ``test_content_planning_loop.py`` — not duplicated here
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -23,6 +24,7 @@ def _make_agent_with_guidelines():
 
 
 def test_writer_fix_deterministic_violations(monkeypatch) -> None:
+    """A clean LLM response with a draft marker applies the fixed draft."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -38,6 +40,7 @@ def test_writer_fix_deterministic_violations(monkeypatch) -> None:
 
 
 def test_writer_fix_deterministic_violations_unexpected_error_propagates(monkeypatch) -> None:
+    """An unexpected programming error (not an LLM error) propagates unhandled."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -61,6 +64,7 @@ def test_writer_fix_deterministic_violations_empty_response(monkeypatch) -> None
 
 
 def test_writer_llm_self_review_no_issues(monkeypatch) -> None:
+    """An empty JSON array review response returns the draft unchanged."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -90,10 +94,9 @@ def test_writer_llm_self_review_with_issues(monkeypatch) -> None:
 def test_writer_llm_self_review_with_markdown_fenced_array(monkeypatch) -> None:
     """Issues array wrapped in markdown fences must still be extracted correctly.
 
-    Regression test: the old naive ``find('[')``/``rfind(']')`` slicing would
-    grab the fence markers' surrounding prose incorrectly whenever the array
-    was wrapped in a ```json code block; the shared ``extract_json_from_response``
-    helper strips fences before parsing.
+    Verifies that the shared ``extract_json_from_response`` helper strips
+    fences and parses the enclosed JSON array, so a cleanly fenced review
+    response is handled correctly.
     """
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
@@ -124,7 +127,285 @@ def test_writer_llm_self_review_no_array(monkeypatch) -> None:
     assert out == "draft text"
 
 
+def test_writer_llm_self_review_markdown_link_before_fenced_array(monkeypatch) -> None:
+    """Markdown brackets before a fenced issues array must not block extraction.
+
+    Naive first-``[`` / last-``]`` slicing grabs the Markdown link and fails;
+    ``extract_json_from_response`` reads the fenced JSON array and applies fixes.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "See [docs](https://example.com/guide) for context.\n\n"
+        "```json\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]\n'
+        "```"
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_numeric_citation_before_array_applies_fixes(monkeypatch) -> None:
+    """A numeric citation bracket like ``[1]`` must not be mistaken for the issues array.
+
+    Regression test: ``[1]`` is a syntactically valid JSON array, but its
+    elements don't match the expected object schema, so the scanner must keep
+    looking for the real issues array instead of short-circuiting on it.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "Per the style guide [1], here are the issues:\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_unrelated_dict_array_before_issues_applies_fixes(
+    monkeypatch,
+) -> None:
+    """A fenced JSON object containing an unrelated dict array must not hide a later issues array.
+
+    Regression test: the scanner must not stop at the fenced object (or its nested
+    ``references`` list, which lacks ``issue`` keys) and must keep looking for the
+    real issues array instead of short-circuiting on it.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        'Example metadata:\n```json\n{"references": [{"title": "source"}]}\n```\n'
+        "Actual issues:\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_mixed_array_keeps_valid_dict_issue(monkeypatch) -> None:
+    """A non-dict element alongside a valid issue dict must not drop the real issue.
+
+    Regression test: ``_extract_json_array_from_text`` used to reject the whole
+    array unless every element was a dict, discarding a valid issue whenever
+    the model's array also contained a stray non-dict entry.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "Here are the issues: "
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}, "malformed"]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_direct_list_without_issue_key_returns_draft(monkeypatch) -> None:
+    """A clean top-level JSON array whose objects lack an ``issue`` key is treated as no issues.
+
+    Regression test: when ``extract_json_from_response`` parses the whole response
+    directly into a list (no rescan involved), elements missing the required
+    ``issue`` key must be filtered out just like the prose-rescan fallback does
+    via ``required_keys``, not passed through to the fix prompt as-is.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    calls = {"n": 0}
+
+    def fake(self, prompt, system_prompt=""):
+        calls["n"] += 1
+        return '[{"title": "source"}, {"title": "other"}]'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert out == "draft text"
+    assert calls["n"] == 1
+
+
+def test_writer_llm_self_review_direct_list_drops_entries_without_issue_key(monkeypatch) -> None:
+    """A direct-parsed list keeps only elements with an ``issue`` key, applying fixes for those.
+
+    Regression test: a mix of a valid issue dict and an unrelated dict (no
+    ``issue`` key) parsed directly as a top-level array must still surface the
+    real issue instead of either dropping it or passing the unrelated dict
+    through to the fix prompt.
+    """
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        '[{"title": "unrelated"}, {"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_non_list_json_returns_draft(monkeypatch) -> None:
+    """A JSON object (not an array) is treated as no issues."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    calls = {"n": 0}
+
+    def fake(self, prompt, system_prompt=""):
+        calls["n"] += 1
+        return '{"status": "ok"}'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert out == "draft text"
+    assert calls["n"] == 1
+
+
+def test_writer_llm_self_review_object_with_nested_arrays_returns_draft(monkeypatch) -> None:
+    """A parsed JSON object with nested arrays must not be rescanned as issues."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    calls = {"n": 0}
+    payload = json.dumps(
+        {
+            "status": "ok",
+            "references": [{"title": "source"}],
+            "warnings": [],
+        }
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        calls["n"] += 1
+        return payload
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert out == "draft text"
+    assert calls["n"] == 1
+
+
+def test_writer_llm_self_review_fenced_object_before_array_applies_fixes(monkeypatch) -> None:
+    """An unrelated fenced object must not hide a later issues array."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        'Example metadata:\n```json\n{"status": "example"}\n```\n'
+        "Actual issues:\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_prose_prefixed_array_applies_fixes(monkeypatch) -> None:
+    """Unfenced prose before a valid issues array must still apply fixes."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        'Here are the issues: [{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
+def test_writer_llm_self_review_markdown_link_before_unfenced_array(monkeypatch) -> None:
+    """Markdown links before an unfenced issues array must not block extraction."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent_with_guidelines()
+    state = {"i": 0}
+    review_payload = (
+        "See [docs](https://example.com/guide) for context.\n"
+        '[{"location": "intro", "issue": "vague", "fix": "be specific"}]'
+    )
+
+    def fake(self, prompt, system_prompt=""):
+        state["i"] += 1
+        if state["i"] == 1:
+            return review_payload
+        return '{"draft": 0}\n---DRAFT---\n# Better draft\nSpecific text.'
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", fake)
+    out = a._llm_self_review("draft text")
+    assert "Better draft" in out
+    assert state["i"] == 2
+
+
 def test_writer_llm_self_review_unexpected_error_propagates(monkeypatch) -> None:
+    """An unexpected programming error (not an LLM error) propagates unhandled."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -156,6 +437,7 @@ def test_writer_self_review_combines_both(monkeypatch) -> None:
 
 
 def test_writer_format_feedback_item_line() -> None:
+    """A well-formed FeedbackItem renders as a single formatted line."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
 
     a = _make_agent_with_guidelines()
@@ -328,7 +610,17 @@ def test_writer_revise_empty_draft() -> None:
     assert out.draft == "   "
 
 
+def test_writer_revise_none_draft_is_treated_as_empty() -> None:
+    """Defensively normalize a model-constructed None draft to an empty string."""
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+
+    a = _make_agent_with_guidelines()
+    revise_input = ReviseWriterInput.model_construct(draft=None, feedback_items=[])
+    assert a.revise(revise_input).draft == ""
+
+
 def test_writer_revise_no_feedback_items() -> None:
+    """An empty feedback_items list leaves the draft unchanged."""
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
@@ -353,6 +645,7 @@ def test_writer_revise_no_feedback_items() -> None:
 
 
 def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
+    """Markdown code fences around a JSON response are stripped before parsing."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -366,6 +659,7 @@ def test_writer_call_agent_json_strips_fences(monkeypatch) -> None:
 
 
 def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) -> None:
+    """LLMRateLimitError propagates unwrapped so the retry funnel can catch it."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMRateLimitError
@@ -381,6 +675,7 @@ def test_writer_fix_deterministic_violations_rate_limit_reraises(monkeypatch) ->
 
 
 def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> None:
+    """LLMTemporaryError propagates unwrapped so the retry funnel can catch it."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMTemporaryError
@@ -396,6 +691,7 @@ def test_writer_fix_deterministic_violations_temporary_reraises(monkeypatch) -> 
 
 
 def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
+    """LLMRateLimitError during self-review propagates unwrapped."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMRateLimitError
@@ -411,6 +707,7 @@ def test_writer_llm_self_review_rate_limit_reraises(monkeypatch) -> None:
 
 
 def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
+    """LLMTemporaryError during self-review propagates unwrapped."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMTemporaryError
@@ -428,8 +725,7 @@ def test_writer_llm_self_review_temporary_reraises(monkeypatch) -> None:
 def test_writer_fix_deterministic_violations_soft_fails_permanent_error(
     monkeypatch, caplog
 ) -> None:
-    import logging
-
+    """Non-transient LLM errors are soft-failed: original draft returned, error logged."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMPermanentError
@@ -448,8 +744,7 @@ def test_writer_fix_deterministic_violations_soft_fails_permanent_error(
 
 
 def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) -> None:
-    import logging
-
+    """Non-transient LLM errors during self-review are soft-failed and logged."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     from llm_service import LLMPermanentError
@@ -467,9 +762,8 @@ def test_writer_llm_self_review_soft_fails_permanent_error(monkeypatch, caplog) 
     assert any(r.exc_info is not None for r in caplog.records)
 
 
-def test_writer_llm_self_review_soft_fails_json_decode(monkeypatch, caplog) -> None:
-    import logging
-
+def test_writer_llm_self_review_malformed_json_returns_draft(monkeypatch, caplog) -> None:
+    """Malformed JSON that cannot be parsed as a list is treated as no issues, not an exception soft-fail."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
     a = _make_agent_with_guidelines()
@@ -478,14 +772,15 @@ def test_writer_llm_self_review_soft_fails_json_decode(monkeypatch, caplog) -> N
         "_call_text",
         lambda self, prompt, system_prompt="": "[not-valid-json",
     )
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.INFO):
         out = a._llm_self_review("orig")
     assert out == "orig"
-    assert any("LLM self-review failed" in r.message for r in caplog.records)
-    assert any(r.exc_info is not None for r in caplog.records)
+    assert any("response was not a JSON array" in r.message for r in caplog.records)
+    assert not any("LLM self-review failed" in r.message for r in caplog.records)
 
 
 def test_writer_fix_deterministic_violations_unwraps_wrapped_rate_limit(monkeypatch) -> None:
+    """A rate-limit error wrapped in EventLoopException is unwrapped before re-raising."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from strands.types.exceptions import EventLoopException
 
@@ -505,8 +800,7 @@ def test_writer_fix_deterministic_violations_unwraps_wrapped_rate_limit(monkeypa
 
 
 def test_writer_llm_self_review_unwraps_wrapped_permanent_error(monkeypatch, caplog) -> None:
-    import logging
-
+    """A permanent error wrapped in EventLoopException is unwrapped before soft-failing."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from strands.types.exceptions import EventLoopException
 

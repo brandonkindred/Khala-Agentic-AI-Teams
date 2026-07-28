@@ -78,7 +78,7 @@ def _merge_spec_cleanup_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
 
     cleaned_parts = []
     for r in results:
-        if r.get("is_valid") is False:
+        if not _coerce_bool(r.get("is_valid", True)):
             merged["is_valid"] = False
         if isinstance(r.get("validation_issues"), list):
             merged["validation_issues"].extend(r["validation_issues"])
@@ -103,6 +103,8 @@ def _write_spec_artifact(repo_path: Path, filename: str, spec_text: str) -> Path
         ``filename`` and ``updated_spec.md`` with ``spec_text``; returns the
         versioned file's path for the caller to log/reference.
     """
+    if not filename or Path(filename).name != filename or filename in (".", ".."):
+        raise ValueError(f"filename must be a bare filename, got {filename!r}")
     plan_dir = repo_path / "plan" / "product_analysis"
     plan_dir.mkdir(parents=True, exist_ok=True)
     spec_file = plan_dir / filename
@@ -154,8 +156,9 @@ def build_specialist_collaboration_plan(
     cross-team collaboration (UX, architecture, risk, data, security).
 
     Preconditions: ``cleaned_spec`` is a string; ``answered_questions`` a list.
-    Postconditions: returns a newline-joined, de-duplicated, deterministically
-        ordered recommendation list keyed off keywords present in the spec + answers.
+    Postconditions: returns a newline-joined string of de-duplicated,
+        deterministically ordered recommendations keyed off keywords present
+        in the spec + answers.
     """
     spec_text = (cleaned_spec + "\n" + format_answered_questions(answered_questions)).lower()
 
@@ -283,25 +286,38 @@ def generate_prd_document(
     Preconditions: ``model`` is a Strands ``Model``; ``llm`` is the ``LLMClient``
         used for context sizing.
     Postconditions: returns the generated PRD text, or ``cleaned_spec`` when the LLM
-        fails or returns empty output.
+        fails or returns empty output. Each prompt input is compacted via LLM
+        summarization to fit the model's context when it would otherwise be too
+        large for the combined prompt; the trailing hard slice is a fail-safe
+        only, for the rare case ``compact_text`` itself fails and falls back to
+        returning the original (still oversized) text.
     """
+    # Local import (mirrors the TYPE_CHECKING-only ``LLMClient`` import above): this
+    # module is imported before ``llm_service`` finishes initializing, so importing
+    # at module scope would be circular.
+    from llm_service import compact_text
+
     # Summarize answered questions for the prompt; this may be empty on the first run
     answered_summary = format_answered_questions(answered_questions)
 
-    # Keep prompt size reasonable while fitting within model context (e.g. 256K)
-    max_chars = compute_prd_snippet_chars(llm)
-    cleaned_spec_snippet = cleaned_spec[:max_chars]
-    answered_summary_snippet = answered_summary[:max_chars]
     specialist_plan = build_specialist_collaboration_plan(
-        cleaned_spec=cleaned_spec_snippet,
+        cleaned_spec=cleaned_spec,
         answered_questions=answered_questions,
     )
-    specialist_plan_snippet = specialist_plan[:max_chars]
+
+    max_chars = compute_prd_snippet_chars(llm)
+    cleaned_spec_input = compact_text(cleaned_spec, max_chars, llm, "specification")[:max_chars]
+    answered_summary_input = compact_text(answered_summary, max_chars, llm, "answered questions")[
+        :max_chars
+    ]
+    specialist_plan_input = compact_text(
+        specialist_plan, max_chars, llm, "specialist collaboration plan"
+    )[:max_chars]
 
     prompt = PRD_PROMPT.format(
-        cleaned_spec=cleaned_spec_snippet,
-        answered_questions_summary=answered_summary_snippet,
-        specialist_collaboration_plan=specialist_plan_snippet,
+        cleaned_spec=cleaned_spec_input,
+        answered_questions_summary=answered_summary_input,
+        specialist_collaboration_plan=specialist_plan_input,
     )
 
     try:
@@ -470,6 +486,22 @@ def run_spec_cleanup(
     return parse_spec_cleanup_response(raw, spec_content)
 
 
+def _coerce_bool(value: Any) -> bool:
+    """Coerce an untrusted LLM/JSON-recovery field to a bool.
+
+    Preconditions: none.
+    Postconditions: returns ``value`` unchanged if it is already a bool;
+        for a string, returns True iff it matches a recognized truthy
+        token ("true"/"yes"/"1", case-insensitive), else False; any other
+        type returns False. Never raises.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return False
+
+
 def parse_spec_cleanup_response(
     raw: Any,
     fallback_spec: str,
@@ -488,7 +520,7 @@ def parse_spec_cleanup_response(
         )
 
     return SpecCleanupResult(
-        is_valid=bool(raw.get("is_valid", True)),
+        is_valid=_coerce_bool(raw.get("is_valid", True)),
         validation_issues=list(raw.get("validation_issues", []))
         if isinstance(raw.get("validation_issues"), list)
         else [],

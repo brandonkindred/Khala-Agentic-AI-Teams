@@ -115,6 +115,7 @@ class BaseV2DevelopmentAgent:
             "code_review": "Code review",
             "qa_testing": "QA testing",
             "security_testing": "Security testing",
+            "qa_security_testing": "QA + Security testing",
             "documentation": "Documentation",
             "review": review_label,
             "problem_solving": "Fixing issues",
