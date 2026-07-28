@@ -44,21 +44,27 @@ def test_resolve_agent_default_think_code_review_is_reduced() -> None:
 
 
 def test_resolve_model_code_review_verify_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """code_review_verify has its own AGENT_DEFAULT_MODELS entry, independent of
-    (and not affecting) code_review's."""
+    """code_review_verify has its own, genuinely lighter AGENT_DEFAULT_MODELS
+    entry, independent of (and not affecting) code_review's.
+
+    llama3.1 (not deepseek-v4-pro:cloud) is required here: deepseek-v4-pro:cloud's
+    reasoning_effort wire mapping collapses "low"/"medium" onto the same "high"
+    tier as code_review's pin (see KNOWN_MODEL_THINKING_LEVELS), so reusing that
+    model could not be made lighter via AGENT_DEFAULT_THINK alone.
+    """
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
     monkeypatch.delenv("LLM_MODEL_code_review", raising=False)
-    assert config.resolve_model("code_review_verify") == "deepseek-v4-pro:cloud"
+    assert config.resolve_model("code_review_verify") == "llama3.1"
     assert config.resolve_model("code_review") == "deepseek-v4-pro:cloud"
 
 
-def test_resolve_agent_default_think_code_review_verify_is_lighter() -> None:
-    """code_review_verify pins a lighter tier than code_review's "high", for the
-    narrower, bounded verify/synthesis sub-passes."""
-    assert config.resolve_agent_default_think("code_review_verify") == "low"
-    assert "low" in config.KNOWN_MODEL_THINKING_LEVELS["deepseek-v4-pro:cloud"]
-    # code_review's own resolution is unaffected by the new key.
+def test_resolve_agent_default_think_code_review_verify_has_no_pin() -> None:
+    """code_review_verify's model (llama3.1) registers no thinking levels, so it
+    has no AGENT_DEFAULT_THINK entry — the pin would be silently inert. code_review's
+    own resolution is unaffected by the new key."""
+    assert config.resolve_agent_default_think("code_review_verify") is None
+    assert "llama3.1" not in config.KNOWN_MODEL_THINKING_LEVELS
     assert config.resolve_agent_default_think("code_review") == "high"
 
 

@@ -62,8 +62,8 @@ def resolve_code_review_verify_model(
     """Resolve the strands model for code-review's narrower verify/synthesis sub-passes.
 
     Same shape as :func:`resolve_code_review_model`, but keyed on the
-    ``code_review_verify`` agent key (its own ``AGENT_DEFAULT_MODELS`` /
-    ``AGENT_DEFAULT_THINK`` entries) instead of ``code_review`` — for bounded
+    ``code_review_verify`` agent key (its own, genuinely lighter
+    ``AGENT_DEFAULT_MODELS`` entry) instead of ``code_review`` — for bounded
     tasks like false-positive verification and narrative synthesis, as opposed
     to open-ended chunk review.
 
