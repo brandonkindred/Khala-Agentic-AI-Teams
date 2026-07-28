@@ -526,8 +526,9 @@ class BlogWriterAgent(_BlogAgentBase):
         """Scan draft for mechanical violations. Returns list of violation descriptions.
 
         Checks: em/en dashes, banned phrases (``BANNED_PHRASES``), vague citation
-        patterns not followed by a source/link, reader-address (``you``/``your``)
-        count below 3, and staccato prose (3+ consecutive short sentences).
+        patterns not followed by a source/link, reader-address
+        (``you``/``your``/``yours``/``yourself``) count below 3, and staccato
+        prose (3+ consecutive short sentences).
         """
         violations: list[str] = []
         draft_lower = draft.lower()
@@ -634,6 +635,9 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``draft`` is a string (may be empty).
         Postconditions:
             - On success, returns the reviewed/fixed draft or the original when no issues.
+            - If the response's JSON parses to a value that is not a list of issue
+              dicts (e.g. a top-level object, or salvaged prose residue with no
+              recoverable issues array), returns the original ``draft`` unchanged.
             - On soft-fail (``LLMError`` excluding types re-raised below, or
               ``json.JSONDecodeError`` / ``TypeError`` / ``ValueError`` / ``AttributeError``),
               logs with traceback via ``logger.exception`` and returns the original ``draft``.
@@ -646,11 +650,15 @@ class BlogWriterAgent(_BlogAgentBase):
                 f"Review this draft:\n\n{draft}", system_prompt=SELF_REVIEW_PROMPT
             )
             cleaned = raw.strip()
-            # Prefer the shared extractor for fenced / whole-response JSON.
-            # Fall back to a Markdown-safe array scan only when extraction fails,
-            # or when a non-list parse looks like salvage from prose (not a
-            # top-level object response — those must not be rescanned for
-            # nested arrays).
+            # Prefer the shared extractor for fenced / whole-response JSON. It can
+            # raise (extraction fails entirely) or, on success, return a non-list
+            # value in two different situations that must be told apart: a
+            # genuine top-level JSON object (the model's real "no issues"
+            # response) vs. a dict salvaged from prose that isn't the actual
+            # top-level structure (e.g. it snagged the one object inside an
+            # issues array). Only the latter is worth rescanning for a real
+            # array; a genuine top-level object must not be rescanned.
+            issues: Optional[list] = None
             try:
                 parsed = extract_json_from_response(cleaned)
             except LLMJsonParseError:
@@ -742,9 +750,10 @@ class BlogWriterAgent(_BlogAgentBase):
               Strands wraps them in ``EventLoopException``) soft-fail into a JSON
               fallback, then a placeholder if both paths yield no content.
             - Any other exception from the LLM call path propagates unchanged —
-              this includes non-transient LLM errors such as
-              ``LLMPermanentError``/``LLMRateLimitError``/``LLMTemporaryError``,
-              not only unexpected programming errors.
+              this includes transient transport errors (``LLMRateLimitError`` /
+              ``LLMTemporaryError``, left for Temporal to retry) and
+              non-transient LLM errors (e.g. ``LLMPermanentError``), not only
+              unexpected programming errors.
         Invariants:
             - The agent's configuration, style guide, and brand spec are not mutated.
         """
@@ -924,6 +933,14 @@ class BlogWriterAgent(_BlogAgentBase):
               content plan, every feedback item formatted via
               ``_format_feedback_item_line``, ``revision_plan`` as planning
               context, and the current draft.
+            - When present on ``revise_input``: ``revise_input.persistent_issues``
+              is inserted before the feedback block; ``previous_feedback_items``
+              (capped at ``MAX_PREVIOUS_FEEDBACK_ITEMS``) is inserted after it;
+              ``selected_title`` and ``elicited_stories`` are each appended as
+              their own labeled section near the end (title before stories);
+              and ``tone_or_purpose`` / ``audience`` are each prepended as a
+              single labeled line at the very front (tone_or_purpose ends up
+              before audience). Absent fields are omitted rather than left blank.
         """
         brand_section = (
             self._brand_spec_prompt
@@ -1630,7 +1647,8 @@ class BlogWriterAgent(_BlogAgentBase):
         cycle where the user acts as the editor.
 
         Postconditions:
-            - Returns ``draft`` unchanged when it is blank.
+            - Returns a ``WriterOutput`` whose ``draft`` field is the original
+              ``draft`` unchanged when it is blank.
             - Otherwise retries the text-completion path up to 3 times: an
               unwrapped ``LLMJsonParseError`` (including ``EventLoopException``
               wrappers) retries without a backoff sleep, and an unwrapped
