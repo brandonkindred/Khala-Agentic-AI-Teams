@@ -1,27 +1,39 @@
 """Durable code review workflow: map-reduce review as a Temporal workflow.
 
 ``CodeReviewWorkflow`` reproduces ``coordinator.run_coordinator`` as a durable,
-resumable computation. It orchestrates the review as a sequence of activities —
-prepare → map fan-out → false-positive verify → architecture-consistency /
-redundancy pass → side-effect / blast-radius pass → deterministic gate →
+resumable computation. It orchestrates the review as: prepare → map fan-out →
+three tail passes run concurrently (false-positive verify, architecture-
+consistency / redundancy, side-effect / blast-radius) → deterministic gate →
 (conditional) narrative synthesis — so a worker restart mid-review re-runs only
 the unfinished activities instead of re-reviewing the whole submission.
 
-The verdict is behavior-identical to thread mode because every phase calls the
-same underlying coordinator functions (through :mod:`.activities`): the map unit
-is ``mapping._cached_review_chunk``, verification is
-``false_positive_filter.filter_false_positives``, the additive architecture pass
-is ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
+The tail passes have no cross-pass data dependency (each reads only
+``review_input`` and/or the map phase's aggregated ``issues``, never another
+pass's output), mirroring ``coordinator._run_tail_passes``'s identical
+concurrent fan-out in thread mode.
+
+Every phase calls the same underlying coordinator functions (through
+:mod:`.activities`): the map unit is ``mapping._cached_review_chunk``,
+verification is ``false_positive_filter.filter_false_positives``, the additive
+architecture pass is
+``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
 additive side-effect pass is
 ``side_effect_impact_pass.find_side_effect_impact_issues``, the gate is
 ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
 ``synthesis.synthesize_review_findings`` with the same deterministic-concat
-fallback.
+fallback. The verdict is NOT identical to the default thread-mode
+``run_coordinator`` path, though: this workflow always folds
+``not_reviewed_issues`` into the approval gate as blocking ``high`` findings
+(see ``finalize_review_activity``), matching thread mode only under
+``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` -- the thread-mode default instead
+surfaces them non-blockingly via ``CodeReviewOutput.not_reviewed_ranges``,
+a field this workflow's return dict does not populate at all.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
-no I/O, time, or randomness — only ``execute_activity`` calls and pure list
-aggregation over JSON-native dicts.
+no I/O, time, or randomness — only ``execute_activity`` calls, ``asyncio.gather``
+for deterministic concurrent fan-out of independent activities (the map-phase
+chunks and the tail passes), and pure list aggregation over JSON-native dicts.
 """
 
 from __future__ import annotations
@@ -166,9 +178,14 @@ class CodeReviewWorkflow:
             - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict.
 
         Postconditions:
-            - Returns a ``CodeReviewOutput`` dict whose verdict matches what
-              ``run_coordinator`` would produce for the same input (the same
-              deterministic gate and narrative fallback are applied).
+            - Returns a ``CodeReviewOutput``-shaped dict (``approved``, ``issues``,
+              ``summary``, ``spec_compliance_notes`` -- no ``not_reviewed_ranges``
+              key) using the same deterministic gate and narrative fallback as
+              ``run_coordinator``. The verdict is intentionally not identical to
+              the default thread-mode ``run_coordinator`` path: not-reviewed
+              ranges always fold into the gate here as blocking ``high`` findings
+              (see module docstring), so the same input can approve under thread
+              mode's default and reject here, or vice versa.
         """
         self._advance("preparing", 0.05)
         prep = await workflow.execute_activity(
@@ -198,7 +215,7 @@ class CodeReviewWorkflow:
         base_input: Dict[str, Any] = prep["base_input"]
         context_fp: str = prep["context_fp"]
         surface_by_path: Dict[str, List[str]] = prep["surface_by_path"]
-        fanout_width: int = prep.get("fanout_width", 1) or 1
+        fanout_width: int = prep.get("fanout_width") or 1
 
         self._advance("reviewing", 0.10)
 
@@ -298,6 +315,13 @@ class CodeReviewWorkflow:
         has_architecture_findings = False
         has_side_effect_findings = False
 
+        async def _empty_tail_pass() -> List[Dict[str, Any]]:
+            # Stand-in for a disabled pass in the gather below: no activity is
+            # scheduled, so the gather always has a uniform three-coroutine
+            # shape (and three ActivityTaskScheduledEvents whenever a real
+            # activity is behind it) regardless of which passes are enabled.
+            return []
+
         if workflow.patched(_CONCURRENT_TAIL_PASSES_PATCH):
             # None of the three tail passes reads another's output (see
             # coordinator._run_tail_passes), so they can be scheduled as
@@ -311,23 +335,18 @@ class CodeReviewWorkflow:
             run_architecture = workflow.patched(_ARCHITECTURE_PASS_PATCH)
             run_side_effect = workflow.patched(_SIDE_EFFECT_PASS_PATCH)
 
-            calls = [_verify()]
-            if run_architecture:
-                calls.append(_architecture())
-            if run_side_effect:
-                calls.append(_side_effect())
-            results_iter = iter(await asyncio.gather(*calls))
-            verified = next(results_iter)
-            if run_architecture:
-                architecture_findings = next(results_iter)
-                if architecture_findings:
-                    verified = [*verified, *architecture_findings]
-                    has_architecture_findings = True
-            if run_side_effect:
-                side_effect_findings = next(results_iter)
-                if side_effect_findings:
-                    verified = [*verified, *side_effect_findings]
-                    has_side_effect_findings = True
+            calls = [
+                _verify(),
+                _architecture() if run_architecture else _empty_tail_pass(),
+                _side_effect() if run_side_effect else _empty_tail_pass(),
+            ]
+            verified, architecture_findings, side_effect_findings = await asyncio.gather(*calls)
+            if architecture_findings:
+                verified = [*verified, *architecture_findings]
+                has_architecture_findings = True
+            if side_effect_findings:
+                verified = [*verified, *side_effect_findings]
+                has_side_effect_findings = True
         else:
             # Pre-migration history: reproduce the original sequential
             # scheduling AND the original workflow.patched call positions
@@ -390,9 +409,13 @@ class CodeReviewWorkflow:
         Mirrors ``coordinator._merge_narrative``: a single sub-review with no
         additive-pass findings (architecture/redundancy or side-effect/blast-radius)
         is used verbatim (no synthesis call); otherwise attempts a synthesis
-        activity and falls back to deterministic concatenation on failure, so a
-        blocking additive-pass finding is never silently absent from the
-        narrative attached to a single-chunk review.
+        activity so the narrative can reflect those findings too. On synthesis
+        failure, falls back to deterministic concatenation of only the
+        per-chunk ``summaries``/``spec_notes`` — the architecture/redundancy
+        and side-effect/blast-radius passes contribute findings via ``issues``,
+        not summaries, so their findings can be absent from this concatenated
+        narrative text on that failure path (they are never absent from the
+        returned ``issues`` list itself, only from this prose summary).
         """
         if len(summaries) == 1 and not has_additive_pass_findings:
             return summaries[0], (spec_notes[0] if spec_notes else "")
