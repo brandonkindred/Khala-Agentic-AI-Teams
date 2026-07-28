@@ -326,6 +326,10 @@ def _fix_issues_one_at_a_time_impl(
         resolution -- even if the LLM's response claimed ``resolved`` -- and
         the loop retries up to ``MAX_ITERATIONS_PER_ISSUE``.
     """
+    assert has_language_conventions == ("{language_conventions}" in single_issue_prompt), (
+        "single_issue_prompt must contain {language_conventions} iff has_language_conventions"
+    )
+
     merged = dict(current_files)
     fixes_applied: List[Dict[str, Any]] = []
     unresolved_issues: List[Any] = []
@@ -336,10 +340,10 @@ def _fix_issues_one_at_a_time_impl(
     phase_ctx = f"{phase_name} " if phase_name else ""
 
     for issue_idx, issue in enumerate(actionable):
-        desc_short = (getattr(issue, "description", None) or "")[:80]
+        desc_short = getattr(issue, "description", None) or ""
         if detail_callback:
             detail_callback(
-                f"Fixing {phase_ctx}issue {issue_idx + 1}/{len(actionable)}: {desc_short[:50]}..."
+                f"Fixing {phase_ctx}issue {issue_idx + 1}/{len(actionable)}: {desc_short}..."
             )
         logger.info(
             "[%s] %sfixing %sissue %d/%d — %s. Next step -> Attempting fix (up to %d iterations)",

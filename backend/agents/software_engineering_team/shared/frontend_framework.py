@@ -17,9 +17,6 @@ import re
 from pathlib import Path
 from typing import Optional
 
-# Scan first N chars of spec for framework mentions to avoid false positives in long docs
-_SPEC_SCAN_CHARS = 16_000
-
 # Word-boundary patterns for framework names (case-insensitive)
 _REACT_PATTERN = re.compile(
     r"\b(?:react(?:\s+(?:app|application|frontend|ui|framework))?|use\s+react)\b",
@@ -41,9 +38,10 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
 
     Checks for:
     - angular.json -> Angular
-    - package.json with @angular/core -> Angular
-    - package.json with react -> React
+    - package.json with @angular/core or @angular/common -> Angular
+    - package.json with react or react-dom -> React
     - package.json with vue -> Vue
+    - vue.config.js or vite.config.ts, plus a *.vue file -> Vue
 
     Returns "angular", "react", "vue", or None if not detected.
     """
@@ -94,11 +92,11 @@ def get_frontend_framework_from_spec(spec_content: str) -> Optional[str]:
 
     Returns "angular", "react", "vue", or None. Uses word-boundary and phrase
     checks to avoid false positives (e.g. "reaction" does not set React).
-    Scans the first _SPEC_SCAN_CHARS of the spec.
+    Scans the full spec content.
     """
     if not spec_content or not spec_content.strip():
         return None
-    text = spec_content[:_SPEC_SCAN_CHARS]
+    text = spec_content
 
     # Check for explicit framework mentions
     if _ANGULAR_PATTERN.search(text):

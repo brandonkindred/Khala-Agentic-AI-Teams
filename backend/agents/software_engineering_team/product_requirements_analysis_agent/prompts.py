@@ -546,7 +546,7 @@ GENERATE_QUESTION_RECOMMENDATIONS_PROMPT = build_json_output_prompt(
         "3. Briefly note alternatives considered and why they were not chosen.\n\n"
     ),
     context_blocks=(
-        format_context_block("Specification excerpt (for context)", "{spec_excerpt}")
+        format_context_block("Specification (for context)", "{spec_content}")
         + "Questions with options:\n{questions_json}\n\n"
         + "Respond with a JSON object only, no markdown:\n"
     ),

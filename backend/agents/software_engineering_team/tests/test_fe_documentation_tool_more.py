@@ -143,7 +143,7 @@ def test_fe_doc_problem_solve_llm_failure(monkeypatch):
     assert "0 of 1" in out.summary
 
 
-def test_fe_doc_relevant_code_for_issue_truncates():
+def test_fe_doc_relevant_code_for_issue_includes_large_file():
     from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
     from software_engineering_team.frontend_code_v2_team.tool_agents.documentation.agent import (
         MAX_RELEVANT_CODE_CHARS,
@@ -153,7 +153,9 @@ def test_fe_doc_relevant_code_for_issue_truncates():
     issue = ReviewIssue(file_path="a.ts")
     big = "x" * (MAX_RELEVANT_CODE_CHARS + 5000)
     out = _relevant_code_for_issue(issue, {"a.ts": big})
-    assert "[truncated]" in out
+    assert len(out) == MAX_RELEVANT_CODE_CHARS
+    assert "[truncated;" in out
+    assert big not in out
 
 
 def test_fe_doc_relevant_code_for_issue_fallback_multifile():
