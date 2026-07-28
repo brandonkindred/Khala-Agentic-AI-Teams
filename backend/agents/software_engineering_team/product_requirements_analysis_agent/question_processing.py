@@ -251,7 +251,7 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
     """Parse a single open question from LLM output.
 
     Preconditions: ``index`` is a non-negative int; ``q_data`` is the decoded item.
-    Postconditions: returns a valid :class:`OpenQuestion`; never raises.
+    Postconditions: returns a valid :class:`OpenQuestion`.
         - ``options``, ``section_impact``, and ``asked_via`` are coerced to lists
           (``None`` becomes ``[]``, scalars become single-element lists).
         - ``section_impact`` and ``asked_via`` elements are coerced to ``str``.
@@ -259,6 +259,12 @@ def parse_open_question(q_data: Any, index: int) -> OpenQuestion:
           defaulting to ``0.5`` when missing or malformed.
         - When ``q_data`` is a dict with options but no default, the
           highest-confidence option is marked default.
+        - The coercions above cover every known malformed-input shape from an
+          LLM response, but this function has no top-level try/except of its
+          own: it does not guarantee never raising in the face of an
+          unanticipated input, and every production caller (parse_spec_review_response,
+          consolidate_open_questions, review_question_answer_alignment,
+          run_context_constraints_discovery) wraps it accordingly.
     """
     if isinstance(q_data, dict):
         raw_options = _coerce_list(q_data.get("options", []))
