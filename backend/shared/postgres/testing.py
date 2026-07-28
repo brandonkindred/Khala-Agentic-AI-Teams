@@ -67,13 +67,15 @@ def truncate_team_tables(schema: TeamSchema) -> int:
 
 
 def drop_team_tables(schema: TeamSchema) -> int:
-    """Drop every table named in ``schema.table_names``.
+    """Drop every table named in ``schema.table_names`` if it exists.
 
     Unlike :func:`truncate_team_tables` (which empties rows but leaves the
     table present), this removes the tables themselves — for tests that need
     to simulate a genuinely fresh/empty database (e.g. proving a schema gets
-    (re-)created before some other code path reads from it). Returns the
-    number of tables dropped.
+    (re-)created before some other code path reads from it). Uses
+    ``DROP TABLE IF EXISTS``, so a missing table is not an error. Returns
+    the number of tables named in ``schema.table_names`` (each dropped if it
+    exists), not a count of tables that were actually present.
 
     Raises ``RuntimeError`` when Postgres is disabled (matches
     ``ensure_team_schema``'s policy of failing loudly on misuse).
@@ -163,8 +165,24 @@ def _real_postgres_schema_body(schema: TeamSchema, *, worker_id: str = "master")
     truncate_team_tables(schema)
 
 
+def _xdist_worker_id(request: pytest.FixtureRequest) -> str:
+    """Return the pytest-xdist worker id, or ``"master"`` when xdist is inactive.
+
+    Preconditions:
+        ``request`` is a live pytest ``FixtureRequest`` (has ``.config``).
+    Postconditions:
+        Returns ``request.config.workerinput["workerid"]`` when running under
+        an xdist worker; otherwise ``"master"`` (xdist not installed, plugin
+        disabled, or plain pytest with no ``-n``).
+    """
+    workerinput = getattr(request.config, "workerinput", None)
+    if workerinput is None:
+        return "master"
+    return workerinput["workerid"]
+
+
 def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
-    """Build a pytest fixture that provisions ``schema`` against a live Postgres.
+    """Build an autouse pytest fixture that provisions ``schema`` against live Postgres.
 
     Registers ``schema`` once per fixture instance (per ``scope``), yields, then
     truncates its tables on teardown via :func:`truncate_team_tables` when
@@ -180,12 +198,20 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     finishes isn't something this fixture factory can do without a caller
     also wiring up a ``conftest.py``-level hook.
 
-    ``scope`` is passed straight through to ``pytest.fixture(scope=...)`` —
+    The returned fixture is always ``autouse=True``: assigning
+    ``_my_schema = real_postgres_schema(SCHEMA)`` is enough for every test in
+    the fixture's scope to get register/truncate; tests do not request it by
+    name. ``scope`` is passed straight through to ``pytest.fixture(scope=...)`` —
     valid values are ``"session"``, ``"package"``, ``"module"`` (the default),
     ``"class"``, or ``"function"``; a wider scope amortizes the DDL/register
     cost across more tests at the price of more state shared between them.
     Raises ``ValueError`` immediately on any other value, rather than letting
     pytest's own less obvious error surface later at collection time.
+
+    Worker identity is read from ``request.config.workerinput`` (with a
+    ``"master"`` fallback) rather than depending on xdist's ``worker_id``
+    fixture, so plain pytest runs work even when pytest-xdist is not installed
+    or its plugin is disabled.
 
     A drop-in replacement for the per-team hand-rolled version of this pattern
     (see ``branding_team/tests/test_store_real_postgres.py``'s ``_branding_schema``
@@ -200,16 +226,8 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
             f"real_postgres_schema: invalid scope {scope!r}; must be one of {sorted(_PYTEST_FIXTURE_SCOPES)}"
         )
 
-    def _fixture(worker_id):
-        # No default here: pytest's fixture-argument discovery skips injecting a
-        # real fixture value for parameters that carry a default, so a defaulted
-        # `worker_id="master"` would silently never receive xdist's actual
-        # per-worker id and every worker would (wrongly) take the "master"
-        # teardown-truncate path — reintroducing the exact cross-worker race
-        # this fixture exists to avoid. Verified via a standalone repro: a
-        # defaulted parameter always sees "master" under `-n`, a required one
-        # sees "gw0"/"gw1"/etc.
-        yield from _real_postgres_schema_body(schema, worker_id=worker_id)
+    def _fixture(request: pytest.FixtureRequest):
+        yield from _real_postgres_schema_body(schema, worker_id=_xdist_worker_id(request))
 
     _fixture.__name__ = f"real_postgres_schema_{schema.team}"
     return pytest.fixture(scope=scope, autouse=True)(_fixture)

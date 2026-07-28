@@ -727,13 +727,13 @@ def test_truncate_team_tables_issues_truncate(monkeypatch):
     from shared.postgres import testing as testing_mod
 
     executed: list[str] = []
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = False
+    cursor.execute.side_effect = lambda sql: executed.append(sql)
 
     @contextmanager
     def fake_get_conn(database=None):
-        cursor = MagicMock()
-        cursor.__enter__ = lambda self: cursor
-        cursor.__exit__ = lambda self, *a: None
-        cursor.execute.side_effect = lambda sql: executed.append(sql)
         conn = MagicMock()
         conn.cursor.return_value = cursor
         yield conn
@@ -751,6 +751,7 @@ def test_truncate_team_tables_issues_truncate(monkeypatch):
     assert '"demo_a"' in executed[0]
     assert '"demo_b"' in executed[0]
     assert "RESTART IDENTITY CASCADE" in executed[0]
+    cursor.__enter__.assert_called_once()
 
 
 def test_truncate_team_tables_raises_when_disabled(monkeypatch):
@@ -860,23 +861,30 @@ def test_real_postgres_schema_rejects_invalid_scope():
         real_postgres_schema(schema, scope="moduel")
 
 
-def test_real_postgres_schema_fixture_worker_id_param_has_no_default():
-    """Regression guard: pytest's fixture-argument discovery skips injecting a real
-    fixture value for parameters that carry a default (verified via a standalone
-    ``-n 2`` repro: a defaulted ``worker_id="master"`` always resolves to the literal
-    default, never xdist's actual per-worker id). If ``worker_id`` ever gains a
-    default again, every xdist worker silently takes the "master" teardown-truncate
-    path — reintroducing the exact cross-worker race this fixture exists to avoid."""
+def test_real_postgres_schema_fixture_reads_worker_id_from_request_config():
+    """Worker id comes from ``request.config.workerinput``, not xdist's ``worker_id``
+    fixture — so plain pytest (xdist absent/disabled) still resolves to ``"master"``
+    instead of failing fixture setup looking up an undeclared ``worker_id``."""
     import inspect
 
-    from shared.postgres.testing import real_postgres_schema
+    from shared.postgres.testing import _xdist_worker_id, real_postgres_schema
 
     schema = TeamSchema(team="demo", table_names=["demo_a"])
     fixture = real_postgres_schema(schema)
     inner = fixture.__wrapped__ if hasattr(fixture, "__wrapped__") else fixture
     params = inspect.signature(inner).parameters
-    assert "worker_id" in params
-    assert params["worker_id"].default is inspect.Parameter.empty
+    assert "request" in params
+    assert "worker_id" not in params
+
+    class _Cfg:
+        pass
+
+    request = MagicMock()
+    request.config = _Cfg()  # no workerinput → master
+    assert _xdist_worker_id(request) == "master"
+
+    request.config.workerinput = {"workerid": "gw1"}
+    assert _xdist_worker_id(request) == "gw1"
 
 
 # ---------------------------------------------------------------------------
@@ -897,13 +905,13 @@ def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
     from shared.postgres import testing as testing_mod
 
     executed: list[str] = []
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = False
+    cursor.execute.side_effect = lambda sql: executed.append(sql)
 
     @contextmanager
     def fake_get_conn(database=None):
-        cursor = MagicMock()
-        cursor.__enter__ = lambda self: cursor
-        cursor.__exit__ = lambda self, *a: None
-        cursor.execute.side_effect = lambda sql: executed.append(sql)
         conn = MagicMock()
         conn.cursor.return_value = cursor
         yield conn
@@ -916,6 +924,7 @@ def test_drop_team_tables_issues_one_drop_per_table(monkeypatch):
     assert len(executed) == 2  # one DROP per table, not one combined statement
     assert 'DROP TABLE IF EXISTS "demo_a" CASCADE' == executed[0]
     assert 'DROP TABLE IF EXISTS "demo_b" CASCADE' == executed[1]
+    cursor.__enter__.assert_called_once()
 
 
 def test_drop_team_tables_raises_when_disabled(monkeypatch):

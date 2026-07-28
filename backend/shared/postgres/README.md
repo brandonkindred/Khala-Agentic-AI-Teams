@@ -186,11 +186,13 @@ no fragile regex parsing of the DDL.
 ## Real-Postgres pytest fixture
 
 `shared.postgres.testing.real_postgres_schema(schema, *, scope="module")`
-builds a ready-to-use pytest fixture for a team's `TeamSchema`: it skips the
-test when `POSTGRES_HOST` is unset, registers the schema, yields, then
-truncates the schema's tables on teardown **when run without pytest-xdist**.
-It wraps the same `register_team_schemas` / `truncate_team_tables` calls
-every hand-rolled real-Postgres test fixture in this repo already makes (see
+builds a ready-to-use **autouse** pytest fixture for a team's `TeamSchema`:
+it skips the test when `POSTGRES_HOST` is unset, registers the schema, yields,
+then truncates the schema's tables on teardown **when run without pytest-xdist**.
+The returned fixture always has `autouse=True`, so assigning it is enough —
+tests in scope do not need to request it by name. It wraps the same
+`register_team_schemas` / `truncate_team_tables` calls every hand-rolled
+real-Postgres test fixture in this repo already makes (see
 `branding_team/tests/test_store_real_postgres.py`'s `_branding_schema`), so a
 team can opt a test module into real Postgres with one line instead of
 re-deriving the skip/register/truncate boilerplate:
@@ -201,7 +203,7 @@ from shared.postgres.testing import real_postgres_schema
 
 pytestmark = pytest.mark.integration
 
-_branding_schema = real_postgres_schema(BRANDING_SCHEMA)  # module-scoped, autouse
+_branding_schema = real_postgres_schema(BRANDING_SCHEMA)  # module-scoped, always autouse
 ```
 
 Like every other real-Postgres test in this repo, it assumes Postgres is
