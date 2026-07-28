@@ -320,11 +320,8 @@ def test_run_code_review_phase_impl_runs_code_review_step_standalone():
     from pathlib import Path
 
     from software_engineering_team.backend_code_v2_team.phases._profile import REVIEW_CONFIG
+    from software_engineering_team.shared.llm_review import LlmReviewOutput
     from software_engineering_team.shared.phases.review import run_code_review_phase_impl
-
-    class _CrOut:
-        issues: List[ReviewIssue] = []
-        raw_issue_count = 0
 
     messages: List[str] = []
 
@@ -335,7 +332,7 @@ def test_run_code_review_phase_impl_runs_code_review_step_standalone():
         repo_path=Path("/tmp/repo"),
         files={"x.py": "code"},
         detail_callback=messages.append,
-        llm_review_fn=lambda **_kw: _CrOut(),
+        llm_review_fn=lambda **_kw: LlmReviewOutput(issues=[], raw_issue_count=0),
         phase_review_result_cls=_PhaseResult,
         config=REVIEW_CONFIG,
     )
@@ -354,17 +351,14 @@ def test_run_code_review_phase_impl_fails_on_code_review_issue():
     from pathlib import Path
 
     from software_engineering_team.backend_code_v2_team.phases._profile import REVIEW_CONFIG
+    from software_engineering_team.shared.llm_review import LlmReviewOutput
     from software_engineering_team.shared.phases.review import run_code_review_phase_impl
 
-    class _CrOut:
-        issues: List[ReviewIssue] = [
-            ReviewIssue(
-                source="code_review",
-                severity="critical",
-                description="SQL injection risk",
-            )
-        ]
-        raw_issue_count = 1
+    cr_issue = ReviewIssue(
+        source="code_review",
+        severity="critical",
+        description="SQL injection risk",
+    )
 
     result = run_code_review_phase_impl(
         llm=object(),
@@ -372,7 +366,7 @@ def test_run_code_review_phase_impl_fails_on_code_review_issue():
         microtask=_microtask(),
         repo_path=Path("/tmp/repo"),
         files={"x.py": "code"},
-        llm_review_fn=lambda **_kw: _CrOut(),
+        llm_review_fn=lambda **_kw: LlmReviewOutput(issues=[cr_issue], raw_issue_count=1),
         phase_review_result_cls=_PhaseResult,
         config=REVIEW_CONFIG,
     )
