@@ -569,9 +569,8 @@ class DesignAgent:
             return build_json_correction_prompt(user_prompt, exc)
 
         def _on_validation_error(_base_prompt: str, exc: Exception) -> str:
-            assert isinstance(exc, StrategySpecParseError), (
-                f"expected StrategySpecParseError, got {type(exc)}"
-            )
+            if not isinstance(exc, StrategySpecParseError):
+                raise TypeError(f"expected StrategySpecParseError, got {type(exc)}") from exc
             return _build_correction_prompt(user_prompt, exc)
 
         def _validate(parsed: Dict[str, Any]) -> Dict[str, Any]:

@@ -336,6 +336,16 @@ def test_dedup_issues_removes_repeats():
     assert sh_review_cycle._dedup_issues([c], seen) == []
 
 
+def test_dedup_issues_tolerates_shapeless_elements():
+    """Elements missing file_path/description dedup on an empty-string key instead of raising."""
+    seen: set = set()
+    shapeless_a = object()
+    shapeless_b = object()
+    result = sh_review_cycle._dedup_issues([shapeless_a, shapeless_b], seen)
+    assert result == [shapeless_a]  # shapeless_b dedups against the ("", "") key
+    assert seen == {("", "")}
+
+
 def test_run_execution_impl_filters_and_handles_failure():
     """Run execution impl filters and handles failure."""
 
@@ -874,6 +884,39 @@ def test_run_batch_coding_fixes_impl_tracks_unresolved_by_index_not_identity():
     assert not any(u is issue3 for u in result.unresolved_issues)
 
 
+def test_run_batch_coding_fixes_impl_detects_duplicate_addressed_indices():
+    """A same-length ``issues_addressed`` with a duplicate index must not report resolved.
+
+    ``actionable`` has 2 issues; ``issues_addressed`` also has 2 entries but both point
+    at issue_index 1, so issue 2 was never actually addressed. Length alone must not be
+    used as a shortcut to skip validation -- ``resolved`` must derive from the real set
+    of valid addressed indices.
+    """
+    parsed = {
+        "files": {"a.py": "fixed"},
+        "issues_addressed": [{"issue_index": 1}, {"issue_index": 1}],
+        "summary": "did it",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue(), _issue(description="bug2")],
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("ignored — parse stub returns the parsed dict"),
+    )
+    assert result.resolved is False
+    assert len(result.unresolved_issues) == 1
+
+
 def test_fix_issues_one_at_a_time_impl_resolves_then_reports_unresolved():
     """First issue resolves via a file fix; second never resolves → unresolved."""
     responses = iter(
@@ -907,6 +950,47 @@ def test_fix_issues_one_at_a_time_impl_resolves_then_reports_unresolved():
     assert merged["a.py"] == "fixed"
     assert len(fixes) == 1 and fixes[0]["fix"] == "s"
     assert len(unresolved) == 1
+
+
+def test_fix_issues_one_at_a_time_impl_survives_parse_failure(caplog):
+    """A parser exception on one attempt is logged and the loop retries, not aborts."""
+    responses = iter(["raw-1", "raw-2"])
+
+    def _parse_single(_raw):
+        parsed = next(parse_results)
+        if parsed is _RAISE:
+            raise ValueError("malformed LLM output")
+        return parsed
+
+    _RAISE = object()
+    parse_results = iter(
+        [
+            _RAISE,  # attempt 1: parser raises
+            {"files": {"a.py": "fixed"}, "resolved": True, "summary": "s", "root_cause": "rc"},
+        ]
+    )
+
+    runner = LlmRunner(
+        agent_factory=lambda *, model=None: lambda _p: next(responses),
+        resolve_model=lambda _llm: None,
+    )
+    with caplog.at_level("WARNING"):
+        merged, fixes, unresolved = sh_ps._fix_issues_one_at_a_time_impl(
+            llm=object(),
+            actionable=[_issue()],
+            current_files={"a.py": "orig"},
+            lang_conv="PY",
+            task_id="t1",
+            single_issue_prompt="{source}{severity}{description}{file_path}{recommendation}{current_code}",
+            parse_single=_parse_single,
+            has_language_conventions=False,
+            runner=runner,
+        )
+    # The parse failure on attempt 1 doesn't abort the phase -- attempt 2 still runs and resolves.
+    assert merged["a.py"] == "fixed"
+    assert len(fixes) == 1 and fixes[0]["fix"] == "s"
+    assert not unresolved
+    assert any("parsing/validation failed" in r.message for r in caplog.records)
 
 
 # --- prompt byte-identity regression lock --------------------------------

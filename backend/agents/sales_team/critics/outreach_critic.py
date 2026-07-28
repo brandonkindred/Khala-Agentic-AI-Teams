@@ -32,10 +32,9 @@ from ..models import (
     OutreachSequence,
     ProspectDossier,
 )
+from ..prompts._dossier_render import render_dossier_json_for_prompt
 
 logger = logging.getLogger(__name__)
-
-_DOSSIER_CHAR_CAP = 12_000
 
 
 _OUTREACH_CRITIC_SYSTEM_PROMPT = """\
@@ -206,9 +205,7 @@ class OutreachCriticAgent:
     ) -> str:
         sequence_json = json.dumps(sequence.model_dump(mode="json"), indent=2)
         if dossier is not None:
-            dossier_json = json.dumps(dossier.model_dump(mode="json"), indent=2)
-            if len(dossier_json) > _DOSSIER_CHAR_CAP:
-                dossier_json = dossier_json[:_DOSSIER_CHAR_CAP] + "\n…(dossier truncated)"
+            dossier_json = render_dossier_json_for_prompt(dossier)
         else:
             dossier_json = "(no dossier supplied)"
         icp_json = json.dumps(icp.model_dump(mode="json"), indent=2)

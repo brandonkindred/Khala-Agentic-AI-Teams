@@ -27,10 +27,9 @@ from ..models import (
     QualificationScore,
     SalesProposal,
 )
+from ..prompts._dossier_render import render_dossier_json_for_prompt
 
 logger = logging.getLogger(__name__)
-
-_DOSSIER_CHAR_CAP = 12_000
 
 
 _PROPOSAL_CRITIC_ROLE_INTRO = """\
@@ -181,18 +180,15 @@ class ProposalCriticAgent:
         Preconditions:
             * ``proposal`` is a fully-populated :class:`SalesProposal`.
         Postconditions:
-            * Returns a prompt embedding ``proposal`` (and ``qualification``, when
-              supplied) as JSON in full, and ``dossier`` as JSON truncated to
-              ``_DOSSIER_CHAR_CAP`` characters (with a truncation marker appended)
-              to keep the prompt within budget. ``dossier``/``qualification`` of
+            * Returns a prompt embedding ``proposal``, ``dossier`` (via
+              :func:`render_dossier_json_for_prompt`), and ``qualification`` as
+              JSON in full, untruncated. ``dossier``/``qualification`` of
               ``None`` render as an explicit placeholder string rather than being
               omitted, so the model never mistakes "not supplied" for "empty".
         """
         proposal_json = json.dumps(proposal.model_dump(mode="json"), indent=2)
         if dossier is not None:
-            dossier_json = json.dumps(dossier.model_dump(mode="json"), indent=2)
-            if len(dossier_json) > _DOSSIER_CHAR_CAP:
-                dossier_json = dossier_json[:_DOSSIER_CHAR_CAP] + "\n…(dossier truncated)"
+            dossier_json = render_dossier_json_for_prompt(dossier)
         else:
             dossier_json = "(no dossier supplied)"
         if qualification is not None:

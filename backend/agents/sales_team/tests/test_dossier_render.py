@@ -11,11 +11,14 @@ outreach prompt embeds. It must be:
 
 from __future__ import annotations
 
+import json
+
 from sales_team.models import ProspectDossier, PublicWorkItem
 from sales_team.prompts._dossier_render import (
     _DOSSIER_LIST_TOP_K,
     _truncate,
     render_dossier_for_prompt,
+    render_dossier_json_for_prompt,
 )
 
 # ---------------------------------------------------------------------------
@@ -238,3 +241,37 @@ def test_render_is_deterministic_across_calls() -> None:
     a = render_dossier_for_prompt(dossier)
     b = render_dossier_for_prompt(dossier)
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# render_dossier_json_for_prompt
+# ---------------------------------------------------------------------------
+
+
+def test_json_render_returns_full_json() -> None:
+    dossier = ProspectDossier(
+        prospect_id="prs_j",
+        full_name="Jane",
+        current_title="VP",
+        current_company="Acme",
+    )
+    out = render_dossier_json_for_prompt(dossier)
+    assert "dossier truncated" not in out
+    assert json.loads(out)["full_name"] == "Jane"
+
+
+def test_json_render_never_truncates_large_dossiers() -> None:
+    big_text = "lorem ipsum " * 5000  # ~60k chars
+    dossier = ProspectDossier(
+        prospect_id="prs_big",
+        full_name="Jane",
+        current_title="VP",
+        current_company="Acme",
+        executive_summary=big_text,
+        trigger_events=[f"event {i}: {'x' * 500}" for i in range(30)],
+    )
+    out = render_dossier_json_for_prompt(dossier)
+    assert "dossier truncated" not in out
+    parsed = json.loads(out)
+    assert parsed["executive_summary"] == big_text
+    assert len(parsed["trigger_events"]) == 30

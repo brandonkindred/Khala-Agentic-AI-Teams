@@ -1131,7 +1131,10 @@ def _partition_review_issues(
           reviews, which never tag, are unaffected).
         - ``proposals`` is :func:`_detect_duplicate_proposals` applied to
           ``proposal_from_findings`` over each :func:`group_similar_findings`
-          group of ``preexisting_issues``.
+          group of ``preexisting_issues``, with any proposal matched to an
+          already-open GitHub issue (``matched_existing: True``) then dropped —
+          it is already tracked, so ``proposals`` only ever carries genuinely
+          new candidates for a human to consider.
         - When ``pr_issues`` is non-empty, it is first partitioned against
           :func:`_fetch_existing_comments` via
           :func:`partition_issues_by_existing_comments`, producing the
@@ -1176,6 +1179,8 @@ def _partition_review_issues(
     finding_groups = group_similar_findings(preexisting_issues)
     proposals = [proposal_from_findings(g, idx) for idx, g in enumerate(finding_groups)]
     proposals = _detect_duplicate_proposals(proposals, client, owner, repo, pr_number)
+    # Already tracked by an existing open GitHub issue -- nothing new to report.
+    proposals = [p for p in proposals if not p.get("matched_existing")]
 
     # Recognize findings that duplicate a comment already on the PR (from a
     # prior review run, or a human), so an evolving PR does not accumulate
@@ -1418,12 +1423,11 @@ def _finalize_review_outcome(
         "addressed_issues_dropped": len(partition.addressed_issues),
         # Pre-existing bugs the reviewer flagged in unchanged code, offered
         # to a human on the Code Review page as GitHub-issue candidates.
-        # Not posted on this PR. Each carries a stable ``id``. ``issue_url``/
-        # ``issue_number`` start unset, UNLESS annotate_duplicate_proposals
-        # already matched the finding to an existing open issue -- in which
-        # case they're pre-filled with that issue's identity and
-        # ``matched_existing`` is True, so the proposal is never offered as
-        # a fresh "create issue" candidate.
+        # Not posted on this PR. Each carries a stable ``id`` and unset
+        # ``issue_url``/``issue_number``. A finding annotate_duplicate_proposals
+        # matched to an existing open issue is already tracked, so
+        # _partition_review_issues drops it before it ever reaches here --
+        # every entry below is a genuinely new candidate.
         "pending_issue_proposals": partition.proposals,
     }
     if posting.comments_failed:
@@ -1552,13 +1556,14 @@ def _run_pr_review_body(
         # The hook runs in a daemon thread; if we let an exception escape, the thread
         # dies and the job is stuck in "running" forever. Mark it failed (mirroring
         # post_run) and post a best-effort, token-scrubbed PR comment.
-        logger.exception("PR review hook failed: %s", review_exc)
+        safe_err = scrub_token_from_text(str(review_exc))
+        logger.exception("PR review hook failed: %s", safe_err)
         try:
             with _main.GitHubClient(token=token) as client:
                 # Same graceful-degradation contract as the reviewer paths: record
                 # the detail in the store, keep the raw exception off the PR.
                 _main._record_review_outage(
-                    client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}"
+                    client, owner, repo, pr_number, job_id, f"code review failed: {safe_err}"
                 )
         except Exception:  # noqa: BLE001 - the status update below is the last resort
             # Safety net: ``_record_review_outage`` above may already have marked
@@ -1572,7 +1577,6 @@ def _run_pr_review_body(
             # last resort) cannot escape and kill the daemon thread — the outer
             # ``_run_pr_review`` guard would catch it, but keeping the body
             # self-consistent means it never depends on that.
-            safe_err = scrub_token_from_text(str(review_exc))
             try:
                 _finalize_review(job_id, JobStatus.FAILED, phase="completed", error=safe_err)
             except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do

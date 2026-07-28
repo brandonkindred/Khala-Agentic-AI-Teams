@@ -1108,6 +1108,36 @@ class TestReviewEndpoint:
         # And it preserved the cause in the job store for diagnosis.
         assert "body blew up past its own handler" in (job.get("error") or "")
 
+    def test_body_failure_scrubs_token_from_log_and_outage(
+        self, review_app, monkeypatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Regression for the token-leak bug: when the ``_run_pr_review_body``
+        try block raises with a GitHub token embedded in the exception text
+        (e.g. leaked into git stderr), the scrubbed form — not the raw
+        exception — must be what's logged and what reaches
+        ``_record_review_outage``, matching the "best-effort, token-scrubbed"
+        contract the surrounding comment promises for the whole except block."""
+        import software_engineering_team.api.pr_review as prm
+
+        secret_url = "https://x:ghp_LEAKEDTOKEN@github.com/o/r.git"
+
+        def _boom(*_a: Any, **_kw: Any) -> None:
+            raise RuntimeError(f"clone failed: {secret_url}")
+
+        monkeypatch.setattr(prm, "_finalize_review_outcome", _boom)
+        with caplog.at_level("ERROR"):
+            resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        # The formatted log message (the %s arg we control) must be scrubbed; the
+        # attached traceback still shows the raw exception (inherent to
+        # ``logger.exception``/``exc_info`` and out of scope for this fix — the bug
+        # is about the message text passed through, not Python's traceback capture).
+        [record] = [r for r in caplog.records if r.getMessage().startswith("PR review hook failed")]
+        assert "ghp_LEAKEDTOKEN" not in record.getMessage()
+        assert "ghp_LEAKEDTOKEN" not in (job.get("error") or "")
+
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         resp = review_app["client"].post(
@@ -3188,7 +3218,7 @@ class TestParallelReviewReads:
 
         class _C:
             def get_pull_request(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return PullRequestDetail(
                     number=n,
                     html_url=f"https://example/pull/{n}",
@@ -3205,14 +3235,17 @@ class TestParallelReviewReads:
                 )
 
             def get_pull_request_files(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
 
             def get_authenticated_login(self):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return "khala-bot"
 
-        pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        try:
+            pr, files, reviewer_login = _fetch_pr_metadata(_C(), "o", "r", 7)
+        except threading.BrokenBarrierError:
+            pytest.fail("fetches did not run concurrently: barrier timed out waiting for 3 parties")
         assert pr.number == 7
         assert [f.filename for f in files] == ["a.py"]
         assert reviewer_login == "khala-bot"
@@ -3348,18 +3381,21 @@ class TestParallelReviewReads:
 
         class _C:
             def list_review_comments(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return [review_comment]
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return {1}
 
             def list_issue_comments(self, o, r, n):
-                barrier.wait()
+                barrier.wait(timeout=5)
                 return []
 
-        out = _fetch_existing_comments(_C(), "o", "r", 7)
+        try:
+            out = _fetch_existing_comments(_C(), "o", "r", 7)
+        except threading.BrokenBarrierError:
+            pytest.fail("fetches did not run concurrently: barrier timed out waiting for 3 parties")
         assert barrier.n_waiting == 0  # confirms the fetches actually ran concurrently
         assert len(out) == 1
         assert out[0].path == "a.py" and out[0].line == 2
@@ -3395,7 +3431,13 @@ class TestParallelReviewReads:
 
         assert _fetch_existing_comments(_C(), "o", "r", 7) == []
 
-    def test_fetch_existing_comments_non_api_error_degrades_whole_result(self, review_app) -> None:
+    @pytest.mark.parametrize(
+        "failing_method",
+        ["list_review_comments", "get_resolved_review_thread_comment_ids", "list_issue_comments"],
+    )
+    def test_fetch_existing_comments_non_api_error_degrades_whole_result(
+        self, review_app, failing_method
+    ) -> None:
         """A non-GitHubAPIError failure (e.g. a bug, an unexpected error) from any
         of the three calls must ALSO degrade the whole result to [] — the
         docstring promises "Any failure ... degrades the WHOLE result", not
@@ -3404,12 +3446,18 @@ class TestParallelReviewReads:
 
         class _C:
             def list_review_comments(self, o, r, n):
-                raise RuntimeError("unexpected")
+                if failing_method == "list_review_comments":
+                    raise RuntimeError("unexpected")
+                return []
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
+                if failing_method == "get_resolved_review_thread_comment_ids":
+                    raise RuntimeError("unexpected")
                 return set()
 
             def list_issue_comments(self, o, r, n):
+                if failing_method == "list_issue_comments":
+                    raise RuntimeError("unexpected")
                 return []
 
         assert _fetch_existing_comments(_C(), "o", "r", 7) == []
@@ -3764,10 +3812,10 @@ class TestPreExistingFindings:
 
 
 class TestDuplicateProposalDetection:
-    """A pre-existing finding matched to an already-open GitHub issue is offered
-    pre-linked to that issue, not as a fresh "create issue" candidate."""
+    """A pre-existing finding matched to an already-open GitHub issue is already
+    tracked, so it is dropped entirely rather than offered to the user."""
 
-    def test_matching_open_issue_marks_proposal_matched_and_prelinked(self, review_app) -> None:
+    def test_matching_open_issue_is_dropped_from_proposals(self, review_app) -> None:
         gh = review_app["github"]["client"]
         gh.open_issues = [
             Issue(
@@ -3791,11 +3839,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
-        proposals = job["review_summary"]["pending_issue_proposals"]
-        assert len(proposals) == 1
-        assert proposals[0]["matched_existing"] is True
-        assert proposals[0]["issue_number"] == 42
-        assert proposals[0]["issue_url"] == "https://example/issues/42"
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
     def test_unrelated_open_issue_does_not_mark_proposal_matched(self, review_app) -> None:
         gh = review_app["github"]["client"]
@@ -3896,8 +3940,9 @@ class TestDuplicateProposalDetection:
         assert proposal["issue_url"] is None
 
     def test_create_review_issues_never_refiles_a_matched_proposal(self, review_app) -> None:
-        """A proposal pre-linked to an existing issue can never be filed as a new,
-        duplicate GitHub issue via the create-issues endpoint."""
+        """A matched finding is dropped before it ever becomes a filable candidate,
+        so requesting its (nonexistent) proposal id via the create-issues endpoint
+        is a no-op rather than filing a new, duplicate GitHub issue."""
         gh = review_app["github"]["client"]
         gh.open_issues = [
             Issue(
@@ -3921,6 +3966,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
+        assert job["review_summary"]["pending_issue_proposals"] == []
         resp = review_app["client"].post(
             f"/reviews/{job['job_id']}/issues", json={"proposal_ids": ["p0"]}
         )
@@ -3928,7 +3974,7 @@ class TestDuplicateProposalDetection:
         data = resp.json()
         assert data["created"] == []
         assert gh.created_issues == []
-        assert data["proposals"][0]["issue_url"] == "https://example/issues/42"
+        assert data["proposals"] == []
 
     def test_duplicate_check_only_considers_open_issues_up_to_the_cap(
         self, review_app, monkeypatch: pytest.MonkeyPatch
@@ -3977,7 +4023,8 @@ class TestDuplicateProposalDetection:
     def test_duplicate_check_env_override_widens_the_cap(
         self, review_app, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Raising the cap via env var lets a later-listed matching issue be found."""
+        """Raising the cap via env var lets a later-listed matching issue be found,
+        so the finding is dropped as already-tracked instead of offered."""
         monkeypatch.setenv("PR_REVIEW_DUPLICATE_MAX_OPEN_ISSUES", "3")
         gh = review_app["github"]["client"]
         gh.open_issues = [
@@ -4012,9 +4059,7 @@ class TestDuplicateProposalDetection:
                 )
             ],
         )
-        proposal = job["review_summary"]["pending_issue_proposals"][0]
-        assert proposal["matched_existing"] is True
-        assert proposal["issue_url"] == "https://example/issues/99"
+        assert job["review_summary"]["pending_issue_proposals"] == []
 
 
 class TestDetectDuplicateProposalsUnit:
