@@ -34,6 +34,22 @@ logger = logging.getLogger(__name__)
 MAX_ISSUES = 10
 MAX_GAPS = 10
 
+ORGANIZATIONAL_PHRASES = [
+    "decision process",
+    "approval process",
+    "who makes",
+    "final decision",
+    "consensus",
+    "product manager",
+    "stakeholder approval",
+    "organizational structure",
+    "who approves",
+    "sign-off",
+    "sign off",
+    "hierarchy",
+    "reporting",
+]
+
 
 def filter_duplicate_questions(
     new_questions: List[OpenQuestion],
@@ -68,8 +84,6 @@ def filter_duplicate_questions(
     def _stem(w: str) -> str:
         """Normalize word for matching (e.g. tokens->token, stored->store)."""
         w = w.strip()
-        if len(w) <= 3:
-            return w
         if w.endswith("ed") and len(w) > 4:
             return w[:-2]  # stored -> store
         if w.endswith("s") and not w.endswith("ss") and len(w) > 4:
@@ -99,7 +113,7 @@ def filter_duplicate_questions(
             logger.info(
                 "Filtering duplicate question (%.0f%% match): %s",
                 match_ratio * 100,
-                q.question_text[:60],
+                q.question_text,
             )
             duplicates.append(q)
             continue
@@ -124,21 +138,6 @@ def filter_organizational_questions(questions: List[OpenQuestion]) -> List[OpenQ
     Preconditions: ``questions`` is a list of :class:`OpenQuestion`.
     Postconditions: returns the sublist that is not organizational, order preserved.
     """
-    ORGANIZATIONAL_PHRASES = [
-        "decision process",
-        "approval process",
-        "who makes",
-        "final decision",
-        "consensus",
-        "product manager",
-        "stakeholder approval",
-        "organizational structure",
-        "who approves",
-        "sign-off",
-        "sign off",
-        "hierarchy",
-        "reporting",
-    ]
     kept: List[OpenQuestion] = []
     for q in questions:
         text_norm = (q.question_text or "").lower().strip()
@@ -399,8 +398,8 @@ def dedupe_questions_by_answer_similarity(
                     logger.info(
                         "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
                         q.id,
-                        opt_label[:50],
-                        existing[:50],
+                        opt_label,
+                        existing,
                     )
                     already_covered = True
                     break
@@ -639,9 +638,9 @@ def add_recommendations(
         for q in open_questions
     ]
     questions_json = json.dumps(questions_payload, indent=2)
-    spec_excerpt = spec_content or ""
+    spec_content_str = spec_content or ""
     prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
-        spec_excerpt=spec_excerpt,
+        spec_content=spec_content_str,
         questions_json=questions_json,
     )
     recs = _fetch_llm_list(
@@ -661,8 +660,8 @@ def add_recommendations(
         }
         result = []
         for q in open_questions:
-            rec = rec_by_id.get(q.id, "")
-            result.append(q.model_copy(update={"recommendation": rec}))
+            rec = rec_by_id.get(q.id)
+            result.append(q.model_copy(update={"recommendation": rec}) if rec else q)
         return result
     except Exception as e:
         logger.warning(

@@ -334,10 +334,13 @@ class CodeReviewIssue(BaseModel):
         default=False,
         description="True when this issue is a bug in code the change under review did NOT add or "
         "modify — a pre-existing defect in unrelated, unchanged code — rather than a defect the "
-        "change introduced. Only set by callers that explicitly ask the reviewer to surface "
-        "pre-existing findings (the PR-review whole-file path); every other gate leaves it False. "
-        "Pre-existing findings are never posted as PR review comments — they are collected and "
-        "offered to a human as GitHub-issue proposals. Default False.",
+        "change introduced. Documented in every profile's output schema, but only the PR-review "
+        "flow (api/pr_review.py) actually acts on it: a finding tagged true is routed to a "
+        "GitHub-issue proposal for a human to review instead of being posted as a PR comment, "
+        "unless the finding's own file/line proves it sits on a line this PR actually added (that "
+        "override, plus a finding naming a file outside this PR's diff entirely, are handled "
+        "deterministically — see api/pr_review.py::_partition_review_issues for why a missing "
+        "file/module is deliberately NOT treated as pre-existing). Default False.",
     )
 
 
