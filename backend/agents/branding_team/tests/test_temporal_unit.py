@@ -58,7 +58,12 @@ def test_task_queue_env_override(monkeypatch) -> None:
 
 def test_phase_sequence_matches_brand_phase_values() -> None:
     """PHASE_SEQUENCE must be the five runnable BrandPhase values, in order —
-    the workflow indexes it and the finalize activity maps it to ``stop_idx``."""
+    the workflow indexes it and the finalize activity maps it to ``stop_idx``.
+
+    This is the Temporal-side half of the ``PHASE_ORDER`` drift guard; its
+    SYSTEM_PROMPT-side sibling is
+    ``test_prompts.py::test_system_prompt_sections_follow_reordered_phase_order``.
+    """
     from branding_team.temporal.constants import PHASE_SEQUENCE
 
     assert PHASE_SEQUENCE == [
@@ -73,7 +78,11 @@ def test_phase_sequence_matches_brand_phase_values() -> None:
 def test_phase_sequence_derives_from_canonical_phase_order() -> None:
     """PHASE_SEQUENCE (temporal, value strings) must not drift from the canonical
     PHASE_ORDER (graphs/shared, enums). Asserting equality here catches a reorder
-    or insertion in one that is not mirrored in the other."""
+    or insertion in one that is not mirrored in the other.
+
+    See ``test_prompts.py::test_system_prompt_sections_follow_reordered_phase_order``
+    for the equivalent drift guard on the SYSTEM_PROMPT side.
+    """
     from branding_team.graphs.shared import PHASE_ORDER
     from branding_team.temporal.constants import PHASE_SEQUENCE
 
