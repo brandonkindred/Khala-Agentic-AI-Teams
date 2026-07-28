@@ -75,7 +75,22 @@ implementation found"). Do not invent file paths.
 
 
 def _parse_finding(d: Dict[str, Any], category: TSCCategory) -> TSCFinding:
-    """Build TSCFinding from LLM response dict."""
+    """Build TSCFinding from LLM response dict.
+
+    Preconditions:
+        * ``d`` is a mapping produced by parsing the LLM's JSON response for
+          one finding (arbitrary/untrusted keys and value types — the LLM may
+          omit fields, use unexpected casing, or send non-string values).
+        * ``category`` is the :class:`TSCCategory` this finding was raised
+          under (supplied by the caller, not read from ``d``).
+    Postconditions:
+        * Always returns a :class:`TSCFinding` — never raises. Missing or
+          falsy string fields (``title``, ``description``, ``location``,
+          ``recommendation``, ``evidence_observed``) default to ``"Untitled"``
+          (title) or ``""`` (the rest). An unparseable/unrecognized
+          ``severity`` (including non-string values) defaults to
+          ``FindingSeverity.MEDIUM`` rather than raising.
+    """
     # str() before .lower(): the value comes straight from an LLM response, so
     # a non-string (e.g. a bare int severity) must not crash the audit — it
     # falls through to the ValueError branch and defaults to MEDIUM.
@@ -102,7 +117,29 @@ def _run_tsc_agent(
     focus_areas: str,
     context: RepoContext,
 ) -> TSCAuditResult:
-    """Generic TSC audit: one criterion, two LLM calls (reasoning + formatting), return TSCAuditResult."""
+    """Generic TSC audit: one criterion, two LLM calls (reasoning + formatting), return TSCAuditResult.
+
+    Preconditions:
+        * ``llm`` is an ``LLMClient``-compatible object usable by
+          :func:`complete_json_via_reasoning` and :func:`compact_text`
+          (``get_max_context_tokens`` is optional — falls back to ``16384``
+          when absent).
+        * ``category`` / ``criterion_name`` / ``focus_areas`` are non-empty
+          strings describing the TSC criterion being audited.
+        * ``context`` is a fully-populated :class:`RepoContext` for the
+          repository under audit.
+    Postconditions:
+        * Returns a :class:`TSCAuditResult` for ``category``. ``findings`` is
+          built only from entries in the parsed response's ``findings`` list
+          that are dicts with a non-empty ``title`` or ``description``
+          (malformed/empty entries are silently dropped, never raised on).
+        * ``compliant`` is the model's own ``compliant`` value when present;
+          otherwise it defaults to ``True`` unless at least one parsed
+          finding is CRITICAL or HIGH severity.
+        * Propagates whatever :func:`complete_json_via_reasoning` raises
+          (e.g. on LLM/transport failure) — this function does not catch or
+          degrade those failures itself.
+    """
     # Compute budgets from model context: reserve 8K tokens for prompt template + response
     ctx_tokens = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
     total_chars = int((ctx_tokens - 8000) * 3.5)

@@ -14,8 +14,12 @@ Contract:
   (e.g. the Ollama client sets ``response_format={"type":"json_object"}``),
   so this helper does not need to configure it.
 - On success after a correction, logs a single INFO line.
-  On terminal failure, logs a single WARNING and re-raises the last error
-  with ``correction_attempts_used`` populated.
+  On terminal failure, logs a single WARNING. For a parse failure, the
+  original :class:`LLMJsonParseError` is mutated (``correction_attempts_used``
+  populated) and re-raised as-is; for a schema-validation failure, a NEW
+  :class:`LLMSchemaValidationError` is raised (wrapping the last
+  ``pydantic.ValidationError`` as its ``cause``) rather than re-raising the
+  original.
 
 See :doc:`/backend/agents/llm_service/FEATURE_SPEC_structured_output_contract.md`
 for the motivating context (the ``user_agent_founder`` "Startup Founder Testing
@@ -287,7 +291,13 @@ def complete_json_via_reasoning(
             ``think``, which is popped and managed internally: the reasoning
             call always uses ``think=True`` and the formatting call always
             uses ``think=False``, regardless of any ``think`` passed in
-            ``**kwargs``.
+            ``**kwargs``. Reserved names: do not pass ``objective``,
+            ``system_prompt``, or ``temperature`` in ``**kwargs`` — this
+            function already forwards those explicitly to the formatting
+            ``client.complete_json`` call, so a same-named entry in
+            ``**kwargs`` raises ``TypeError: got multiple values for
+            keyword argument`` (use the dedicated ``formatting_system_prompt``
+            / ``temperature`` parameters above instead).
     """
     if not objective:
         raise ValueError("objective must be non-empty")
@@ -352,6 +362,12 @@ def complete_validated_via_reasoning(
     ``think``, which is popped and managed internally — the reasoning call
     always uses ``think=True`` and the formatting call always uses
     ``think=False``, regardless of any ``think`` passed in ``**kwargs``.
+    Reserved names: do not pass ``objective``, ``system_prompt``,
+    ``temperature``, ``correction_attempts``, or ``context`` in ``**kwargs`` —
+    this function already forwards those explicitly to :func:`complete_validated`,
+    so a same-named entry in ``**kwargs`` raises ``TypeError: got multiple
+    values for keyword argument`` (use the dedicated parameters above
+    instead).
     """
     if not objective:
         raise ValueError("objective must be non-empty")

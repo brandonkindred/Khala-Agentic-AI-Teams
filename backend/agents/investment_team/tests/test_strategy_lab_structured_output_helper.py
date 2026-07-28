@@ -37,6 +37,14 @@ def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
 
+    charge_calls = 0
+
+    def _counting_charge() -> None:
+        nonlocal charge_calls
+        charge_calls += 1
+
+    monkeypatch.setattr(so_mod, "charge_active_budget", _counting_charge)
+
     result = so_mod.invoke_structured_with_schema(
         "strategy_design_review",
         "sys",
@@ -50,9 +58,16 @@ def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatc
     )
 
     assert result == {"ready": True, "rationale": "ok", "issues": []}
+    # charge=False means invoke_structured_with_schema must not touch the
+    # active budget itself at all — charging it is entirely the caller's
+    # responsibility on this path (see design_review.py's explicit
+    # charge_active_budget() calls around its charge=False invocation).
+    assert charge_calls == 0
     assert len(client.reasoning_calls) == 1
     assert client.reasoning_calls[0]["think"] is True
-    assert client.reasoning_calls[0]["objective"] == "strategy design review (structured) (reasoning)"
+    assert (
+        client.reasoning_calls[0]["objective"] == "strategy design review (structured) (reasoning)"
+    )
     assert client.reasoning_calls[0]["system_prompt"] == "sys" + so_mod.REASONING_MODE_SUFFIX
 
     assert len(client.calls) == 1

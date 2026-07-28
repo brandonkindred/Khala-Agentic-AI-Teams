@@ -96,6 +96,7 @@ def _resolve_diversity_mode() -> str:
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+
 # Shared stop-order semantics reference (stop-market / stop-limit / trailing
 # stop). Appended to the designer's system prompts so a trailing stop's
 # above-entry ratchet is understood as intended gain-locking behavior, and so
@@ -148,6 +149,7 @@ def _get_self_review_system_prompt() -> str:
     if not body:
         raise ValueError("design_self_review_system.md must be non-empty")
     return body + "\n\n" + _get_stop_order_semantics()
+
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).
@@ -296,7 +298,11 @@ class DesignAgent:
         Every underlying LLM call (generation, each parse-retry, and the
         optional self-review / self-revision) charges the active design-phase
         budget via :func:`charge_active_budget` and raises
-        :class:`DesignBudgetExhausted` when the per-cycle cap is hit.
+        :class:`DesignBudgetExhausted` when the per-cycle cap is hit. When
+        structured output is available, generation itself is a reasoning-then-
+        formatting pair of provider calls (see :meth:`_invoke_and_parse` /
+        :meth:`_structured_preflight`) charged as two budget units up front,
+        not one.
         """
         prior_text = (
             format_prior_results(prior_records)

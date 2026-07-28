@@ -147,7 +147,29 @@ class ProposalCriticAgent:
         dossier: Optional[ProspectDossier],
         qualification: Optional[QualificationScore],
     ) -> ProposalCriticReport:
-        """Evaluate ``proposal`` and return a :class:`ProposalCriticReport`."""
+        """Evaluate ``proposal`` and return a :class:`ProposalCriticReport`.
+
+        Runs a two-pass reasoning-then-formatting LLM call via
+        :func:`complete_validated_via_reasoning` — a ``think=True`` prose
+        critique followed by a ``think=False`` schema-validated formatting
+        pass (with up to 2 self-correction attempts on a parse/validation
+        miss) — rather than a single JSON call.
+
+        Preconditions:
+            * ``proposal`` is a fully-populated :class:`SalesProposal`.
+            * ``dossier`` / ``qualification`` may each be ``None``.
+        Postconditions:
+            * Always returns a :class:`ProposalCriticReport` — never raises.
+              On any LLM/validation failure (including exhausting the
+              correction attempts), logs a single WARNING and returns
+              :func:`_fallback_proposal_report`'s forced-FAIL report instead.
+            * On success, enforces the invariant documented on
+              :attr:`ProposalCriticReport.status`: ``status == "PASS"`` iff
+              no must-fix violation exists. A must-fix violation always
+              forces ``status="FAIL"`` and ``approved=False``, overriding
+              whatever the model returned, so the two fields can never
+              disagree with that rule in the returned report.
+        """
         prompt = self._build_prompt(proposal, dossier, qualification)
         try:
             report = complete_validated_via_reasoning(

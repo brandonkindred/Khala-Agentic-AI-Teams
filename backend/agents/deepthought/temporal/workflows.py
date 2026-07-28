@@ -333,7 +333,19 @@ class DeepthoughtWorkflow:
         strategy: str,
         max_depth: int,
     ) -> QueryAnalysis:
-        """Run the analyse activity and parse its result back into a model."""
+        """Run the analyse activity and parse its result back into a model.
+
+        ``activities.analyse_activity`` bundles ``DeepthoughtAgent._analyse``'s
+        two sequential LLM calls (a ``think=True`` reasoning pass followed by
+        a ``think=False`` formatting pass, via
+        :func:`llm_service.complete_json_via_reasoning`) behind a single
+        durable activity boundary rather than exposing them as two activities
+        — see the module docstring. ``ANALYSE_ACTIVITY_OPTS`` gives this
+        activity a 20-minute ``start_to_close_timeout``, double the plain
+        single-call ``LLM_ACTIVITY_OPTS`` (10 minutes), so that two
+        individually healthy provider calls can't be aborted by a timeout
+        budget sized for one.
+        """
         data = await workflow.execute_activity(
             activities.analyse_activity,
             AnalysePayload(

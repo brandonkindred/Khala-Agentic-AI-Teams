@@ -161,6 +161,12 @@ def test_structured_call_passes_schema_and_expected_kwargs(monkeypatch: pytest.M
     reasoning_call = stub_client.reasoning_calls[0]
     assert reasoning_call["think"] is True
     assert reasoning_call["system_prompt"] == mod._SYSTEM_PROMPT + so_mod.REASONING_MODE_SUFFIX
+    # The reasoning-pass user prompt must re-assert prose-only LAST, after the
+    # task template's own "Return ONLY a JSON object"-style directive, so the
+    # more specific/later user-turn instruction doesn't win and make the
+    # reasoning pass emit JSON instead of prose (see
+    # ``_REASONING_USER_PROMPT_SUFFIX``'s docstring in ``_structured_output.py``).
+    assert reasoning_call["prompt"].endswith(so_mod._REASONING_USER_PROMPT_SUFFIX)
 
 
 def test_structured_agent_key_and_phase_labels(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -347,6 +353,7 @@ def test_non_schema_forced_semantic_exhaustion_propagates_without_degrading(
 def test_structured_output_available_true_for_ollama_real_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Ollama is a real provider wired up to advertise structured-output support."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     assert so_mod.structured_output_available() is True
 
@@ -354,6 +361,7 @@ def test_structured_output_available_true_for_ollama_real_provider(
 def test_structured_output_available_false_for_dummy_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The no-LLM dummy test/dev harness never advertises structured-output support."""
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
     assert so_mod.structured_output_available() is False
 
@@ -361,6 +369,7 @@ def test_structured_output_available_false_for_dummy_provider(
 def test_structured_output_available_false_for_bedrock_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Bedrock lacks provider-enforced schema-conformant decoding support."""
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
     assert so_mod.structured_output_available() is False
 
@@ -398,9 +407,13 @@ def test_structured_path_needs_no_correction_resend_unlike_fallback(
 ) -> None:
     """Measurable-reduction evidence for the parent structured-output work.
 
-    Replays the SAME simulated failure sequence — one response the strict
-    extractor rejects, then a valid one — down both paths and counts LLM
-    calls. ``structured_format_calls`` below counts only the formatting-pass
+    The two paths are NOT given the same simulated failure sequence: the
+    structured path's stub client returns a valid, schema-conformant payload
+    on its one (formatting-pass) call, since schema-constrained decoding
+    cannot itself emit unparseable JSON; only the legacy fallback path is
+    scripted with a reject-then-valid sequence (``["not json at all", _GOOD]``)
+    to exercise its correction-resend. ``structured_format_calls`` below
+    counts only the formatting-pass
     (``complete_json``) calls, not the reasoning pass — after the
     reasoning+formatting split, the structured path's real total is two
     provider calls (reasoning then formatting), matching the legacy path's
@@ -412,6 +425,12 @@ def test_structured_path_needs_no_correction_resend_unlike_fallback(
     proxy for that resend elimination.
     """
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
+
+    # Capture the real function before either path monkeypatches
+    # ``mod.build_json_correction_prompt`` — capturing it later would pick up
+    # whichever stub the structured-path block below has already installed,
+    # not the real implementation the fallback path needs to exercise.
+    real_build = mod.build_json_correction_prompt
 
     # --- Structured path: one call, zero correction resends. ---
     structured_corrections = 0
@@ -439,7 +458,6 @@ def test_structured_path_needs_no_correction_resend_unlike_fallback(
 
     # --- Legacy fallback path: same failure sequence, one resend. ---
     fallback_corrections = 0
-    real_build = mod.build_json_correction_prompt
 
     def _count_fallback_correction(*args: Any, **kwargs: Any) -> str:
         nonlocal fallback_corrections
