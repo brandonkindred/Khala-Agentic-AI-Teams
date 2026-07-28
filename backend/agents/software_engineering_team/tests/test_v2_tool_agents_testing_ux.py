@@ -112,6 +112,7 @@ class TestFETestingQA:
         """QA is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +197,7 @@ class TestFEUxUsability:
         """UX/Usability is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
     def test_review_invalid_json(self, monkeypatch):
         a, mod = self._agent()
@@ -254,6 +256,8 @@ class TestTestingQACollapse:
         """QA is review-only in both stacks: fixing is the coding agent's job."""
         assert not hasattr(self._be_agent(), "problem_solve")
         assert not hasattr(self._fe_agent(), "problem_solve")
+        assert not hasattr(self._be_agent(), "problem_solve_sources")
+        assert not hasattr(self._fe_agent(), "problem_solve_sources")
 
     def test_per_team_plan_recommendations_differ(self):
         be_plan = self._be_agent().plan(_be_phase_input())

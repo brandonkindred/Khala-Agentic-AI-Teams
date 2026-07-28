@@ -148,13 +148,24 @@ class SingleIssueProblemSolveMixin:
         ``self._logger``, ``self._run_agent``, ``self._problem_solving_kwargs``,
         ``self.max_relevant_code_chars``, ``self.problem_solving_prompt``,
         ``self._parse_single_issue``, ``self.default_severity``,
-        ``self.default_recommendation``, ``self.name``, ``self.empty_label`` —
-        i.e. exactly what :class:`BaseReviewToolAgent` supplies.
+        ``self.default_recommendation``, ``self.issue_source``, ``self.name``,
+        ``self.empty_label`` — i.e. exactly what :class:`BaseReviewToolAgent`
+        supplies.
     """
 
     problem_solve_sources: Tuple[str, ...] = ()
 
     def problem_solve(self, inp) -> ToolAgentPhaseOutput:
+        """Fix issues one at a time whose source is in :attr:`problem_solve_sources`.
+
+        Preconditions: ``inp`` exposes ``review_issues`` (each with ``source``)
+        and ``current_files``; the attributes listed in this mixin's
+        class-level Preconditions are supplied by the combining class.
+        Postconditions: returns a :class:`ToolAgentPhaseOutput` whose ``files``
+        is the merged file set after applying each successful single-issue fix
+        (unchanged when there is no LLM or no matching issues). A single
+        issue's fix failure is logged and does not abort the remaining issues.
+        """
         if not self._model:
             return ToolAgentPhaseOutput(summary=f"{self.name} problem_solve skipped (no LLM).")
         issues = [
@@ -223,7 +234,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
     # review_parse_mode / uses_json_model already declared below as "text" / False
 
     # --- Labels (subclasses override) ------------------------------------
-    name: str = "Tool"  # used for deliver, problem_solve, and "<name> review"
+    name: str = "Tool"  # used for deliver and "<name> review"
     execute_label: Optional[str] = None  # defaults to ``name`` when unset
     empty_label: str = "issues"  # "No <empty_label> to fix."
 

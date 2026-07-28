@@ -434,6 +434,7 @@ class TestBackendSecurity:
         """Security is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +503,7 @@ class TestBackendTestingQA:
         """QA is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------
@@ -627,3 +629,4 @@ class TestFrontendSecurity:
         """Security is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")

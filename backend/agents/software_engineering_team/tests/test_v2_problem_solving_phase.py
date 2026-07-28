@@ -546,26 +546,36 @@ def test_run_qa_fixes():
     assert out.resolved is True
 
 
-def test_run_qa_fixes_does_not_consult_tool_agent_problem_solve():
-    """QA is review-only: even when a QA tool agent is wired, fixing must come
-    entirely from the generic coding-agent fix loop, never from the reviewer's
-    own problem_solve."""
+def test_run_qa_fixes_does_not_consult_tool_agent_problem_solve(monkeypatch):
+    """QA is review-only: even when a QA tool agent is wired and the issue is
+    actionable, fixing must come entirely from the generic coding-agent fix
+    loop, never from the reviewer's own problem_solve."""
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
     from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
         run_qa_fixes,
     )
+
+    resp = (
+        "## FILE a.py ##\nfixed\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     tool_agent = MagicMock()
 
     out = run_qa_fixes(
         llm=MagicMock(),
         microtask=_microtask(),
-        phase_result=_phase_result([_issue(severity="info", source="qa")], phase_name="qa"),
+        phase_result=_phase_result([_issue(severity="high", source="qa")], phase_name="qa"),
         current_files={"a.py": "code"},
         tool_agents={ToolAgentKind.TESTING_QA: tool_agent},
     )
     tool_agent.problem_solve.assert_not_called()
     assert out.resolved is True
+    assert out.files["a.py"] == "fixed"
 
 
 def test_run_security_fixes():
@@ -584,14 +594,23 @@ def test_run_security_fixes():
     assert out.resolved is True
 
 
-def test_run_security_fixes_does_not_consult_tool_agent_problem_solve():
-    """Security is review-only: even when a Security tool agent is wired,
-    fixing must come entirely from the generic coding-agent fix loop, never
-    from the reviewer's own problem_solve."""
+def test_run_security_fixes_does_not_consult_tool_agent_problem_solve(monkeypatch):
+    """Security is review-only: even when a Security tool agent is wired and
+    the issue is actionable, fixing must come entirely from the generic
+    coding-agent fix loop, never from the reviewer's own problem_solve."""
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases import problem_solving as ps_mod
     from software_engineering_team.backend_code_v2_team.phases.problem_solving import (
         run_security_fixes,
     )
+
+    resp = (
+        "## FILE a.py ##\nfixed\n"
+        "## RESOLVED ##\nyes\n## END RESOLVED ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(ps_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(ps_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     tool_agent = MagicMock()
 
@@ -599,13 +618,14 @@ def test_run_security_fixes_does_not_consult_tool_agent_problem_solve():
         llm=MagicMock(),
         microtask=_microtask(),
         phase_result=_phase_result(
-            [_issue(severity="info", source="security")], phase_name="security"
+            [_issue(severity="high", source="security")], phase_name="security"
         ),
         current_files={"a.py": "code"},
         tool_agents={ToolAgentKind.SECURITY: tool_agent},
     )
     tool_agent.problem_solve.assert_not_called()
     assert out.resolved is True
+    assert out.files["a.py"] == "fixed"
 
 
 def test_run_documentation_fixes():
