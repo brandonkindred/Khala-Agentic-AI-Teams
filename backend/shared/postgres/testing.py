@@ -21,6 +21,17 @@ from shared.postgres.schema import TeamSchema
 
 logger = logging.getLogger(__name__)
 
+# pytest's own accepted fixture scopes (session/package/module/class/function) —
+# validated against in real_postgres_schema so a typo raises here, not as a more
+# obscure error later at collection time.
+_PYTEST_FIXTURE_SCOPES = frozenset({"session", "package", "module", "class", "function"})
+
+
+def _quote_ident(name: str) -> str:
+    if '"' in name:
+        raise ValueError(f"refusing to quote identifier containing a double-quote: {name!r}")
+    return f'"{name}"'
+
 
 def truncate_team_tables(schema: TeamSchema) -> int:
     """Truncate every table named in ``schema.table_names``.
@@ -151,6 +162,13 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
     worker but "master" — see :func:`_real_postgres_schema_body` for why an
     uncoordinated cross-worker truncate is unsafe.
 
+    ``scope`` is passed straight through to ``pytest.fixture(scope=...)`` —
+    valid values are ``"session"``, ``"package"``, ``"module"`` (the default),
+    ``"class"``, or ``"function"``; a wider scope amortizes the DDL/register
+    cost across more tests at the price of more state shared between them.
+    Raises ``ValueError`` immediately on any other value, rather than letting
+    pytest's own less obvious error surface later at collection time.
+
     A drop-in replacement for the per-team hand-rolled version of this pattern
     (see ``branding_team/tests/test_store_real_postgres.py``'s ``_branding_schema``
     fixture): any team's ``conftest.py`` or test module can do
@@ -159,6 +177,10 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
 
     Not itself wired into any team's tests yet — callers opt in explicitly.
     """
+    if scope not in _PYTEST_FIXTURE_SCOPES:
+        raise ValueError(
+            f"real_postgres_schema: invalid scope {scope!r}; must be one of {sorted(_PYTEST_FIXTURE_SCOPES)}"
+        )
 
     def _fixture(worker_id):
         # No default here: pytest's fixture-argument discovery skips injecting a
@@ -173,12 +195,6 @@ def real_postgres_schema(schema: TeamSchema, *, scope: str = "module"):
 
     _fixture.__name__ = f"real_postgres_schema_{schema.team}"
     return pytest.fixture(scope=scope, autouse=True)(_fixture)
-
-
-def _quote_ident(name: str) -> str:
-    if '"' in name:
-        raise ValueError(f"refusing to quote identifier containing a double-quote: {name!r}")
-    return f'"{name}"'
 
 
 # Re-export the in-memory fake scaffold so callers can import from either

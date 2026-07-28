@@ -26,7 +26,7 @@ from shared.postgres.testing import real_postgres_schema
 
 pytestmark = pytest.mark.integration
 
-_SCHEMA = TeamSchema(
+DEMO_SCHEMA = TeamSchema(
     team="shared_postgres_fixture_demo",
     statements=[
         """CREATE TABLE IF NOT EXISTS shared_postgres_fixture_demo (
@@ -37,7 +37,7 @@ _SCHEMA = TeamSchema(
     table_names=["shared_postgres_fixture_demo"],
 )
 
-_schema_fixture = real_postgres_schema(_SCHEMA, scope="module")
+_schema_fixture = real_postgres_schema(DEMO_SCHEMA, scope="module")
 
 
 def test_fixture_registers_schema_and_table_is_queryable() -> None:

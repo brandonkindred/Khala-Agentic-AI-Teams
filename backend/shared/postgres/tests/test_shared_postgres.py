@@ -848,6 +848,14 @@ def test_real_postgres_schema_returns_configured_pytest_fixture():
     assert marker.autouse is True
 
 
+def test_real_postgres_schema_rejects_invalid_scope():
+    from shared.postgres.testing import real_postgres_schema
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    with pytest.raises(ValueError, match="invalid scope"):
+        real_postgres_schema(schema, scope="moduel")
+
+
 def test_real_postgres_schema_fixture_worker_id_param_has_no_default():
     """Regression guard: pytest's fixture-argument discovery skips injecting a real
     fixture value for parameters that carry a default (verified via a standalone
