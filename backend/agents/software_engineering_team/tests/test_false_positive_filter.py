@@ -467,6 +467,31 @@ def test_strip_numbered_prefixes_empty_content() -> None:
     assert mapper is None
 
 
+def test_find_function_at_line_rejects_nonpositive_line() -> None:
+    """Tool returns an error string for non-positive line numbers instead of guessing."""
+    idx = CodebaseIndex(files={"app/main.py": "def f():\n    return 1\n"})
+    _, _, _, find_fn = _build_tools(idx)
+    assert "positive" in find_fn("app/main.py", 0).lower()
+    assert "positive" in find_fn("app/main.py", -3).lower()
+
+
+def test_strip_numbered_prefixes_rejects_bad_preconditions() -> None:
+    """Helper raises when documented preconditions are violated."""
+    with pytest.raises((TypeError, ValueError, AssertionError)):
+        _strip_numbered_prefixes(None, 1)  # type: ignore[arg-type]
+    with pytest.raises((TypeError, ValueError, AssertionError)):
+        _strip_numbered_prefixes("x = 1\n", 0)
+
+
+def test_find_heuristic_beyond_eof() -> None:
+    """Heuristic finder reports beyond-EOF instead of attributing the last construct."""
+    from code_review_agent.false_positive_filter import _find_heuristic_function_at_line
+
+    content = "function alpha() {\n  return 1;\n}\n"
+    msg = _find_heuristic_function_at_line(content, 99, "app.ts")
+    assert "beyond" in msg.lower()
+
+
 def test_find_function_at_line_pre_numbered_python() -> None:
     """Tool strips N: prefixes and reports original line numbers in the enclosing range."""
     # Simulate a hunk starting at original line 100. The def is at original line 101.

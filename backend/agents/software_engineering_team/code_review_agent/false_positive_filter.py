@@ -479,8 +479,12 @@ def _strip_numbered_prefixes(
           - ``line_mapper(physical)`` maps a physical line index back to its
             original file line number (or to ``physical`` if the line had no
             numbered prefix, e.g. a separator).
-        - Never raises.
+        - Never raises when preconditions hold.
     """
+    if not isinstance(content, str):
+        raise TypeError("content must be a string")
+    if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+        raise ValueError("line_number must be a positive integer")
     lines = content.splitlines()
     if not lines:
         return content, line_number, None
@@ -544,6 +548,10 @@ def _find_python_function_at_line(
           ``node_end_line`` helpers (``end_lineno`` when present, else the node's
           own ``lineno``), so all three AST consumers agree on construct ranges.
     """
+    if not isinstance(content, str) or not content:
+        raise ValueError("content must be a non-empty string")
+    if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+        raise ValueError("line_number must be a positive integer")
     try:
         tree = ast.parse(content)
     except Exception as exc:
@@ -616,12 +624,25 @@ def _find_heuristic_function_at_line(
     Postconditions:
         - Returns the best-guess start line and advises using ``read_file`` for
           the precise construct name.
-        - Returns a "no construct found" message (never raises) when no
-          column-0 declaration precedes ``line_number``.
+        - Returns an explicit beyond-EOF message when ``line_number`` exceeds
+          the file length.
+        - Returns a "no construct found" message (never raises when
+          preconditions hold) when no column-0 declaration precedes
+          ``line_number``.
     """
+    if not isinstance(content, str) or not content:
+        raise ValueError("content must be a non-empty string")
+    if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+        raise ValueError("line_number must be a positive integer")
     shown = display_line if display_line is not None else line_number
+    lines = content.splitlines()
+    if line_number > len(lines):
+        return (
+            f"Line {shown} is beyond the end of {path} "
+            f"(file has {len(lines)} lines)."
+        )
     best_start: Optional[int] = None
-    for i, line in enumerate(content.splitlines(), start=1):
+    for i, line in enumerate(lines, start=1):
         if i > line_number:
             break
         if not line or not line.strip():
@@ -722,10 +743,14 @@ def _build_tools(index: CodebaseIndex) -> list:
             is not readable; never raises.
         """
         try:
+            if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+                return f"Error: line_number must be a positive integer, got {line_number!r}."
             resolved = index.resolve_path(path)
             if not resolved:
                 return f"Error: {path!r} is not a readable path."
-            content = index.read_file(path)
+            content = index.read_file_or_none(path)
+            if content is None:
+                return f"Error: {path!r} is not a readable path."
             display_path = resolved if resolved != index.EXISTING_CODEBASE_PATH else path
             # Strip ``N: `` line-number prefixes that the PR-review path injects via
             # ``render_annotated_hunks``; remap to the physical line index so the
