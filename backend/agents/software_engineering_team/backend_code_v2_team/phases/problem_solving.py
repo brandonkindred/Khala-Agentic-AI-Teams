@@ -232,10 +232,15 @@ def _run_phase_fixes(
     )
 
 
+# "qa" and "security" are intentionally absent: TestingQAToolAgent and
+# SecurityToolAgent are review-only (they no longer implement problem_solve) —
+# fixing their findings is the coding agent's job, done entirely by the
+# generic per-issue fix loop in _run_phase_fixes. Only Build Specialist (whose
+# "fix" is mechanically re-running the build) and Documentation (which fixes
+# the same prose/docs artifacts it authors itself) still get a second,
+# tool-agent-driven fix pass.
 _PHASE_FIX_TOOL_AGENT: Dict[str, ToolAgentKind] = {
     "code_review": ToolAgentKind.BUILD_SPECIALIST,
-    "qa": ToolAgentKind.TESTING_QA,
-    "security": ToolAgentKind.SECURITY,
     "documentation": ToolAgentKind.DOCUMENTATION,
 }
 
@@ -339,17 +344,24 @@ def run_qa_fixes(
     task_id: str = "",
     detail_callback: Optional[Callable[[str], None]] = None,
 ) -> ProblemSolvingResult:
-    """Fix issues from QA testing phase (bugs, missing tests, quality issues)."""
-    return _run_phase_fixes_with_tool_agent(
-        phase_name="qa",
+    """Fix issues from QA testing phase (bugs, missing tests, quality issues).
+
+    The QA tool agent only reports findings (see ``TestingQAToolAgent``) — all
+    fixing here is done by the generic per-issue coding-agent loop; there is no
+    second, tool-agent-driven fix pass. ``tool_agents`` is accepted for
+    signature parity with the other phase-fix functions but unused.
+    """
+    del tool_agents  # QA is review-only; fixing is the coding agent's job.
+    return _run_phase_fixes(
         llm=llm,
         microtask=microtask,
         phase_result=phase_result,
         current_files=current_files,
         language=language,
         repo_path=repo_path,
-        tool_agents=tool_agents,
+        tool_agents=None,
         task_id=task_id,
+        phase_name="qa",
         detail_callback=detail_callback,
     )
 
@@ -366,17 +378,24 @@ def run_security_fixes(
     task_id: str = "",
     detail_callback: Optional[Callable[[str], None]] = None,
 ) -> ProblemSolvingResult:
-    """Fix issues from security testing phase (vulnerabilities, security best practices)."""
-    return _run_phase_fixes_with_tool_agent(
-        phase_name="security",
+    """Fix issues from security testing phase (vulnerabilities, security best practices).
+
+    The security tool agent only reports findings (see ``SecurityToolAgent``) —
+    all fixing here is done by the generic per-issue coding-agent loop; there is
+    no second, tool-agent-driven fix pass. ``tool_agents`` is accepted for
+    signature parity with the other phase-fix functions but unused.
+    """
+    del tool_agents  # Security is review-only; fixing is the coding agent's job.
+    return _run_phase_fixes(
         llm=llm,
         microtask=microtask,
         phase_result=phase_result,
         current_files=current_files,
         language=language,
         repo_path=repo_path,
-        tool_agents=tool_agents,
+        tool_agents=None,
         task_id=task_id,
+        phase_name="security",
         detail_callback=detail_callback,
     )
 
