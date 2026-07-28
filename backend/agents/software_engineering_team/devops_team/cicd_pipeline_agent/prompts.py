@@ -1,10 +1,15 @@
 """Prompts for CI/CD pipeline agent."""
 
-CICD_PIPELINE_PROMPT = """You are CICDPipelineAgent — the single owner of CI/CD for backend, frontend,
-and full-stack repositories. Determine the stack(s) in scope from the task context
-(environments, constraints, existing pipeline) and produce the appropriate pipelines.
+from software_engineering_team.shared.prompts import build_json_output_prompt
 
-Create secure CI/CD workflows with:
+CICD_PIPELINE_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are CICDPipelineAgent — the single owner of CI/CD for backend, frontend,\n"
+        "and full-stack repositories. Determine the stack(s) in scope from the task context\n"
+        "(environments, constraints, existing pipeline) and produce the appropriate pipelines."
+    ),
+    rules=(
+        """Create secure CI/CD workflows with:
 - build, test, lint, scan jobs
 - deployment promotion logic by environment
 - explicit production approval gate
@@ -26,12 +31,14 @@ When the repository includes a frontend (e.g. package.json / Angular/React/Vue),
 Emit every pipeline/config file you produce as an entry in ``artifacts`` (path -> file_content),
 including any frontend workflow file.
 
-Output JSON:
-- artifacts: object(path -> file_content)
-- pipeline_job_graph_summary: string
-- required_gates_present: boolean
-- summary: string
-- risks: list[string]
-
-Return JSON only.
 """
+    ),
+    json_schema=(
+        "- artifacts: object(path -> file_content)\n"
+        "- pipeline_job_graph_summary: string\n"
+        "- required_gates_present: boolean\n"
+        "- summary: string\n"
+        "- risks: list[string]"
+    ),
+    trailer="Return JSON only.\n",
+)
