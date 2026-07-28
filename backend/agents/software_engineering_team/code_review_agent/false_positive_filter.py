@@ -498,10 +498,10 @@ def _find_heuristic_function_at_line(
 ) -> str:
     """Guess the enclosing construct for ``line_number`` using column-0 heuristics.
 
-    Scans from the first line up to ``line_number`` and returns the start line of
-    the last column-0 declaration found — the same heuristic used by
-    ``code_boundaries._heuristic_break_lines`` for chunk splitting. Useful for
-    TypeScript, JavaScript, Go, and other non-Python languages.
+    Scans from the first line up to ``line_number`` and formats a message naming
+    the start line of the last column-0 declaration found — the same heuristic
+    used by ``code_boundaries._heuristic_break_lines`` for chunk splitting.
+    Useful for TypeScript, JavaScript, Go, and other non-Python languages.
 
     Preconditions:
         - ``content`` is a non-empty string.
@@ -509,7 +509,8 @@ def _find_heuristic_function_at_line(
         - ``path`` is a non-empty string used only for display.
 
     Postconditions:
-        - Returns the best-guess start line and advises using ``read_file`` for
+        - Returns a human-readable message identifying the best-guess start line
+          of the enclosing construct and advising the use of ``read_file`` for
           the precise construct name.
         - Returns a "no construct found" message (never raises) when no
           column-0 declaration precedes ``line_number``.
@@ -742,6 +743,8 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
         - Returns the lines for finding ``i``: an ``--- Finding index i ---``
           anchor the verdict contract refers back to, a severity/category/
           location line, the description, and the suggestion when present.
+        - Description and suggestion strings have runs of whitespace collapsed
+          to a single space so they fit cleanly on one prompt line.
     """
     location = issue.file_path or "(file unknown)"
     if issue.line is not None:

@@ -12,6 +12,7 @@ from code_review_agent.function_boundaries import (
 
 
 def test_top_level_function() -> None:
+    """A body line inside a top-level ``def`` resolves to that function's name and span."""
     content = "def foo():\n    x = 1\n    return x\n"
     result = enclosing_construct(content, 2)
     assert result is not None
@@ -22,6 +23,7 @@ def test_top_level_function() -> None:
 
 
 def test_nested_function_picks_innermost() -> None:
+    """A line inside a nested function resolves to the innermost construct, not the outer."""
     content = "\n".join(
         [
             "def outer():",  # 1
@@ -39,6 +41,7 @@ def test_nested_function_picks_innermost() -> None:
 
 
 def test_class_method_is_qualified_with_class_name() -> None:
+    """A method body line returns a ``Class.method`` qualified name with kind ``function``."""
     content = "\n".join(
         [
             "class Widget:",  # 1
@@ -54,6 +57,7 @@ def test_class_method_is_qualified_with_class_name() -> None:
 
 
 def test_decorated_function_start_includes_decorator_line() -> None:
+    """A finding on a decorated function's body is grouped under the function starting at the decorator line, not the ``def`` line."""
     content = "\n".join(
         [
             "@decorator",  # 1
@@ -68,21 +72,25 @@ def test_decorated_function_start_includes_decorator_line() -> None:
 
 
 def test_module_level_line_returns_none() -> None:
+    """A line with no enclosing function or class returns ``None``."""
     content = "x = 1\ny = 2\n"
     assert enclosing_construct(content, 1) is None
 
 
 def test_syntax_error_returns_none() -> None:
+    """Unparseable Python content returns ``None`` rather than raising."""
     content = "def foo(:\n    pass\n"
     assert enclosing_construct(content, 1) is None
 
 
 def test_line_outside_any_construct_returns_none() -> None:
+    """A module-level line after a function (outside any construct span) returns ``None``."""
     content = "def foo():\n    return 1\n\nx = foo()\n"
     assert enclosing_construct(content, 4) is None
 
 
 def test_enclosing_construct_maps_pre_numbered_lines() -> None:
+    """Prefixed ``N: `` content strips to physical lines before AST lookup; spans are 1-based physical."""
     content = "4240: def foo():\n4241:     return 1\n"
     stripped, physical, _mapper = strip_numbered_prefixes(content, line_number=4241)
     result = enclosing_construct(stripped, physical)
@@ -96,6 +104,7 @@ def test_enclosing_construct_maps_pre_numbered_lines() -> None:
 
 
 def test_heuristic_finds_column_zero_declaration() -> None:
+    """Non-Python heuristic returns the nearest preceding column-0 declaration line."""
     content = "\n".join(
         [
             "function foo() {",  # 1
@@ -108,6 +117,7 @@ def test_heuristic_finds_column_zero_declaration() -> None:
 
 
 def test_heuristic_skips_closing_brackets_and_comments() -> None:
+    """Column-0 closers and comments are ignored so the heuristic picks the real declaration."""
     content = "\n".join(
         [
             "function foo() {",  # 1
@@ -124,6 +134,7 @@ def test_heuristic_skips_closing_brackets_and_comments() -> None:
 
 
 def test_heuristic_no_construct_returns_none() -> None:
+    """Indented-only content with no column-0 declaration returns ``None``."""
     content = "  indented only\n  still indented\n"
     assert enclosing_construct_start_heuristic(content, 2) is None
 
@@ -132,6 +143,7 @@ def test_heuristic_no_construct_returns_none() -> None:
 
 
 def test_strip_numbered_prefixes_plain_content_unchanged() -> None:
+    """Plain (unprefixed) content is returned as-is with the original line and no mapper."""
     content = "def foo():\n    return 1\n"
     stripped, physical, mapper = strip_numbered_prefixes(content, line_number=2)
     assert stripped == content
@@ -140,6 +152,7 @@ def test_strip_numbered_prefixes_plain_content_unchanged() -> None:
 
 
 def test_strip_numbered_prefixes_detects_and_strips() -> None:
+    """Prefixed hunks strip ``N: ``, remap the absolute target to a physical line, and expose a mapper."""
     content = "4240: def foo():\n4241:     x = 1\n4242:     return x\n"
     stripped, physical, mapper = strip_numbered_prefixes(content, line_number=4242)
     assert stripped == "def foo():\n    x = 1\n    return x"
@@ -149,6 +162,7 @@ def test_strip_numbered_prefixes_detects_and_strips() -> None:
 
 
 def test_strip_numbered_prefixes_empty_content() -> None:
+    """Empty content strips to empty with the original line number and no mapper."""
     stripped, physical, mapper = strip_numbered_prefixes("", line_number=1)
     assert stripped == ""
     assert physical == 1

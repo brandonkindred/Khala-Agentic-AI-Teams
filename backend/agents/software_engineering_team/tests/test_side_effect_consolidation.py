@@ -30,6 +30,7 @@ def _index(files: dict) -> CodebaseIndex:
 
 
 def test_two_findings_in_same_python_function_merge() -> None:
+    """Two ``side-effects`` findings in the same function merge into one with combined text and span."""
     content = "\n".join(
         [
             "def foo():",  # 1
@@ -64,6 +65,7 @@ def test_two_findings_in_same_python_function_merge() -> None:
 
 
 def test_findings_in_different_functions_do_not_merge() -> None:
+    """Findings in distinct top-level functions stay separate (no shared construct or reference)."""
     content = "\n".join(
         [
             "def foo():",  # 1
@@ -87,6 +89,7 @@ def test_findings_in_different_functions_do_not_merge() -> None:
 
 
 def test_finding_referencing_another_functions_finding_merges() -> None:
+    """A caller finding that cites another finding's ``path:line`` merges with that finding."""
     content = "\n".join(
         [
             "def foo():",  # 1
@@ -109,6 +112,7 @@ def test_finding_referencing_another_functions_finding_merges() -> None:
 
 
 def test_transitive_reference_chain_merges_three() -> None:
+    """A→B and B→C reference links transitively merge all three findings into one group."""
     content = "\n".join(
         [
             "def foo():",  # 1
@@ -137,6 +141,7 @@ def test_transitive_reference_chain_merges_three() -> None:
 
 
 def test_non_python_files_group_by_heuristic_start_line() -> None:
+    """Non-Python findings sharing the same heuristic column-0 declaration start merge together."""
     content = "\n".join(
         [
             "function foo() {",  # 1
@@ -159,6 +164,7 @@ def test_non_python_files_group_by_heuristic_start_line() -> None:
 
 
 def test_non_side_effect_issues_pass_through_unchanged() -> None:
+    """Non-``side-effects`` categories are returned unchanged and never enter a merge group."""
     index = _index({"app/foo.py": "def foo():\n    return 1\n"})
     doc_issue = _issue(category="documentation", description="stale docstring")
     other_issue = _issue(category="logic", description="unrelated logic issue")
@@ -167,6 +173,7 @@ def test_non_side_effect_issues_pass_through_unchanged() -> None:
 
 
 def test_single_side_effect_issue_passes_through_unchanged() -> None:
+    """A singleton ``side-effects`` finding has nothing to merge with and is returned as-is."""
     index = _index({"app/foo.py": "def foo():\n    return 1\n"})
     issue = _issue(line=2, description="lone finding")
     result = consolidate_side_effect_issues([issue], index)
@@ -174,6 +181,7 @@ def test_single_side_effect_issue_passes_through_unchanged() -> None:
 
 
 def test_unresolvable_file_does_not_crash_and_leaves_issues_separate() -> None:
+    """Findings whose file is missing from the index stay separate rather than crashing or merging."""
     index = _index({})
     issues = [
         _issue(file_path="missing.py", line=2, description="a"),
@@ -187,6 +195,7 @@ def test_unresolvable_file_does_not_crash_and_leaves_issues_separate() -> None:
 
 
 def test_severity_elevates_to_highest_in_group() -> None:
+    """Merged severity is the highest among members (critical wins over low)."""
     content = "def foo():\n    x = 1\n    return x\n"
     index = _index({"app/foo.py": content})
     issues = [
@@ -208,6 +217,7 @@ def test_severity_elevates_to_highest_in_group() -> None:
     ],
 )
 def test_severity_elevates_across_all_adjacent_ranks(severities, expected) -> None:
+    """Severity elevation holds for every adjacent rank pair on the severity ladder."""
     content = "def foo():\n    x = 1\n    return x\n"
     index = _index({"app/foo.py": content})
     issues = [
@@ -220,6 +230,7 @@ def test_severity_elevates_across_all_adjacent_ranks(severities, expected) -> No
 
 
 def test_pre_existing_true_only_when_all_members_are() -> None:
+    """A consolidated group is marked pre_existing only if every member in the group is pre_existing; a single non-pre-existing member forces the merged issue to False."""
     content = "def foo():\n    x = 1\n    return x\n"
     index = _index({"app/foo.py": content})
     issues = [
@@ -238,6 +249,7 @@ def test_pre_existing_true_only_when_all_members_are() -> None:
 
 
 def test_merge_preserves_earliest_start_of_multi_line_members() -> None:
+    """Merged ``start_line`` uses each member's effective start so multi-line ranges keep the earliest bound."""
     content = "\n".join(
         [
             "def foo():",  # 1
@@ -263,6 +275,7 @@ def test_merge_preserves_earliest_start_of_multi_line_members() -> None:
 
 
 def test_construct_resolution_normalizes_pre_numbered_hunks() -> None:
+    """Annotated ``N: `` hunks remapped before construct lookup so cross-function references still merge."""
     # Mirrors the PR-review path's render_annotated_hunks output: every line
     # prefixed with its original file line number.
     content = "\n".join(
@@ -284,6 +297,7 @@ def test_construct_resolution_normalizes_pre_numbered_hunks() -> None:
 
 
 def test_majority_file_wins_for_multi_file_group() -> None:
+    """When a merged group spans files, the published finding's path is the majority-file path."""
     foo_content = "def foo():\n    return 1\n"
     other_content = "def other():\n    return foo() + bar()\n"
     index = _index({"app/foo.py": foo_content, "app/other.py": other_content})
