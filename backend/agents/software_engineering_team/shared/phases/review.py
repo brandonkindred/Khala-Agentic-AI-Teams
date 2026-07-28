@@ -67,9 +67,11 @@ def run_code_review_phase_impl(
 
     Postconditions:
         - Returns a ``phase_review_result_cls`` instance whose ``passed`` is
-          true iff no critical/high code-review issue was found. Never
-          raises: every failure path is contained to a synthetic issue or a
-          logged warning, mirroring ``_code_review_step``'s existing containment.
+          true iff no critical/high code-review issue was found. Never raises
+          on a tool/agent failure: those paths are contained to a synthetic
+          issue or a logged warning, mirroring ``_code_review_step``'s
+          existing containment. Caller-supplied ``detail_callback`` exceptions
+          are not contained — they propagate to the caller.
     """
     task_id = task.id
     microtask_id = microtask.id
@@ -178,7 +180,9 @@ def _run_agent_testing_phase(
     ``_qa_review_step``/``_security_review_step``'s identical containment.
     An outright tool-agent ``.review()`` failure is contained to a logged
     warning only — no synthetic issue is added, so the phase may still pass
-    when the tool agent is the only source of findings.
+    when the tool agent is the only source of findings. Caller-supplied
+    ``detail_callback`` exceptions are not contained — they propagate
+    (the announce calls sit outside the agent/tool try/except blocks).
     """
     task_id = task.id
     microtask_id = microtask.id
@@ -349,8 +353,9 @@ def run_qa_testing_phase_impl(
           :attr:`~software_engineering_team.shared.v2_review.ReviewConfig.tool_phase_includes_context`
           flag (forwarded to ``_run_agent_testing_phase``).
     Postconditions:
-        - Delegates to ``_run_agent_testing_phase`` with ``_QA_TESTING_PHASE_SPEC``;
-          never raises (containment is the helper's).
+        - Delegates to ``_run_agent_testing_phase`` with ``_QA_TESTING_PHASE_SPEC``.
+          Never raises on a tool/agent failure (containment is the helper's);
+          caller-supplied ``detail_callback`` exceptions propagate.
     """
     return _run_agent_testing_phase(
         spec=_QA_TESTING_PHASE_SPEC,
