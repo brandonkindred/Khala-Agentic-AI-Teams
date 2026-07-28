@@ -142,6 +142,50 @@ def test_extract_answer_empty_input_returns_none() -> None:
     assert extract_answer_from_qa_history(question, "   \n  ") is None
 
 
+def test_extract_answer_preserves_answer_line_matching_question_header(tmp_path: Path) -> None:
+    question_text = "What approach should we use for structuring the docs?"
+    answer = "Use Markdown.\n### Details\nMore info below."
+    record_answers(tmp_path, [_answered_question(question_text, answer)], iteration=1)
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.selected_answer == answer
+
+
+def test_extract_answer_preserves_answer_line_matching_iteration_header(tmp_path: Path) -> None:
+    question_text = "How should the changelog be organized?"
+    answer = "By release.\n## Iteration notes\nSee below for details."
+    record_answers(tmp_path, [_answered_question(question_text, answer)], iteration=1)
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.selected_answer == answer
+
+
+def test_extract_answer_preserves_line_matching_status_marker(tmp_path: Path) -> None:
+    question_text = "What disclaimer text should ship with auto-generated answers?"
+    answer = (
+        "Show this notice.\n*Auto-answered previously, verify before relying on it.\nEnd of notice."
+    )
+    record_answers(tmp_path, [_answered_question(question_text, answer)], iteration=1)
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    result = extract_answer_from_qa_history(_open_question(question_text), qa_history)
+
+    assert result is not None
+    assert result.selected_answer == answer
+
+
 def test_extract_answer_strips_indented_markers() -> None:
     qa_history = (
         "# Q&A History\n\n"
@@ -246,6 +290,65 @@ def test_parse_qa_history_blocks_preserves_multiline_rationale_in_full_block() -
     assert len(blocks) == 1
     _iteration, _question_text, _answer, full_block = blocks[0]
     assert "First line of rationale.\nSecond line of rationale." in full_block
+
+
+def test_parse_qa_history_blocks_does_not_split_on_embedded_question_header(
+    tmp_path: Path,
+) -> None:
+    question_text = "What approach should we use for structuring the docs?"
+    answer = "Use Markdown.\n### Details\nMore info below."
+    record_answers(tmp_path, [_answered_question(question_text, answer)], iteration=1)
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, question_text_out, answer_out, _full_block = blocks[0]
+    assert question_text_out == question_text
+    assert answer_out == answer
+
+
+def test_parse_qa_history_blocks_does_not_split_on_embedded_iteration_header(
+    tmp_path: Path,
+) -> None:
+    question_text = "How should the changelog be organized?"
+    answer = "By release.\n## Iteration notes\nSee below for details."
+    record_answers(tmp_path, [_answered_question(question_text, answer)], iteration=1)
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, question_text_out, answer_out, _full_block = blocks[0]
+    assert question_text_out == question_text
+    assert answer_out == answer
+
+
+def test_record_answers_prunes_superseded_block_with_escaped_content(tmp_path: Path) -> None:
+    question_text = "Which retry policy should the payment worker use?"
+    first_answer = "Backoff.\n*Auto-answered fallback text\n## Iteration notes\nEnd."
+    record_answers(tmp_path, [_answered_question(question_text, first_answer)], iteration=1)
+
+    record_answers(
+        tmp_path,
+        [_answered_question(question_text, "New answer.")],
+        iteration=2,
+    )
+
+    qa_history = (tmp_path / "plan" / "product_analysis" / "qa_history.md").read_text(
+        encoding="utf-8"
+    )
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    iteration, question_text_out, answer_out, _full_block = blocks[0]
+    assert iteration == 2
+    assert question_text_out == question_text
+    assert answer_out == "New answer."
 
 
 def test_parse_qa_history_blocks_single_line_still_works() -> None:

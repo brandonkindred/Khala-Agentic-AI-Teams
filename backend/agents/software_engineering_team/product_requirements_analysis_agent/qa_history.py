@@ -38,6 +38,17 @@ _AUTO_ANSWERED_MARKER = "*Auto-answered"
 _CUSTOM_TEXT_MARKER = "*Custom text:*"
 _DEFAULT_APPLIED_MARKER = "*(Default applied)*"
 
+# Every marker that terminates an in-progress answer/rationale field (used by
+# _is_boundary_line). A "###"/"##" line also always terminates a field, checked
+# separately since it's a prefix class rather than a fixed string.
+_FIELD_BOUNDARY_MARKERS = (
+    _ANSWER_MARKER,
+    _RATIONALE_MARKER,
+    _AUTO_ANSWERED_MARKER,
+    _CUSTOM_TEXT_MARKER,
+    _DEFAULT_APPLIED_MARKER,
+)
+
 
 def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically (write-temp-then-rename).
@@ -106,12 +117,84 @@ def read_qa_history(repo_path: Path) -> str:
     return ""
 
 
+def _is_boundary_line(stripped: str) -> bool:
+    """Return True if a stripped qa_history.md line is a field or section boundary marker.
+
+    Covers the two field markers (``**Answer:**``, ``**Rationale:**``), the three
+    single-line status markers, and any ``##``-prefixed heading (which also covers
+    ``###``, since a 3-hash line always starts with two hashes too). Used both by
+    :func:`_consume_block_body` to stop buffering a continuation line into the
+    current field, and by :func:`_escape_continuation_line` to decide whether a
+    multi-line value's continuation line must be escaped before being written to
+    qa_history.md so it can't be mistaken for one of these markers on read-back.
+
+    Preconditions: ``stripped`` has leading/trailing whitespace already removed.
+    Postconditions: returns ``True`` iff ``stripped`` starts with ``##`` or one of
+        the field/status marker prefixes; ``False`` otherwise; never raises.
+    """
+    return stripped.startswith("##") or stripped.startswith(_FIELD_BOUNDARY_MARKERS)
+
+
+def _escape_continuation_line(line: str) -> str:
+    """Escape a continuation line so it can't be read back as a structural marker.
+
+    Applied to every line of a multi-line answer/rationale value except its first
+    (which is already unambiguous, since it's introduced by the field marker on the
+    same physical line). Without this, a continuation line that happens to start
+    with ``###``, ``##``, or one of the field/status markers would be silently
+    misread as a new question header, iteration header, or field boundary — either
+    splitting one answer into multiple bogus Q&A blocks, or truncating it early.
+    Reversed by :func:`_unescape_continuation_line` on read.
+
+    Preconditions: ``line`` is a single line (no embedded ``\\n``).
+    Postconditions: returns ``line`` prefixed with one ``\\`` if it already starts
+        with ``\\`` (to keep the escape reversible) or would collide with
+        :func:`_is_boundary_line`; otherwise returns ``line`` unchanged; never
+        raises.
+    """
+    if line.startswith("\\") or _is_boundary_line(line.strip()):
+        return "\\" + line
+    return line
+
+
+def _unescape_continuation_line(line: str) -> str:
+    """Reverse :func:`_escape_continuation_line` for a line read back from qa_history.md.
+
+    Preconditions: ``line`` is a persisted continuation line from inside a qa_history.md
+        field value.
+    Postconditions: returns ``line`` with exactly one leading ``\\`` removed if
+        present; otherwise ``line`` unchanged; never raises.
+    """
+    return line[1:] if line.startswith("\\") else line
+
+
+def _format_field_value(marker: str, value: str) -> str:
+    """Render a (possibly multi-line) field value as ``marker`` plus its lines, newline-terminated.
+
+    Continuation lines (every line of ``value`` after the first) are escaped via
+    :func:`_escape_continuation_line` so a value that happens to contain a line
+    matching a qa_history.md structural marker round-trips intact instead of
+    corrupting the file on the next :func:`record_answers` write.
+
+    Preconditions: ``marker`` is one of this module's field marker constants;
+        ``value`` is a non-empty string (may contain embedded ``\\n``).
+    Postconditions: returns a string ending in ``\\n`` whose first line is
+        ``f"{marker} {value's first line}"`` and whose remaining lines are
+        ``value``'s continuation lines, escaped; never raises.
+    """
+    value_lines = value.split("\n")
+    rendered = [value_lines[0]] + [_escape_continuation_line(vl) for vl in value_lines[1:]]
+    return f"{marker} " + "\n".join(rendered) + "\n"
+
+
 def _consume_block_body(lines: List[str]) -> Tuple[str, str]:
     """Buffer a Q&A block's answer/rationale continuation lines until the next boundary.
 
     Shared by :func:`extract_answer_from_qa_history` and :func:`parse_qa_history_blocks`
     so the two parsers can't drift on what counts as a continuation line versus a new
-    field or section boundary.
+    field or section boundary. Continuation lines are unescaped via
+    :func:`_unescape_continuation_line` as they're buffered, reversing the escaping
+    :func:`_format_field_value` applies on write.
 
     Preconditions: ``lines`` are the lines of a qa_history.md block following its
         ``### question`` header (may be empty).
@@ -131,16 +214,10 @@ def _consume_block_body(lines: List[str]) -> Tuple[str, str]:
         elif stripped.startswith(_RATIONALE_MARKER):
             rationale_lines = [stripped.removeprefix(_RATIONALE_MARKER).strip()]
             current_field = rationale_lines
-        elif (
-            stripped.startswith("###")
-            or stripped.startswith("##")
-            or stripped.startswith(
-                (_AUTO_ANSWERED_MARKER, _CUSTOM_TEXT_MARKER, _DEFAULT_APPLIED_MARKER)
-            )
-        ):
+        elif _is_boundary_line(stripped):
             current_field = None
         elif current_field is not None:
-            current_field.append(line)
+            current_field.append(_unescape_continuation_line(line))
 
     return "\n".join(answer_lines).strip(), "\n".join(rationale_lines).strip()
 
@@ -327,9 +404,9 @@ def record_answers(
     new_section = f"\n## Iteration {iteration}\n\n"
     for aq in answered_questions:
         new_section += f"### {aq.question_text}\n"
-        new_section += f"{_ANSWER_MARKER} {aq.selected_answer}\n"
+        new_section += _format_field_value(_ANSWER_MARKER, aq.selected_answer)
         if aq.rationale:
-            new_section += f"{_RATIONALE_MARKER} {aq.rationale}\n"
+            new_section += _format_field_value(_RATIONALE_MARKER, aq.rationale)
         if aq.was_auto_answered:
             new_section += f"{_AUTO_ANSWERED_MARKER} with {aq.confidence:.0%} confidence*\n"
         elif aq.was_default:
