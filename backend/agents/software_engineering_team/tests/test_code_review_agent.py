@@ -1,17 +1,21 @@
 """Tests for CodeReviewAgent (Strands-migrated).
 
 ``run`` always delegates to the map-reduce coordinator. Covers small and
-large inputs through that path, the ``_reconcile_approval`` safety net
-(minor-only override, synthesized issue from summary, zero-feedback
-auto-approve), and the new-field propagation for single-chunk reviews.
+large inputs through that path, plus the cases where a verdict contradicting
+its own issues list (minor-only reject, zero-issue reject, approved-with-
+critical-issue) now fails ``ChunkReviewLLMResponse`` schema validation
+instead of being silently repaired by the coordinator's old
+``_reconcile_approval`` safety net -- and the new-field propagation for
+single-chunk reviews.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+import pytest
 from code_review_agent import CodeReviewAgent
-from code_review_agent.models import CodeReviewInput, CodeReviewOutput
+from code_review_agent.models import CodeReviewInput, CodeReviewOutput, CodeReviewUnavailableError
 
 from llm_service.clients.dummy import DummyLLMClient
 
@@ -113,8 +117,17 @@ class _StubClient(DummyLLMClient):
         return self._canned
 
 
-def test_reconcile_auto_approves_when_only_minor_issues() -> None:
-    """LLM flags approved=False with only low/info issues → override to True."""
+def test_reconcile_low_only_reject_now_fails_schema_validation() -> None:
+    """LLM flags approved=False with only low/info issues used to be overridden
+    to True by the coordinator's ``_reconcile_approval`` safety net. That net
+    only ever sees verdicts that already satisfy ``ChunkReviewLLMResponse``'s
+    own consistency validator, which now requires an ``approved=False`` reply
+    to carry an actionable critical/high issue -- a low-only rejection no
+    longer reaches the coordinator at all, it fails schema validation and
+    retries once. ``_input()`` is a single chunk, so the identical retry
+    failure trips the coordinator's total-failure guard instead of ever
+    producing a verdict to reconcile."""
+
     agent = CodeReviewAgent(
         llm_client=_StubClient(
             {
@@ -129,52 +142,65 @@ def test_reconcile_auto_approves_when_only_minor_issues() -> None:
                     },
                 ],
                 "summary": "One nit",
+                "spec_compliance_notes": "",
             }
         )
     )
-    result = agent.run(_input())
-    assert result.approved is True
-    assert len(result.issues) == 1
-    assert result.issues[0].severity == "low"
+    with pytest.raises(CodeReviewUnavailableError):
+        agent.run(_input())
 
 
-def test_reconcile_synthesizes_issue_when_rejected_with_summary_and_no_issues() -> None:
-    """LLM returns approved=False with 0 issues but a non-empty summary →
-    synthesize a high-severity blocking issue from the summary."""
+def test_reconcile_zero_issue_reject_with_summary_now_fails_schema_validation() -> None:
+    """LLM returns approved=False with 0 issues but a non-empty summary used to
+    be repaired by ``mapping._outcome_from_output`` into a synthesized
+    high-severity issue built from the summary. ``ChunkReviewLLMResponse``'s
+    consistency validator now rejects that shape at the schema layer instead
+    (an ``approved=False`` verdict must already carry an actionable
+    critical/high issue), so the reply fails validation and retries once.
+    ``_input()`` is a single chunk, so the identical retry failure trips the
+    coordinator's total-failure guard rather than fabricating a verdict for
+    code that was never actually reviewed."""
+
     agent = CodeReviewAgent(
         llm_client=_StubClient(
             {
                 "approved": False,
                 "issues": [],
                 "summary": "Code lacks error handling around DB calls",
+                "spec_compliance_notes": "",
             }
         )
     )
-    result = agent.run(_input())
-    assert result.approved is False
-    assert len(result.issues) == 1
-    assert result.issues[0].severity == "high"
-    assert "error handling" in result.issues[0].description.lower()
+    with pytest.raises(CodeReviewUnavailableError):
+        agent.run(_input())
 
 
-def test_reconcile_auto_approves_when_rejected_with_no_feedback() -> None:
-    """LLM returns approved=False with 0 issues AND 0 summary → auto-approve
-    (prevents unresolvable loops)."""
+def test_reconcile_zero_issue_zero_summary_reject_now_fails_schema_validation() -> None:
+    """LLM returns approved=False with 0 issues AND 0 summary used to be
+    auto-approved by the coordinator's ``_reconcile_approval`` safety net
+    (preventing unresolvable loops). That net only ever sees verdicts that
+    already satisfy ``ChunkReviewLLMResponse``'s own consistency validator,
+    which now requires an ``approved=False`` reply to carry an actionable
+    critical/high issue regardless of the summary -- this reply fails schema
+    validation and retries once. ``_input()`` is a single chunk, so the
+    identical retry failure trips the coordinator's total-failure guard
+    instead of ever reaching the auto-approve safety net."""
+
     agent = CodeReviewAgent(
-        llm_client=_StubClient({"approved": False, "issues": [], "summary": ""})
+        llm_client=_StubClient(
+            {"approved": False, "issues": [], "summary": "", "spec_compliance_notes": ""}
+        )
     )
-    result = agent.run(_input())
-    assert result.approved is True
-    assert result.issues == []
+    with pytest.raises(CodeReviewUnavailableError):
+        agent.run(_input())
 
 
 def test_multiple_run_calls_on_same_instance_succeed() -> None:
     """Regression: a single ``CodeReviewAgent`` instance must handle many
-    ``run()`` calls in sequence. Early Strands migrations cached a Strands
-    ``Agent`` instance in ``__init__`` and reused it across calls, which
-    broke the ``structured_output_model`` forced-tool-choice on the second
-    call because Strands' Agent accumulates message history. The fix is to
-    construct a fresh Strands Agent per ``run()``.
+    ``run()`` calls in sequence. Each call builds a fresh review prompt and
+    invokes ``complete_validated`` directly against the injected
+    ``LLMClient``, so no persistent state from a previous review (message
+    history, cached model, etc.) can leak into the next one.
     """
     agent = CodeReviewAgent(llm_client=DummyLLMClient())
     for i in range(4):
@@ -253,7 +279,6 @@ def test_repo_root_defaults_none_and_round_trips_through_json() -> None:
 def test_repo_root_does_not_satisfy_code_or_files_requirement() -> None:
     """``repo_root`` is not a code source: an input with only ``repo_root`` and no
     files/code still fails the ``_require_code_or_files`` validator."""
-    import pytest
 
     with pytest.raises(ValueError):
         CodeReviewInput(repo_root="/tmp/checkout")
@@ -262,8 +287,6 @@ def test_repo_root_does_not_satisfy_code_or_files_requirement() -> None:
 def test_run_raises_unavailable_when_review_cannot_complete() -> None:
     """Contract: a review that cannot be completed raises — callers must treat
     it as a failed run, never as feedback for the coding agent."""
-    import pytest
-    from code_review_agent.models import CodeReviewUnavailableError
 
     from llm_service import LLMRateLimitError
 
@@ -276,8 +299,17 @@ def test_run_raises_unavailable_when_review_cannot_complete() -> None:
         agent.run(_input())
 
 
-def test_reconcile_rejects_when_critical_issue_present() -> None:
-    """LLM returns a critical issue with approved=True → override to False."""
+def test_reconcile_approved_true_with_critical_issue_now_fails_schema_validation() -> None:
+    """LLM returns a critical issue with approved=True (the mirror image of
+    the zero-issue-reject conflict above) used to be overridden to False by
+    the coordinator's ``_reconcile_approval`` safety net. That net only ever
+    sees verdicts that already satisfy ``ChunkReviewLLMResponse``'s own
+    consistency validator, which now requires ``approved=True`` to carry NO
+    actionable critical/high issue -- this contradictory reply fails schema
+    validation and retries once. ``_input()`` is a single chunk, so the
+    identical retry failure trips the coordinator's total-failure guard
+    instead of ever reaching the reconcile safety net."""
+
     agent = CodeReviewAgent(
         llm_client=_StubClient(
             {
@@ -285,20 +317,19 @@ def test_reconcile_rejects_when_critical_issue_present() -> None:
                 "issues": [
                     {
                         "severity": "critical",
-                        "category": "security",
+                        "category": "logic",
                         "file_path": "app/main.py",
                         "description": "SQL injection in user query",
                         "suggestion": "Use parameterized queries",
                     },
                 ],
                 "summary": "LGTM",
+                "spec_compliance_notes": "",
             }
         )
     )
-    result = agent.run(_input())
-    assert result.approved is False
-    assert len(result.issues) == 1
-    assert result.issues[0].severity == "critical"
+    with pytest.raises(CodeReviewUnavailableError):
+        agent.run(_input())
 
 
 # ---------------------------------------------------------------------------

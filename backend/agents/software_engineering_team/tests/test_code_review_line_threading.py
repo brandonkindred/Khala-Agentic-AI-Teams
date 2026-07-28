@@ -89,6 +89,7 @@ def test_single_call_threads_line() -> None:
                     }
                 ],
                 "summary": "needs work",
+                "spec_compliance_notes": "",
             }
         ]
     )
@@ -100,6 +101,10 @@ def test_single_call_threads_line() -> None:
 
 
 def test_single_call_bad_line_becomes_none() -> None:
+    """A non-positive line number is schema-valid (an int) but semantically
+    bad (``coerce_line`` treats it as absent) -- unlike a non-numeric string,
+    which ``ChunkReviewIssueLLM.line: Optional[int]`` now rejects outright at
+    the schema layer rather than letting it through for downstream coercion."""
     client = _ScriptedClient(
         [
             {
@@ -109,12 +114,13 @@ def test_single_call_bad_line_becomes_none() -> None:
                         "severity": "high",
                         "category": "logic",
                         "file_path": "app/main.py",
-                        "line": "bogus",
+                        "line": 0,
                         "description": "issue",
                         "suggestion": "fix",
                     }
                 ],
                 "summary": "needs work",
+                "spec_compliance_notes": "",
             }
         ]
     )
@@ -137,7 +143,7 @@ def test_coordinator_threads_line() -> None:
                 "issues": [
                     {
                         "severity": "critical",
-                        "category": "security",
+                        "category": "logic",
                         "file_path": "app/main.py",
                         "line": 13,
                         "description": "injection",
@@ -145,6 +151,7 @@ def test_coordinator_threads_line() -> None:
                     }
                 ],
                 "summary": "bad",
+                "spec_compliance_notes": "",
             }
         ]
     )
@@ -198,6 +205,7 @@ def test_split_segments_cite_absolute_prefixed_lines() -> None:
                     }
                 ],
                 "summary": "per-chunk issue",
+                "spec_compliance_notes": "",
             }
 
     client = _CiteFirstPrefixed()
@@ -236,6 +244,7 @@ def test_pre_numbered_split_segment_keeps_cited_line() -> None:
                     }
                 ],
                 "summary": "found one",
+                "spec_compliance_notes": "",
             }
         ]
     )
@@ -274,6 +283,7 @@ def test_blank_issue_path_resolves_to_sole_segment_and_strips_lines_suffix() -> 
                     }
                 ],
                 "summary": "per-chunk issue",
+                "spec_compliance_notes": "",
             }
         ]
     )
