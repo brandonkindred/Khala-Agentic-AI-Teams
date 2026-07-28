@@ -133,7 +133,7 @@ def _verify_parallelism() -> int:
     return _map_parallelism()
 
 
-@dataclass
+@dataclass(frozen=True)
 class CodebaseIndex:
     """In-memory view of all code the verifier may read to check a finding.
 
@@ -141,8 +141,10 @@ class CodebaseIndex:
         - ``files`` maps a file path to its FULL content (never a chunk or a
           truncated excerpt): seeing the whole file is the entire point — the
           chunk reviewer's partial view is what produced the false positive.
-        - ``existing_codebase`` is the (already capped) pre-existing-code excerpt
-          passed for context; it is exposed as the read-only pseudo-path
+          Whitespace-only bodies (e.g. a newline-only ``__init__.py``) are kept;
+          only ``None`` / empty-string content is excluded at construction.
+        - ``existing_codebase`` is the full pre-existing-code excerpt passed for
+          context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
         - ``repo_reader`` is an optional read-only, thread-safe ``RepoReader``
           giving read access to the rest of the repository (files that already
@@ -151,8 +153,9 @@ class CodebaseIndex:
           existing-codebase excerpt fail to resolve a path, which is what lets
           the verifier confirm "this file already exists" and drop the false
           positive. In-memory search (``search``) never touches it.
-        - The index is read-only after construction: no method mutates ``files``
-          or ``existing_codebase``, and it never mutates ``repo_reader`` (whose
+        - The index is read-only after construction: the dataclass is frozen,
+          ``files`` is shallow-copied at init, no method mutates ``files`` or
+          ``existing_codebase``, and it never mutates ``repo_reader`` (whose
           own reads are internally synchronized), so it is safe to share across
           the parallel verification worker threads.
     """
@@ -163,6 +166,9 @@ class CodebaseIndex:
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "files", dict(self.files))
+
     @classmethod
     def from_input(
         cls, input_data: CodeReviewInput, repo_reader: Optional[RepoReader] = None
@@ -170,19 +176,22 @@ class CodebaseIndex:
         """Build the index from a review input's ``files`` or legacy ``code``.
 
         Postconditions:
-            - When ``files`` is set, every file with non-blank content is
-              included (insertion order preserved), with no header parsing.
+            - When ``files`` is set, every file whose content is not ``None`` and
+              not ``""`` is included (insertion order preserved), including
+              whitespace-only bodies, with no header parsing.
             - Otherwise the legacy ``code`` blob is parsed into ``### path ###``
-              blocks via the coordinator's canonical parser; headerless and
-              blank blocks are dropped (they cannot be addressed by a path).
-            - ``existing_codebase`` carries the input's existing-codebase excerpt
-              (empty string when absent); ``repo_reader`` is stored verbatim.
+              blocks via the coordinator's canonical parser; headerless blocks
+              and empty-string bodies are dropped (they cannot be addressed by
+              a path).
+            - ``existing_codebase`` carries the input's full existing-codebase
+              excerpt (empty string when absent); ``repo_reader`` is stored
+              verbatim.
         """
         if input_data.files is not None:
             files = {
                 path: content
                 for path, content in input_data.files.items()
-                if content and content.strip()
+                if content is not None and content != ""
             }
         else:
             # Lazy import keeps this module free of an import cycle with the
@@ -191,7 +200,7 @@ class CodebaseIndex:
 
             files = {}
             for path, content in parse_code_into_file_blocks(input_data.code or ""):
-                if path and content.strip():
+                if path and content != "":
                     files[path] = content
         return cls(
             files=files,
@@ -785,6 +794,13 @@ class _Verdict:
     is_false_positive: bool = False
     confidence: str = ""
     reasoning: str = ""
+
+    def __post_init__(self) -> None:
+        if self.is_false_positive and self.confidence not in ("high", "medium"):
+            raise ValueError(
+                "is_false_positive=True requires confidence 'high' or 'medium', "
+                f"got confidence={self.confidence!r}"
+            )
 
 
 def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:

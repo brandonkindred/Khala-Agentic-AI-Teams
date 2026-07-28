@@ -149,10 +149,34 @@ def _enable_filter(monkeypatch):
 # --------------------------------------------------------------------------- CodebaseIndex
 
 
-def test_index_from_files_keeps_nonblank() -> None:
-    """``from_input`` keeps only files with non-blank content (blank/empty dropped)."""
-    idx = CodebaseIndex.from_input(_input(files={"a.py": "x = 1\n", "b.py": "   ", "c.py": ""}))
-    assert set(idx.files) == {"a.py"}
+def test_index_from_files_keeps_whitespace_only() -> None:
+    """``from_input`` keeps whitespace-only files; only None/empty-string content is dropped."""
+    idx = CodebaseIndex.from_input(
+        _input(files={"a.py": "x = 1\n", "b.py": "   ", "c.py": "", "d.py": "\n"})
+    )
+    assert set(idx.files) == {"a.py", "b.py", "d.py"}
+
+
+def test_verdict_invariant_rejects_low_confidence_false_positive() -> None:
+    """``_Verdict`` rejects is_false_positive=True without high/medium confidence."""
+    from code_review_agent.false_positive_filter import _Verdict
+
+    with pytest.raises(ValueError):
+        _Verdict(is_false_positive=True, confidence="low")
+    with pytest.raises(ValueError):
+        _Verdict(is_false_positive=True, confidence="")
+    ok = _Verdict(is_false_positive=True, confidence="high")
+    assert ok.is_false_positive is True
+
+
+def test_codebase_index_is_frozen_and_isolates_files_dict() -> None:
+    """Frozen index isolates its files map from the caller's dict and rejects reassignment."""
+    src = {"a.py": "x"}
+    idx = CodebaseIndex(files=src)
+    src["a.py"] = "mutated"
+    assert idx.files["a.py"] == "x"
+    with pytest.raises(Exception):
+        idx.files = {}  # type: ignore[misc]
 
 
 def test_index_from_legacy_code_parses_headers() -> None:
@@ -413,10 +437,11 @@ def test_find_function_at_line_never_raises(monkeypatch: pytest.MonkeyPatch) -> 
     """
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
 
-    def _boom(path: str) -> str:
+    def _boom(_self: CodebaseIndex, path: str) -> str:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(idx, "resolve_path", _boom)
+    # Patch on the class: CodebaseIndex is frozen, so instance setattr fails.
+    monkeypatch.setattr(CodebaseIndex, "resolve_path", _boom)
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("app/main.py", 1)
     assert result.startswith("Error")
