@@ -31,7 +31,7 @@ def test_resolve_model_global_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_model_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_MODEL_backend", raising=False)
-    assert config.resolve_model("backend") == "deepseek-v4-pro:cloud"
+    assert config.resolve_model("backend") == "kimi-k2.7-code:cloud"
 
 
 def test_resolve_agent_default_think_code_review_is_reduced() -> None:
@@ -41,6 +41,32 @@ def test_resolve_agent_default_think_code_review_is_reduced() -> None:
     # The pinned tier must be a real registered level for its model, or the wire
     # resolution would fall back to max and defeat the point.
     assert "high" in config.KNOWN_MODEL_THINKING_LEVELS["deepseek-v4-pro:cloud"]
+
+
+def test_resolve_model_code_review_verify_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """code_review_verify has its own, genuinely lighter AGENT_DEFAULT_MODELS
+    entry, independent of (and not affecting) code_review's.
+
+    llama3.1 is required here rather than a thinking-tier pin on the same model
+    as code_review: deepseek-v4-pro:cloud's reasoning_effort wire mapping collapses
+    "low"/"medium" onto the same "high" tier code_review already pinned (see
+    KNOWN_MODEL_THINKING_LEVELS), so that route could not be made genuinely
+    lighter via AGENT_DEFAULT_THINK alone.
+    """
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
+    monkeypatch.delenv("LLM_MODEL_code_review", raising=False)
+    assert config.resolve_model("code_review_verify") == "llama3.1"
+    assert config.resolve_model("code_review") == "kimi-k2.7-code:cloud"
+
+
+def test_resolve_agent_default_think_code_review_verify_has_no_pin() -> None:
+    """code_review_verify's model (llama3.1) registers no thinking levels, so it
+    has no AGENT_DEFAULT_THINK entry — the pin would be silently inert. code_review's
+    own resolution is unaffected by the new key."""
+    assert config.resolve_agent_default_think("code_review_verify") is None
+    assert "llama3.1" not in config.KNOWN_MODEL_THINKING_LEVELS
+    assert config.resolve_agent_default_think("code_review") == "high"
 
 
 def test_resolve_agent_default_think_unlisted_and_none_are_none() -> None:

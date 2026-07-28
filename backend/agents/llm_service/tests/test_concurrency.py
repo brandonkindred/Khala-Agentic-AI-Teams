@@ -35,10 +35,10 @@ def test_garbage_limit_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("LLM_MAX_CONCURRENCY", "not-an-int")
     reset_llm_semaphore()
     sem = get_llm_semaphore()
-    acquired = [sem.acquire(blocking=False) for _ in range(4)]
-    assert all(acquired)  # default is 4
+    acquired = [sem.acquire(blocking=False) for _ in range(8)]
+    assert all(acquired)  # default is 8
     assert sem.acquire(blocking=False) is False
-    for _ in range(4):
+    for _ in range(8):
         sem.release()
 
 

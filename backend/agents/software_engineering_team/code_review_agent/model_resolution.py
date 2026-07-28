@@ -1,10 +1,16 @@
 """Shared strands-model resolution for the code-review agents.
 
-The chunk reviewer, the synthesis pass, and the false-positive verifier all need
-the same thing: run a strands ``Agent`` on the injected ``llm`` when it already
-implements the strands ``Model`` interface (the test path injects such a
-client), or on the shared, cached production model otherwise. Keeping that one
-rule here stops the three call sites from drifting apart.
+The synthesis pass, the false-positive verifier, ``architecture_consistency_pass``,
+and ``side_effect_impact_pass`` all need the same thing: run a strands ``Agent`` on
+the injected ``llm`` when it already implements the strands ``Model`` interface
+(the test path injects such a client), or on the shared, cached production model
+otherwise. Keeping that one rule here stops those call sites from drifting apart.
+Today all of them use ``resolve_code_review_model`` (``mapping.py`` also calls it,
+but only to fingerprint the model identity for cache keys — the chunk reviewer
+itself now calls ``LLMClient.complete_json`` directly rather than dispatching
+through this module). ``resolve_code_review_verify_model`` below adds the lighter
+``code_review_verify`` routing path but is not yet wired into any call site —
+that adoption is tracked as separate follow-up work.
 
 This is intentionally distinct from the generic
 ``software_engineering_team.shared.strands_model.resolve_strands_model``: the
@@ -54,6 +60,42 @@ def resolve_code_review_model(
     if think is None:
         return get_strands_model("code_review")
     return get_strands_model("code_review", think=think)
+
+
+def resolve_code_review_verify_model(
+    llm: "Union[LLMClient, _StrandsModel]", think: Optional[Union[bool, str]] = None
+) -> "Union[LLMClient, _StrandsModel]":
+    """Resolve the strands model for code-review's narrower verify/synthesis sub-passes.
+
+    Same shape as :func:`resolve_code_review_model`, but keyed on the
+    ``code_review_verify`` agent key (its own, genuinely lighter
+    ``AGENT_DEFAULT_MODELS`` entry) instead of ``code_review`` — intended for
+    bounded tasks like false-positive verification and narrative synthesis, as
+    opposed to open-ended chunk review. Not yet called by any production call
+    site (``false_positive_filter.py`` and ``synthesis.py`` still call
+    :func:`resolve_code_review_model`); wiring them over to this resolver is
+    tracked as separate follow-up work, not part of adding the routing path
+    itself.
+
+    Preconditions:
+        - ``llm`` is an ``LLMClient`` or an object implementing the strands
+          ``Model`` interface.
+        - ``think`` is ``None`` (use the model's default thinking level), or an
+          explicit override applied only on the production path.
+
+    Postconditions:
+        - Returns ``llm`` itself when it already implements the strands ``Model``
+          interface (the test path injects such a client); ``think`` is ignored
+          for it (see ``thinking_override_supported``). Otherwise returns
+          ``get_strands_model("code_review_verify", think=think)`` (or without
+          ``think`` when it is ``None``), safe to share across concurrent
+          ``Agent`` calls.
+    """
+    if isinstance(llm, _StrandsModel):
+        return llm
+    if think is None:
+        return get_strands_model("code_review_verify")
+    return get_strands_model("code_review_verify", think=think)
 
 
 def thinking_override_supported(llm: "Union[LLMClient, _StrandsModel]") -> bool:
