@@ -208,10 +208,14 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
     has_architecture_findings = bool(architecture_findings)
     if architecture_findings:
         verified = [*verified, *architecture_findings]
+    side_effect_findings = A.find_side_effect_impact_activity(payload)
+    has_side_effect_findings = bool(side_effect_findings)
+    if side_effect_findings:
+        verified = [*verified, *side_effect_findings]
     gate = A.finalize_review_activity(
         verified, not_reviewed, prep["skipped_issues"], approved_flags
     )
-    if len(summaries) == 1 and not has_architecture_findings:
+    if len(summaries) == 1 and not has_architecture_findings and not has_side_effect_findings:
         summary, notes = summaries[0], (spec_notes[0] if spec_notes else "")
     else:
         synth = A.synthesize_findings_activity(
