@@ -83,54 +83,76 @@ def test_worker_thread_target_handles_runtime_error_loop_stopped(monkeypatch) ->
         def close(self):
             self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
 
     worker._worker_thread_target()  # Must not raise
+    assert loop._closed is True
 
 
-def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch) -> None:
+def test_worker_thread_target_handles_unknown_runtime_error(monkeypatch, caplog) -> None:
     """An unrelated RuntimeError in the worker loop is logged, not raised."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
     class _FakeLoop:
+        def __init__(self):
+            self._closed = False
+
         def run_until_complete(self, coro):
             raise RuntimeError("totally different error")
 
         def close(self):
-            pass
+            self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
 
-    worker._worker_thread_target()  # Logs but must not raise
+    with caplog.at_level(logging.ERROR, logger="agents.blogging.temporal.worker"):
+        worker._worker_thread_target()  # Logs but must not raise
+
+    assert loop._closed is True
+    assert any("Blogging Temporal worker failed" in r.message for r in caplog.records)
 
 
-def test_worker_thread_target_handles_generic_exception(monkeypatch) -> None:
+def test_worker_thread_target_handles_generic_exception(monkeypatch, caplog) -> None:
     """A generic exception in the worker loop is logged, not raised."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
     class _FakeLoop:
+        def __init__(self):
+            self._closed = False
+
         def run_until_complete(self, coro):
             raise ValueError("oops")
 
         def close(self):
-            pass
+            self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
 
-    worker._worker_thread_target()  # Must not raise
+    with caplog.at_level(logging.ERROR, logger="agents.blogging.temporal.worker"):
+        worker._worker_thread_target()  # Must not raise
+
+    assert loop._closed is True
+    assert any("Blogging Temporal worker failed" in r.message for r in caplog.records)
 
 
 def test_worker_thread_target_handles_cancelled(monkeypatch) -> None:
@@ -142,17 +164,23 @@ def test_worker_thread_target_handles_cancelled(monkeypatch) -> None:
     monkeypatch.setattr(worker, "is_temporal_enabled", lambda: True)
 
     class _FakeLoop:
+        def __init__(self):
+            self._closed = False
+
         def run_until_complete(self, coro):
             raise asyncio.CancelledError()
 
         def close(self):
-            pass
+            self._closed = True
 
-    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: _FakeLoop())
-    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda loop: None)
+    loop = _FakeLoop()
+    monkeypatch.setattr(worker.asyncio, "new_event_loop", lambda: loop)
+    monkeypatch.setattr(worker.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(worker, "set_temporal_client", lambda c: None)
     monkeypatch.setattr(worker, "set_temporal_loop", lambda _loop: None)
+
     worker._worker_thread_target()
+    assert loop._closed is True
 
 
 def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None:
@@ -170,18 +198,24 @@ def test_shutdown_blogging_temporal_components_running_loop(monkeypatch) -> None
         def is_running(self):
             return True
 
-    monkeypatch.setattr(
-        worker.asyncio,
-        "run_coroutine_threadsafe",
-        lambda coro, loop: _FakeFuture(),
-    )
+    fake_loop = _FakeLoop()
+    scheduled = []
 
+    def fake_run_coroutine_threadsafe(coro, loop):
+        scheduled.append((coro, loop))
+        return _FakeFuture()
+
+    monkeypatch.setattr(worker.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe)
     monkeypatch.setattr(worker, "_worker_instance", fake_worker)
-    monkeypatch.setattr(worker, "_worker_running_loop", _FakeLoop())
+    monkeypatch.setattr(worker, "_worker_running_loop", fake_loop)
     monkeypatch.setattr(worker, "_worker_thread", None)
     monkeypatch.setattr(worker, "_activity_executor", None)
 
     worker.shutdown_blogging_temporal_components()
+
+    fake_worker.shutdown.assert_called_once()
+    assert len(scheduled) == 1
+    assert scheduled[0][1] is fake_loop
 
 
 def test_shutdown_blogging_temporal_components_force_stop(monkeypatch) -> None:
@@ -258,8 +292,10 @@ def test_shutdown_blogging_temporal_components_with_executor(monkeypatch) -> Non
     executor.shutdown.assert_called()
 
 
-def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch) -> None:
+def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch, caplog) -> None:
     """If executor.shutdown raises, log but don't crash."""
+    import logging
+
     from agents.blogging.temporal import worker
 
     executor = MagicMock()
@@ -268,7 +304,11 @@ def test_shutdown_blogging_temporal_components_executor_exception(monkeypatch) -
     monkeypatch.setattr(worker, "_worker_running_loop", None)
     monkeypatch.setattr(worker, "_worker_thread", None)
     monkeypatch.setattr(worker, "_activity_executor", executor)
-    worker.shutdown_blogging_temporal_components()
+
+    with caplog.at_level(logging.ERROR, logger="agents.blogging.temporal.worker"):
+        worker.shutdown_blogging_temporal_components()
+
+    assert any("ThreadPoolExecutor shutdown failed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +431,13 @@ def test_plan_stage_activity_returns_planning_dto(monkeypatch, tmp_path) -> None
 def test_plan_stage_activity_abort_returns_fail(monkeypatch, tmp_path) -> None:
     """A planning abort (cancel/failed job) yields a FAIL DTO, not a raise."""
     acts, _ = _patch_context(monkeypatch, tmp_path)
-    monkeypatch.setattr(_v2(), "run_planning_stage", lambda c: (None, None, "FAIL"))
+    # Dual contract of run_planning_stage: success returns None and mutates ctx;
+    # HITL abort returns (planning_phase_result, None, "FAIL").
+    monkeypatch.setattr(
+        _v2(),
+        "run_planning_stage",
+        lambda c: (_Dumpable({"content_plan": {}}), None, "FAIL"),
+    )
 
     out = acts.plan_stage_activity("j1", {"brief": "x"})
     assert out["status"] == "FAIL"
