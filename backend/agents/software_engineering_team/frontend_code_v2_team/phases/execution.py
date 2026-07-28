@@ -63,7 +63,14 @@ ToolAgentRunner = Callable[[ToolAgentInput], ToolAgentOutput]
 
 
 def _llm_runner() -> LlmRunner:
-    """Build the LLM runner from this module's globals so tests can monkeypatch them."""
+    """Build the LLM runner from this module's globals so tests can monkeypatch them.
+
+    Preconditions: none.
+    Postconditions: returns a freshly constructed ``LlmRunner`` bound to this
+      module's current ``Agent`` / ``resolve_text_mode_strands_model``
+      globals, looked up at call time (not cached), so monkeypatching either
+      name before the call takes effect.
+    """
     return LlmRunner(agent_factory=Agent, resolve_model=resolve_text_mode_strands_model)
 
 
@@ -88,6 +95,19 @@ def _run_general_microtask(
 
     Delegates to the shared implementation; keeps ``Agent`` /
     ``resolve_text_mode_strands_model`` as this module's LLM boundary.
+
+    Preconditions: ``llm`` is an ``LLMClient``; ``microtask``/``task`` are
+      fully-formed domain objects; ``architecture`` is ``None`` or a
+      ``SystemArchitecture``.
+    Postconditions: returns the parsed ``{path: content}`` map produced by
+      ``_run_general_microtask_impl`` using this team's ``EXECUTION_PROMPT`` /
+      ``parse_files_and_summary_template`` / ``PROFILE`` and a fresh
+      ``_llm_runner()``; see that shared implementation for the full contract.
+      Its rejection guard is a generic, unconditional ``.py``-suffix check
+      shared with the backend team (not scoped by ``language``), so it rarely
+      fires here since this team's output is mostly ``.ts``/``.tsx``/etc. —
+      but any stray ``.py`` file whose content fails to parse is still
+      dropped, not returned.
     """
     return _run_general_microtask_impl(
         llm=llm,
@@ -119,6 +139,14 @@ def run_execution(
 
     Delegates the non-gated loop to ``run_execution_impl``; see that shared
     implementation for the full contract.
+
+    Preconditions: ``task``/``planning_result`` are fully-formed; ``repo_path``
+      is a path the coding step can write under; ``only_microtask_ids``, if
+      given, may reference any subset of ``planning_result.microtasks``.
+    Postconditions: returns an ``ExecutionResult``; a failed microtask is
+      marked FAILED and execution continues with the remaining microtasks; an
+      unmet ``depends_on`` is logged but does not block the microtask from
+      running.
     """
     return run_execution_impl(
         llm=llm,
@@ -184,7 +212,28 @@ def _code_review_gate(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> GateOutcome:
-    """Run the frontend code-review gate (build + lint + code review agents only)."""
+    """Run the frontend code-review gate (build + lint + code review agents,
+    plus every wired tool agent).
+
+    Preconditions: ``deps.build_verifier``/``deps.code_review_agent``/
+      ``deps.linting_tool_agent``/``deps.tool_agents`` are set consistently
+      with what the caller wants exercised; ``files`` is the microtask's
+      current ``{path: content}`` output.
+    Postconditions: the review/agent logic itself never raises (build, lint,
+      code-review, and tool-agent failures are all contained to synthetic
+      issues or logged warnings); an exception from ``detail_callback`` —
+      which is invoked outside that containment and, in the gated loop,
+      forwards to the caller-supplied ``progress_callback`` — is not caught
+      here and propagates uncaught. Calls ``run_microtask_review`` with
+      ``qa_agent=None, security_agent=None`` (disabling only those two LLM
+      review steps) and the full, unscoped ``deps.tool_agents`` mapping —
+      unlike the QA/security gates, this call does not narrow ``tool_agents``
+      to a single kind, so the returned ``issues`` can include
+      build/lint/code-review findings *and* every wired tool agent's findings
+      (e.g. accessibility, ui_design), not only code-review-sourced ones.
+      Copies ``passed``/``issues``/``summary``/``raw_issue_count`` (defaulting
+      to ``None``) from the result unfiltered.
+    """
     from .review import run_microtask_review
 
     r = run_microtask_review(
@@ -222,8 +271,37 @@ def _qa_gate(
     detail_callback: Callable[[str], None],
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
-    """Run the frontend QA gate (QA agent + ``testing_qa`` tool agent only),
-    keeping only ``source == "qa"`` issues."""
+    """Run the frontend QA gate, keeping only ``source == "qa"`` issues.
+
+    Disables the external ``security_agent``/``code_review_agent``/
+    ``linting_tool_agent`` and passes ``build_verifier=None`` — build and
+    lint are then genuinely skipped by ``run_microtask_review``.
+    ``code_review_agent=None`` does not skip code review, though: the shared
+    ``_code_review_step`` still runs its LLM-fallback reviewer whenever no
+    external agent is supplied, and the fan-out calls it unconditionally, so
+    a code-review LLM call happens on every invocation of this gate; its
+    issues are filtered out below, not never produced.
+
+    Preconditions: ``deps.qa_agent``/``deps.tool_agents`` are set consistently
+      with what the caller wants exercised; ``files`` is the microtask's
+      current ``{path: content}`` output.
+    Postconditions: the review/agent logic itself never raises (an outright
+      QA-agent or tool-agent failure is contained to a synthetic issue or a
+      logged warning); an exception from ``detail_callback`` — which is
+      invoked outside that containment and, in the gated loop, forwards to
+      the caller-supplied ``progress_callback`` — is not caught here and
+      propagates uncaught. Calls ``run_microtask_review`` with only
+      ``qa_agent`` enabled among the external review agents (build and lint
+      skipped; the LLM-fallback code-review step still runs and contributes
+      to ``r.issues``) and ``tool_agents`` scoped to
+      ``ToolAgentKind.TESTING_QA`` via ``_scoped_tool_agents`` (``None`` when
+      that kind isn't wired), then filters ``r.issues`` to ``source == "qa"``
+      before returning, discarding the code-review issues and any other
+      non-QA-sourced ones. ``passed`` is computed as ``not qa_issues`` (true
+      iff no QA-sourced issue survives filtering) rather than taken from
+      ``r.passed`` — a stray non-QA issue in ``r.issues`` cannot fail this
+      gate.
+    """
     from .review import run_microtask_review
 
     r = run_microtask_review(
@@ -256,8 +334,37 @@ def _security_gate(
     detail_callback: Callable[[str], None],
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
-    """Run the frontend security gate (security agent + ``security`` tool agent only),
-    keeping only ``source == "security"`` issues."""
+    """Run the frontend security gate, keeping only ``source == "security"`` issues.
+
+    Disables the external ``qa_agent``/``code_review_agent``/
+    ``linting_tool_agent`` and passes ``build_verifier=None`` — build and
+    lint are then genuinely skipped by ``run_microtask_review``.
+    ``code_review_agent=None`` does not skip code review, though: the shared
+    ``_code_review_step`` still runs its LLM-fallback reviewer whenever no
+    external agent is supplied, and the fan-out calls it unconditionally, so
+    a code-review LLM call happens on every invocation of this gate; its
+    issues are filtered out below, not never produced.
+
+    Preconditions: ``deps.security_agent``/``deps.tool_agents`` are set
+      consistently with what the caller wants exercised; ``files`` is the
+      microtask's current ``{path: content}`` output.
+    Postconditions: the review/agent logic itself never raises (an outright
+      security-agent or tool-agent failure is contained to a synthetic issue
+      or a logged warning); an exception from ``detail_callback`` — which is
+      invoked outside that containment and, in the gated loop, forwards to
+      the caller-supplied ``progress_callback`` — is not caught here and
+      propagates uncaught. Calls ``run_microtask_review`` with only
+      ``security_agent`` enabled among the external review agents (build and
+      lint skipped; the LLM-fallback code-review step still runs and
+      contributes to ``r.issues``) and ``tool_agents`` scoped to
+      ``ToolAgentKind.SECURITY`` via ``_scoped_tool_agents`` (``None`` when
+      that kind isn't wired), then filters ``r.issues`` to
+      ``source == "security"`` before returning, discarding the code-review
+      issues and any other non-security-sourced ones. ``passed`` is computed
+      as ``not sec_issues`` (true iff no security-sourced issue survives
+      filtering) rather than taken from ``r.passed`` — a stray non-security
+      issue in ``r.issues`` cannot fail this gate.
+    """
     from .review import run_microtask_review
 
     r = run_microtask_review(
@@ -280,14 +387,30 @@ def _security_gate(
 
 
 def _run_batch_coding_fixes(**kwargs: Any) -> Any:
-    """Lazy binding of the frontend batch-fix runner (kept per-team for its Agent patch surface)."""
+    """Lazy binding of the frontend batch-fix runner (kept per-team for its Agent patch surface).
+
+    Preconditions: ``kwargs`` matches
+      ``.problem_solving.run_batch_coding_fixes``'s signature.
+    Postconditions: returns that function's result unchanged; the import is
+      deferred to call time so this module has no import-time dependency on
+      ``.problem_solving`` (avoiding the ``review`` <-> ``execution``
+      circular import).
+    """
     from .problem_solving import run_batch_coding_fixes
 
     return run_batch_coding_fixes(**kwargs)
 
 
 def _run_documentation_self_review(**kwargs: Any) -> Any:
-    """Lazy binding of the frontend documentation self-review runner."""
+    """Lazy binding of the frontend documentation self-review runner.
+
+    Preconditions: ``kwargs`` matches
+      ``.review.run_documentation_self_review``'s signature.
+    Postconditions: returns that function's result unchanged; the import is
+      deferred to call time so this module has no import-time dependency on
+      ``.review`` (avoiding the ``review`` <-> ``execution`` circular
+      import).
+    """
     from .review import run_documentation_self_review
 
     return run_documentation_self_review(**kwargs)
@@ -341,24 +464,45 @@ def run_execution_with_review_gates(
     """
     Execute microtasks with batch-based review cycles.
 
-    After each microtask is coded, it must pass through sequential review phases:
+    After each microtask is coded, it must pass through review phases:
     1. Code Review (build + lint + code review) - batch fix all issues
-    2. QA Testing - batch fix all issues, then restart from Code Review
-    3. Security Testing - batch fix all issues, then restart from Code Review
-    4. Documentation - self-review loop (3-5 iterations, never fails)
+    2. QA Testing + Security Testing - independent, concurrent analysis passes
+       over the same post-Code-Review snapshot (``GATE_CONFIG.parallelize_qa_security``
+       is ``True``); batch fix all issues from either, then restart from Code Review
+    3. Documentation - self-review loop (3-5 iterations, never fails)
 
     Key behavior:
     - Each review phase collects ALL issues and sends them to the coding agent at once
-    - After QA or Security fixes, the flow restarts from Code Review
+    - After QA and/or Security fixes, the flow restarts from Code Review
     - Documentation uses self-review iterations (no failure mode)
 
     ``progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)`` is called during execution.
     ``current_index`` is the 1-based index of the currently executing microtask.
-    ``microtask_phase`` is one of: "coding", "code_review", "qa_testing", "security_testing", "documentation", "completed".
+    ``microtask_phase`` is one of: "coding", "code_review", "qa_testing", "security_testing",
+    "qa_security_testing", "documentation", "completed". "qa_security_testing" is reported
+    while QA and Security run concurrently (see ``GATE_CONFIG.parallelize_qa_security``);
+    it must not be read as "qa_testing has passed".
     ``phase_detail`` provides human-readable detail about the current action.
 
     Thin wrapper: the loop lives in the shared ``run_gated_execution_impl``,
     parameterised by this team's ``GATE_CONFIG``.
+
+    Preconditions:
+      - ``review_deps``, if given, supplies whichever of
+        ``build_verifier``/``code_review_agent``/``linting_tool_agent``/
+        ``qa_agent``/``security_agent``/``tool_agents`` the configured gates
+        need; unset ones mean "not available" to ``run_microtask_review``,
+        not an error.
+    Postconditions:
+      - Returns an ``ExecutionResult``; each microtask ends COMPLETED,
+        SKIPPED, FAILED or REVIEW_FAILED.
+      - Raises ``MicrotaskReviewFailedError`` when a microtask's review fails
+        and ``on_failure == "stop"`` (or a security failure with
+        ``security_failure_always_stops``).
+      - Matching the backend, ``GATE_CONFIG.parallelize_qa_security=True``
+        here too: QA and Security run concurrently over the same
+        post-Code-Review snapshot, so ``progress_callback`` can report
+        ``"qa_security_testing"`` for this team as well.
     """
     return run_gated_execution_impl(
         gate_config=GATE_CONFIG,
