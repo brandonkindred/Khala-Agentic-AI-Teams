@@ -186,7 +186,7 @@ class _SystemPromptProbe(DummyLLMClient):
 
     def complete_json(self, prompt, *, system_prompt=None, **kwargs):
         self.system_prompts.append(system_prompt or "")
-        return {"approved": True, "issues": [], "summary": "ok"}
+        return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
 
 @pytest.mark.parametrize(
@@ -228,6 +228,7 @@ class _IssueProbe(DummyLLMClient):
                 }
             ],
             "summary": "x",
+            "spec_compliance_notes": "",
         }
 
 
