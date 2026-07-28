@@ -479,18 +479,20 @@ class BrandingTeamOrchestrator:
         """Best-effort extraction of a phase output from graph results.
 
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
-        objects. Phase 1 wraps six agents as a single top-level node, so
-        ``_merge_phase1_fragments`` is tried first — it merges every fan-out
-        specialist's ``structured_output``, not just the synthesizer's. For
-        every other phase (different node ids), ``_merge_phase1_fragments``
-        itself returns ``None`` (not this method) and execution continues
-        below unchanged. Otherwise, when the node's agent was built with
-        ``structured_output=``, Strands forces a tool call to produce the
-        payload and populates ``AgentResult.structured_output`` instead of
-        the message's text blocks — so that's checked next. Agents without
-        structured output fall back to parsing the last text block. This
-        method itself never returns ``None``: if nothing above yields a
-        value, it returns a default ``model_class()`` instance.
+        objects. Phase 1 wraps six agents as a single top-level node, so this
+        method first tries ``_merge_phase1_fragments``, which merges every
+        fan-out specialist's ``structured_output`` (not just the
+        synthesizer's) into one ``model_class`` instance; if that succeeds,
+        its result is returned directly. For every other phase (different
+        node ids), ``_merge_phase1_fragments`` returns ``None`` and this
+        method falls through to the per-node extraction logic below: when
+        the node's agent was built with ``structured_output=``, Strands
+        forces a tool call to produce the payload and populates
+        ``AgentResult.structured_output`` instead of the message's text
+        blocks — so that's checked next. Agents without structured output
+        fall back to parsing the last text block. This method itself never
+        returns ``None``: if nothing above yields a value, it returns a
+        default ``model_class()`` instance.
         """
         try:
             if hasattr(result, "result") and hasattr(result.result, "get"):
