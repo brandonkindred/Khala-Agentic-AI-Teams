@@ -934,8 +934,7 @@ only turns off merging, the underlying findings are unaffected.
 
 Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
-or changes the rest of the review. Set to `false`/`0`/`no` to disable
-consolidation (any other value, or unset, leaves it enabled).
+or changes the rest of the review.
 
 ---
 

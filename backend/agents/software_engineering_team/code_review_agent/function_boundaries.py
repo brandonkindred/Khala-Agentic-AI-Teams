@@ -40,9 +40,10 @@ class EnclosingConstruct:
         - ``start_line`` is lowered to the earliest decorator line when the
           construct is decorated (matches ``node_start_line``).
         - ``kind`` is ``"function"`` or ``"class"``.
-        - ``name`` is qualified as ``"ClassName.method_name"`` when ``kind`` is
-          ``"function"`` and the function is a method; otherwise it is the bare
-          name.
+        - ``name`` is qualified as ``"ClassName.function_name"`` when ``kind``
+          is ``"function"`` and the function's AST span is nested inside a
+          class body (a direct method, or a helper function defined inside a
+          method); otherwise it is the bare name.
     """
 
     start_line: int

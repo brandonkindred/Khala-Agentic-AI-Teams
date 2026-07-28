@@ -221,10 +221,12 @@ def _submission_cache_size() -> int:
     """Resolve the submission cache capacity from the environment.
 
     Postconditions:
-        - Returns ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` parsed as an int, clamped
-          to a floor of 0 (a negative or garbage value becomes the default, an
-          explicit 0 disables the short-circuit). ``0`` is load-bearing: callers
-          treat it as "no submission cache", so every review runs in full.
+        - Returns ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` parsed as an int,
+          clamped to a floor of 0: an unset or unparseable value falls back to
+          the default, while a negative value is clamped to 0 (not the
+          default) — same as any other floor. An explicit or clamped-to 0
+          disables the short-circuit; ``0`` is load-bearing: callers treat it
+          as "no submission cache", so every review runs in full.
     """
     return parse_env_int("CODE_REVIEW_SUBMISSION_CACHE_SIZE", DEFAULT_SUBMISSION_CACHE_SIZE, 0)
 
