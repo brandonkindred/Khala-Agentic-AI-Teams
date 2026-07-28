@@ -14,6 +14,7 @@ from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
     ReviewToolAgent,
+    SingleIssueProblemSolveMixin,
     lenient_json_object,
     relevant_code_for_issue,
 )
@@ -140,7 +141,11 @@ def _stub_single_issue_parser(raw):
     return {"files": {"x.ts": "fixed"}} if raw else {"files": {}}
 
 
-class _DemoAgent(BaseReviewToolAgent):
+# Mixes in SingleIssueProblemSolveMixin (opt-in self-fix) to exercise the
+# mixin's mechanics, mirroring how BuildSpecialistToolAgentBase (the one real
+# consumer of self-fix) is composed — review-lens agents (security, QA,
+# accessibility, performance, UX) do NOT mix this in; see the mixin's docstring.
+class _DemoAgent(SingleIssueProblemSolveMixin, BaseReviewToolAgent):
     name = "Demo"
     empty_label = "demo issues"
     issue_source = "demo"
@@ -435,9 +440,17 @@ def test_engine_review_propagates_unexpected_error(monkeypatch: pytest.MonkeyPat
         agent.review(_Input(current_files={"a.ts": "code"}))
 
 
-def test_engine_review_problem_solve_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issues produced via the engine still flow through the unchanged
-    one-at-a-time problem_solve path keyed on ``source``."""
+def test_base_review_tool_agent_has_no_problem_solve():
+    """BaseReviewToolAgent itself is report-only: problem_solve/problem_solve_sources
+    live only on the opt-in SingleIssueProblemSolveMixin, never on the review base."""
+    assert not hasattr(BaseReviewToolAgent, "problem_solve")
+    assert not hasattr(BaseReviewToolAgent, "problem_solve_sources")
+
+
+def test_problem_solve_works_on_engine_review_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A review agent that opts into SingleIssueProblemSolveMixin can still fix
+    a matching issue one at a time, keyed on ``source`` — regardless of
+    whether that agent's ``review`` uses the engine or the one-shot path."""
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = None

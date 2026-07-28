@@ -280,9 +280,9 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
 # ---------------------------------------------------------------------------
 
 AGENT_DEFAULT_MODELS: dict[str, str] = {
-    "backend": "deepseek-v4-pro:cloud",
-    "frontend": "deepseek-v4-pro:cloud",
-    "code_review": "deepseek-v4-pro:cloud",
+    "backend": "kimi-k2.7-code:cloud",
+    "frontend": "kimi-k2.7-code:cloud",
+    "code_review": "kimi-k2.7-code:cloud",
     "repair": "deepseek-v4-pro:cloud",
     "devops": "deepseek-v4-pro:cloud",
     "dbc_comments": "deepseek-v4-pro:cloud",
@@ -454,8 +454,8 @@ def resolve_max_tokens() -> int:
 
 
 # Fallback reset windows (seconds) when a 429 carries no Retry-After. Weekly is
-# long so a weekly-exhausted provider isn't retried hourly; rate is ~1h.
-_DEFAULT_FAILOVER_RATE_WINDOW_S = 3600.0
+# long so a weekly-exhausted provider isn't retried hourly; rate is ~5m.
+_DEFAULT_FAILOVER_RATE_WINDOW_S = 300.0
 _DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 7 * 24 * 3600.0
 
 
@@ -483,7 +483,7 @@ def _resolve_positive_window(env_name: str, default: float) -> float:
 
 
 def failover_rate_window_seconds() -> float:
-    """Fallback reset window for a non-weekly 429 with no Retry-After (default 1h).
+    """Fallback reset window for a non-weekly 429 with no Retry-After (default 5m).
 
     Postconditions: returns ``> 0`` seconds. Never raises.
     """
