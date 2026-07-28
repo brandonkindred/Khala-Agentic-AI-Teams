@@ -147,7 +147,20 @@ class AuditStatusResponse(BaseModel):
 
 
 def mark_all_running_jobs_failed(reason: str) -> None:
-    """Mark all pending or running SOC2 audit jobs as failed (e.g. on server shutdown)."""
+    """Mark all pending or running SOC2 audit jobs as failed.
+
+    Intended for use during server shutdown so in-flight thread-mode
+    audits are not left stuck in ``running`` across a restart.
+
+    Preconditions:
+        - ``reason`` is a non-empty string explaining why jobs are being
+          marked failed.
+    Postconditions:
+        - All jobs currently ``pending`` or ``running`` in the job store are
+          transitioned to ``failed`` with the provided ``reason``.
+        - Any exception raised by the job store is logged and suppressed;
+          this function never propagates an error to its caller.
+    """
     try:
         job_store._job_manager.mark_all_active_jobs_failed(reason)
     except Exception as e:
@@ -310,5 +323,9 @@ def get_audit_status(job_id: str) -> AuditStatusResponse:
 
 @app.get("/health")
 def health() -> dict:
-    """Health check endpoint."""
+    """Return a simple health check response.
+
+    Postconditions:
+        - Always returns ``{"status": "ok"}`` with HTTP 200.
+    """
     return {"status": "ok"}

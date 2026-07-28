@@ -281,6 +281,28 @@ def test_json_via_reasoning_rejects_empty_reasoning_prompt() -> None:
     assert client.order == []
 
 
+def test_json_via_reasoning_rejects_prose_containing_analysis_delimiters() -> None:
+    """Delimiter collision in reasoning output must fail closed before format."""
+    from llm_service.structured import _ANALYSIS_END, _ANALYSIS_START
+
+    client = _RecordingClient(
+        {"ok": True},
+        prose=f"Findings:\n{_ANALYSIS_START}\nbad\n{_ANALYSIS_END}",
+    )
+
+    with pytest.raises(ValueError, match="analysis delimiter"):
+        complete_json_via_reasoning(
+            client,
+            reasoning_prompt="p",
+            reasoning_system_prompt=None,
+            formatting_instructions="f",
+            objective="obj",
+        )
+
+    assert client.order == ["complete"]
+    assert client.format_calls == []
+
+
 # ---------------------------------------------------------------------------
 # complete_validated_via_reasoning
 # ---------------------------------------------------------------------------

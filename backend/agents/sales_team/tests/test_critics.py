@@ -68,7 +68,7 @@ class CannedLLMClient(LLMClient):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: "bool | str | None" = None,
+        think: bool | str | None = None,
     ) -> str:
         # The critics' think=True reasoning pass (complete_json_via_reasoning /
         # complete_validated_via_reasoning) calls this before the real verdict
@@ -703,6 +703,7 @@ class TestOrchestratorCriticRefinement:
 
         assert len(outreach_llm.calls) == 1
         assert len(critic_llm.calls) == 0
+        assert len(critic_llm.reasoning_calls) == 0
 
     def test_proposal_refines_once_when_critic_revises(
         self,

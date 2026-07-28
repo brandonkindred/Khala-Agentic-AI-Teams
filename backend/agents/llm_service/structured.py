@@ -48,6 +48,24 @@ T = TypeVar("T", bound=BaseModel)
 _ANALYSIS_START = "--- ANALYSIS ---"
 _ANALYSIS_END = "--- END ANALYSIS ---"
 
+
+def _ensure_prose_has_no_analysis_delimiters(prose: str) -> None:
+    """Reject reasoning output that would collide with the wrap markers.
+
+    Preconditions:
+        - ``prose`` is the raw string returned by the reasoning ``complete`` call.
+    Postconditions:
+        - Returns normally when neither delimiter appears in ``prose``.
+        - Raises ``ValueError`` if either marker is present, so the formatting
+          call never receives an ambiguous prompt.
+    """
+    if _ANALYSIS_START in prose or _ANALYSIS_END in prose:
+        raise ValueError(
+            "Reasoning output contains an analysis delimiter, "
+            "cannot safely wrap it for the formatting call"
+        )
+
+
 _CORRECTIVE_SUFFIX = (
     "\n\n---\n"
     "Your previous reply was rejected.\n"
@@ -286,6 +304,9 @@ def complete_json_via_reasoning(
     Postconditions: returns the JSON-decoded dict from the formatting call.
     A step-1 exception propagates immediately (step 2 is never invoked) —
     matching the failure behavior of the single-call form this replaces.
+    If the reasoning call's prose contains ``_ANALYSIS_START`` or
+    ``_ANALYSIS_END``, raises ``ValueError`` before the formatting call so
+    an ambiguous wrap is never sent downstream.
 
     Args:
         reasoning_prompt: The user prompt for the reasoning call.
@@ -331,6 +352,7 @@ def complete_json_via_reasoning(
         temperature=reasoning_temperature,
         think=True,
     )
+    _ensure_prose_has_no_analysis_delimiters(prose)
     format_prompt = f"{formatting_instructions}\n\n{_ANALYSIS_START}\n{prose}\n{_ANALYSIS_END}"
     return client.complete_json(
         format_prompt,
@@ -407,6 +429,7 @@ def complete_validated_via_reasoning(
         temperature=reasoning_temperature,
         think=True,
     )
+    _ensure_prose_has_no_analysis_delimiters(prose)
     instructions_block = f"{formatting_instructions}\n\n" if formatting_instructions else ""
     format_prompt = (
         "Convert the following analysis into a single JSON object matching "

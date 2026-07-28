@@ -26,7 +26,12 @@ def default_repo_context(**overrides: Any) -> RepoContext:
 
 
 class FakeLLM:
-    """Minimal LLM stand-in returning a canned JSON dict per call.
+    """Minimal LLM stand-in for the two-call reasoning+JSON pattern.
+
+    - ``complete_json`` returns the canned JSON dict (the formatting pass).
+    - ``complete`` returns a string: the prompt truncated to ``max_chars``
+      for ``compact_text``, or the prompt echoed back for ``think=True``
+      reasoning (recorded on ``reasoning_calls``).
 
     Shared by ``test_agents.py`` (the class-based TSC/report-writer agents)
     and ``test_pipeline.py`` (the pipeline steps that wrap them) — both stub

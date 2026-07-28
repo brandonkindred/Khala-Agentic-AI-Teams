@@ -301,13 +301,9 @@ def test_reasoning_pass_starvation_also_degrades_to_legacy_loop(
 
     assert new_code == "# fixed"
     assert updates == {"changes_made": "tightened guard"}
+    assert agent.calls == 1
     starvation_warnings = [r for r in caplog.records if "schema_forced" in r.message]
     assert len(starvation_warnings) == 1
-
-
-# ---------------------------------------------------------------------------
-# No degrade: a non-schema_forced fatal failure propagates unchanged
-# ---------------------------------------------------------------------------
 
 
 def test_non_schema_forced_permanent_error_propagates_without_degrading(
