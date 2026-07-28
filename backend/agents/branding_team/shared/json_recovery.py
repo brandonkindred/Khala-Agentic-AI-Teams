@@ -7,8 +7,8 @@ outermost ``{...}`` slice fallback. This module gives both a single place to
 call instead, delegating to the team-agnostic salvage engine in
 ``shared.llm_recovery`` rather than re-deriving the brace-slicing logic here.
 
-Wired into ``orchestrator.py`` (``_parse_model_from_text``); the
-``assistant/agent.py`` (``_loads_lenient``) migration is tracked separately.
+Wired into both ``orchestrator.py`` (``_parse_model_from_text``) and
+``assistant/agent.py`` (``_loads_lenient``).
 """
 
 from __future__ import annotations
