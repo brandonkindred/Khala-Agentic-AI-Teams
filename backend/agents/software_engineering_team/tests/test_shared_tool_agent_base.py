@@ -14,6 +14,7 @@ from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
     ReviewToolAgent,
+    SingleIssueProblemSolveMixin,
     lenient_json_object,
     relevant_code_for_issue,
 )
@@ -140,7 +141,11 @@ def _stub_single_issue_parser(raw):
     return {"files": {"x.ts": "fixed"}} if raw else {"files": {}}
 
 
-class _DemoAgent(BaseReviewToolAgent):
+# Mixes in SingleIssueProblemSolveMixin (opt-in self-fix) to exercise the
+# mixin's mechanics, mirroring how BuildSpecialistToolAgentBase (the one real
+# consumer of self-fix) is composed — review-lens agents (security, QA,
+# accessibility, performance, UX) do NOT mix this in; see the mixin's docstring.
+class _DemoAgent(SingleIssueProblemSolveMixin, BaseReviewToolAgent):
     name = "Demo"
     empty_label = "demo issues"
     issue_source = "demo"
@@ -323,6 +328,7 @@ def test_engine_review_maps_issues_and_source():
                 }
             ],
             "summary": "needs work",
+            "spec_compliance_notes": "",
         }
     )
     out = agent.review(_Input(current_files={"a.ts": "code"}))
@@ -338,7 +344,9 @@ def test_engine_review_maps_issues_and_source():
 
 def test_engine_review_clean_pass_reports_no_issues():
     """A clean engine pass yields an empty issue list and a 0-issue summary."""
-    agent = _engine_agent({"approved": True, "issues": [], "summary": "ok"})
+    agent = _engine_agent(
+        {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+    )
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert out.issues == []
     assert "Demo review: 0 issue(s) found." == out.summary
@@ -346,7 +354,9 @@ def test_engine_review_clean_pass_reports_no_issues():
 
 def test_engine_review_skips_without_code():
     """With no current files the engine is not invoked and review is skipped."""
-    agent = _engine_agent({"approved": True, "issues": [], "summary": "ok"})
+    agent = _engine_agent(
+        {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+    )
     out = agent.review(_Input(current_files={}))
     assert "skipped (no code)" in out.summary
 
@@ -357,8 +367,8 @@ def test_engine_review_skips_without_code():
         {"approved": True, "issues": "not-a-list", "extra": 1},  # wrong type
         {"approved": True, "summary": "ok"},  # 'issues' key entirely missing
         {"approved": True, "issues": ["not-a-dict", 7, None]},  # non-dict entries
-        {"issues": []},  # 'approved' key missing — engine defaults it
-        {"approved": True, "issues": []},  # 'summary' key missing — engine defaults it
+        {"issues": []},  # 'approved' key missing
+        {"approved": True, "issues": []},  # 'summary'/'spec_compliance_notes' missing
     ],
     ids=[
         "issues-wrong-type",
@@ -369,14 +379,25 @@ def test_engine_review_skips_without_code():
     ],
 )
 def test_engine_review_handles_malformed_response(response: dict):
-    """A malformed engine response — ``issues`` of the wrong type, the ``issues``
-    key entirely absent, or non-dict issue entries — is handled gracefully: the
-    engine sanitizes it and the adapter, mapping the typed CodeReviewOutput,
-    returns a clean phase output with no issues."""
+    """A malformed engine response used to be sanitized by the old hand-rolled
+    parser into a clean, empty-issues phase output. ``ChunkReviewLLMResponse``
+    no longer tolerates any of these: all four top-level fields (``approved``,
+    ``issues``, ``summary``, ``spec_compliance_notes``) are required with no
+    defaults, and each ``issues`` entry must validate as a
+    ``ChunkReviewIssueLLM``. The five parametrized shapes cover: ``issues`` of
+    the wrong type, the ``issues`` key entirely absent, non-dict ``issues``
+    entries, a missing ``approved``, and a missing ``summary``/
+    ``spec_compliance_notes``. Every one now fails schema validation and
+    retries once via ``complete_validated``. ``_engine_agent`` reviews a
+    single file (one chunk) through ``run_coordinator``, so the identical
+    retry failure trips the coordinator's total-failure guard
+    (``CodeReviewUnavailableError``); ``_engine_review`` (`tool_agent_base.py`)
+    catches that and degrades to a "(LLM error)" summary — not the old
+    "0 issue(s) found." clean pass."""
     agent = _engine_agent(response)
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert out.issues == []
-    assert "Demo review: 0 issue(s) found." == out.summary
+    assert "Demo review failed (LLM error)." == out.summary
 
 
 class _RaisingEngine:
@@ -419,9 +440,17 @@ def test_engine_review_propagates_unexpected_error(monkeypatch: pytest.MonkeyPat
         agent.review(_Input(current_files={"a.ts": "code"}))
 
 
-def test_engine_review_problem_solve_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issues produced via the engine still flow through the unchanged
-    one-at-a-time problem_solve path keyed on ``source``."""
+def test_base_review_tool_agent_has_no_problem_solve():
+    """BaseReviewToolAgent itself is report-only: problem_solve/problem_solve_sources
+    live only on the opt-in SingleIssueProblemSolveMixin, never on the review base."""
+    assert not hasattr(BaseReviewToolAgent, "problem_solve")
+    assert not hasattr(BaseReviewToolAgent, "problem_solve_sources")
+
+
+def test_problem_solve_works_on_engine_review_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A review agent that opts into SingleIssueProblemSolveMixin can still fix
+    a matching issue one at a time, keyed on ``source`` — regardless of
+    whether that agent's ``review`` uses the engine or the one-shot path."""
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = None
