@@ -119,18 +119,24 @@ def derive_issue_title(description: str, max_len: int = _TITLE_MAX_LEN) -> str:
     every finding posted as a PR comment must display a title, so this
     guarantees one exists from data the finding already carries.
 
+    Preconditions:
+        - ``max_len`` is a positive integer.
+
     Postconditions:
         - Returns the description's first line, trimmed to at most
-          ``max_len`` characters at a word boundary with a trailing "…" when
-          truncated. Returns "" only when ``description`` is blank.
+          ``max_len`` characters TOTAL (including a trailing "…" when
+          truncated) at a word boundary. Returns "" only when ``description``
+          is blank.
     """
+    assert max_len > 0, "max_len must be positive"
     stripped = (description or "").strip()
     if not stripped:
         return ""
     text = stripped.splitlines()[0].strip()
     if not text or len(text) <= max_len:
         return text
-    truncated = text[:max_len].rsplit(" ", 1)[0].rstrip(",.;:—-") or text[:max_len].rstrip()
+    limit = max_len - 1  # reserve one character for the trailing ellipsis
+    truncated = text[:limit].rsplit(" ", 1)[0].rstrip(",.;:—-") or text[:limit].rstrip()
     return f"{truncated}…"
 
 
@@ -312,7 +318,8 @@ class ChunkReviewOutput(BaseModel):
     approved: bool = Field(default=False, description="True if chunk has no critical/high issues")
     issues: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Issues found (each with severity, category, file_path, description, suggestion)",
+        description="Issues found (each with severity, category, file_path, title, description, "
+        "suggestion)",
     )
     summary: str = Field(default="", description="Review summary for this chunk")
     spec_compliance_notes: str = Field(

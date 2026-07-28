@@ -17,6 +17,7 @@ from software_engineering_team.github_source.issue_proposals import (
     proposal_from_findings,
 )
 from software_engineering_team.github_source.pr_review_mapping import (
+    _fallback_title,
     build_review_body,
     choose_event,
     format_comment_body,
@@ -299,6 +300,14 @@ def test_format_comment_body_omits_description_when_it_equals_derived_title() ->
     # not then repeat that exact text a second time as the description paragraph.
     body = format_comment_body(_Issue(title="", description="leftover one"))
     assert body.count("leftover one") == 1
+
+
+def test_fallback_title_never_exceeds_max_len() -> None:
+    # A first line with no word boundary must still respect the documented "at
+    # most _TITLE_MAX_LEN characters TOTAL" postcondition, ellipsis included.
+    title = _fallback_title("a" * 200)
+    assert len(title) <= 80
+    assert title.endswith("…")
 
 
 def test_format_comment_body_falls_back_to_derived_title_when_blank() -> None:

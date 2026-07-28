@@ -29,7 +29,8 @@ unrelated changed file. The review body itself never lists findings.
 
 Kept free of any GitHub-client or LLM dependency so it is cheap to unit-test and
 reusable. Findings are duck-typed: any object exposing ``severity``, ``category``,
-``file_path``, ``description``, ``suggestion`` and ``line`` attributes works.
+``file_path``, ``title``, ``description``, ``suggestion`` and ``line`` attributes
+works.
 
 The duplicate-issue-detection/proposal subsystem that used to live here (cluster
 pre-existing findings, match them against open issues, render a GitHub issue) is
@@ -80,8 +81,9 @@ def _fallback_title(description: str) -> str:
 
     Postconditions:
         - Returns the description's first line, trimmed to at most
-          ``_TITLE_MAX_LEN`` characters at a word boundary with a trailing
-          "…" when truncated. Returns "" only when ``description`` is blank.
+          ``_TITLE_MAX_LEN`` characters TOTAL (including a trailing "…" when
+          truncated) at a word boundary. Returns "" only when ``description``
+          is blank.
     """
     stripped = (description or "").strip()
     if not stripped:
@@ -89,9 +91,8 @@ def _fallback_title(description: str) -> str:
     text = stripped.splitlines()[0].strip()
     if not text or len(text) <= _TITLE_MAX_LEN:
         return text
-    truncated = (
-        text[:_TITLE_MAX_LEN].rsplit(" ", 1)[0].rstrip(",.;:—-") or text[:_TITLE_MAX_LEN].rstrip()
-    )
+    limit = _TITLE_MAX_LEN - 1  # reserve one character for the trailing ellipsis
+    truncated = text[:limit].rsplit(" ", 1)[0].rstrip(",.;:—-") or text[:limit].rstrip()
     return f"{truncated}…"
 
 
