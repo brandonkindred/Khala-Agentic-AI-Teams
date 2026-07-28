@@ -107,6 +107,40 @@ def is_no_op_suggestion(suggestion: str) -> bool:
     return bool(_NO_OP_SUGGESTION_RE.match(text))
 
 
+_TITLE_MAX_LEN = 80
+
+
+def derive_issue_title(description: str, max_len: int = _TITLE_MAX_LEN) -> str:
+    """Derive a short, descriptive title from an issue's description.
+
+    Fallback for a finding that reaches a PR comment with no explicit title
+    (e.g. from an auxiliary pass that constructs a ``CodeReviewIssue``
+    directly rather than through the LLM-authored chunk-review schema):
+    every finding posted as a PR comment must display a title, so this
+    guarantees one exists from data the finding already carries.
+
+    Preconditions:
+        - ``max_len`` is a positive integer.
+
+    Postconditions:
+        - Returns the description's first line, trimmed to at most
+          ``max_len`` characters TOTAL (including a trailing "…" when
+          truncated) at a word boundary. Returns "" only when ``description``
+          is blank.
+    """
+    assert max_len > 0, "max_len must be positive"
+    stripped = (description or "").strip()
+    if not stripped:
+        return ""
+    text = stripped.splitlines()[0].strip()
+    if not text or len(text) <= max_len:
+        return text
+    limit = max_len - 1  # reserve one character for the trailing ellipsis
+    prefix = text[:limit]
+    truncated = prefix.rsplit(" ", 1)[0].rstrip(",.;:—-") or prefix.rstrip()
+    return f"{truncated}…"
+
+
 def coerce_line(value: Any) -> Optional[int]:
     """Parse an LLM-provided line number into a positive int, or None.
 
@@ -285,7 +319,8 @@ class ChunkReviewOutput(BaseModel):
     approved: bool = Field(default=False, description="True if chunk has no critical/high issues")
     issues: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Issues found (each with severity, category, file_path, description, suggestion)",
+        description="Issues found (each with severity, category, file_path, title, description, "
+        "suggestion)",
     )
     summary: str = Field(default="", description="Review summary for this chunk")
     spec_compliance_notes: str = Field(
@@ -321,6 +356,13 @@ class CodeReviewIssue(BaseModel):
     start_line: Optional[int] = Field(
         default=None,
         description="Optional start line for a multi-line issue; `line` is then the end line.",
+    )
+    title: str = Field(
+        default="",
+        description="A short, descriptive title summarizing the issue (e.g. 'Missing pagination "
+        "in UserListComponent'), distinct from `description`, which explains the problem in full. "
+        "Every finding posted as a PR comment displays a title; a blank value here is filled in at "
+        "render time via `derive_issue_title(description)`.",
     )
     description: str = Field(
         default="",
@@ -365,8 +407,8 @@ _ChunkReviewIssueCategory = Literal[
 class ChunkReviewIssueLLM(BaseModel):
     """Narrow LLM-authored shape for one issue in a chunk-review response.
 
-    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
-    ``generate_structured`` (see ``llm_service``'s README, "When to use which
+    Schema for ``chunk_reviewer._run_chunk_review`` to validate replies via
+    ``llm_service.complete_validated`` (see ``llm_service``'s README, "When to use which
     entrypoint"). This is the raw per-issue shape the model is asked to
     emit — distinct from the persisted :class:`CodeReviewIssue`, which
     additionally range-validates ``line``/``start_line`` against the cited
@@ -420,6 +462,12 @@ class ChunkReviewIssueLLM(BaseModel):
         default=None,
         description="Optional start line for a multi-line issue; `line` is then the end line.",
     )
+    title: str = Field(
+        default="",
+        description="A short, descriptive title summarizing the issue, distinct from "
+        "`description` (which explains the problem in full). Blank when the model omits it; the "
+        "downstream normalizer fills in a fallback derived from `description`.",
+    )
     description: str = Field(
         default="",
         description="Clear description of the issue",
@@ -439,12 +487,10 @@ class ChunkReviewIssueLLM(BaseModel):
 class ChunkReviewLLMResponse(BaseModel):
     """Narrow LLM-authored shape for one chunk-review call's response.
 
-    Pilot schema for migrating ``chunk_reviewer._run_chunk_review`` to
-    ``generate_structured``. Today that function hand-parses this exact
-    shape out of a ``complete_json_with_continuation`` reply via bare
-    ``.get()``/``str()``/``bool()`` coercions (chunk_reviewer.py). This model
-    documents and validates that contract; wiring it into an actual
-    ``generate_structured`` call is a separate, follow-up change.
+    ``chunk_reviewer._run_chunk_review`` validates every chunk-review reply
+    against this model via ``llm_service.complete_validated``, replacing the
+    hand-rolled ``.get()``/``str()``/``bool()`` coercions the reviewer used to
+    apply to a raw ``complete_json_with_continuation`` reply.
 
     All four fields are required, not defaulted: the chunk-review prompt's
     own output-contract reminder (``FINAL_OUTPUT_CONTRACT_NOTE`` in

@@ -24,6 +24,7 @@ from .models import (
     FileSegment,
     ReviewChunk,
     coerce_line,
+    derive_issue_title,
     is_no_op_suggestion,
 )
 
@@ -539,6 +540,10 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
           (e.g. "No changes needed.") is dropped (see ``is_no_op_suggestion``):
           the reviewer's own suggested fix says there is nothing to do, so it
           is not a reportable issue.
+        - Every returned issue's ``title`` is non-blank whenever ``description``
+          is (the LLM's own title when given, otherwise
+          ``derive_issue_title(description)``), so every finding that reaches
+          a PR comment has a title to display.
     """
     seg_by_path = {seg.path: seg for seg in chunk.segments}
     issues: List[CodeReviewIssue] = []
@@ -559,6 +564,7 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
         category = _clean_str(item.get("category"), "general").lower()
         if category not in _VALID_CATEGORIES:
             category = "general"
+        title = _clean_str(item.get("title"), "") or derive_issue_title(description)
         issues.append(
             CodeReviewIssue(
                 severity=severity,
@@ -566,6 +572,7 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
                 file_path=path,
                 line=_validate_line(coerce_line(item.get("line")), seg),
                 start_line=_validate_line(coerce_line(item.get("start_line")), seg),
+                title=title,
                 description=description,
                 suggestion=suggestion,
                 pre_existing=_coerce_bool(item.get("pre_existing")),
