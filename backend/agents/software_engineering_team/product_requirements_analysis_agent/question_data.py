@@ -17,7 +17,17 @@ from .models import OpenQuestion, QuestionOption, SOPSubPhase
 
 
 def _context_discovery_fallback_questions() -> List[OpenQuestion]:
-    """Fixed list of context/constraint questions used when LLM returns empty or invalid."""
+    """Fixed list of context/constraint questions used when LLM returns empty or invalid.
+
+    Preconditions: none — takes no arguments and reads no external state.
+    Postconditions: returns a new list of 7 fully-formed ``OpenQuestion`` instances
+        (``ctx_project_type``, ``ctx_deployment``, ``ctx_cloud_provider``, ``ctx_tenets``,
+        ``ctx_sla``, ``ctx_rto_rpo``), each with ``source="context_discovery"`` and at
+        least 2 ``QuestionOption`` entries, exactly one of which has ``is_default=True``
+        per question (``ctx_tenets`` allows two defaults since ``allow_multiple=True``).
+        The returned list is freshly constructed on every call — callers may mutate it
+        without affecting subsequent calls.
+    """
     return [
         OpenQuestion(
             id="ctx_project_type",
@@ -223,6 +233,17 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
 # Each sub-phase maps to a list of question definitions. Questions with
 # ``depends_on`` are conditional — they are only asked when the parent
 # question's answer matches one of the listed values.
+#
+# Invariants (hold for every question-definition dict in every sub-phase list):
+# - Required keys: ``sop_id`` (globally unique str, dotted "P1.<subphase>.<letter>"
+#   form, optionally suffixed e.g. ".1"/".2" for a follow-up), ``question_text``,
+#   ``category``, ``allow_multiple`` (bool), ``options`` (list of option dicts),
+#   ``depends_on`` (``None`` or a ``{parent_sop_id: [required_label, ...]}`` mapping
+#   consumed by ``sop_engine.evaluate_sop_conditionals`` — a conditional question's
+#   ``parent_sop_id`` always names a ``sop_id`` defined earlier in the registry).
+# - Each option dict has ``id`` and ``label`` (both str) and ``rationale`` (str,
+#   may be empty); ``is_default`` is optional and defaults to falsy when absent.
+# - At most one option per question sets ``is_default: True``.
 SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
     # ------------------------------------------------------------------
     # TENETS — foundational context collected BEFORE any technical details
@@ -1448,6 +1469,19 @@ def _sop_phase1_fallback_questions() -> List[OpenQuestion]:
     Used when LLM-based spec extraction AND question generation both fail.
     Only includes root questions (no conditional follow-ups).
     Every question is guaranteed at least 3 options.
+
+    Preconditions: none — takes no arguments; reads only the module-level
+        ``SOP_PHASE1_QUESTIONS`` registry, whose entries must each carry
+        ``sop_id`` and ``question_text`` (both required per the registry's
+        invariants above).
+    Postconditions: returns a new list with one ``OpenQuestion`` per question
+        definition in ``SOP_PHASE1_QUESTIONS`` whose ``depends_on`` is ``None``
+        (conditional/follow-up questions are excluded). Each returned question
+        has ``source="sop_phase1"``, ``priority="high"``, ``sop_sub_phase`` set
+        to the owning sub-phase's value, and at least ``MIN_OPTIONS`` (3) options
+        — questions defined with fewer than 3 options are padded with an "Other"
+        option and/or a free-text placeholder option to reach the minimum. Does
+        not mutate ``SOP_PHASE1_QUESTIONS``.
     """
     MIN_OPTIONS = 3
     fallback: List[OpenQuestion] = []
