@@ -701,24 +701,27 @@ def _build_tools(index: CodebaseIndex) -> list:
             construct (all other languages). Returns an error string if the path
             is not readable; never raises.
         """
-        content = index.read_file(path)
-        if content.startswith("Error:"):
-            return content
-        resolved = index.resolve_path(path)
-        display_path = resolved if resolved and resolved != index.EXISTING_CODEBASE_PATH else path
-        # Strip ``N: `` line-number prefixes that the PR-review path injects via
-        # ``render_annotated_hunks``; remap to the physical line index so the
-        # helper functions operate on plain code, then restore original numbers
-        # in the output via ``display_line`` / ``line_mapper``.
-        stripped, physical, mapper = _strip_numbered_prefixes(content, line_number)
-        _, ext = os.path.splitext(display_path)
-        if ext.lower() in (".py", ".pyi"):
-            return _find_python_function_at_line(
+        try:
+            resolved = index.resolve_path(path)
+            if not resolved:
+                return f"Error: {path!r} is not a readable path."
+            content = index.read_file(path)
+            display_path = resolved if resolved != index.EXISTING_CODEBASE_PATH else path
+            # Strip ``N: `` line-number prefixes that the PR-review path injects via
+            # ``render_annotated_hunks``; remap to the physical line index so the
+            # helper functions operate on plain code, then restore original numbers
+            # in the output via ``display_line`` / ``line_mapper``.
+            stripped, physical, mapper = _strip_numbered_prefixes(content, line_number)
+            _, ext = os.path.splitext(display_path)
+            if ext.lower() in (".py", ".pyi"):
+                return _find_python_function_at_line(
+                    stripped, physical, display_path, display_line=line_number, line_mapper=mapper
+                )
+            return _find_heuristic_function_at_line(
                 stripped, physical, display_path, display_line=line_number, line_mapper=mapper
             )
-        return _find_heuristic_function_at_line(
-            stripped, physical, display_path, display_line=line_number, line_mapper=mapper
-        )
+        except Exception as exc:
+            return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
     return [read_file, list_files, search_codebase, find_function_at_line]
 
@@ -841,10 +844,10 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     block = [
         f"--- Finding index {i} ---",
         f"severity: {issue.severity} | category: {issue.category} | location: {location}",
-        f"description: {issue.description}",
+        f"description: {' '.join(issue.description.split())}",
     ]
     if issue.suggestion:
-        block.append(f"suggestion: {issue.suggestion}")
+        block.append(f"suggestion: {' '.join(issue.suggestion.split())}")
     return block
 
 

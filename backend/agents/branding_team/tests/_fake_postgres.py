@@ -20,7 +20,7 @@ dispatch table and the module list passed to ``install_fake_postgres``.
 
 from __future__ import annotations
 
-import sys
+import os
 from collections import Counter
 from typing import Any
 
@@ -314,7 +314,7 @@ def _dispatch() -> DispatchTable:
         return (
             "from branding_conversations c" in norm
             and "left join branding_conv_messages" in norm
-            and "where c.conversation_id" in norm
+            and "where c.conversation_id = %s" in norm
             and "order by m.id" in norm
         )
 
@@ -356,22 +356,24 @@ def _dispatch() -> DispatchTable:
         return (
             "from branding_conversations c" in norm
             and "left join branding_conv_messages" in norm
-            and "where c.brand_id" in norm
+            and "where c.conversation_id = (" in norm
+            and "where brand_id" in norm
             and "order by m.id" in norm
         )
 
     def handle_join_conv_by_brand(cur: FakeCursor, params: tuple) -> None:
-        """Emulate get_by_brand_id LEFT JOIN (conversation + messages by brand_id).
+        """Emulate get_by_brand_id LEFT JOIN (conversation + messages, pinned to
+        the brand's single most-recently-updated conversation).
 
         Params: ``(brand_id,)``.
         Returns dict rows with conversation_id/mission/output plus message fields
         (null-role placeholder when empty); empty list when no conversation matches.
+        Mirrors the real query's subquery: among all conversations attached to
+        ``brand_id``, only the one with the greatest ``updated_at`` is loaded.
         """
         (brand_id,) = params
-        conv = next(
-            (c for c in cur.db["conversations"].values() if c["brand_id"] == brand_id),
-            None,
-        )
+        candidates = [c for c in cur.db["conversations"].values() if c["brand_id"] == brand_id]
+        conv = max(candidates, key=lambda c: c["updated_at"], default=None)
         if conv is None:
             cur.set_all([])
             return
@@ -675,26 +677,34 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
 
     Preconditions:
         ``monkeypatch`` is a pytest ``MonkeyPatch`` (or compatible).
-        All store classes reach Postgres only through ``PostgresHelperMixin``
-        in ``branding_team._db`` (their modules are not patched here).
+        All store classes reach Postgres only through
+        ``shared.postgres.PostgresHelperMixin``, which calls ``pg_cursor()``
+        in ``shared.postgres.client`` (their own modules are not patched here).
     Postconditions:
-        ``branding_team._db.get_conn`` is patched to yield a shared ``FakeConn``
-        backed by the returned default db and branding's SQL dispatch table.
-        ``api.state`` is patched only if it still exposes ``get_conn``.
+        ``POSTGRES_HOST`` is set (preserving a real, already-configured value
+        rather than overwriting it) so ``pg_cursor``'s ``is_postgres_enabled()``
+        guard falls through instead of yielding ``None``.
+        ``shared.postgres.client.get_conn`` is patched to yield a shared
+        ``FakeConn`` backed by the returned default db and branding's SQL
+        dispatch table.
     """
-    import branding_team._db as db_mod
+    import shared.postgres.client as client_mod
+
+    # Preserve a real POSTGRES_HOST (e.g. the CI Postgres service container) rather
+    # than overwriting it: shared.postgres.runner.ensure_team_schema (invoked from the
+    # app-factory lifespan on every TestClient startup) imports get_conn directly from
+    # shared.postgres.client, a separate binding this fixture's get_conn patch below
+    # cannot reach. Clobbering POSTGRES_HOST to an unresolvable placeholder host would
+    # make that call lazily create — and permanently cache — a broken connection pool
+    # for the rest of the test session, breaking every later real-Postgres test too.
+    monkeypatch.setenv("POSTGRES_HOST", os.environ.get("POSTGRES_HOST") or "postgres")
 
     # BrandingStore, BrandingConversationStore, and BrandingSessionStore all use
-    # PostgresHelperMixin from branding_team._db, so patching _db.get_conn covers them.
-    modules: list[Any] = [db_mod]
-
-    api_state = sys.modules.get("branding_team.api.state")
-    if api_state is not None and hasattr(api_state, "get_conn"):
-        modules.append(api_state)
-
+    # shared.postgres.PostgresHelperMixin, which resolves get_conn via
+    # shared.postgres.client at call time, so patching client_mod.get_conn covers them.
     return _install_fake_postgres(
         monkeypatch,
-        modules=modules,
+        modules=[client_mod],
         dispatch=_dispatch(),
         db=_default_db(),
     )
