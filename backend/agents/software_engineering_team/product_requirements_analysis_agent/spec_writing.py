@@ -103,6 +103,8 @@ def _write_spec_artifact(repo_path: Path, filename: str, spec_text: str) -> Path
         ``filename`` and ``updated_spec.md`` with ``spec_text``; returns the
         versioned file's path for the caller to log/reference.
     """
+    if not filename or Path(filename).name != filename or filename in (".", ".."):
+        raise ValueError(f"filename must be a bare filename, got {filename!r}")
     plan_dir = repo_path / "plan" / "product_analysis"
     plan_dir.mkdir(parents=True, exist_ok=True)
     spec_file = plan_dir / filename
