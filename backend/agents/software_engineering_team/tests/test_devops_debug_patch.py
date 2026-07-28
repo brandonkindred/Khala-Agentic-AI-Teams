@@ -82,8 +82,7 @@ class _StubClient(DummyLLMClient):
     Constraints:
       - Always returns the same ``response`` dict regardless of prompt/kwargs
       - Does not validate temperature, tools, or other call parameters
-      - Routes through the Strands adapter path (``chat_json_round`` →
-        ``StructuredOutputTool`` detection → ``complete_json``)
+      - Directly implements ``complete_json`` and returns the canned dict
     """
 
     def __init__(self, response: Dict[str, Any]) -> None:
@@ -463,7 +462,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
@@ -548,7 +547,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                     "fixable": False,
                 },
                 {"approved": True, "summary": "ok", "findings": []},
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 {"quality_gates": {}, "summary": "ok"},
                 {"files": {}, "summary": "doc ok"},
             ],
@@ -642,7 +641,7 @@ class TestDevOpsPipelineDebugPatchLoop:
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
@@ -762,12 +761,13 @@ class TestDevOpsPipelineDebugPatchLoop:
                 # DevSecOps review
                 {"approved": True, "summary": "ok", "findings": []},
                 # Change review
-                {"approved": True, "summary": "ok"},
+                {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""},
                 # Test validation
                 {"quality_gates": {}, "summary": "ok"},
                 # Doc runbook
                 {"files": {}, "summary": "doc ok"},
-            ]
+            ],
+            strict=True,
         )
 
         agent = DevOpsTeamLeadAgent(llm_client=client)
@@ -822,6 +822,7 @@ class TestDevOpsPipelineDebugPatchLoop:
             )
         assert result.success
         assert result.iterations == MAX_INFRA_FIX_ITERATIONS
+        client.assert_exhausted()
 
 
 # ---------------------------------------------------------------------------
