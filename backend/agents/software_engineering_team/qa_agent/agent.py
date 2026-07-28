@@ -58,6 +58,15 @@ class QAExpertAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
+        """Resolve the review model and cache one system prompt per request mode.
+
+        Preconditions: ``llm_client`` is ``None``, an ``LLMClient``, or a
+        Strands ``Model``.
+        Postconditions: ``self._model`` is a usable Strands model, and
+        ``self._system_prompts`` maps each of the four supported request
+        modes (``default``, ``fix_build``, ``write_tests``,
+        ``acceptance_evidence``) to a persona string.
+        """
         self._model = resolve_strands_model(
             llm_client, agent_key="qa", get_strands_model_fn=get_strands_model
         )
@@ -140,6 +149,15 @@ class QAExpertAgent:
 
     @staticmethod
     def _select_mode(input_data: QAInput) -> str:
+        """Choose the request mode for this run.
+
+        Preconditions: ``input_data`` is a valid :class:`QAInput`.
+        Postconditions: returns one of ``"default"``, ``"fix_build"``,
+        ``"write_tests"``, or ``"acceptance_evidence"``. ``"fix_build"`` is
+        returned only when ``request_mode`` is ``"fix_build"`` AND
+        ``build_errors`` is non-empty; a ``"fix_build"`` request with no
+        build errors falls back to ``"default"``.
+        """
         if input_data.request_mode == "fix_build" and input_data.build_errors:
             return "fix_build"
         if input_data.request_mode == "write_tests":

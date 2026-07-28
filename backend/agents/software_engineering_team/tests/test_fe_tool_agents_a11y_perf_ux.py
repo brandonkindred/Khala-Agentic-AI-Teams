@@ -180,6 +180,7 @@ class TestAccessibility:
         """Accessibility is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +267,7 @@ class TestPerformance:
         """Performance is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +348,7 @@ class TestUxUsability:
         """UX/Usability is review-only: fixing its findings is the coding agent's job."""
         a, _ = self._agent()
         assert not hasattr(a, "problem_solve")
+        assert not hasattr(a, "problem_solve_sources")
 
 
 # ---------------------------------------------------------------------------

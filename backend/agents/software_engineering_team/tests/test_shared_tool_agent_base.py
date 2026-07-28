@@ -420,9 +420,16 @@ def test_engine_review_propagates_unexpected_error(monkeypatch: pytest.MonkeyPat
         agent.review(_Input(current_files={"a.ts": "code"}))
 
 
+def test_base_review_tool_agent_has_no_problem_solve():
+    """BaseReviewToolAgent itself is report-only: problem_solve/problem_solve_sources
+    live only on the opt-in SingleIssueProblemSolveMixin, never on the review base."""
+    assert not hasattr(BaseReviewToolAgent, "problem_solve")
+    assert not hasattr(BaseReviewToolAgent, "problem_solve_sources")
+
+
 def test_engine_review_problem_solve_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issues produced via the engine still flow through the unchanged
-    one-at-a-time problem_solve path keyed on ``source``."""
+    """A demo agent that opts into SingleIssueProblemSolveMixin still fixes
+    engine-produced issues one at a time, keyed on ``source``."""
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = None
