@@ -16,6 +16,7 @@ from .models import (
     IntakeResult,
     Phase,
     PlanningResult,
+    ReviewResult,
     ToolAgentInput,
     ToolAgentKind,
     ToolAgentOutput,
@@ -36,13 +37,16 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
     """Orchestrates intake -> planning -> execution -> review -> problem-solving -> deliver.
 
     Intake and planning run as gated phases via ``BaseTeamLead._run_gated_phases``;
-    execution/review/problem-solving/deliver remain hand-rolled below the gate call
-    pending a later migration (their phase shape — a whole-result review/problem-
-    solving retry loop with no git/branch concerns — does not fit the code-v2 teams'
-    ``BaseV2DevelopmentAgent`` state machine, mirroring why ``devops_team`` also
-    does not use it). Does not use ``BaseTeamLead``'s per-repo briefing cache
-    (:meth:`BaseTeamLead._repo_context_cache_for`), so ``__init__`` passes empty
-    extension/exclude-dir sets and a zero char budget for that unused feature.
+    the review/problem-solving retry loop runs via ``BaseTeamLead._run_bounded_retry_loop``.
+    ``run_execution``/``run_deliver`` and the artifact-substring review check /
+    placeholder-file fix logic itself remain team-specific: this team's phase
+    shape (a whole-result review/problem-solving retry loop with no LLM-based
+    gates and no git/branch concerns) does not fit the code-v2 teams'
+    ``BaseV2DevelopmentAgent`` per-microtask gated state machine, mirroring why
+    ``devops_team`` also does not use it. Does not use ``BaseTeamLead``'s
+    per-repo briefing cache (:meth:`BaseTeamLead._repo_context_cache_for`), so
+    ``__init__`` passes empty extension/exclude-dir sets and a zero char budget
+    for that unused feature.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
@@ -100,6 +104,17 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
         spec_content: str = "",
         job_updater: Optional[Callable[..., None]] = None,
     ) -> AIAgentDevelopmentWorkflowResult:
+        """Run the full AI-agent development workflow for a task.
+
+        Preconditions: ``task.id`` is set; ``repo_path`` points to an existing
+          repository root when execution needs to read source files.
+        Postconditions: returns an ``AIAgentDevelopmentWorkflowResult`` whose
+          ``success``, ``current_phase``, ``failure_reason``, ``summary``, and
+          phase results are populated. Trace events are appended to
+          ``result.trace`` and, when ``job_updater`` is provided, forwarded to it.
+          Exceptions are caught and recorded in the result with
+          ``needs_followup=True``.
+        """
         result = AIAgentDevelopmentWorkflowResult(task_id=task.id, current_phase=Phase.INTAKE)
 
         def _trace(phase: Phase, message: str) -> None:
@@ -136,7 +151,9 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
 
             Preconditions: ``_phase_intake`` has run (``intake`` is set).
             Postconditions: sets nonlocal ``planning`` and ``result.planning_result``;
-              always returns None today (see _phase_intake docstring).
+              always returns None because ``run_planning`` has no soft-failure
+              branch and exceptions propagate to ``run_workflow``'s outer
+              try/except.
             """
             nonlocal planning
             result.current_phase = Phase.PLANNING
@@ -162,20 +179,37 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                 tool_runners=self._build_tool_runners(),
             )
             result.execution_result = execution
-            result.final_files = execution.files
 
-            for i in range(1, MAX_REVIEW_ITERATIONS + 1):
+            def _attempt_review_cycle(i: int) -> Optional[ReviewResult]:
+                """One review/problem-solving iteration for ``_run_bounded_retry_loop``.
+
+                Preconditions: ``execution`` (nonlocal) holds the current
+                  ``ExecutionResult``; ``i`` is the 0-based iteration index
+                  supplied by ``_run_bounded_retry_loop``.
+                Postconditions: always sets ``result.review_result`` and
+                  ``result.iterations_used`` (1-based). Returns the passing
+                  ``ReviewResult`` when review passes; returns a non-passing
+                  ``ReviewResult`` when problem-solving resolved the issues
+                  (and mutates ``execution.files``/``.summary`` in place so
+                  the next iteration re-reviews the patched files); returns
+                  ``None`` (abort signal for ``_run_bounded_retry_loop``; the
+                  helper only invokes ``is_success`` on non-``None`` values)
+                  when problem-solving could not resolve the issues, after
+                  populating ``result.failure_reason``, ``result.summary``, and
+                  ``result.needs_followup``.
+                """
+                iteration = i + 1
                 result.current_phase = Phase.REVIEW
-                result.iterations_used = i
-                _trace(Phase.REVIEW, f"Review iteration {i}")
+                result.iterations_used = iteration
+                _trace(Phase.REVIEW, f"Review iteration {iteration}")
                 review = run_review(execution_result=execution)
                 result.review_result = review
 
                 if review.passed:
-                    break
+                    return review
 
                 result.current_phase = Phase.PROBLEM_SOLVING
-                _trace(Phase.PROBLEM_SOLVING, f"Problem-solving iteration {i}")
+                _trace(Phase.PROBLEM_SOLVING, f"Problem-solving iteration {iteration}")
                 problem_solving = run_problem_solving(
                     execution_result=execution, review_result=review
                 )
@@ -185,12 +219,30 @@ class AIAgentDevelopmentTeamLead(BaseTeamLead):
                     result.failure_reason = "Review failed and no deterministic fix was available."
                     result.summary = review.summary
                     result.needs_followup = True
-                    return result
+                    return None
 
                 execution.files = problem_solving.files
                 execution.summary = f"{execution.summary} | {problem_solving.summary}"
+                # Intentionally return the pre-fix (non-passing) review: the
+                # helper treats ``r.passed`` as False and continues, so the next
+                # iteration re-runs ``run_review`` against the patched files.
+                return review
 
-            if not result.review_result or not result.review_result.passed:
+            # ``None`` from attempt is the explicit abort signal;
+            # ``is_success`` is only invoked on non-``None`` values.
+            succeeded, _final_review = self._run_bounded_retry_loop(
+                max_iterations=MAX_REVIEW_ITERATIONS,
+                attempt=_attempt_review_cycle,
+                is_success=lambda r: r.passed,
+            )
+            # Last attempted file set (see ``final_files`` Field description):
+            # includes problem-solving patches even on abort/exhausted paths.
+            result.final_files = execution.files
+            if not succeeded:
+                if result.needs_followup:
+                    # Abort path: _attempt_review_cycle already populated
+                    # failure_reason/summary/needs_followup before returning None.
+                    return result
                 result.failure_reason = "Review did not pass after max iterations."
                 result.summary = (
                     result.review_result.summary if result.review_result else "Review failed"
