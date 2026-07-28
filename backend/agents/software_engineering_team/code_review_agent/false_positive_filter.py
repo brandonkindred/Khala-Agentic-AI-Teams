@@ -666,6 +666,25 @@ def _find_heuristic_function_at_line(
     )
 
 
+def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
+    """Return ``text`` capped to ``max_len`` characters for log lines.
+
+    Preconditions:
+        - ``max_len`` >= 1.
+
+    Postconditions:
+        - Returns ``""`` when ``text`` is None or empty.
+        - Returns ``text`` unchanged when ``len(text) <= max_len``.
+        - Otherwise returns ``text[:max_len] + "..."``.
+    """
+    assert max_len >= 1
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
+
+
 def _build_tools(index: CodebaseIndex) -> list:
     """Build strands tools bound to ``index`` for one verification agent.
 
@@ -692,7 +711,10 @@ def _build_tools(index: CodebaseIndex) -> list:
             The file's full text, or an "Error: ..." message if the path is
             unknown or ambiguous.
         """
-        return index.read_file(path)
+        try:
+            return index.read_file(path)
+        except Exception as exc:
+            return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
 
     @tool
     def list_files() -> str:
@@ -701,8 +723,11 @@ def _build_tools(index: CodebaseIndex) -> list:
         Returns:
             One path per line. Read any of them with read_file(path).
         """
-        paths = index.list_files()
-        return "\n".join(paths) if paths else "(no files available)"
+        try:
+            paths = index.list_files()
+            return "\n".join(paths) if paths else "(no files available)"
+        except Exception as exc:
+            return f"Error: could not list files: {type(exc).__name__}: {exc}"
 
     @tool
     def search_codebase(query: str) -> str:
@@ -718,10 +743,13 @@ def _build_tools(index: CodebaseIndex) -> list:
         Returns:
             Matching "path:line: text" lines, or a message that nothing matched.
         """
-        matches = index.search(query)
-        if not matches:
-            return f"No matches for {query!r}."
-        return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+        try:
+            matches = index.search(query)
+            if not matches:
+                return f"No matches for {query!r}."
+            return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+        except Exception as exc:
+            return f"Error: could not search for {query!r}: {type(exc).__name__}: {exc}"
 
     @tool
     def find_function_at_line(path: str, line_number: int) -> str:
@@ -1128,7 +1156,7 @@ def _verify_and_filter(
                 "FalsePositiveFilter: verification failed for %s (%s: %s); keeping its findings",
                 file_path,
                 type(exc).__name__,
-                exc,
+                _truncate_for_log(str(exc)),
             )
             return {}
 
@@ -1179,8 +1207,8 @@ def _verify_and_filter(
                     issue.severity,
                     issue.file_path,
                     issue.line if issue.line is not None else "-",
-                    issue.description,
-                    verdict.reasoning or "no reasoning given",
+                    _truncate_for_log(issue.description),
+                    _truncate_for_log(verdict.reasoning) or "no reasoning given",
                 )
 
     if not removed_indices:

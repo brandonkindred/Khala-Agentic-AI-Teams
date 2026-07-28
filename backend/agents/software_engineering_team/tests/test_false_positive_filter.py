@@ -15,6 +15,7 @@ chunk review and the verification call in an end-to-end run.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -304,6 +305,38 @@ def test_list_files_tool_handles_empty_index() -> None:
     """The list_files tool returns a placeholder string for an empty index."""
     _, list_files, _, _ = _build_tools(CodebaseIndex(files={}))
     assert list_files() == "(no files available)"
+
+
+def test_truncate_for_log_caps_length() -> None:
+    """``_truncate_for_log`` leaves short text alone and caps long text with an ellipsis."""
+    from code_review_agent.false_positive_filter import _truncate_for_log
+
+    assert _truncate_for_log("abc", 10) == "abc"
+    assert _truncate_for_log(None, 10) == ""
+    assert len(_truncate_for_log("x" * 500, 400)) == 403  # 400 + "..."
+    assert _truncate_for_log("x" * 500, 400).endswith("...")
+
+
+def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
+    """Index-backed tools return Error strings when the underlying index raises."""
+    idx = CodebaseIndex(files={"a.py": "x"})
+    read_file, list_files, search_codebase, _find = _build_tools(idx)
+
+    def _boom_read(_self: CodebaseIndex, path: str) -> str:
+        raise RuntimeError("index boom")
+
+    def _boom_list(_self: CodebaseIndex) -> List[str]:
+        raise RuntimeError("index boom")
+
+    def _boom_search(_self: CodebaseIndex, query: str, max_matches: int = 60):
+        raise RuntimeError("index boom")
+
+    monkeypatch.setattr(CodebaseIndex, "read_file", _boom_read)
+    monkeypatch.setattr(CodebaseIndex, "list_files", _boom_list)
+    monkeypatch.setattr(CodebaseIndex, "search", _boom_search)
+    assert read_file("a.py").startswith("Error")
+    assert list_files().startswith("Error")
+    assert search_codebase("x").startswith("Error")
 
 
 # --------------------------------------------------------------------------- find_function_at_line
@@ -831,6 +864,29 @@ def test_filter_removes_confirmed_false_positive() -> None:
     )
     out = filter_false_positives(stub, _input(), [keep, drop])
     assert out == [keep]
+
+
+def test_filter_drop_log_truncates_description(caplog) -> None:
+    """Drop INFO logs truncate oversized description and reasoning fields."""
+    keep = _issue(description="real", line=5)
+    drop = _issue(description="D" * 1000, line=1)
+    stub = _VerdictStub(
+        verdicts=[
+            {"index": 0, "is_real_issue": True, "confidence": "high"},
+            {
+                "index": 1,
+                "is_real_issue": False,
+                "confidence": "high",
+                "reasoning": "R" * 1000,
+            },
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        out = filter_false_positives(stub, _input(), [keep, drop])
+    assert out == [keep]
+    joined = " ".join(r.message for r in caplog.records)
+    assert "D" * 1000 not in joined
+    assert "R" * 1000 not in joined
 
 
 def test_filter_keeps_blank_path_issue_even_with_other_removals() -> None:
