@@ -772,6 +772,31 @@ def test_on_timeout_hook_raising_does_not_mask_the_degrade(caplog) -> None:
     assert "hook blew up" in caplog.text
 
 
+def test_on_timeout_hook_raising_baseexception_still_propagates() -> None:
+    """Unlike a plain Exception, a BaseException (e.g. a real interrupt) from
+    on_timeout is never swallowed — it propagates out of parallel_map exactly
+    like a fast-fail worker exception would, and the pool still shuts down
+    cleanly rather than hanging."""
+
+    def hook(_item: int) -> None:
+        raise KeyboardInterrupt("stop")
+
+    def fn(x: int) -> int:
+        if x == 0:
+            time.sleep(1.0)
+        return x
+
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        parallel_map(
+            [0, 1],
+            fn,
+            max_workers=2,
+            skip_none=False,
+            timeout=0.1,
+            on_timeout=hook,
+        )
+
+
 def test_invalid_timeout_rejected() -> None:
     """A non-positive or non-numeric timeout raises up front."""
     with pytest.raises(ValueError):

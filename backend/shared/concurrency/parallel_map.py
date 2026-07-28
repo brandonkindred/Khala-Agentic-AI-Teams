@@ -80,28 +80,47 @@ def _run_with_timeout(
           the caller, ``parallel_map``).
 
     Postconditions:
-        - Every index reachable through ``index_of`` gets exactly one write
-          to ``ordered`` and exactly one append to ``completion`` — either
-          the future's real result, or ``None`` for a degraded item.
+        - If no worker future raises an exception, every index reachable
+          through ``index_of`` gets exactly one write to ``ordered`` and
+          exactly one append to ``completion`` — either the future's real
+          result, or ``None`` for a degraded item. A worker exception still
+          re-raises immediately (see Preconditions on ``timeout``/fast-fail
+          above), leaving any not-yet-processed index unwritten — the same
+          fast-fail contract ``parallel_map`` documents for ``timeout=None``.
         - Returns ``True`` iff at least one item was degraded; the caller
           uses this to choose the ``wait_for_stragglers`` shutdown behavior.
-        - Mutates only ``ordered`` and ``completion`` from the caller's
-          state (plus reading, never writing, ``start_times``/
-          ``finish_times``/``submitted_items``) — the sets and counters used
-          internally to track stragglers are local to this call.
+        - Mutates ``ordered`` and ``completion`` from the caller's state
+          (plus reading, never writing, ``start_times``/``finish_times``/
+          ``submitted_items``) — the sets and counters used internally to
+          track stragglers are local to this call. Also invokes the
+          caller-supplied ``on_timeout(item)`` in this thread for each
+          degraded item (logging, not propagating, an ``Exception`` it
+          raises) — callers relying on ``on_timeout`` for side effects
+          should treat those as happening synchronously, here.
     """
     timed_out = False
 
     def _degrade(i: int) -> None:
         nonlocal timed_out
         timed_out = True
+        # Record the degrade (ordered/completion) before letting a hook
+        # BaseException (e.g. SystemExit) propagate: timed_out is already
+        # True at this point, so the caller must never see that combined
+        # with a missing entry for this index. An Exception is logged and
+        # swallowed instead — the existing "one bad hook can't take down
+        # the batch" contract.
+        hook_error: Optional[BaseException] = None
         if on_timeout is not None:
             try:
                 on_timeout(submitted_items[i])
             except Exception:
                 logger.exception("on_timeout hook raised for a degraded item; the item's result remains None")
+            except BaseException as exc:
+                hook_error = exc
         ordered[i] = None
         completion.append(None)
+        if hook_error is not None:
+            raise hook_error
 
     pending = set(futures)
     poll_interval = min(timeout, _TIMEOUT_POLL_INTERVAL_SECONDS)
