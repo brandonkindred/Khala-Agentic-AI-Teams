@@ -12,8 +12,6 @@ from software_engineering_team.shared.tool_agent_base import (
 )
 
 from ...models import ReviewIssue
-from ...output_templates import parse_problem_solving_single_issue_template
-from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
 MAX_RELEVANT_CODE_CHARS = 8_000
 
@@ -73,24 +71,20 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 
 
 class PerformanceToolAgent(BaseReviewToolAgent):
-    """Performance tool agent: bundle size, code splitting, caching, runtime cost review and fixes.
+    """Performance tool agent: bundle size, code splitting, caching, runtime cost review.
 
-    ``review`` runs in JSON mode (``_model_json``) so a prose response is biased
-    toward returning JSON; ``problem_solve`` keeps text mode (``_model``) because
-    its output is a ``## FILE`` marker template that JSON mode would clobber.
+    Reports issues for the coding agent to fix; ``review`` runs in JSON mode
+    (``_model_json``) so a prose response is biased toward returning JSON.
     """
 
     name = "Performance"
     empty_label = "performance issues"
     issue_source = "performance"
-    problem_solve_sources = ("performance", "tool_performance")
     review_prompt = PERFORMANCE_REVIEW_PROMPT
-    problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
     max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
     review_parse_mode = "json"
     uses_json_model = True
     review_model_attr = "_model_json"
-    default_recommendation = "Fix the performance issue."
     plan_recommendations = [
         "Set performance budgets: main bundle < 250KB, route chunks < 100KB.",
         "Use lazy loading for routes and heavy components.",
@@ -98,4 +92,3 @@ class PerformanceToolAgent(BaseReviewToolAgent):
         "Consider HTTP caching headers and service worker for PWA.",
     ]
     plan_summary = "Performance planning: bundle size, lazy loading, caching recommendations."
-    _parse_single_issue = staticmethod(parse_problem_solving_single_issue_template)

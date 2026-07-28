@@ -545,7 +545,7 @@ def test_returns_empty_for_non_code_review_profile() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
         _FailIfAskedClient(),
@@ -569,7 +569,7 @@ def test_returns_empty_when_pre_numbered() -> None:
     class _FailIfAskedClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
         _FailIfAskedClient(),
@@ -603,7 +603,7 @@ def test_finds_and_returns_new_findings() -> None:
                         }
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(_FindingsClient(), _input())
     assert len(result) == 1
@@ -627,7 +627,7 @@ def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
                         }
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
         _FindingsClient(), _input(files={"app/main.py": "def bar():\n    return 1\n"})
@@ -665,7 +665,7 @@ def test_finds_caller_impact_across_the_repository() -> None:
                         }
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
         _FindingsClient(),
@@ -688,7 +688,7 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
                 calls["side_effect_pass"] += 1
                 return {"findings": []}
             calls["chunk_review"] += 1
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     files = {"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 2\n"}
     run_coordinator(_CountingClient(), CodeReviewInput(files=files))
@@ -726,7 +726,7 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
                         },
                     ]
                 }
-            return {"approved": True, "issues": [], "summary": "ok"}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = run_coordinator(
         _FindingsClient(),
@@ -754,6 +754,7 @@ def test_coordinator_skips_pass_for_non_default_profile() -> None:
                 "approved": True,
                 "issues": [],
                 "summary": "ok",
+                "spec_compliance_notes": "",
             }
 
     run_coordinator(
