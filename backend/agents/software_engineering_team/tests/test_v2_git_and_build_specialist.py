@@ -321,16 +321,14 @@ class TestFEBuildSpecialist:
         assert "3 of 3" in out.summary
 
     def test_problem_solve_llm_exception(self, monkeypatch):
+        from llm_service.interface import LLMError
+
         a, mod = self._agent()
         a._model = object()
 
-        def _raise(*args, **kwargs):
-            raise RuntimeError("err")
-
-        # Returns a callable that raises
         class _StubAgent:
             def __call__(self, prompt):
-                raise RuntimeError("err")
+                raise LLMError("err")
 
         monkeypatch.setattr(mod, "Agent", lambda *a, **kw: _StubAgent())
         out = a.problem_solve(

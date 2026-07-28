@@ -7,6 +7,7 @@ import logging
 import pytest
 
 from llm_service.clients.dummy import DummyLLMClient
+from llm_service.interface import LLMError
 from software_engineering_team.code_review_agent import CodeReviewUnavailableError
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
@@ -243,6 +244,58 @@ def test_review_no_code():
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = object()
     assert "no code" in agent.review(_Input(current_files={})).summary
+
+
+def test_review_skips_when_current_files_is_none():
+    """``current_files is None`` must degrade to the same "no code" skip as an
+    empty map — not raise AttributeError from ``_build_code_text``."""
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    inp = _Input()
+    inp.current_files = None
+    assert "no code" in agent.review(inp).summary
+
+
+def test_review_uses_review_model_attr_for_no_model_guard(monkeypatch):
+    """The no-model guard must check ``review_model_attr``, not always ``_model``.
+
+    A subclass that reviews via ``_model_json`` with ``_model`` unset must still
+    invoke the LLM rather than silently skipping.
+    """
+
+    class _JsonAttrAgent(_DemoAgent):
+        review_model_attr = "_model_json"
+
+    agent = _JsonAttrAgent.__new__(_JsonAttrAgent)
+    agent._model = None
+    agent._model_json = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _FakeAgent("raw-review"))
+    out = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert "skipped (no LLM)" not in out.summary
+    assert "1 issue(s) found." in out.summary
+
+
+def test_review_code_with_braces_reaches_llm_uncorrupted(monkeypatch):
+    """Literal braces in file contents must reach the LLM uncorrupted on the
+    one-shot review path (safe placeholder substitution, not value-escaping)."""
+    seen: list[str] = []
+    code = 'cfg = {"a": 1}\nf"{x}"'
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    out = agent.review(_Input(current_files={"a.ts": code}))
+    assert "1 issue(s) found." in out.summary
+    assert len(seen) == 1
+    assert code in seen[0]
+    assert "{{" not in seen[0]
 
 
 def test_review_no_prompt_raises():
@@ -490,11 +543,20 @@ def test_problem_solve_fixes(monkeypatch):
     assert "fixed 1 of 1 issue(s) (one at a time)." in out.summary
 
 
-def test_problem_solve_escapes_braces_in_code(monkeypatch):
-    """Relevant code containing literal ``{``/``}`` (dict literals, f-strings,
-    etc.) must not be interpreted as ``str.format`` placeholders — the fix
-    proceeds normally instead of raising KeyError/IndexError or being skipped."""
-    agent = _make(monkeypatch, "## FILE x.ts ##\nfixed")
+def test_problem_solve_preserves_braces_in_code(monkeypatch):
+    """Relevant code with literal braces must reach the LLM uncorrupted (not
+    doubled by a mistaken ``str.format`` escape) and still complete the fix."""
+    seen: list[str] = []
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "## FILE x.ts ##\nfixed"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
     code_with_braces = 'config = {"a": 1}\nname = f"{value}"'
     out = agent.problem_solve(
         _Input(
@@ -503,20 +565,64 @@ def test_problem_solve_escapes_braces_in_code(monkeypatch):
         )
     )
     assert "fixed 1 of 1 issue(s) (one at a time)." in out.summary
+    assert len(seen) == 1
+    assert code_with_braces in seen[0]
+    assert "{{" not in seen[0]
 
 
-def test_problem_solve_llm_exception(monkeypatch):
-    """An exception raised by the underlying LLM agent while fixing an issue
-    is caught per-issue: the issue counts as unfixed ("fixed 0 of 1") rather
-    than aborting the whole problem_solve call."""
+def test_problem_solve_preserves_braces_in_issue_fields(monkeypatch):
+    """Issue fields may contain braces from code snippets; substitution must
+    leave them intact in the prompt and still complete the fix."""
+    seen: list[str] = []
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "## FILE x.ts ##\nfixed"
+
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = object()
     agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    desc = 'missing key {"timeout"}'
+    rec = 'use dict.get("timeout", 0)'
+    issue = ReviewIssue(
+        source="demo",
+        file_path="x.ts",
+        description=desc,
+        recommendation=rec,
+    )
+    out = agent.problem_solve(_Input(current_files={"x.ts": "old"}, review_issues=[issue]))
+    assert "fixed 1 of 1 issue(s) (one at a time)." in out.summary
+    assert desc in seen[0] and rec in seen[0]
+    assert "{{" not in seen[0]
 
-    def boom(*a, **k):
-        raise RuntimeError("err")
 
-    _patch_agent(monkeypatch, boom)
+def test_problem_solve_drops_reserved_extra_kwargs(monkeypatch, caplog):
+    """``_problem_solving_kwargs`` keys that collide with reserved prompt fields
+    are dropped (with a warning) so ``.format`` does not raise TypeError."""
+    agent = _make(monkeypatch, "## FILE x.ts ##\nfixed")
+    monkeypatch.setattr(
+        agent,
+        "_problem_solving_kwargs",
+        lambda inp: {"source": "shadow", "language_conventions": "conv"},
+    )
+    with caplog.at_level(logging.WARNING):
+        out = agent.problem_solve(
+            _Input(
+                current_files={"x.ts": "old"},
+                review_issues=[ReviewIssue(source="demo", file_path="x.ts")],
+            )
+        )
+    assert "fixed 1 of 1" in out.summary
+    assert "reserved keys" in caplog.text
+
+
+def test_problem_solve_non_dict_parse_skips_issue(monkeypatch):
+    """A non-mapping parse result is skipped for that issue rather than raising
+    on ``.get``."""
+    agent = _make(monkeypatch, "raw-response")
+    monkeypatch.setattr(agent, "_parse_single_issue", lambda raw: None)
     out = agent.problem_solve(
         _Input(
             current_files={"x.ts": "old"},
@@ -524,6 +630,49 @@ def test_problem_solve_llm_exception(monkeypatch):
         )
     )
     assert "fixed 0 of 1" in out.summary
+
+
+def test_problem_solve_llm_exception(monkeypatch):
+    """An ``LLMError`` from the underlying LLM agent while fixing an issue is
+    caught per-issue: the issue counts as unfixed ("fixed 0 of 1") rather than
+    aborting the whole problem_solve call."""
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+
+    class _Boom:
+        def __call__(self, prompt):
+            raise LLMError("err")
+
+    _patch_agent(monkeypatch, lambda *a, **k: _Boom())
+    out = agent.problem_solve(
+        _Input(
+            current_files={"x.ts": "old"},
+            review_issues=[ReviewIssue(source="demo", file_path="x.ts")],
+        )
+    )
+    assert "fixed 0 of 1" in out.summary
+
+
+def test_problem_solve_unexpected_error_propagates(monkeypatch):
+    """Programming errors (e.g. AttributeError) from the LLM runner must not be
+    swallowed — they propagate so bugs surface."""
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+
+    class _Boom:
+        def __call__(self, prompt):
+            raise AttributeError("unexpected bug")
+
+    _patch_agent(monkeypatch, lambda *a, **k: _Boom())
+    with pytest.raises(AttributeError, match="unexpected bug"):
+        agent.problem_solve(
+            _Input(
+                current_files={"x.ts": "old"},
+                review_issues=[ReviewIssue(source="demo", file_path="x.ts")],
+            )
+        )
 
 
 def test_problem_solve_parse_exception(monkeypatch):

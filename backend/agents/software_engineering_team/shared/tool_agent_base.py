@@ -41,8 +41,9 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from llm_service.interface import LLMError
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 from software_engineering_team.shared.v2_models import (
@@ -58,6 +59,14 @@ from software_engineering_team.shared.v2_models import (
 # it risks a broken fix — the cap exists only to bound a pathological single
 # file, not to restrict normal usage.
 DEFAULT_MAX_RELEVANT_CODE_CHARS = 100_000
+
+# Placeholders filled explicitly in ``SingleIssueProblemSolveMixin.problem_solve``.
+# ``_problem_solving_kwargs`` must not return these keys (they are dropped with a
+# warning if it does), so ``str.format`` cannot raise
+# ``TypeError: got multiple values for keyword argument``.
+_PROBLEM_SOLVE_RESERVED_KEYS = frozenset(
+    {"source", "severity", "description", "file_path", "recommendation", "current_code"}
+)
 
 
 def relevant_code_for_issue(
@@ -173,14 +182,29 @@ class SingleIssueProblemSolveMixin:
     def problem_solve(self, inp) -> ToolAgentPhaseOutput:
         """Fix issues one at a time whose source is in :attr:`problem_solve_sources`.
 
-        Preconditions: ``inp`` exposes ``review_issues`` (each with ``source``)
-        and ``current_files``; the attributes listed in this mixin's
-        class-level Preconditions are supplied by the combining class.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput`. When there is
-        no LLM or no matching issues, ``files`` is empty (the default) and
-        ``current_files`` is left untouched; otherwise ``files`` is the merged
-        file set after applying each successful single-issue fix. A single
-        issue's fix failure is logged and does not abort the remaining issues.
+        Preconditions:
+            - ``inp`` exposes ``review_issues`` (each with ``source``,
+              ``severity``, ``description``, ``file_path``, ``recommendation``)
+              and ``current_files``.
+            - The attributes listed in this mixin's class-level Preconditions
+              are supplied by the combining class.
+            - ``_problem_solving_kwargs(inp)`` must not return keys in
+              ``_PROBLEM_SOLVE_RESERVED_KEYS`` (overlapping keys are dropped
+              with a warning rather than raising).
+
+        Postconditions:
+            - Returns a :class:`ToolAgentPhaseOutput`. When there is no LLM or
+              no matching issues, ``files`` is empty (the default) and
+              ``current_files`` is left untouched; otherwise ``files`` is the
+              merged file set after applying each successful single-issue fix.
+            - An ``LLMError`` / ``TimeoutError`` from the LLM call, or a
+              ``ValueError`` / ``json.JSONDecodeError`` from
+              ``_parse_single_issue``, is logged and skips that issue without
+              aborting the loop. Non-mapping parse results are likewise skipped.
+            - Any other exception (programming errors) propagates to the caller.
+
+        Invariants:
+            - ``inp`` is never modified; changes apply to a local ``merged`` copy.
         """
         if not self._model:
             return ToolAgentPhaseOutput(summary=f"{self.name} problem_solve skipped (no LLM).")
@@ -189,35 +213,66 @@ class SingleIssueProblemSolveMixin:
         ]
         if not issues:
             return ToolAgentPhaseOutput(summary=f"No {self.empty_label} to fix.")
-        extra = self._problem_solving_kwargs(inp)
+        extra = dict(self._problem_solving_kwargs(inp))
+        overlapping = _PROBLEM_SOLVE_RESERVED_KEYS.intersection(extra)
+        if overlapping:
+            self._logger.warning(
+                "%s _problem_solving_kwargs reserved keys dropped: %s",
+                self.name,
+                overlapping,
+            )
+            for key in overlapping:
+                del extra[key]
         merged = dict(inp.current_files)
         fixed_count = 0
         for issue in issues:
             relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
+            # Keyword ``str.format`` does not re-parse braces inside values, so
+            # issue fields and code are passed through unescaped. Escaping here
+            # would corrupt the prompt the model edits.
+            prompt = self.problem_solving_prompt.format(
+                source=issue.source or self.issue_source,
+                severity=issue.severity or self.default_severity,
+                description=issue.description or "",
+                file_path=issue.file_path or "N/A",
+                recommendation=issue.recommendation or self.default_recommendation,
+                current_code=relevant_code,
+                **extra,
+            )
             try:
-                prompt = self.problem_solving_prompt.format(
-                    source=issue.source or self.issue_source,
-                    severity=issue.severity or self.default_severity,
-                    description=issue.description or "",
-                    file_path=issue.file_path or "N/A",
-                    recommendation=issue.recommendation or self.default_recommendation,
-                    current_code=relevant_code.replace("{", "{{").replace("}", "}}"),
-                    **extra,
-                )
                 raw = self._run_agent(self._model, prompt)
-                parsed = self._parse_single_issue(raw)
-                fixed_files = parsed.get("files") or {}
-                if fixed_files:
-                    merged.update(fixed_files)
-                    fixed_count += 1
-            except Exception as e:
+            except (LLMError, TimeoutError) as e:
                 self._logger.warning(
                     "%s fix for issue %s failed: %s",
                     self.name,
                     (issue.description or "")[:50],
                     e,
+                    exc_info=True,
                 )
                 continue
+            try:
+                parsed = self._parse_single_issue(raw)
+            except (ValueError, json.JSONDecodeError) as e:
+                self._logger.warning(
+                    "%s parse for issue %s failed: %s",
+                    self.name,
+                    (issue.description or "")[:50],
+                    e,
+                    exc_info=True,
+                )
+                continue
+            if not isinstance(parsed, Mapping):
+                self._logger.warning(
+                    "%s parse for issue %s returned non-mapping %s; skipping",
+                    self.name,
+                    (issue.description or "")[:50],
+                    type(parsed).__name__,
+                )
+                continue
+            fixed_files = parsed.get("files") or {}
+            if fixed_files:
+                merged.update(fixed_files)
+                fixed_count += 1
         return ToolAgentPhaseOutput(
             files=merged,
             summary=f"{self.name}: fixed {fixed_count} of {len(issues)} issue(s) (one at a time).",
@@ -344,6 +399,9 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         Preconditions: when set, ``conventions_by_language`` maps lowercased
         language names (plus optional ``"_default"``) to convention strings.
         Postconditions: returns ``{}`` or ``{"language_conventions": <str>}``.
+            Never returns keys in ``_PROBLEM_SOLVE_RESERVED_KEYS`` (``source``,
+            ``severity``, ``description``, ``file_path``, ``recommendation``,
+            ``current_code``); callers also filter overlaps defensively.
         """
         conv = self.conventions_by_language or {}
         if not conv:
@@ -471,8 +529,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         if self.review_via_engine:
             return self._engine_review(inp)
         review_label = f"{self.name} review"
-        if self._fallback_no_model(self._model) is not None:
+        model = getattr(self, self.review_model_attr)
+        if self._fallback_no_model(model) is not None:
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no LLM).")
+        if not getattr(inp, "current_files", None):
+            return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no code).")
         code_text = self._build_code_text(inp.current_files)
         if not code_text.strip():
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no code).")
@@ -482,11 +543,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                 "review_prompt, review_via_engine=True, or build_runner when using the "
                 "default review() path."
             )
-        prompt = self.review_prompt.format(
-            task_description=inp.task_description or "N/A",
-            code=code_text,
-        )
-        model = getattr(self, self.review_model_attr)
+        # ``str.replace`` keeps braces inside ``code_text`` / task text literal;
+        # only the two known placeholders are substituted.
+        prompt = self.review_prompt.replace(
+            "{task_description}", inp.task_description or "N/A"
+        ).replace("{code}", code_text)
         status, result = self._call_with_single_fallback(
             lambda: self._invoke_llm(model, prompt),
             log_label=review_label,
