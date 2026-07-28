@@ -233,7 +233,7 @@ def parse_qa_history_blocks(qa_history: str) -> List[Tuple[int, str, str, str]]:
                 block_lines.append(next_line)
                 stripped = next_line.strip()
                 if stripped.startswith("**Answer:**"):
-                    answer_lines = [next_line.removeprefix("**Answer:**").strip()]
+                    answer_lines = [stripped.removeprefix("**Answer:**").strip()]
                     current_field = answer_lines
                 elif stripped.startswith(
                     ("**Rationale:**", "*Auto-answered", "*Custom text:*", "*(Default applied)*")

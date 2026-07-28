@@ -177,6 +177,21 @@ def test_parse_qa_history_blocks_preserves_bullet_in_multiline_answer() -> None:
     assert answer == "Roll out in three phases.\n* Phase one: canary\nPhase two: full rollout"
 
 
+def test_parse_qa_history_blocks_strips_indented_answer_marker() -> None:
+    qa_history = (
+        "# Q&A History\n\n"
+        "## Iteration 1\n\n"
+        "### Should the answer marker line be allowed to be indented?\n"
+        "  **Answer:** Yes, whitespace before the marker is tolerated.\n\n"
+    )
+
+    blocks = parse_qa_history_blocks(qa_history)
+
+    assert len(blocks) == 1
+    _iteration, _question_text, answer, _full_block = blocks[0]
+    assert answer == "Yes, whitespace before the marker is tolerated."
+
+
 def test_parse_qa_history_blocks_preserves_answer_containing_marker_substring() -> None:
     qa_history = (
         "# Q&A History\n\n"
