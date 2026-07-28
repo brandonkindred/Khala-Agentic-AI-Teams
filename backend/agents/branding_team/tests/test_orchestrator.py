@@ -734,6 +734,94 @@ def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
     assert output.brand_promise == "Fallback promise."
 
 
+def _text_node_result(text: str) -> MagicMock:
+    """A mock NodeResult whose single agent result carries raw ``text`` and
+    no ``structured_output``, forcing extraction down the
+    ``_parse_model_from_text`` path exercised by the tests below."""
+    agent_result = MagicMock()
+    agent_result.message = {"content": [{"text": text}]}
+    agent_result.structured_output = None
+    node_result = MagicMock()
+    node_result.get_agent_results.return_value = [agent_result]
+    return node_result
+
+
+def test_parse_model_from_text_truncated_json_returns_none_and_extract_degrades() -> None:
+    """JSON cut off mid-object (e.g. a truncated LLM response) must not
+    validate — _parse_model_from_text returns None, and _extract_phase_output
+    must surface that as degraded=True rather than silently defaulting."""
+    from branding_team.orchestrator import _parse_model_from_text
+
+    full_json = _full_strategic_core().model_dump_json()
+    truncated = full_json[: len(full_json) // 2]
+
+    assert _parse_model_from_text(truncated, StrategicCoreOutput) is None
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": _text_node_result(truncated)}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is True
+    assert output == StrategicCoreOutput()
+
+
+def test_parse_model_from_text_prose_wrapped_json_recovers() -> None:
+    """Real prose before and after the JSON block (a common LLM reply shape)
+    must still be recovered — proving the degradation signal isn't
+    spuriously set for payloads that are genuinely recoverable."""
+    from branding_team.orchestrator import _parse_model_from_text
+
+    real_payload = _full_strategic_core()
+    text = (
+        "Here is the strategic core output:\n\n"
+        + real_payload.model_dump_json()
+        + "\n\nLet me know if any revisions are needed."
+    )
+
+    parsed = _parse_model_from_text(text, StrategicCoreOutput)
+    assert parsed == real_payload
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": _text_node_result(text)}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is False
+    assert output.positioning_statement == real_payload.positioning_statement
+    assert output.brand_promise == real_payload.brand_promise
+
+
+def test_parse_model_from_text_schema_mismatch_returns_none_and_extract_degrades() -> None:
+    """Syntactically valid JSON that fails schema validation (a required
+    nested field missing) must not validate — _parse_model_from_text returns
+    None, and _extract_phase_output must surface that as degraded=True."""
+    from branding_team.orchestrator import _parse_model_from_text
+
+    text = json.dumps(
+        {
+            "positioning_statement": "For enterprise leaders who need clarity, we deliver it.",
+            "core_values": [{"behavioral_definition": "Missing the required 'value' field."}],
+        }
+    )
+
+    assert _parse_model_from_text(text, StrategicCoreOutput) is None
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": _text_node_result(text)}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase1_strategic_core", StrategicCoreOutput
+    )
+
+    assert degraded is True
+    assert output == StrategicCoreOutput()
+
+
 def test_gather_integrations_market_research_failure_returns_none() -> None:
     """A failing market-research call is swallowed to None; disabled design → None."""
     import asyncio

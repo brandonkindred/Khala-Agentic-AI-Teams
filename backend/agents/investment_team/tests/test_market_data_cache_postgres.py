@@ -4,10 +4,13 @@ The production cache layer in :mod:`investment_team.market_data_cache.store`
 uses Postgres for the snapshot index when ``POSTGRES_HOST`` is set; the
 fallback uses an in-process list. The standard ``test_market_data_cache``
 fixture monkey-patches ``POSTGRES_HOST`` away so those tests exercise the
-fallback path only. This file mocks ``is_postgres_enabled`` and
-``get_conn`` so the Postgres branches in ``_find_covering_snapshot``,
-``_record_snapshot``, and the surrounding error-handling fall-throughs
-become reachable without a live database.
+fallback path only. ``MarketDataCache`` reaches Postgres only through
+``shared.postgres.PostgresHelperMixin``, which calls ``pg_cursor()`` in
+``shared.postgres.client``; this file patches ``shared.postgres.client.get_conn``
+and sets ``POSTGRES_HOST`` (so ``pg_cursor``'s ``is_postgres_enabled()`` guard
+falls through) so the Postgres branches in ``_find_covering_snapshot``,
+``_record_snapshot``, and the surrounding error-handling fall-throughs become
+reachable without a live database.
 
 Each test asserts on the recorded SQL plus the public outcome
 (``SnapshotMeta`` returned, snapshot inserted, etc.) so the contract
@@ -19,12 +22,14 @@ assertion.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
 import pytest
 
+import shared.postgres.client as client_mod
 from investment_team.market_data_cache.store import (
     MarketDataCache,
     SnapshotMeta,
@@ -37,6 +42,7 @@ class _FakeCursor:
         self._rows = list(rows or [])
         self._raise = raise_on_execute
         self.executed: List[tuple] = []
+        self.rowcount = 0
 
     def __enter__(self) -> "_FakeCursor":
         return self
@@ -48,6 +54,7 @@ class _FakeCursor:
         if self._raise:
             raise RuntimeError("fixture-placeholder-not-a-secret: simulated db failure")
         self.executed.append((sql, params))
+        self.rowcount = 1
 
     def fetchone(self) -> Optional[Any]:
         return self._rows.pop(0) if self._rows else None
@@ -65,6 +72,26 @@ class _FakeConn:
 
     def cursor(self, row_factory: Any = None) -> _FakeCursor:  # noqa: ARG002
         return self._cursor
+
+
+def _patch_pg_cursor(monkeypatch: pytest.MonkeyPatch, cursor: _FakeCursor) -> None:
+    """Route ``pg_cursor`` (used by ``PostgresHelperMixin``) at a fake cursor.
+
+    Sets ``POSTGRES_HOST`` (only if unset, to avoid clobbering a real value)
+    so ``pg_cursor``'s ``is_postgres_enabled()`` guard falls through, and
+    patches ``shared.postgres.client.get_conn`` — the module ``pg_cursor``
+    itself resolves ``get_conn`` from — to yield a ``_FakeConn`` wrapping
+    ``cursor``.
+    """
+    if not client_mod.is_postgres_enabled():
+        monkeypatch.setenv("POSTGRES_HOST", "fixture-placeholder-not-a-secret")
+
+    @contextmanager
+    def _fake_get_conn(database: Optional[str] = None):  # noqa: ARG001
+        with _FakeConn(cursor) as conn:
+            yield conn
+
+    monkeypatch.setattr(client_mod, "get_conn", _fake_get_conn)
 
 
 @pytest.fixture
@@ -166,18 +193,7 @@ def test_find_covering_snapshot_postgres_hit_returns_row(
         "schema_version": 1,
     }
     cursor = _FakeCursor(rows=[row])
-
-    import investment_team.market_data_cache.store as store_mod
-
-    monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    monkeypatch.setattr(store_mod, "dict_row", object(), raising=False)
-    import sys
-
-    import shared.postgres
-
-    monkeypatch.setattr(shared.postgres, "dict_row", object(), raising=False)
-    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
+    _patch_pg_cursor(monkeypatch, cursor)
 
     out = cache._find_covering_snapshot(
         symbol="AAA",
@@ -199,14 +215,7 @@ def test_find_covering_snapshot_postgres_miss_returns_none(
     """Pre: ``is_postgres_enabled()`` true, conn returns no row.
     Post: lookup returns None (no in-memory consultation needed)."""
     cursor = _FakeCursor(rows=[])
-
-    import sys
-
-    import investment_team.market_data_cache.store as store_mod
-
-    monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
+    _patch_pg_cursor(monkeypatch, cursor)
 
     out = cache._find_covering_snapshot(
         symbol="ZZZ",
@@ -230,14 +239,7 @@ def test_find_covering_snapshot_postgres_error_falls_back_to_memory(
     cache._memory_index.append(meta)
 
     cursor = _FakeCursor(rows=[], raise_on_execute=True)
-
-    import sys
-
-    import investment_team.market_data_cache.store as store_mod
-
-    monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
-    sys.modules["shared.postgres"].dict_row = object()  # type: ignore[attr-defined]
+    _patch_pg_cursor(monkeypatch, cursor)
 
     out = cache._find_covering_snapshot(
         symbol="AAA",
@@ -264,11 +266,7 @@ def test_record_snapshot_postgres_insert(
     matches the documented column order.
     """
     cursor = _FakeCursor()
-
-    import investment_team.market_data_cache.store as store_mod
-
-    monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
+    _patch_pg_cursor(monkeypatch, cursor)
 
     meta = _meta()
     cache._record_snapshot(meta)
@@ -301,11 +299,7 @@ def test_record_snapshot_postgres_failure_falls_back_to_memory(
     process retains a usable record.
     """
     cursor = _FakeCursor(raise_on_execute=True)
-
-    import investment_team.market_data_cache.store as store_mod
-
-    monkeypatch.setattr(store_mod, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(store_mod, "get_conn", lambda: _FakeConn(cursor))
+    _patch_pg_cursor(monkeypatch, cursor)
 
     meta = _meta(symbol="ERR")
     cache._record_snapshot(meta)

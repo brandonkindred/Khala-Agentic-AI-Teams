@@ -509,6 +509,7 @@ def test_post_conversations_with_initial_message_calls_assistant() -> None:
                 target_audience="Developers",
             ),
             ["What are your values?", "Who are your competitors?"],
+            False,
         )
         resp = client.post(
             "/conversations",
@@ -535,6 +536,7 @@ def test_post_conversation_messages_updates_state_and_returns_reply() -> None:
                 target_audience="TBD",
             ),
             ["Next question?"],
+            False,
         )
         msg_resp = client.post(
             f"/conversations/{conversation_id}/messages",
