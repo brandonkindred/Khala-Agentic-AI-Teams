@@ -92,7 +92,8 @@ def _fallback_title(description: str) -> str:
     if not text or len(text) <= _TITLE_MAX_LEN:
         return text
     limit = _TITLE_MAX_LEN - 1  # reserve one character for the trailing ellipsis
-    truncated = text[:limit].rsplit(" ", 1)[0].rstrip(",.;:—-") or text[:limit].rstrip()
+    prefix = text[:limit]
+    truncated = prefix.rsplit(" ", 1)[0].rstrip(",.;:—-") or prefix.rstrip()
     return f"{truncated}…"
 
 
@@ -347,22 +348,28 @@ def format_comment_body(
           comment this same finding duplicates.
     Postconditions:
         - Returns a bolded title heading (the finding's own ``title``, or one
-          derived from ``description`` when blank) tagged with severity and
-          category, followed by the problem description and, when a suggestion
-          is present, a ``**Suggested fix:**`` paragraph. When the description
-          is short enough that its derived title reproduces it verbatim, the
-          description paragraph is omitted rather than repeating the same text
-          twice. When ``existing_reference`` is given, a trailing note links
-          it — so a reviewer sees this finding was already raised and is still
-          open, rather than reading it as a brand-new duplicate.
+          derived from ``description`` when blank), followed by a
+          ``_[SEVERITY] category_`` tag line, the problem description, and,
+          when a suggestion is present, a ``**Suggested fix:**`` paragraph.
+          When the description is short enough that its derived title
+          reproduces it verbatim, the description paragraph is omitted rather
+          than repeating the same text twice. When both ``title`` and
+          ``description`` are blank, the heading itself falls back to
+          ``**[SEVERITY] category**`` and the separate tag line is omitted, so
+          severity/category is never shown twice. When ``existing_reference``
+          is given, a trailing note links it — so a reviewer sees this finding
+          was already raised and is still open, rather than reading it as a
+          brand-new duplicate.
     """
     severity = (getattr(issue, "severity", "") or "info").upper()
     category = getattr(issue, "category", "") or "general"
     description = getattr(issue, "description", "") or ""
     suggestion = getattr(issue, "suggestion", "") or ""
     title = (getattr(issue, "title", "") or "").strip() or _fallback_title(description)
-    heading = f"**{title}**" if title else f"**[{severity}] {category}**"
-    body = f"{heading}\n_[{severity}] {category}_"
+    if title:
+        body = f"**{title}**\n_[{severity}] {category}_"
+    else:
+        body = f"**[{severity}] {category}**"
     if description and description.strip() != title:
         body += f"\n\n{description}"
     if suggestion:
@@ -455,6 +462,7 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
           to a "N finding(s) reported" line (so an empty summary never omits that
           change-requesting comments sit on the PR).
     """
+    assert issue_count >= 0, "issue_count must be non-negative"
     if issue_count == 0:
         return "No issues found — the code is of good quality."
     parts: list[str] = []

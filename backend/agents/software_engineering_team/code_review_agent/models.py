@@ -136,7 +136,8 @@ def derive_issue_title(description: str, max_len: int = _TITLE_MAX_LEN) -> str:
     if not text or len(text) <= max_len:
         return text
     limit = max_len - 1  # reserve one character for the trailing ellipsis
-    truncated = text[:limit].rsplit(" ", 1)[0].rstrip(",.;:—-") or text[:limit].rstrip()
+    prefix = text[:limit]
+    truncated = prefix.rsplit(" ", 1)[0].rstrip(",.;:—-") or prefix.rstrip()
     return f"{truncated}…"
 
 

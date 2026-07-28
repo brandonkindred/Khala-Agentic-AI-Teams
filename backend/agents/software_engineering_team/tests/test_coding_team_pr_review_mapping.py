@@ -18,6 +18,7 @@ from software_engineering_team.github_source.issue_proposals import (
 )
 from software_engineering_team.github_source.pr_review_mapping import (
     _fallback_title,
+    _location_prefix,
     build_review_body,
     choose_event,
     format_comment_body,
@@ -317,6 +318,33 @@ def test_format_comment_body_falls_back_to_derived_title_when_blank() -> None:
     assert "**The UserListComponent does not paginate results.**" in body
 
 
+def test_format_comment_body_no_duplicate_severity_tag_when_title_and_description_blank() -> None:
+    # With no title and no description to derive one from, the heading itself
+    # falls back to "[SEVERITY] category" -- the separate tag line must not
+    # repeat that same text a second time.
+    body = format_comment_body(
+        _Issue(severity="info", category="general", title="", description="", suggestion="")
+    )
+    assert body == "**[INFO] general**"
+    assert body.count("general") == 1
+
+
+def test_location_prefix_with_line() -> None:
+    assert _location_prefix("a.py", 5) == "`a.py:5` — "
+
+
+def test_location_prefix_without_line() -> None:
+    assert _location_prefix("a.py") == "`a.py` — "
+
+
+def test_location_prefix_nonpositive_line_omitted() -> None:
+    assert _location_prefix("a.py", 0) == "`a.py` — "
+
+
+def test_location_prefix_empty_path_is_empty() -> None:
+    assert _location_prefix("") == ""
+
+
 def test_format_issue_comment_prefixes_file_location() -> None:
     body = format_issue_comment(_Issue(file_path="a.py", title="Bad import", description="D1"))
     assert body.startswith("`a.py` — ")
@@ -344,9 +372,14 @@ def test_format_issue_comment_with_none_file_has_no_prefix() -> None:
 
 
 def test_inline_comment_to_timeline_body_prefixes_path_and_line() -> None:
-    comment = {"path": "a.py", "line": 12, "side": "RIGHT", "body": "**[HIGH] logic** — boom"}
+    # inline_comment_to_timeline_body is deliberately content-agnostic -- it
+    # only prepends a location to whatever body string it's given (the body's
+    # own title/description/fix layout is format_comment_body's concern,
+    # covered by the dedicated format_comment_body tests above).
+    body_text = format_comment_body(_Issue(severity="high", category="logic", title="Bug"))
+    comment = {"path": "a.py", "line": 12, "side": "RIGHT", "body": body_text}
     body = inline_comment_to_timeline_body(comment)
-    assert body == "`a.py:12` — **[HIGH] logic** — boom"
+    assert body == f"`a.py:12` — {body_text}"
 
 
 def test_inline_comment_to_timeline_body_drops_nonpositive_line() -> None:
@@ -385,6 +418,11 @@ def test_build_review_body_omits_spec_section_when_notes_empty() -> None:
     body = build_review_body("Issues cluster in the auth flow.", "", issue_count=2)
     assert body == "Issues cluster in the auth flow."
     assert "Spec compliance" not in body
+
+
+def test_build_review_body_rejects_negative_issue_count() -> None:
+    with pytest.raises(AssertionError):
+        build_review_body("", "", issue_count=-1)
 
 
 def test_build_review_body_zero_issues_is_short_and_affirmational() -> None:
