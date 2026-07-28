@@ -191,7 +191,13 @@ def _code_review_gate(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> GateOutcome:
-    """Run the frontend code-review gate (build + lint + code review + all wired tool agents)."""
+    """Run the frontend code-review gate (build + lint + code review + all wired tool agents).
+
+    Forwards ``deps.tool_agent_cache`` into ``run_microtask_review`` so that
+    any ``testing_qa``/``security`` tool-agent calls made here are served from
+    cache (rather than re-invoked) when the QA/Security gates already
+    computed them earlier in the same cycle, or vice versa.
+    """
     from .review import run_microtask_review
 
     r = run_microtask_review(
@@ -231,7 +237,14 @@ def _qa_gate(
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
     """Run the frontend QA gate (QA agent + ``testing_qa`` tool agent only),
-    keeping only ``source == "qa"`` issues."""
+    keeping only ``source == "qa"`` issues.
+
+    ``cache``: forwarded to ``run_microtask_review`` as the pre-existing
+    per-agent QA/security LLM cache (unrelated to ``tool_agent_cache``).
+    ``deps.tool_agent_cache`` is forwarded separately so a ``testing_qa``
+    tool-agent result already computed by the CR gate's fan-out this cycle is
+    reused here instead of re-invoked.
+    """
     from .review import run_microtask_review
 
     r = run_microtask_review(
@@ -266,7 +279,14 @@ def _security_gate(
     cache: Optional[AgentReviewCache] = None,
 ) -> GateOutcome:
     """Run the frontend security gate (security agent + ``security`` tool agent only),
-    keeping only ``source == "security"`` issues."""
+    keeping only ``source == "security"`` issues.
+
+    ``cache``: forwarded to ``run_microtask_review`` as the pre-existing
+    per-agent QA/security LLM cache (unrelated to ``tool_agent_cache``).
+    ``deps.tool_agent_cache`` is forwarded separately so a ``security``
+    tool-agent result already computed by the CR gate's fan-out this cycle is
+    reused here instead of re-invoked.
+    """
     from .review import run_microtask_review
 
     r = run_microtask_review(

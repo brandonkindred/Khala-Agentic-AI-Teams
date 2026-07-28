@@ -486,11 +486,16 @@ def _run_review_cycles(
     # (code_review_agent.mapping._cached_review_chunk).
     agent_review_cache = AgentReviewCache()
 
-    # Per-tool-agent result cache, same "constructed here, discarded on
-    # return" per-microtask-cycle scope as ``agent_review_cache`` above.
-    # Stored on ``deps`` (rather than threaded as a new gate-call keyword)
-    # so teams whose gate functions don't read it — currently only the
-    # backend team — are completely unaffected; see
+    # Per-tool-agent result cache, freshly constructed here and attached to
+    # ``deps`` so gate callables can access it. Unlike the local
+    # ``agent_review_cache`` above (truly discarded on return), this instance
+    # is assigned onto the shared ``deps`` object and so persists there after
+    # this call returns -- its effective per-microtask-cycle lifetime is
+    # enforced by this same reset running again at the start of every
+    # ``_run_review_cycles`` call, so the next microtask never sees a stale
+    # entry from this one. Stored on ``deps`` (rather than threaded as a new
+    # gate-call keyword) so teams whose gate functions don't read it —
+    # currently only the backend team — are completely unaffected; see
     # docs/GATE_DEPENDENCY_GRAPH.md's "residual 2x" caching design.
     deps.tool_agent_cache = AgentReviewCache()
 
