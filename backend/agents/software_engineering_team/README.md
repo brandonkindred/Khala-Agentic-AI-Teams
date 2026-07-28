@@ -37,6 +37,15 @@ All agents enforce these rules for produced code:
 | **Git Branching** | Work on `development` branch; PR to merge into `main`. Tech Lead creates `development` if missing |
 | **Commit Messages** | Conventional Commits format: `type(scope): description` (feat, fix, docs, test, ci, etc.) |
 
+New agents should follow the canonical LLM-calling pattern documented in
+[`docs/LLM_CALLING_PATTERN_DECISION.md`](docs/LLM_CALLING_PATTERN_DECISION.md).
+
+Prompt modules should reuse the shared builders in
+`backend/shared/prompts/templates.py` rather than hand-writing JSON-output or
+context-formatting scaffolding; see
+[`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
+for the before/after line-count report from that migration.
+
 ## Sub-teams and SDLC
 
 Agents are grouped by **SDLC phase** and **who consumes whose output**. Execution is driven by **task assignee** (`backend`, `frontend`, `devops`, `git_setup`). QA and Security are **not** task assignees; they are invoked **inside** backend and frontend workflows (per task) and in a final full-codebase security pass.

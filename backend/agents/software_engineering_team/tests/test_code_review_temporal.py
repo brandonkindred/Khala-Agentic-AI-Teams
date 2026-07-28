@@ -163,6 +163,14 @@ def test_review_prep_dto_round_trips() -> None:
     assert reloaded.chunks == []
 
 
+def test_review_prep_dto_fanout_width_round_trips() -> None:
+    dto = pm.ReviewPrepDTO(fanout_width=5)
+    reloaded = pm.ReviewPrepDTO.model_validate(dto.model_dump(mode="json"))
+    assert reloaded.fanout_width == 5
+    # Default matches the sequential-safe floor when a caller doesn't set it.
+    assert pm.ReviewPrepDTO().fanout_width == 1
+
+
 # ---------------------------------------------------------------------------
 # 3. Activity pipeline == coordinator verdict (durable path is identical)
 # ---------------------------------------------------------------------------
@@ -200,10 +208,14 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
     has_architecture_findings = bool(architecture_findings)
     if architecture_findings:
         verified = [*verified, *architecture_findings]
+    side_effect_findings = A.find_side_effect_impact_activity(payload)
+    has_side_effect_findings = bool(side_effect_findings)
+    if side_effect_findings:
+        verified = [*verified, *side_effect_findings]
     gate = A.finalize_review_activity(
         verified, not_reviewed, prep["skipped_issues"], approved_flags
     )
-    if len(summaries) == 1 and not has_architecture_findings:
+    if len(summaries) == 1 and not has_architecture_findings and not has_side_effect_findings:
         summary, notes = summaries[0], (spec_notes[0] if spec_notes else "")
     else:
         synth = A.synthesize_findings_activity(
@@ -249,6 +261,7 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
 
     prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
     assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
+    assert prep["fanout_width"] == cfg.resolve_temporal_fanout_width(len(prep["chunks"]))
 
     coordinator_out = run_coordinator(DummyLLMClient(), review_input)
     pipeline_out = _run_activity_pipeline(review_input)
@@ -263,6 +276,17 @@ def test_prepare_activity_reports_no_code_for_empty_files() -> None:
 
     prep = A.prepare_review_activity(_input(code="").model_dump(mode="json"))
     assert prep["no_code"] is True
+
+
+def test_prepare_activity_single_chunk_fanout_width_is_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_review_agent.temporal import activities as A
+
+    monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    prep = A.prepare_review_activity(_input().model_dump(mode="json"))
+    assert prep["single_chunk"] is True
+    assert prep["fanout_width"] == 1
 
 
 def test_prepare_activity_compacts_architecture_overview() -> None:
@@ -851,6 +875,72 @@ def test_worker_max_concurrent_activities_env_parsing(
         monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", env_value)
 
     assert worker_mod._max_concurrent_activities() == expected
+
+
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [
+        (None, 8),
+        ("16", 16),
+        ("0", 1),
+        ("-5", 1),
+        ("not-a-number", 8),
+    ],
+)
+def test_worker_max_concurrent_activities_delegates_to_config(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
+) -> None:
+    """``worker._max_concurrent_activities`` must track
+    ``config.resolve_max_concurrent_activities`` exactly -- it's a thin
+    delegation, not an independent implementation, so both must agree on every
+    env-parsing edge case."""
+    from code_review_agent.temporal import worker as worker_mod
+
+    if env_value is None:
+        monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    else:
+        monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", env_value)
+
+    assert cfg.resolve_max_concurrent_activities() == expected
+    assert worker_mod._max_concurrent_activities() == cfg.resolve_max_concurrent_activities()
+
+
+# ---------------------------------------------------------------------------
+# 5b. Per-review adaptive Temporal fan-out width
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env_value, chunk_count, expected",
+    [
+        (None, 3, 3),  # small review: never requests more than it has chunks
+        (None, 1, 1),
+        (None, 0, 1),  # defensive floor: never zero or negative
+        (None, 40, 8),  # large review (telemetry's ~20-50-chunk band): capped
+        # at the default worker capacity -- cannot exceed validated capacity,
+        # so this cannot regress the 4->8 timeout incident.
+        ("20", 40, 20),  # raising the ceiling raises the per-review cap too
+        ("20", 5, 5),  # ...but a small review still only takes what it needs
+        ("not-a-number", 40, 8),  # garbage ceiling falls back to the default
+    ],
+)
+def test_resolve_temporal_fanout_width_scales_with_chunk_count(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, chunk_count: int, expected: int
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", raising=False)
+    else:
+        monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", env_value)
+
+    assert cfg.resolve_temporal_fanout_width(chunk_count) == expected
+
+
+def test_resolve_temporal_fanout_width_never_exceeds_worker_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES", "8")
+    for chunk_count in (1, 5, 8, 9, 40, 540):
+        assert cfg.resolve_temporal_fanout_width(chunk_count) <= 8
 
 
 def test_worker_start_delegates_to_start_team_worker(monkeypatch: pytest.MonkeyPatch) -> None:

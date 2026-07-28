@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
 
 from branding_team.shared.coro_runner import run_coroutine
+from branding_team.shared.json_recovery import recover_json_object
 
 from .agents import BrandComplianceAgent
 from .graphs.phase1_strategic_core import build_phase1_graph
@@ -185,9 +186,17 @@ class BrandingTeamOrchestrator:
         result = run_coroutine(graph.invoke_async(task))
 
         # ---- Extract phase outputs from graph node results (table-driven) ----
-        strategic_core, narrative, visual_identity, channel_activation, governance = [
-            self._extract_phase_output(result, node_id, model_cls) if stop_idx >= min_idx else None
+        extractions = [
+            self._extract_phase_output(result, node_id, model_cls)
+            if stop_idx >= min_idx
+            else (None, False)
             for node_id, model_cls, min_idx in _PHASE_EXTRACTION
+        ]
+        strategic_core, narrative, visual_identity, channel_activation, governance = (
+            output for output, _ in extractions
+        )
+        degraded_phases = [
+            phase for phase, (_, degraded) in zip(PHASE_ORDER, extractions) if degraded
         ]
 
         # ---- Run compliance checks (outside the graph) ----
@@ -213,6 +222,7 @@ class BrandingTeamOrchestrator:
             competitive_snapshot=competitive_snapshot,
             design_asset_result=design_asset_result,
             stop_idx=stop_idx,
+            degraded_phases=degraded_phases,
         )
 
         if store and brand_id and resolved_client_id:
@@ -225,7 +235,7 @@ class BrandingTeamOrchestrator:
         mission: BrandingMission,
         phase: BrandPhase,
         prior_outputs: Optional[dict[str, dict]] = None,
-    ) -> BaseModel:
+    ) -> "tuple[BaseModel, bool]":
         """Run a single pipeline phase in isolation and return its output model.
 
         The monolithic ``build_branding_graph`` wires phases as sequential nodes,
@@ -244,9 +254,12 @@ class BrandingTeamOrchestrator:
               JSON-safe phase-output dicts (``model_dump(mode="json")``), or is
               ``None``/empty for the first phase.
         Postconditions:
-            - Returns an instance of the phase's output model (never ``None``);
-              a parse failure yields a default-constructed model, matching
-              ``_extract_phase_output``'s contract.
+            - Returns ``(output, degraded)`` from ``_extract_phase_output``:
+              ``output`` is never ``None`` (a parse failure yields a
+              default-constructed model); ``degraded`` is ``True`` iff that
+              default was used. The caller (the Temporal phase activity) owns
+              folding ``degraded`` into the run's durable degradation record —
+              this method does not persist anything itself.
         """
         if phase not in _PHASE_SPEC:
             raise ValueError(f"{phase!r} is not a runnable branding phase")
@@ -311,6 +324,7 @@ class BrandingTeamOrchestrator:
         competitive_snapshot: Any,
         design_asset_result: Any,
         stop_idx: int,
+        degraded_phases: Optional[List[BrandPhase]] = None,
     ) -> TeamOutput:
         """Assemble the final ``TeamOutput`` from computed phase artifacts.
 
@@ -322,9 +336,15 @@ class BrandingTeamOrchestrator:
             - The five phase outputs are their respective models or ``None`` (a
               phase not reached for this ``stop_idx``); ``checks`` is the compliance
               result list; ``competitive_snapshot``/``design_asset_result`` are the
-              integration results (or ``None`` when disabled).
+              integration results (or ``None`` when disabled); ``degraded_phases``
+              lists only phases actually reached this run whose output could not
+              be parsed and was default-constructed by ``_extract_phase_output``
+              (or ``None``/empty when every reached phase parsed successfully) —
+              the caller owns de-duplication and ordering, this method passes
+              the list through as-is.
         Postconditions:
-            - Returns a fully-populated ``TeamOutput``; performs no I/O and no
+            - Returns a fully-populated ``TeamOutput`` whose ``degraded_phases``
+              reflects the caller-supplied list; performs no I/O and no
               persistence (the caller owns ``store.append_brand_version``).
         """
         current_phase = self._determine_current_phase(
@@ -341,6 +361,7 @@ class BrandingTeamOrchestrator:
             mission_summary=mission_summary,
             current_phase=current_phase,
             phase_gates=phase_gates,
+            degraded_phases=degraded_phases or [],
             strategic_core=strategic_core,
             narrative_messaging=narrative,
             visual_identity=visual_identity,
@@ -475,25 +496,61 @@ class BrandingTeamOrchestrator:
         )
 
     @staticmethod
-    def _extract_phase_output(result, node_id: str, model_class):
+    def _extract_phase_output(result, node_id: str, model_class) -> "tuple[BaseModel, bool]":
         """Best-effort extraction of a phase output from graph results.
 
         The graph node results contain ``AgentResult`` or ``MultiAgentResult``
-        objects.  We attempt to parse the agent's last text output as the
-        structured model.  If parsing fails, return a default instance.
+        objects. Phase 1 wraps six agents as a single top-level node, so this
+        method first tries ``_merge_phase1_fragments``, which merges every
+        fan-out specialist's ``structured_output`` (not just the
+        synthesizer's) into one ``model_class`` instance; if that succeeds,
+        its result is returned directly. For every other phase (different
+        node ids), ``_merge_phase1_fragments`` returns ``None`` and this
+        method falls through to the per-node extraction logic below: when
+        the node's agent was built with ``structured_output=``, Strands
+        forces a tool call to produce the payload and populates
+        ``AgentResult.structured_output`` instead of the message's text
+        blocks — so that's checked next. Agents without structured output
+        fall back to parsing the last text block.
+
+        Preconditions:
+            - ``result`` is the Strands graph invocation result (or a test
+              double shaped like one); ``node_id`` identifies a node in
+              ``result.result``; ``model_class`` is the expected output model
+              for that node.
+        Postconditions:
+            - Returns ``(output, degraded)``. ``output`` is a parsed
+              ``model_class`` instance on success (from the Phase 1 merge,
+              structured output, or text parsing), or a default-constructed
+              ``model_class()`` when none of those yield a value or the node
+              result is missing/malformed. ``degraded`` is ``True`` iff a
+              default was returned, and every such fall-through is logged
+              (with traceback for unexpected errors) rather than swallowed
+              silently. Callers that assemble a ``TeamOutput`` must fold
+              ``degraded`` phases into ``TeamOutput.degraded_phases``
+              themselves — this method does not know which ``BrandPhase`` it
+              was called for.
         """
         try:
             if hasattr(result, "result") and hasattr(result.result, "get"):
                 node_result = result.result.get(node_id)
                 if node_result and hasattr(node_result, "result"):
+                    merged = _merge_phase1_fragments(node_result, model_class)
+                    if merged is not None:
+                        return merged, False
                     agent_results = node_result.get_agent_results()
                     if agent_results:
                         last = agent_results[-1]
+                        structured = getattr(last, "structured_output", None)
+                        if isinstance(structured, BaseModel):
+                            parsed = _merge_structured_output(structured, model_class)
+                            if parsed is not None:
+                                return parsed, False
                         if hasattr(last, "message") and last.message:
                             text = _collect_message_text(last.message)
                             parsed = _parse_model_from_text(text, model_class)
                             if parsed is not None:
-                                return parsed
+                                return parsed, False
         except Exception:
             # Malformed JSON / schema mismatch already returns None from
             # _parse_model_from_text; reaching here means an unexpected error
@@ -503,7 +560,12 @@ class BrandingTeamOrchestrator:
                 node_id,
                 exc_info=True,
             )
-        return model_class()
+            return model_class(), True
+        logger.warning(
+            "Could not extract phase output for node %s from agent text; using default",
+            node_id,
+        )
+        return model_class(), True
 
 
 def _collect_message_text(message: dict) -> str:
@@ -528,28 +590,131 @@ def _collect_message_text(message: dict) -> str:
     return "".join(parts)
 
 
-def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
-    """Best-effort parse of ``text`` into ``model_class``; None on failure.
+def _merge_structured_output(
+    structured: BaseModel, model_class: type[BaseModel]
+) -> Optional[BaseModel]:
+    """Validate an agent's typed ``structured_output`` against a phase's output model.
 
-    Tries the whole string first, then falls back to the outermost
-    ``{ ... }`` slice for replies that wrap JSON in prose.
+    ``structured`` is often a strict subset of ``model_class`` — e.g. the
+    positioning synthesizer only emits ``positioning_statement``/``brand_promise``
+    out of the full ``StrategicCoreOutput`` schema — which validates fine since
+    every field on the phase output models has a default. Returns None on a
+    genuine schema mismatch, same failure contract as ``_parse_model_from_text``.
+    """
+    try:
+        return model_class.model_validate(structured.model_dump())
+    except ValidationError:
+        return None
+
+
+# Phase 1 fan-out node id -> the StrategicCoreOutput key its structured_output
+# nests under, or None to merge its fields in flat. Every value except
+# discovery_auditor's matches a StrategicCoreOutput field name 1:1 (see
+# agents.py/models.py). discovery_auditor alone nests: StrategicCoreOutput.
+# brand_discovery is typed BrandDiscoveryAudit, not BrandDiscoveryAuditOutput
+# (discovery_auditor's own structured_output= type) -- but the two are
+# field-for-field identical (see models.py), so BrandDiscoveryAuditOutput's
+# model_dump() validates cleanly as a BrandDiscoveryAudit once nested here.
+_PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
+    "discovery_auditor": "brand_discovery",
+    "purpose_vision_writer": None,
+    "values_articulator": None,
+    "audience_segmenter": None,
+    "differentiation_mapper": None,
+    "positioning_synthesizer": None,
+}
+
+
+def _merge_phase1_fragments(node_result, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 1 fan-out node's ``structured_output`` into one phase output.
+
+    Phase 1 wraps six agents (five parallel specialists + a synthesizer) as a
+    single top-level ``"phase1_strategic_core"`` node (see
+    ``graphs/top_level.py``); the specialists' fragments are just as real as
+    the synthesizer's, but a flat ``get_agent_results()[-1]`` only ever sees
+    the last (synthesizer) result. This walks the nested ``MultiAgentResult``
+    directly — keyed by node id, per ``strands.multiagent.base.MultiAgentResult``
+    — to recover each specialist's own typed output.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every recognized
+        Phase 1 node's ``structured_output`` when at least one was found;
+        returns None when ``node_result`` doesn't wrap a nested multi-agent
+        result, none of ``_PHASE1_NODE_MERGE``'s node ids are present (e.g.
+        every other phase, which uses different node ids), or the merged
+        data fails validation — in every None case the caller falls back to
+        its existing single-agent-result logic unchanged.
+    """
+    nested_results = getattr(getattr(node_result, "result", None), "results", None)
+    if not isinstance(nested_results, dict):
+        return None
+
+    merged: dict[str, Any] = {}
+    found_any = False
+    for child_node_id, nest_under in _PHASE1_NODE_MERGE.items():
+        child = nested_results.get(child_node_id)
+        if child is None or not hasattr(child, "get_agent_results"):
+            continue
+        child_agent_results = child.get_agent_results()
+        if not child_agent_results:
+            continue
+        structured = getattr(child_agent_results[-1], "structured_output", None)
+        if not isinstance(structured, BaseModel):
+            continue
+        found_any = True
+        data = structured.model_dump()
+        if nest_under:
+            merged[nest_under] = data
+        else:
+            merged.update(data)
+
+    if not found_any:
+        return None
+    try:
+        return model_class.model_validate(merged)
+    except ValidationError:
+        return None
+
+
+def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Best-effort parse of ``text`` into ``model_class``; ``None`` on failure.
+
+    Delegates JSON recovery (whole-string parse, then fenced/prose-wrapped
+    brace-slice fallback) to the shared ``recover_json_object`` helper rather
+    than re-deriving that logic here. Recovery is anchored on
+    ``model_class``'s field names so a reply containing more than one JSON
+    object (e.g. the real payload followed by a usage/metadata echo) selects
+    the object that actually carries the expected schema — every field on
+    these phase models defaults, so an unanchored recovery could otherwise
+    validate successfully against an unrelated trailing object and silently
+    report success on a payload no agent ever produced.
+
+    Preconditions:
+        ``model_class`` is a ``pydantic.BaseModel`` subclass.
+    Postconditions:
+        Returns a validated ``model_class`` instance when JSON can be
+        recovered from ``text`` and validates against the schema; returns
+        ``None`` for empty text, unrecoverable text, text where no candidate
+        object carries any of ``model_class``'s field names, or a
+        ``ValidationError`` (schema mismatch). Any other exception raised by
+        ``model_class.model_validate`` is a genuine bug (a broken custom
+        validator, a non-model ``model_class``) and propagates rather than
+        being swallowed.
     """
     if not text:
         return None
-    # ValidationError covers both malformed JSON and schema mismatch from
-    # model_validate_json; anything else is a genuine bug and should surface.
+    data = recover_json_object(text, required_keys=model_class.model_fields.keys())
+    if data is None:
+        return None
+    # ValidationError covers a schema mismatch between the recovered JSON and
+    # model_class; anything else is a genuine bug and should surface.
     try:
-        return model_class.model_validate_json(text)
+        return model_class.model_validate(data)
     except ValidationError:
-        pass
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        try:
-            return model_class.model_validate_json(text[start:end])
-        except ValidationError:
-            return None
-    return None
+        return None
 
 
 def _bullets(title: str, items: Iterable[Any], fmt: Callable[[Any], str] = lambda x: x) -> str:

@@ -98,6 +98,7 @@ def _conversation_to_response(
     mission: BrandingMission,
     latest_output: Optional[TeamOutput],
     suggested_questions: List[str],
+    degraded: bool = False,
 ) -> ConversationStateResponse:
     """Assemble the ``ConversationStateResponse`` API model from in-memory state.
 
@@ -107,7 +108,9 @@ def _conversation_to_response(
         conversation fields.
     Postconditions:
         Returns a ``ConversationStateResponse`` with ``messages`` mapped 1:1 to
-        ``ConversationMessage`` and ``suggested_questions`` defaulted to ``[]``.
+        ``ConversationMessage``, ``suggested_questions`` defaulted to ``[]``,
+        and ``degraded`` reflecting whether this turn's mission extraction was
+        lost (see ``BrandingAssistantAgent.respond``).
     """
     msg_list = [
         ConversationMessage(role=m.role, content=m.content, timestamp=m.timestamp) for m in messages
@@ -119,6 +122,7 @@ def _conversation_to_response(
         mission=mission,
         latest_output=latest_output,
         suggested_questions=suggested_questions or [],
+        degraded=degraded,
     )
 
 
@@ -155,6 +159,7 @@ def _create_branding_conversation_impl(
     messages: List[_StoredMessage] = []
     mission: BrandingMission = _default_mission()
     latest_output: Optional[TeamOutput] = None
+    degraded = False
 
     if initial_message:
         # Freshly created conversation: no prior history, mission is the default.
@@ -164,8 +169,8 @@ def _create_branding_conversation_impl(
         if not conversation_store.append_message(conversation_id, "user", initial_message):
             raise HTTPException(status_code=404, detail="Conversation not found")
         messages.append(_local_message("user", initial_message))
-        reply, updated_mission, suggested_questions = _main._get_assistant_agent().respond(
-            [], _default_mission(), initial_message
+        reply, updated_mission, suggested_questions, degraded = (
+            _main._get_assistant_agent().respond([], _default_mission(), initial_message)
         )
         if not conversation_store.update_mission(conversation_id, updated_mission):
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -204,7 +209,7 @@ def _create_branding_conversation_impl(
         ]
 
     return _conversation_to_response(
-        conversation_id, brand_id, messages, mission, latest_output, suggested_questions
+        conversation_id, brand_id, messages, mission, latest_output, suggested_questions, degraded
     )
 
 
@@ -328,7 +333,7 @@ def _send_branding_conversation_message_impl(
     if not conversation_store.append_message(conversation_id, "user", payload.message):
         raise HTTPException(status_code=404, detail="Conversation not found")
     history_pairs = [(m.role, m.content) for m in state.messages]
-    reply, updated_mission, suggested_questions = _main._get_assistant_agent().respond(
+    reply, updated_mission, suggested_questions, degraded = _main._get_assistant_agent().respond(
         history_pairs, state.mission, payload.message
     )
     if not conversation_store.update_mission(conversation_id, updated_mission):
@@ -360,5 +365,11 @@ def _send_branding_conversation_message_impl(
     ]
     latest_output = output if output is not None else state.latest_output
     return _conversation_to_response(
-        conversation_id, brand_id, messages, updated_mission, latest_output, suggested_questions
+        conversation_id,
+        brand_id,
+        messages,
+        updated_mission,
+        latest_output,
+        suggested_questions,
+        degraded,
     )

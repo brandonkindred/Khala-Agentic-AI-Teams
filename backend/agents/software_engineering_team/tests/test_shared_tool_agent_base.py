@@ -33,14 +33,15 @@ def test_relevant_code_prefers_issue_file():
     assert out == "--- a.ts ---\ncode"
 
 
-def test_relevant_code_truncates_large_issue_file():
+def test_relevant_code_bounds_large_issue_file():
     """A single issue file larger than the max-chars budget is truncated and
     marked with a "[truncated]" suffix."""
     issue = ReviewIssue(file_path="a.ts")
     big = "x" * (DEFAULT_MAX_RELEVANT_CODE_CHARS + 100)
     out = relevant_code_for_issue(issue, {"a.ts": big})
-    assert "[truncated]" in out
-    assert len(out) < len(big)
+    assert len(out) == DEFAULT_MAX_RELEVANT_CODE_CHARS
+    assert "[truncated;" in out
+    assert big not in out
 
 
 def test_relevant_code_falls_back_to_first_files():
@@ -51,13 +52,16 @@ def test_relevant_code_falls_back_to_first_files():
     assert "a.ts" in out and "b.ts" in out
 
 
-def test_relevant_code_multifile_truncation():
+def test_relevant_code_multifile_honors_budget():
     """With no issue file_path and multiple large files, the fallback path
     also enforces the max_chars budget, truncating combined output."""
     issue = ReviewIssue(file_path="")
     files = {f"f{i}.ts": "y" * 3000 for i in range(10)}
     out = relevant_code_for_issue(issue, files, max_chars=5000)
-    assert "[truncated]" in out
+    assert len(out) == 5000
+    assert "[truncated;" in out
+    assert "f0.ts" in out
+    assert "f9.ts" not in out
 
 
 def test_relevant_code_empty_returns_placeholder():
@@ -562,8 +566,7 @@ def test_constructor_resolves_json_model_when_enabled(monkeypatch):
     assert "text" in seen and "json" in seen
 
 
-@pytest.mark.parametrize("mode", ["json"])
-def test_review_json_mode(monkeypatch, mode):
+def test_review_json_mode(monkeypatch):
     """When ``review_parse_mode`` is "json", the raw LLM response is parsed as
     a JSON object (rather than via the subclass's text parser) into issues."""
 

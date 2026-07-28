@@ -423,6 +423,15 @@ def test_symbol_surface_excludes_indented_python_defs() -> None:
     assert coord._symbol_surface(content) == ["C", "top"]
 
 
+def test_symbol_surface_is_not_capped_at_sixty() -> None:
+    """A file with more than the old 60-symbol cap has every symbol surfaced —
+    there is no hardcoded per-file truncation anymore."""
+    content = "\n".join(f"def fn_{i}():\n    pass" for i in range(75))
+    result = coord._symbol_surface(content)
+    assert len(result) == 75
+    assert "fn_0" in result and "fn_74" in result
+
+
 def test_half_sibling_surface_falls_back_without_map() -> None:
     """With no surface map (a direct caller), a bisected half keeps the parent's surface."""
     from code_review_agent.models import FileSegment, ReviewChunk
@@ -434,30 +443,29 @@ def test_half_sibling_surface_falls_back_without_map() -> None:
     assert mapping._half_sibling_surface(half, surface, "parent surface") == "app/b.py: foo"
 
 
-def test_sibling_surface_is_capped_to_the_shared_limit() -> None:
-    """A large sibling surface is truncated to the shared cap, so the cache key
-    hashes exactly the (capped) bytes the prompt will carry."""
+def test_sibling_surface_is_bounded_to_prompt_budget() -> None:
+    """A large sibling surface cannot exceed the characters reserved in the prompt."""
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
     chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
     out = coord._sibling_surface(chunk, surface)
-    assert len(out) <= compute_code_review_sibling_surface_chars()
+    assert len(out) == compute_code_review_sibling_surface_chars()
+    assert "app/f0.py:" in out
 
 
-def test_sibling_surface_cap_is_env_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CODE_REVIEW_SIBLING_SURFACE_CHARS tunes the cap without code changes."""
+def test_sibling_surface_honors_env_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
     chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "50")
-    assert len(coord._sibling_surface(chunk, surface)) <= 50
+    out = coord._sibling_surface(chunk, surface)
+    assert len(out) == 50
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "0")
-    assert coord._sibling_surface(chunk, surface) == ""  # 0 drops the block
-
+    assert coord._sibling_surface(chunk, surface) == ""
 
 def test_surface_by_path_skips_headerless_and_symbolless() -> None:
     """Only named blocks with a non-empty surface appear in the map."""

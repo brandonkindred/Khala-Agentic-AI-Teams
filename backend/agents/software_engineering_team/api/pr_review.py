@@ -28,12 +28,12 @@ from software_engineering_team.api.coding_team_state import (
 from software_engineering_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
-    anchor_to_first_file,
     annotate_duplicate_proposals,
     build_existing_comments,
     build_review_body,
     choose_event,
     duplicate_check_max_open_issues,
+    format_issue_comment,
     group_similar_findings,
     inline_comment_to_timeline_body,
     is_within_diff,
@@ -205,13 +205,32 @@ class ReviewCode(NamedTuple):
 # the "is this file removed" check isn't a bare string literal at each call site.
 _FILE_STATUS_REMOVED = "removed"
 
-# Prefix of the whole-file-mode focus note, exposed so callers/tests can detect
-# the note (e.g. in task_requirements) without duplicating its full wording.
-WHOLE_FILE_FOCUS_NOTE_PREFIX = "Review focus:"
+# Prefix of the scope-tagging focus note (whole-file or hunk mode), exposed so
+# callers/tests can detect the note (e.g. in task_requirements) without
+# duplicating its full wording.
+REVIEW_FOCUS_NOTE_PREFIX = "Review focus:"
+
+# Shared "tag pre-existing findings" instruction body, reused by both the
+# whole-file and hunk-mode focus notes below (only the framing sentence
+# ahead of it differs, since the two modes show the reviewer different
+# content). Kept as one instruction so the tagging contract can never drift
+# between the two modes.
+_PRE_EXISTING_TAG_INSTRUCTIONS = (
+    "For EVERY issue you report, add a boolean field named `pre_existing` to the issue "
+    "object:\n"
+    "- Set `pre_existing: false` for a defect in the code this pull request ADDS or MODIFIES — "
+    "these are the findings that matter for reviewing the PR.\n"
+    "- Set `pre_existing: true` for a genuine bug you notice in PRE-EXISTING, UNCHANGED code "
+    "that this pull request did not touch (an unrelated defect visible in the surrounding "
+    "code). Still report such bugs — do not stay silent about them — but tag them so they are "
+    "recorded separately instead of blamed on this change.\n"
+    "Do not invent pre-existing issues to pad the review; only tag a finding `pre_existing: "
+    "true` when it is a real defect in code outside this PR's change."
+)
 
 
 def _whole_file_focus(body: str) -> str:
-    """Append a "tag pre-existing findings" instruction to ``body``.
+    """Append a "tag pre-existing findings" instruction to ``body`` (whole-file mode).
 
     Whole-file review shows the reviewer complete files (for context and existing-
     code awareness), which also lets it see unchanged code. Rather than silently
@@ -225,21 +244,40 @@ def _whole_file_focus(body: str) -> str:
 
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``WHOLE_FILE_FOCUS_NOTE_PREFIX``
+          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
           and instructs the reviewer to emit a ``pre_existing`` field per issue.
     """
     note = (
-        f"{WHOLE_FILE_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
-        "file contents are provided for context. For EVERY issue you report, add a boolean field "
-        "named `pre_existing` to the issue object:\n"
-        "- Set `pre_existing: false` for a defect in the code this pull request ADDS or MODIFIES — "
-        "these are the findings that matter for reviewing the PR.\n"
-        "- Set `pre_existing: true` for a genuine bug you notice in PRE-EXISTING, UNCHANGED code "
-        "that this pull request did not touch (an unrelated defect visible in the surrounding "
-        "file). Still report such bugs — do not stay silent about them — but tag them so they are "
-        "recorded separately instead of blamed on this change.\n"
-        "Do not invent pre-existing issues to pad the review; only tag a finding `pre_existing: "
-        "true` when it is a real defect in code outside this PR's change."
+        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
+        "file contents are provided for context, which also lets you see unchanged code.\n"
+        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
+    )
+    return f"{body}\n\n{note}" if body.strip() else note
+
+
+def _hunk_review_focus(body: str) -> str:
+    """Append the same "tag pre-existing findings" instruction to ``body`` (hunk mode).
+
+    Hunk-mode review shows the reviewer diff hunks — added lines plus some
+    surrounding unchanged context lines — rather than complete files. A context
+    line can still reveal a genuine, unrelated pre-existing bug, so this mode
+    asks for the same ``pre_existing`` tag whole-file mode does (previously this
+    mode carried no tagging instruction at all, so every hunk-mode finding
+    defaulted ``pre_existing=False`` and was posted regardless of relevance).
+
+    Preconditions:
+        - ``body`` is a string (the PR body or "").
+
+    Postconditions:
+        - Returns ``body`` with the focus note appended (or the note alone when
+          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
+          and instructs the reviewer to emit a ``pre_existing`` field per issue.
+    """
+    note = (
+        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. You are "
+        "shown diff hunks (added lines plus some surrounding unchanged context lines), not "
+        "complete files.\n"
+        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
     )
     return f"{body}\n\n{note}" if body.strip() else note
 
@@ -413,25 +451,34 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         - On success the job is ``completed`` with ``github_pr_url`` set and one PR
           review submitted (REQUEST_CHANGES on critical/high findings from a PR the
           bot did not author, else COMMENT) whose body carries only the summary.
-          Only findings about the code this PR added or modified are posted; a
-          finding the reviewer tagged ``pre_existing`` (a bug in unchanged code the
-          PR did not touch) is NOT commented — instead it is serialized into
-          ``review_summary["pending_issue_proposals"]`` for a human to optionally
-          file as a GitHub issue, and it drives neither the review event nor the
-          "no issues" reaction.
+          A finding the reviewer tagged ``pre_existing`` (a bug in unchanged code
+          the PR did not touch, per its own line/file — see
+          :func:`_partition_review_issues`) is NOT commented — instead it is
+          serialized into ``review_summary["pending_issue_proposals"]`` for a
+          human to optionally file as a GitHub issue, and it drives neither the
+          review event nor the "no issues" reaction. Every other finding IS
+          posted, including one naming a file this PR never touched at all (see
+          below) — such a finding is not necessarily pre-existing (it is often
+          "this PR should have added/modified file X but didn't"), so only the
+          reviewer's own tag, never file/diff membership alone, withholds a
+          finding from the PR.
           Every posted finding produces exactly one comment and no comment lists
           more than one finding: a finding tied to a changed line becomes an individual
           line-anchored inline comment carried in the single review (a stray
           off-diff line is bisected out so the rest stay anchored); a finding whose
           file changed but whose cited line is off-diff becomes an individual
           file-level review comment posted on the dedicated comments endpoint (the
-          only one that accepts ``subject_type``); a standalone conversation
-          comment is used only as a last resort, when even a file-level post is
-          rejected, so no finding is dropped. A finding that cannot be posted at
-          all marks the job ``failed`` (via ``comments_failed``); any unhandled
-          exception likewise marks it ``failed`` and posts a (token-scrubbed) PR
-          comment — never raises. (A best-effort failure to post the summary body
-          alone does not fail the job, since the findings still post.)
+          only one that accepts ``subject_type``); a finding whose file never
+          appears in the diff at all (e.g. a module the PR should have added but
+          didn't) is posted as its own standalone conversation comment naming its
+          own file rather than misattributed to an unrelated changed file — the
+          same standalone path also catches, as a last resort, a finding whose
+          file-level post GitHub itself rejected, so no finding is dropped. A
+          finding that cannot be posted at all marks the job ``failed`` (via
+          ``comments_failed``); any unhandled exception likewise marks it
+          ``failed`` and posts a (token-scrubbed) PR comment — never raises. (A
+          best-effort failure to post the summary body alone does not fail the
+          job, since the findings still post.)
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
     # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
@@ -505,6 +552,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
     except Exception as exc:  # noqa: BLE001 - the daemon thread must never die with the job left running
         logger.exception("PR review %s: unhandled exception escaped the review body", job_id)
+        scrubbed_error = scrub_token_from_text(str(exc))
         try:
             # phase="completed" (terminal), matching the success and provider-abort
             # paths — a failed job must not keep a mid-review "reviewing" phase.
@@ -512,11 +560,27 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 job_id,
                 JobStatus.FAILED,
                 phase="completed",
-                error=scrub_token_from_text(str(exc)),
+                error=scrubbed_error,
             )
         except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
             logger.exception(
                 "PR review %s: last-resort finalize failed after escaped exception", job_id
+            )
+        # Tell the PR too, same as the no-engine-provider path above: whoever
+        # triggered the review is watching it, not the job store, and this is
+        # the last line of defense — a GitHub outage here must not raise.
+        try:
+            with _main.GitHubClient(token=token) as client:
+                _main._safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review failed: {scrubbed_error}",
+                )
+        except Exception:  # noqa: BLE001 - notification is best-effort
+            logger.warning(
+                "PR review %s: failed to post failure notice after escaped exception", job_id
             )
 
 
@@ -659,10 +723,11 @@ def _run_reviewer(
     ``_whole_file_focus`` to focus on the change since it now also sees
     unchanged code); a truthy ``code`` drives a diff-hunk attempt
     (``pre_numbered=True``, since ``_build_review_code``'s rendering already
-    carries its own ``"N: "`` line-number prefixes). The two sources can never
-    be mixed into a single call (the underlying engine's ``files``/``code``
-    are mutually exclusive), which is why a partial fetch needs two calls
-    instead of one.
+    carries its own ``"N: "`` line-number prefixes, steered via
+    ``_hunk_review_focus`` for the same reason — a hunk's surrounding context
+    lines are unchanged code too). The two sources can never be mixed into a
+    single call (the underlying engine's ``files``/``code`` are mutually
+    exclusive), which is why a partial fetch needs two calls instead of one.
 
     Preconditions:
         - ``provider`` was resolved before the first GitHub call.
@@ -724,8 +789,17 @@ def _run_reviewer(
     if code:
         # _build_review_code renders every line with its original line-number
         # prefix; declaring pre_numbered here (instead of letting the reviewer
-        # sniff the format) keeps issue lines verbatim.
-        attempts.append(dict(code=code, pre_numbered=True, task_requirements=pr.body or ""))
+        # sniff the format) keeps issue lines verbatim. Diff hunks still carry
+        # unchanged context lines, so steer this attempt the same way the
+        # whole-file attempt is steered — otherwise it would comment on
+        # pre-existing, unchanged code the PR never touched.
+        attempts.append(
+            dict(
+                code=code,
+                pre_numbered=True,
+                task_requirements=_hunk_review_focus(pr.body or ""),
+            )
+        )
     assert attempts, "caller must supply a non-empty head_files and/or non-empty code"
 
     outputs: List[Any] = []
@@ -1100,6 +1174,7 @@ class ReviewIssuePartition(NamedTuple):
     addressed_issues: List[Any]
     line_comments: List[Any]
     file_comments: List[Any]
+    standalone_comments: List[str]
 
 
 def _partition_review_issues(
@@ -1114,7 +1189,7 @@ def _partition_review_issues(
     """Split the reviewer's raw findings into PR-scoped issues and pre-existing-bug proposals.
 
     Dedupes the PR-scoped findings against the PR's existing comments, then
-    maps/anchors/splits the survivors into postable line- and file-level
+    maps/splits the survivors into postable line-, file-level, and standalone
     comments.
 
     Preconditions:
@@ -1127,8 +1202,16 @@ def _partition_review_issues(
         - An issue tagged ``pre_existing=True`` is kept in
           ``preexisting_issues`` unless :func:`is_within_diff` against
           ``changed_by_path`` proves it lies on a line this PR actually
-          ADDED, in which case it is overridden into ``pr_issues`` (hunk-mode
-          reviews, which never tag, are unaffected).
+          ADDED, in which case it is overridden into ``pr_issues``. An issue
+          that omits the tag (or from a caller that never asks for it)
+          defaults ``pre_existing=False`` and is treated as a PR finding —
+          this deliberately includes a finding naming a file outside the
+          diff (e.g. "module X is imported but was never added"): such a
+          finding is exactly the kind ``false_positive_filter.py`` already
+          keeps rather than treats as noise (a missing file/module the PR
+          should have added is a real, in-scope defect, not a pre-existing
+          one), so only the reviewer's own tag — never file/diff membership
+          alone — routes a finding to proposals.
         - ``proposals`` is :func:`_detect_duplicate_proposals` applied to
           ``proposal_from_findings`` over each :func:`group_similar_findings`
           group of ``preexisting_issues``, with any proposal matched to an
@@ -1142,11 +1225,14 @@ def _partition_review_issues(
           already-RESOLVED existing comment and were dropped). When
           ``pr_issues`` is empty, ``addressed_issues == []`` and no
           existing-comments fetch happens (nothing to de-duplicate).
-        - ``line_comments``/``file_comments`` is
-          :func:`split_review_comments` over :func:`map_issues_to_comments`
-          applied to ``pr_issues``, plus every non-``None``
-          :func:`anchor_to_first_file` result for the leftovers
-          ``map_issues_to_comments`` could not place.
+        - ``line_comments``/``file_comments`` is :func:`split_review_comments`
+          over :func:`map_issues_to_comments` applied to ``pr_issues``.
+          ``standalone_comments`` renders (via :func:`format_issue_comment`)
+          every leftover ``map_issues_to_comments`` could not resolve to a
+          path in the diff at all — such a finding is never misattributed to
+          an unrelated changed file (the bug this replaces): it is posted as
+          its own standalone conversation comment naming its own
+          ``file_path`` instead.
         - The existing-comments fetch and duplicate-detection are both
           best-effort and degrade internally (never raise). Any other
           exception (e.g. from ``map_issues_to_comments``) propagates to the
@@ -1157,14 +1243,27 @@ def _partition_review_issues(
     # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
     # in unchanged code are NOT posted on this PR — they become GitHub-issue
     # proposals a human approves later on the Code Review page. A finding
-    # without the tag defaults to a PR finding (hunk-mode reviews never
-    # tag, so they behave exactly as before). The LLM's self-reported tag
-    # is not trusted unconditionally: a finding whose file/line is verified
-    # to be a line this PR actually ADDED (per is_within_diff against
-    # changed_by_path — deliberately narrower than valid_by_path, which
-    # would also match unchanged context lines) cannot legitimately be
-    # "pre-existing, unchanged code", so a mistagged pre_existing=true is
-    # overridden back to a PR finding rather than silently skipping review.
+    # without the tag defaults to a PR finding (hunk-mode reviews now tag
+    # too, per _hunk_review_focus, but any caller that doesn't ask still
+    # behaves exactly as before). The LLM's self-reported tag is not trusted
+    # unconditionally: a finding whose file/line is verified to be a line
+    # this PR actually ADDED (per is_within_diff against changed_by_path —
+    # deliberately narrower than valid_by_path, which would also match
+    # unchanged context lines) cannot legitimately be "pre-existing,
+    # unchanged code", so a mistagged pre_existing=true is overridden back to
+    # a PR finding rather than silently skipping review.
+    #
+    # Deliberately NOT gated on whether the finding's file is in the diff at
+    # all: a finding naming a file outside the diff is very often "this PR
+    # should have added/modified file X but didn't" — a genuine, in-scope
+    # defect, not a pre-existing one — and false_positive_filter.py already
+    # keeps exactly this kind of "unresolved path" finding rather than
+    # dropping it as noise. Forcing every off-diff-file finding to
+    # preexisting_issues would silently swallow that class of real,
+    # PR-blocking finding. The mis-anchoring failure mode that once
+    # motivated such a gate (an off-diff finding posted against an unrelated
+    # changed file) is fixed below instead, by giving it its own standalone
+    # comment rather than a borrowed file anchor.
     pr_issues: List[Any] = []
     preexisting_issues: List[Any] = []
     for i in output.issues:
@@ -1187,12 +1286,11 @@ def _partition_review_issues(
     # repeat comments every time it is re-reviewed. A match against an
     # already-RESOLVED comment is dropped (requirement: already addressed);
     # a match against a still-open comment is kept but cross-referenced (see
-    # map_issues_to_comments/anchor_to_first_file below) instead of posted as
-    # an unexplained duplicate. The fetch is best-effort: any failure yields
-    # [], so this never turns a working review into a failed one. Skipped
-    # entirely on a clean review (no findings): there is nothing to
-    # de-duplicate, so the up-to-three API calls the fetch makes would be
-    # pure waste.
+    # map_issues_to_comments below) instead of posted as an unexplained
+    # duplicate. The fetch is best-effort: any failure yields [], so this
+    # never turns a working review into a failed one. Skipped entirely on a
+    # clean review (no findings): there is nothing to de-duplicate, so the
+    # up-to-three API calls the fetch makes would be pure waste.
     if pr_issues:
         existing_comments = _fetch_existing_comments(client, owner, repo, pr_number)
         pr_issues, addressed_issues, existing_by_issue = partition_issues_by_existing_comments(
@@ -1203,17 +1301,15 @@ def _partition_review_issues(
 
     comments, leftovers = map_issues_to_comments(pr_issues, valid_by_path, existing_by_issue)
 
-    # Re-anchor leftover findings (file not in diff) as file-level
-    # comments on the first changed file in the diff, so they travel as
-    # review comments rather than standalone top-level PR conversation
-    # comments.  anchor_to_first_file returns None only when valid_by_path
-    # is empty — but we already exit early in that case, so the filter is
-    # just a safety net.
-    anchored_leftovers = [
-        anchor_to_first_file(issue, valid_by_path, existing_by_issue.get(id(issue)))
-        for issue in leftovers
+    # A leftover names a file map_issues_to_comments could not resolve to any
+    # path in this PR's diff at all (e.g. a module the PR should have added
+    # but didn't). Posting it against an unrelated changed file would be
+    # misleading and posting nothing at all would silently drop a real
+    # finding, so it gets its own standalone conversation comment instead —
+    # naming its own file_path, tied to no diff line or anchor.
+    standalone_comments = [
+        format_issue_comment(issue, existing_by_issue.get(id(issue))) for issue in leftovers
     ]
-    comments = comments + [c for c in anchored_leftovers if c is not None]
 
     # Two GitHub endpoints, two shapes. Line-anchored comments ride the
     # single review; file-level comments (subject_type="file") go on the
@@ -1229,6 +1325,7 @@ def _partition_review_issues(
         addressed_issues=addressed_issues,
         line_comments=line_comments,
         file_comments=file_comments,
+        standalone_comments=standalone_comments,
     )
 
 
@@ -1270,18 +1367,21 @@ def _post_review_comments(
         - ``partition.line_comments`` are submitted via :func:`_submit_review`,
           bisecting out any off-diff line so the rest stay anchored. A
           ``GitHubAPIError`` from that submission is swallowed ONLY when there
-          are no line comments AND there are file-level comments still to
-          post (the summary submission failed but file-level findings still
-          carry the review); in every other case it is re-raised UNCHANGED to
-          the caller's outer handler.
-        - File-level comments (mapped + re-anchored leftovers) plus any
-          bisected-out line comments are posted via :func:`_post_file_comments`;
-          whatever that still cannot post falls through to standalone
-          conversation comments via ``_main._safe_comment`` (module-qualified
+          are no line comments AND there is a file-level comment or a
+          standalone comment still to post (the summary submission failed but
+          another finding still carries the review); in every other case it
+          is re-raised UNCHANGED to the caller's outer handler.
+        - File-level comments plus any bisected-out line comments are posted
+          via :func:`_post_file_comments`; whatever that still cannot post,
+          together with every entry in ``partition.standalone_comments``
+          (findings whose file was never in the diff at all — see
+          :func:`_partition_review_issues`), is posted as a standalone
+          conversation comment via ``_main._safe_comment`` (module-qualified
           so ``monkeypatch.setattr(main, ...)`` keeps taking effect).
         - Returns a :class:`CommentPostingResult` with ``inline_count =
-          len(line_comments) - len(dropped_lines)``, ``file_comment_count``/
-          the standalone count from :func:`_post_file_comments`, and
+          len(line_comments) - len(dropped_lines)``, ``file_comment_count``
+          from :func:`_post_file_comments`, ``comment_findings`` counting
+          every standalone comment attempted (both sources), and
           ``comments_failed`` counting the standalone posts that returned
           falsy.
         - Never raises except the untolerated ``GitHubAPIError`` re-raise
@@ -1292,12 +1392,17 @@ def _post_review_comments(
     # engine from its FULL issue list (software_engineering_team's
     # synthesize_review_findings runs before this split), so the narrative
     # can describe a pre-existing finding's theme/location even though its
-    # own per-issue comment is suppressed. When any finding was
-    # pre-existing, fall back to build_review_body's deterministic "N
-    # findings reported" text instead of risking that leak.
+    # own per-issue comment is suppressed. Suppress on partition.proposals
+    # rather than partition.preexisting_issues directly: proposals is the
+    # actual signal a human will see something withheld from this PR (the
+    # two are equivalent today -- group_similar_findings never returns zero
+    # groups for a non-empty input, and annotate_duplicate_proposals never
+    # drops a proposal, only tags it -- but proposals is the one that would
+    # still be correct if that grouping/dedup contract ever changed).
+    suppress_narrative = bool(partition.proposals)
     body = build_review_body(
-        output.summary if not partition.preexisting_issues else "",
-        output.spec_compliance_notes if not partition.preexisting_issues else "",
+        output.summary if not suppress_narrative else "",
+        output.spec_compliance_notes if not suppress_narrative else "",
         issue_count=len(partition.pr_issues),
     )
     event = choose_event(partition.pr_issues, author=pr.author, reviewer=reviewer_login)
@@ -1315,29 +1420,39 @@ def _post_review_comments(
     except GitHubAPIError:
         # _submit_review raises only when the whole submission failed
         # (a non-422 on line comments, or every summary-only attempt for
-        # a no-line-comment review). Tolerate it ONLY when there are
-        # file-level findings still to post — the summary is then a
-        # best-effort courtesy and those findings carry the review (and
-        # surface any real error themselves). Otherwise nothing reached
+        # a no-line-comment review). Tolerate it ONLY when there is a
+        # file-level or standalone finding still to post — the summary is
+        # then a best-effort courtesy and that finding carries the review
+        # (and surfaces any real error itself). Otherwise nothing reached
         # GitHub, so let the failure mark the job failed rather than
-        # report a hollow success.
-        if line_comments or not file_comments:
+        # report a hollow success. A non-empty line_comments is deliberately
+        # NEVER tolerated even when file/standalone comments also exist: a
+        # rejected line-comment submission is a real, unexplained GitHub
+        # error (not the routine 422 _submit_review already retries around),
+        # so it must fail the job loudly rather than be silently masked by
+        # whatever else happens to post successfully.
+        if line_comments or not (file_comments or partition.standalone_comments):
             raise
-        logger.warning("Summary-only review failed; posting file-level findings only")
+        logger.warning("Summary-only review failed; posting remaining findings only")
         dropped_lines = []
     inline_count = len(line_comments) - len(dropped_lines)
 
-    # File-level comments (mapped + re-anchored leftovers) and any
-    # bisected-out line comments (demoted, keeping the file anchor) each
-    # go on the dedicated endpoint. A rejected line comment falls through
-    # as its original entry, so the standalone fallback still names
-    # ``path:line``.
+    # File-level comments and any bisected-out line comments (demoted,
+    # keeping the file anchor) each go on the dedicated endpoint. A rejected
+    # line comment falls through as its original entry, so the standalone
+    # fallback still names ``path:line``.
     file_comment_count, standalone = _post_file_comments(
         client, owner, repo, pr_number, pr.head_sha, file_comments + dropped_lines
     )
 
-    # Only truly-unpostable findings fall through to standalone comments.
-    standalone_bodies = [inline_comment_to_timeline_body(c) for c in standalone]
+    # Two sources feed standalone conversation comments: findings GitHub
+    # still rejected as file-level comments (truly unpostable), and findings
+    # whose file was never in the diff at all (already rendered by
+    # _partition_review_issues, since it has the existing-comment
+    # cross-reference those bodies need).
+    standalone_bodies = [inline_comment_to_timeline_body(c) for c in standalone] + list(
+        partition.standalone_comments
+    )
     comments_failed = sum(
         0 if _main._safe_comment(client, owner, repo, pr_number, body) else 1
         for body in standalone_bodies
@@ -1347,7 +1462,7 @@ def _post_review_comments(
         event=event,
         inline_count=inline_count,
         file_comment_count=file_comment_count,
-        comment_findings=len(standalone),
+        comment_findings=len(standalone_bodies),
         comments_failed=comments_failed,
     )
 

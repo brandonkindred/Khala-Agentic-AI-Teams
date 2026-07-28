@@ -65,30 +65,45 @@ def relevant_code_for_issue(
     current_files: Dict[str, str],
     max_chars: int = DEFAULT_MAX_RELEVANT_CODE_CHARS,
 ) -> str:
-    """Return code context for a single issue: prefer issue's file, else first files.
+    """Return code context for a single issue: prefer issue's file, else all files.
 
-    Preconditions: ``current_files`` maps path -> content; ``max_chars`` > 0.
-    Postconditions: returns a non-empty string; falls back to ``"(no code)"``
-    when no content can be included.
+    Preconditions: ``current_files`` maps path -> content.
+    Postconditions: returns a non-empty string; when ``max_chars`` is positive
+        and content is available, the returned string is bounded by
+        ``max_chars``; falls back to ``"(no code)"`` when ``max_chars`` is
+        non-positive or no content can be included. Truncated context carries
+        an explicit marker so the fix agent does not mistake a prefix for the
+        complete file or submission.
     """
+    if max_chars <= 0:
+        return "(no code)"
     if issue.file_path and issue.file_path in current_files:
-        content = current_files[issue.file_path]
-        if len(content) <= max_chars:
-            return f"--- {issue.file_path} ---\n{content}"
-        return f"--- {issue.file_path} ---\n{content[:max_chars]}\n... [truncated]"
+        candidates = [(issue.file_path, current_files[issue.file_path])]
+    else:
+        candidates = list(current_files.items())
+    if not candidates:
+        return "(no code)"
+
     parts: List[str] = []
-    total = 0
-    for path, content in list(current_files.items())[:10]:
+    used = 0
+    truncated = False
+    for path, content in candidates:
         chunk = f"--- {path} ---\n{content}\n"
-        if total + len(chunk) > max_chars:
-            remaining = max_chars - total
-            if remaining > 200:
-                chunk = f"--- {path} ---\n{content[:remaining]}\n... [truncated]"
-                parts.append(chunk)
+        remaining = max_chars - used
+        if remaining <= 0:
+            truncated = True
             break
-        parts.append(chunk)
-        total += len(chunk)
-    return "\n".join(parts) if parts else "(no code)"
+        parts.append(chunk[:remaining])
+        used += min(len(chunk), remaining)
+        if len(chunk) > remaining:
+            truncated = True
+            break
+
+    rendered = "".join(parts)
+    if truncated:
+        marker = "\n[truncated; select or retrieve additional file context before editing]"
+        rendered = rendered[: max(0, max_chars - len(marker))] + marker[:max_chars]
+    return rendered.rstrip("\n") or "(no code)"
 
 
 def lenient_json_object(
@@ -314,6 +329,7 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         return self._invoke_llm(model, prompt)
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
+        """Render ``current_files`` as ``--- path ---\\ncontent`` blocks, joined for the prompt."""
         return "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_files.items())
 
     def _problem_solving_kwargs(self, inp) -> Dict[str, Any]:
@@ -427,22 +443,27 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         )
 
     def review(self, inp) -> ToolAgentPhaseOutput:
-        """Run this agent's review phase.
+        """Find issues in ``inp.current_files``, via the recipe this subclass configured.
 
-        Preconditions: when neither :attr:`build_runner` nor
-        :attr:`review_via_engine` is set, :attr:`review_prompt` must be a
-        non-``None`` template string — the base class declares it as
-        ``Optional[str] = None`` for subclasses that take one of those other
-        two paths, so a subclass using the default one-shot LLM path must
-        set it.
-        Postconditions: returns a :class:`ToolAgentPhaseOutput`. Only the
-        default one-shot LLM path (neither :attr:`build_runner` nor
-        :attr:`review_via_engine` set) never raises — a missing model, empty
-        code, or LLM failure each degrade to a skipped/failed summary with no
-        issues. When :attr:`build_runner` or :attr:`review_via_engine` is
-        set, an unexpected exception from the runner/engine is a defect and
-        propagates uncaught; see :meth:`_build_review` and
-        :meth:`_engine_review`.
+        Preconditions: ``inp`` is a ``ToolAgentPhaseInput``-shaped object. When
+            neither :attr:`build_runner` nor :attr:`review_via_engine` is set,
+            :attr:`review_prompt` must be a non-``None`` template string — the
+            base class declares it as ``Optional[str] = None`` for subclasses
+            that take one of those other two paths, so a subclass using the
+            default one-shot LLM path must set it (a subclass that misconfigures
+            this raises ``ValueError``).
+        Postconditions: takes the first configured path -- :attr:`build_runner`
+            (a static analysis/build tool), :attr:`review_via_engine` (the
+            shared code-review engine), or the LLM one-shot ``review_prompt`` --
+            and returns a :class:`ToolAgentPhaseOutput` whose ``issues`` (if
+            any) all carry :attr:`issue_source`. Only the default one-shot LLM
+            path (neither :attr:`build_runner` nor :attr:`review_via_engine`
+            set) degrades a missing model, empty code, or LLM failure to a
+            skipped/failed summary with no issues rather than raising. When
+            :attr:`build_runner` or :attr:`review_via_engine` is set, an
+            unexpected exception from the runner/engine is a defect and
+            propagates uncaught; see :meth:`_build_review` and
+            :meth:`_engine_review`.
         """
         if self.build_runner is not None:
             return self._build_review(inp)
@@ -491,6 +512,11 @@ class BaseReviewToolAgent(LlmToolAgentBase):
         )
 
     def deliver(self, inp) -> ToolAgentPhaseOutput:
+        """Stub deliver phase: this family of tool agents applies no delivery-time changes.
+
+        Postconditions: returns a placeholder :class:`ToolAgentPhaseOutput`
+            summary; never touches ``inp`` or applies any change.
+        """
         return ToolAgentPhaseOutput(summary=f"{self.name} deliver.")
 
 
