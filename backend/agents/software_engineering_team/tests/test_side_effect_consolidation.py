@@ -207,6 +207,19 @@ def test_severity_elevates_to_highest_in_group() -> None:
     assert result[0].severity == "critical"
 
 
+def test_merge_preserves_title_from_highest_severity_member() -> None:
+    """Non-merged fields such as ``title`` are kept from the highest-severity member."""
+    content = "def foo():\n    x = 1\n    return x\n"
+    index = _index({"app/foo.py": content})
+    issues = [
+        _issue(line=2, severity="low", title="low title", description="minor note"),
+        _issue(line=3, severity="critical", title="critical title", description="critical break"),
+    ]
+    result = consolidate_side_effect_issues(issues, index)
+    assert len(result) == 1
+    assert result[0].title == "critical title"
+
+
 @pytest.mark.parametrize(
     ("severities", "expected"),
     [

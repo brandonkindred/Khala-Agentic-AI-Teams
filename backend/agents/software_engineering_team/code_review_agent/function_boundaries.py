@@ -180,10 +180,14 @@ def enclosing_construct_start_heuristic(content: str, line_number: int) -> Optio
     """Best-guess construct start line for non-Python content.
 
     Scans from the first line up to ``line_number`` and returns the start line
-    of the last column-0 declaration found — the same heuristic used by
-    ``code_boundaries._heuristic_break_lines`` for chunk splitting. Useful for
-    TypeScript, JavaScript, Go, and other non-Python languages, where no name or
-    end line is available (unlike :func:`enclosing_construct`).
+    of the last column-0 non-comment, non-closing-delimiter line found — the
+    same heuristic used by ``code_boundaries._heuristic_break_lines`` for
+    chunk splitting. That includes imports, exports, assignments, and other
+    top-level statements as well as function/class declarations; only blank
+    lines, indented lines, and ``_HEURISTIC_SKIP`` prefixes (comments /
+    closers) are ignored. Useful for TypeScript, JavaScript, Go, and other
+    non-Python languages, where no name or end line is available (unlike
+    :func:`enclosing_construct`).
 
     Preconditions:
         - ``content`` is a string (may be empty).
@@ -191,7 +195,8 @@ def enclosing_construct_start_heuristic(content: str, line_number: int) -> Optio
 
     Postconditions:
         - Returns the best-guess start line, or ``None`` when no column-0
-          declaration precedes ``line_number``. Never raises.
+          non-comment, non-closing-delimiter line precedes ``line_number``.
+          Never raises.
     """
     best_start: Optional[int] = None
     for i, line in enumerate(content.splitlines(), start=1):

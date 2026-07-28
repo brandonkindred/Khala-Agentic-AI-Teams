@@ -1319,6 +1319,10 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
     the previous one's ``ActivityTaskCompletedEvent``, so their scheduling
     events would carry different ``workflow_task_completed_event_id``s.
 
+    ``consolidate_side_effect_issues_activity`` is intentionally *not* part of
+    that gather (it needs the merged verified list), so this also asserts it
+    is scheduled in a later workflow task than the three concurrent passes.
+
     Also replays the recorded history, the same non-determinism guard as the
     baseline test above, and marked ``integration``/skips the same way for the
     same reason (see that test's docstring).
@@ -1336,6 +1340,7 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
         "code_review_architecture_consistency",
         "code_review_side_effect_impact",
     }
+    consolidation_activity_name = "code_review_side_effect_consolidation"
 
     try:
         test_env = await WorkflowEnvironment.start_time_skipping()
@@ -1381,6 +1386,25 @@ async def test_workflow_gathers_tail_pass_activities_concurrently() -> None:
     assert len(scheduling_workflow_task_ids) == 1, (
         "expected all three tail-pass activities to be scheduled by the same "
         f"workflow task (gathered together); got {scheduling_workflow_task_ids}"
+    )
+    concurrent_task_id = next(iter(scheduling_workflow_task_ids))
+
+    consolidation_events = [
+        event
+        for event in history.events
+        if event.activity_task_scheduled_event_attributes.activity_type.name
+        == consolidation_activity_name
+    ]
+    assert len(consolidation_events) == 1, (
+        "expected one side-effect consolidation activity scheduled event, "
+        f"got {len(consolidation_events)}"
+    )
+    consolidation_task_id = consolidation_events[
+        0
+    ].activity_task_scheduled_event_attributes.workflow_task_completed_event_id
+    assert consolidation_task_id != concurrent_task_id, (
+        "expected consolidation to be scheduled after the concurrent tail-pass "
+        f"gather (different workflow task); both used task id {concurrent_task_id}"
     )
 
     await Replayer(workflows=[CodeReviewWorkflow]).replay_workflow(history)

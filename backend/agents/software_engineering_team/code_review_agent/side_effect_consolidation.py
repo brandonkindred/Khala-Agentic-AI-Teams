@@ -158,6 +158,12 @@ def _severity_rank(severity: str) -> int:
 def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
     """Merge two or more side-effect findings into one consolidated issue.
 
+    Starts from the highest-severity member's full ``model_dump()`` so any
+    ``CodeReviewIssue`` fields this pass does not explicitly recompute
+    (currently ``title``, and any future fields) are preserved rather than
+    silently dropped. Only the fields listed in the postconditions below are
+    recomputed from the group.
+
     Preconditions:
         - ``len(group) >= 2``; every issue's ``category`` is ``"side-effects"``.
 
@@ -168,6 +174,7 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
           line is cited, matching a single-line issue's shape).
         - ``severity`` is the highest-ranked severity in the group
           (``critical`` > ``high`` > ``medium`` > ``low`` > ``info``).
+        - ``category`` is always ``"side-effects"``.
         - ``description`` is the group's non-blank values deduped via
           ``dedupe_strings``. A single surviving value is used verbatim;
           multiple values are prefixed with "Consolidated N related
@@ -176,6 +183,8 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
           ``dedupe_strings``. A single surviving value is used verbatim;
           multiple values are joined as a plain bulleted list (no preamble).
         - ``pre_existing`` is True only when every issue in the group is.
+        - Every other ``CodeReviewIssue`` field (including ``title``) is
+          copied from the highest-severity member.
     """
     file_counts: "OrderedDict[str, int]" = OrderedDict()
     for issue in group:
@@ -219,16 +228,21 @@ def _merge_group(group: List[CodeReviewIssue]) -> CodeReviewIssue:
     else:
         suggestion = "\n".join(f"- {s}" for s in suggestions)
 
-    return CodeReviewIssue(
-        severity=best.severity,
-        category=_SIDE_EFFECT_CATEGORY,
-        file_path=majority_file,
-        line=line,
-        start_line=start_line,
-        description=description,
-        suggestion=suggestion,
-        pre_existing=all(i.pre_existing for i in group),
+    # Preserve non-merged fields (e.g. title) from the highest-severity member.
+    payload = best.model_dump()
+    payload.update(
+        {
+            "severity": best.severity,
+            "category": _SIDE_EFFECT_CATEGORY,
+            "file_path": majority_file,
+            "line": line,
+            "start_line": start_line,
+            "description": description,
+            "suggestion": suggestion,
+            "pre_existing": all(i.pre_existing for i in group),
+        }
     )
+    return CodeReviewIssue.model_validate(payload)
 
 
 def consolidate_side_effect_issues(

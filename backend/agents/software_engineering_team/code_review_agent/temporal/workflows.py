@@ -382,6 +382,12 @@ class CodeReviewWorkflow:
                     verified = [*verified, *side_effect_findings]
                     has_side_effect_findings = True
 
+        # Side-effect / blast-radius consolidation: merge near-duplicate findings
+        # that share the same root cause (same enclosing construct or a path:line
+        # cited inside another finding's construct). Pure source analysis, no LLM
+        # calls, gated independently of the side-effect pass itself. Runs after
+        # the concurrent tail-pass gather (it needs the merged verified list),
+        # so it is intentionally sequential — not part of that gather.
         if workflow.patched(_SIDE_EFFECT_CONSOLIDATION_PATCH):
             verified = await workflow.execute_activity(
                 A.consolidate_side_effect_issues_activity,
