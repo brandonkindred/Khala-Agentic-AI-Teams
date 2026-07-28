@@ -1,8 +1,14 @@
 """Prompts for the Infrastructure Debug agent."""
 
-INFRA_DEBUG_PROMPT = """You are an Infrastructure Debug Specialist. Analyze the execution output from an IaC tool and classify each error.
+from software_engineering_team.shared.prompts import build_json_output_prompt
 
-For each error found, provide:
+INFRA_DEBUG_PROMPT = build_json_output_prompt(
+    role_sentence=(
+        "You are an Infrastructure Debug Specialist. Analyze the execution output from an IaC "
+        "tool and classify each error."
+    ),
+    rules=(
+        """For each error found, provide:
 - error_type: one of "syntax", "state", "permissions", "resource_conflict", "validation", "runtime", "unknown"
 - tool: the IaC tool name
 - file_path: the file where the error originates (if identifiable)
@@ -11,8 +17,10 @@ For each error found, provide:
 
 Also determine whether ALL errors are fixable via code changes (syntax, validation errors are fixable; permissions, state, runtime typically are not).
 
-Output format (JSON):
-{
+"""
+    ),
+    json_schema=(
+        """{
   "errors": [
     {
       "error_type": "syntax",
@@ -24,5 +32,10 @@ Output format (JSON):
   ],
   "summary": "Brief summary of findings",
   "fixable": true
-}
-"""
+}"""
+    ),
+    # Empty trailer preserves the pre-migration prompt's lack of a trailing
+    # "Return JSON only." instruction (unlike the other devops single-shot
+    # prompts, this one never had one).
+    trailer="",
+)

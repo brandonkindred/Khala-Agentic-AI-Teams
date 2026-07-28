@@ -92,7 +92,9 @@ def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
           empty files (the workflow then returns an approved empty verdict).
           Otherwise it carries the bounded ``chunks``, the shared ``base_input``
           (profile normalized to its ``.value``), the ``context_fp`` and
-          ``surface_by_path`` fingerprints, and ``single_chunk``.
+          ``surface_by_path`` fingerprints, ``single_chunk``, and the review's
+          own adaptive map-phase ``fanout_width``
+          (``config.resolve_temporal_fanout_width(len(chunks))``).
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are (identical to
           ``run_coordinator``'s prep).
@@ -109,6 +111,7 @@ def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
     from ..chunking import _blocks_from_input, build_review_chunks
     from ..mapping import _context_fingerprint, _review_model_fingerprint, _surface_by_path
     from ..models import CodeReviewInput, CodeReviewIssue
+    from .config import resolve_temporal_fanout_width
     from .phase_models import ReviewPrepDTO
 
     llm = _resolve_llm()
@@ -149,6 +152,7 @@ def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
     chunks = build_review_chunks(
         blocks, compute_code_review_map_chunk_chars(llm), input_data.pre_numbered
     )
+    fanout_width = resolve_temporal_fanout_width(len(chunks))
 
     base_input = {
         "language": input_data.language or "",
@@ -176,6 +180,7 @@ def prepare_review_activity(review_input: Dict[str, Any]) -> Dict[str, Any]:
         context_fp=context_fp,
         surface_by_path=surface_by_path,
         single_chunk=len(chunks) == 1,
+        fanout_width=fanout_width,
     ).model_dump(mode="json")
 
 

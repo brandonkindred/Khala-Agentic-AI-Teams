@@ -17,9 +17,13 @@ from .prompts import LINT_FIX_PROMPT
 
 logger = logging.getLogger(__name__)
 
-MAX_AFFECTED_FILES = 15
-MAX_AFFECTED_CODE_CHARS = 12_000
+# Cap on lint issues sent to the fix-generation prompt; a linter run can report
+# hundreds of violations, and each one adds an issue line plus (indirectly, via
+# _read_affected_files) file content to the prompt, so this bounds both prompt
+# size and LLM output size for a single fix-generation call.
 MAX_ISSUES_FOR_LLM = 30
+MAX_AFFECTED_FILES = 15
+MAX_AFFECTED_CODE_CHARS = 60_000  # Cap context to avoid blowing up the LLM context window
 
 
 class LintingToolAgent:
@@ -36,6 +40,13 @@ class LintingToolAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
+        """Resolve the strands model for lint-fix generation.
+
+        Preconditions: none -- ``llm_client`` is optional; a missing/unconfigured
+            client resolves to a model that fails fast when actually invoked.
+        Postconditions: ``self._model`` holds the strands model resolved for the
+            ``"linting_tool_agent"`` agent key.
+        """
         self._model = resolve_strands_model(
             llm_client, agent_key="linting_tool_agent", get_strands_model_fn=get_strands_model
         )
@@ -80,7 +91,9 @@ class LintingToolAgent:
             )
 
         # Phase 3: Review (LLM fix generation)
-        affected_code = self._read_affected_files(repo_path, execution_result.issues)
+        affected_code = self._read_affected_files(
+            repo_path, execution_result.issues[:MAX_ISSUES_FOR_LLM]
+        )
         edits = self._generate_fixes(execution_result.issues, affected_code)
 
         summary = (
@@ -104,8 +117,11 @@ class LintingToolAgent:
     def _read_affected_files(repo_path: Path, issues: List[LintIssue]) -> str:
         """Read and concatenate content of files mentioned in lint issues.
 
-        De-duplicates file paths and truncates total output to stay within
-        context-window limits.
+        De-duplicates file paths, caps the number of files to
+        ``MAX_AFFECTED_FILES`` and total content to ``MAX_AFFECTED_CODE_CHARS``
+        so a large or numerous affected file can't blow the fix-generation
+        prompt past the model's context window. Rejects any ``file_path`` that
+        resolves outside ``repo_path``.
         """
         seen_files: Dict[str, str] = {}
         total_chars = 0
@@ -122,16 +138,15 @@ class LintingToolAgent:
                 continue
             try:
                 content = file_abs.read_text(encoding="utf-8", errors="replace")
-                if total_chars + len(content) > MAX_AFFECTED_CODE_CHARS:
-                    remaining = MAX_AFFECTED_CODE_CHARS - total_chars
-                    if remaining > 200:
-                        content = content[:remaining] + "\n... [truncated]"
-                    else:
-                        break
-                seen_files[issue.file_path] = content
-                total_chars += len(content)
             except Exception:
                 continue
+            if total_chars + len(content) > MAX_AFFECTED_CODE_CHARS:
+                remaining = MAX_AFFECTED_CODE_CHARS - total_chars
+                if remaining <= 200:
+                    break
+                content = content[:remaining] + "\n... [truncated]"
+            seen_files[issue.file_path] = content
+            total_chars += len(content)
 
         parts: List[str] = []
         for fpath, content in seen_files.items():

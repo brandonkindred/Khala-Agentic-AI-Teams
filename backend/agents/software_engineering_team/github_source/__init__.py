@@ -40,7 +40,6 @@ from .issue_proposals import (
 )
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
-    anchor_to_first_file,
     build_review_body,
     choose_event,
     format_comment_body,
@@ -72,7 +71,6 @@ __all__ = [
     "Repo",
     "ReviewComment",
     "SubIssue",
-    "anchor_to_first_file",
     "annotate_duplicate_proposals",
     "build_existing_comments",
     "build_issue_from_proposal",
