@@ -12,16 +12,22 @@ The tail passes have no cross-pass data dependency (each reads only
 pass's output), mirroring ``coordinator._run_tail_passes``'s identical
 concurrent fan-out in thread mode.
 
-The verdict is behavior-identical to thread mode because every phase calls the
-same underlying coordinator functions (through :mod:`.activities`): the map unit
-is ``mapping._cached_review_chunk``, verification is
-``false_positive_filter.filter_false_positives``, the additive architecture pass
-is ``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
+Every phase calls the same underlying coordinator functions (through
+:mod:`.activities`): the map unit is ``mapping._cached_review_chunk``,
+verification is ``false_positive_filter.filter_false_positives``, the additive
+architecture pass is
+``architecture_consistency_pass.find_architecture_and_redundancy_issues``, the
 additive side-effect pass is
 ``side_effect_impact_pass.find_side_effect_impact_issues``, the gate is
 ``coordinator._dedupe_issues`` + ``_reconcile_approval``, and the narrative is
 ``synthesis.synthesize_review_findings`` with the same deterministic-concat
-fallback.
+fallback. The verdict is NOT identical to the default thread-mode
+``run_coordinator`` path, though: this workflow always folds
+``not_reviewed_issues`` into the approval gate as blocking ``high`` findings
+(see ``finalize_review_activity``), matching thread mode only under
+``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` -- the thread-mode default instead
+surfaces them non-blockingly via ``CodeReviewOutput.not_reviewed_ranges``,
+a field this workflow's return dict does not populate at all.
 
 Sandbox note: activity and constant imports are wrapped in
 ``workflow.unsafe.imports_passed_through()``; the workflow body itself performs
@@ -172,9 +178,14 @@ class CodeReviewWorkflow:
             - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict.
 
         Postconditions:
-            - Returns a ``CodeReviewOutput`` dict whose verdict matches what
-              ``run_coordinator`` would produce for the same input (the same
-              deterministic gate and narrative fallback are applied).
+            - Returns a ``CodeReviewOutput``-shaped dict (``approved``, ``issues``,
+              ``summary``, ``spec_compliance_notes`` -- no ``not_reviewed_ranges``
+              key) using the same deterministic gate and narrative fallback as
+              ``run_coordinator``. The verdict is intentionally not identical to
+              the default thread-mode ``run_coordinator`` path: not-reviewed
+              ranges always fold into the gate here as blocking ``high`` findings
+              (see module docstring), so the same input can approve under thread
+              mode's default and reject here, or vice versa.
         """
         self._advance("preparing", 0.05)
         prep = await workflow.execute_activity(
@@ -204,7 +215,7 @@ class CodeReviewWorkflow:
         base_input: Dict[str, Any] = prep["base_input"]
         context_fp: str = prep["context_fp"]
         surface_by_path: Dict[str, List[str]] = prep["surface_by_path"]
-        fanout_width: int = prep.get("fanout_width", 1) or 1
+        fanout_width: int = prep.get("fanout_width") or 1
 
         self._advance("reviewing", 0.10)
 
