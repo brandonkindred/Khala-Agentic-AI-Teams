@@ -2,9 +2,9 @@
 
 Pure-function tests (``parse_code_into_file_blocks``, the splitter and
 chunker) stay LLM-free. The LLM-integration tests use ``DummyLLMClient``
-subclasses now that ``ChunkReviewAgent`` is Strands-backed and bypasses
-``llm.complete_json`` in favor of the ``chat_json_round`` +
-structured-output flow.
+subclasses because ``ChunkReviewAgent`` calls ``llm.complete_json`` directly
+through ``complete_validated`` and validates responses against
+``ChunkReviewLLMResponse`` — no strands ``Agent``/``Model`` is involved.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from pydantic import ValidationError
 from llm_service import (
     LLMJsonParseError,
     LLMRateLimitError,
+    LLMSchemaValidationError,
     LLMSemanticExhaustionError,
     LLMTruncatedError,
 )
@@ -1386,8 +1387,10 @@ def test_unexpected_chunk_exception_fails_closed() -> None:
 
 
 def test_is_content_failure_classifies_model_output_errors_only() -> None:
-    """Known model-output failures (including a raw ``json.JSONDecodeError`` from
-    the chunk reviewer's ``json.loads``) are recoverable content failures;
+    """Known model-output failures (``LLMJsonParseError`` from the client,
+    a raw ``json.JSONDecodeError`` in the exception chain,
+    ``LLMSemanticExhaustionError``, ``LLMTruncatedError``, and
+    ``LLMSchemaValidationError``) are recoverable content failures;
     reviewer-code bugs are not."""
     from code_review_agent.coordinator import _is_content_failure
 
@@ -1396,6 +1399,10 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
     # A token-limit truncation is recoverable: a smaller chunk yields a smaller review.
     assert _is_content_failure(LLMTruncatedError("truncated", finish_reason="length")) is True
+    # A schema-invalid (but parseable) reply is recoverable the same way a
+    # parse failure is -- the chunk reviewer's complete_validated call raises
+    # this after exhausting its corrective retry.
+    assert _is_content_failure(LLMSchemaValidationError("schema invalid")) is True
     # A JSONDecodeError wrapped by strands must still be recognised via the chain.
     wrapped = RuntimeError("agent failed")
     wrapped.__cause__ = json.JSONDecodeError("Expecting value", "x", 0)
@@ -1406,10 +1413,11 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
 
 
 def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
-    """The chunk reviewer parses model output with a bare ``json.loads``; bad
-    JSON surfaces as a raw ``json.JSONDecodeError``. That is recoverable model
-    output, so it must take the degrade path (run completes, graceful) — not fail
-    closed like a reviewer-code bug. By default the range is non-blocking."""
+    """A raw ``json.JSONDecodeError`` in the exception chain (e.g. wrapped by
+    the injected client or a lower layer, rather than the client's own
+    ``LLMJsonParseError``) is still recoverable model output, so it must take
+    the degrade path (run completes, graceful) — not fail closed like a
+    reviewer-code bug. By default the range is non-blocking."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
@@ -2362,15 +2370,18 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
     assert not any("Missing error handling around DB calls" in i.description for i in result.issues)
     info = [i for i in result.issues if i.severity == "info"]
     assert [i.file_path for i in info] == ["empty.py"]
-    info = [i for i in result.issues if i.severity == "info"]
-    assert [i.file_path for i in info] == ["empty.py"]
 
 
 def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
     """A chunk that rejects with no issues AND no summary has no actionable
-    feedback: the documented auto-approve applies, and the approving chunk's
-    summary must never be synthesized into a phantom 'Code review rejected:
-    Looks good' issue (verdicts and summaries stay paired per chunk)."""
+    feedback for ``ChunkReviewLLMResponse``'s consistency validator either
+    (same as ``test_zero_issue_reject_with_summary_now_fails_schema_validation``,
+    the empty summary here doesn't change that), so it fails schema
+    validation and degrades to a non-blocking ``not_reviewed_ranges`` entry
+    rather than the old ``_reconcile_approval`` auto-approve safety net. The
+    approving sibling chunk's summary must never leak into a phantom 'Code
+    review rejected: Looks good' issue (verdicts and summaries stay paired
+    per chunk)."""
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
@@ -2399,6 +2410,7 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
 
+    assert "b.py (lines 1-2)" in result.not_reviewed_ranges
     assert result.approved is True
     assert result.issues == []
     assert "Looks good" in result.summary  # the approving summary survives as summary text

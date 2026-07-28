@@ -33,7 +33,7 @@ def _input(**overrides: object) -> AcceptanceVerifierInput:
 class _IssueStubClient(DummyLLMClient):
     """Returns one canned engine response (chunk review) for every call.
 
-    A criterion-tagged issue carries no ``file_path`` so the engine's
+    A criterion-tagged issue uses an empty ``file_path`` so the engine's
     false-positive filter is skipped (it only re-checks code-location findings),
     making the adapter's per-criterion derivation deterministic.
     """

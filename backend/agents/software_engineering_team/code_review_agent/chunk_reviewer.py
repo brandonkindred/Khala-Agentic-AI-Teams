@@ -157,7 +157,7 @@ class ChunkReviewAgent:
     def run(
         self, input_data: ChunkReviewInput, think: Optional[Union[bool, str]] = None
     ) -> ChunkReviewOutput:
-        """Review one chunk and return approved, issues, summary.
+        """Review one chunk and return approved, issues, summary, and spec_compliance_notes.
 
         Preconditions:
             - ``think`` is ``None`` (use the client's default thinking level) or an
@@ -213,6 +213,14 @@ def _run_chunk_review(
             ``approved`` verdict inconsistent with its own issues list (see
             ``ChunkReviewLLMResponse._require_approval_consistent_with_issues``).
             Also classified as a recoverable content failure by ``mapping.py``.
+        LLMSemanticExhaustionError: the model produced no usable assistant
+            content (a reasoning-only reply with no final answer). Propagates
+            unchanged from ``complete_validated``; also a recoverable content
+            failure downstream.
+        LLMTruncatedError: the reply hit the output-token limit
+            (``finish_reason=length``). Propagates unchanged from
+            ``complete_validated``; also a recoverable content failure
+            downstream — a smaller chunk yields a smaller review.
         LLMPermanentError: other unrecoverable LLM failures propagate
             unchanged from ``complete_validated``.
     """

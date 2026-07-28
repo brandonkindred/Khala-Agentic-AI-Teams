@@ -371,16 +371,20 @@ def test_engine_review_skips_without_code():
 )
 def test_engine_review_handles_malformed_response(response: dict):
     """A malformed engine response used to be sanitized by the old hand-rolled
-    parser -- ``issues`` of the wrong type, the ``issues`` key entirely absent,
-    non-dict issue entries, or a missing ``approved``/``summary`` -- into a
-    clean, empty-issues phase output. ``ChunkReviewLLMResponse`` no longer
-    tolerates any of these: all four top-level fields are required with no
-    defaults, and ``issues`` entries must be actual ``ChunkReviewIssueLLM``
-    objects, so every one of these shapes now fails schema validation and
-    retries once. ``_engine_agent`` reviews a single file (one chunk), so the
-    identical retry failure trips the coordinator's total-failure guard,
-    which ``_engine_review`` (`tool_agent_base.py`) catches and degrades to a
-    "(LLM error)" summary — not the old "0 issue(s) found." clean pass."""
+    parser into a clean, empty-issues phase output. ``ChunkReviewLLMResponse``
+    no longer tolerates any of these: all four top-level fields (``approved``,
+    ``issues``, ``summary``, ``spec_compliance_notes``) are required with no
+    defaults, and each ``issues`` entry must validate as a
+    ``ChunkReviewIssueLLM``. The five parametrized shapes cover: ``issues`` of
+    the wrong type, the ``issues`` key entirely absent, non-dict ``issues``
+    entries, a missing ``approved``, and a missing ``summary``/
+    ``spec_compliance_notes``. Every one now fails schema validation and
+    retries once via ``complete_validated``. ``_engine_agent`` reviews a
+    single file (one chunk) through ``run_coordinator``, so the identical
+    retry failure trips the coordinator's total-failure guard
+    (``CodeReviewUnavailableError``); ``_engine_review`` (`tool_agent_base.py`)
+    catches that and degrades to a "(LLM error)" summary — not the old
+    "0 issue(s) found." clean pass."""
     agent = _engine_agent(response)
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert out.issues == []

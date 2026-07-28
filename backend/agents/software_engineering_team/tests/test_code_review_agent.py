@@ -197,11 +197,10 @@ def test_reconcile_zero_issue_zero_summary_reject_now_fails_schema_validation() 
 
 def test_multiple_run_calls_on_same_instance_succeed() -> None:
     """Regression: a single ``CodeReviewAgent`` instance must handle many
-    ``run()`` calls in sequence. Early Strands migrations cached a Strands
-    ``Agent`` instance in ``__init__`` and reused it across calls, which
-    broke the ``structured_output_model`` forced-tool-choice on the second
-    call because Strands' Agent accumulates message history. The fix is to
-    construct a fresh Strands Agent per ``run()``.
+    ``run()`` calls in sequence. Each call builds a fresh review prompt and
+    invokes ``complete_validated`` directly against the injected
+    ``LLMClient``, so no persistent state from a previous review (message
+    history, cached model, etc.) can leak into the next one.
     """
     agent = CodeReviewAgent(llm_client=DummyLLMClient())
     for i in range(4):
