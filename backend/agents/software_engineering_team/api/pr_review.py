@@ -96,16 +96,14 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
         is a positive PR number.
     Postconditions: returns the job_id of a non-terminal review job whose
         ``github_context`` matches (owner, repo, pr_number) — owner/repo
-        case-insensitively, as GitHub treats them, and ``pr_number`` via ``int()``
-        coercion so a string-typed store value still matches — and whose heartbeat
-        is live per :func:`_review_job_heartbeat_live`; ``None`` when no such job
-        exists. A matching job whose heartbeat went stale (its worker crashed before
-        terminalizing it) is NOT returned — it must not block new reviews of the PR
-        forever — and is best-effort marked ``failed`` so it stops surfacing as a
-        zombie running review; a failure to mark it never propagates. Only review
-        jobs carry ``pr_number`` in ``github_context`` (issue runs carry
-        ``issue_number``), so matching on it never collides with an issue run.
-        Raises only if the job-service scan itself fails.
+        case-insensitively, as GitHub treats them — and whose heartbeat is live per
+        :func:`_review_job_heartbeat_live`; ``None`` when no such job exists. A matching
+        job whose heartbeat went stale (its worker crashed before terminalizing it) is
+        NOT returned — it must not block new reviews of the PR forever — and is
+        best-effort marked ``failed`` so it stops surfacing as a zombie running review;
+        a failure to mark it never propagates. Only review jobs carry ``pr_number`` in
+        ``github_context`` (issue runs carry ``issue_number``), so matching on it never
+        collides with an issue run. Raises only if the job-service scan itself fails.
 
     Cross-worker by construction: the scan reads the shared central job service (the same
     store ``_running_job_for_issue`` uses), so a review already running under a *different*
@@ -118,45 +116,43 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
     """
     for j in _main.list_jobs(active_only=True):
         ctx = (j or {}).get("github_context") or {}
-        try:
-            stored_pr = int(ctx.get("pr_number"))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if stored_pr != pr_number:
-            continue
-        if not (
+        if (
             str(ctx.get("owner") or "").casefold() == owner.casefold()
             and str(ctx.get("repo") or "").casefold() == repo.casefold()
+            and ctx.get("pr_number") == pr_number
         ):
-            continue
-        job_id = j.get("job_id")
-        if _review_job_heartbeat_live(j):
-            return job_id
-        # Crash-orphaned: no worker has heartbeated it within the cutoff. Unblock
-        # new reviews and terminalize the zombie (best-effort — the unblock matters,
-        # the cleanup is cosmetic).
-        logger.warning(
-            "review job %s for %s/%s#%s has a stale heartbeat; treating as dead and marking failed",
-            job_id,
-            owner,
-            repo,
-            pr_number,
-        )
-        if job_id:
-            try:
-                _main.update_job(
-                    job_id,
-                    status=JobStatus.FAILED.value,
-                    error="review worker heartbeat went stale (process died mid-review)",
-                )
-                _main.update_review(
-                    job_id,
-                    status=JobStatus.FAILED.value,
-                    error="review worker heartbeat went stale (process died mid-review)",
-                    completed=True,
-                )
-            except Exception:  # noqa: BLE001 - unblocking admission must not depend on cleanup
-                logger.warning("could not mark stale review job %s failed", job_id, exc_info=True)
+            job_id = j.get("job_id")
+            if _review_job_heartbeat_live(j):
+                return job_id
+            # Crash-orphaned: no worker has heartbeated it within the cutoff. Unblock
+            # new reviews and terminalize the zombie (best-effort — the unblock matters,
+            # the cleanup is cosmetic).
+            logger.warning(
+                "review job %s for %s/%s#%s has a stale heartbeat; treating as dead and marking failed",
+                job_id,
+                owner,
+                repo,
+                pr_number,
+            )
+            if job_id:
+                try:
+                    _main.update_job(
+                        job_id,
+                        status=JobStatus.FAILED.value,
+                        error="review worker heartbeat went stale (process died mid-review)",
+                    )
+                    _main.update_review(
+                        job_id,
+                        status=JobStatus.FAILED.value,
+                        error="review worker heartbeat went stale (process died mid-review)",
+                        completed=True,
+                    )
+                except Exception as exc:  # noqa: BLE001 - unblocking admission must not depend on cleanup
+                    logger.warning(
+                        "could not mark stale review job %s failed: %s",
+                        job_id,
+                        scrub_token_from_text(str(exc)),
+                    )
     return None
 
 
@@ -342,10 +338,7 @@ def _fetch_head_files(
             content = client.get_file_contents(owner, repo, f.filename, head_sha)
         except Exception as e:  # noqa: BLE001 - a fetch failure degrades to hunk rendering, never fails review
             logger.warning(
-                "PR review: could not fetch head content for %s@%s: %s",
-                f.filename,
-                head_sha,
-                scrub_token_from_text(str(e)),
+                "PR review: could not fetch head content for %s@%s: %s", f.filename, head_sha, e
             )
             content = None
         return f.filename, content
@@ -462,10 +455,13 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           bot did not author, else COMMENT) whose body carries only the summary.
           A finding the reviewer tagged ``pre_existing`` (a bug in unchanged code
           the PR did not touch, per its own line/file — see
-          :func:`_partition_review_issues`) is NOT commented — instead it is
-          serialized into ``review_summary["pending_issue_proposals"]`` for a
-          human to optionally file as a GitHub issue, and it drives neither the
-          review event nor the "no issues" reaction. Every other finding IS
+          :func:`_partition_review_issues`) is NOT commented and is serialized
+          into ``review_summary["pending_issue_proposals"]`` for a human to
+          optionally file as a GitHub issue, and it drives neither the review
+          event nor the "no issues" reaction. If :func:`_partition_review_issues`
+          proves the finding lies on a line the PR actually ADDED, the
+          pre_existing tag is overridden back to a PR finding and the finding
+          is commented like any other. Every other finding IS
           posted, including one naming a file this PR never touched at all (see
           below) — such a finding is not necessarily pre-existing (it is often
           "this PR should have added/modified file X but didn't"), so only the
@@ -490,89 +486,86 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           job, since the findings still post.)
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
-    # Outer guard covers provider resolution, RUNNING updates, heartbeat setup,
-    # and the body: anything that escapes must still mark the job failed (scrubbed)
-    # and never raise, so the daemon-thread hook cannot leave a job wedged.
-    # Fully self-protected: the fallback finalize is best-effort and swallowed.
-    try:
-        # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
-        # provider installed) must fail the job immediately instead of burning REST
-        # rate budget on PR metadata + diff assembly and then failing anyway.
-        provider = _main.get_engine_provider()
-        if provider is None:
-            logger.error("PR review %s aborted: no engine provider configured", job_id)
-            error = (
-                "code review failed: no engine provider configured — SE's own "
-                "_se_startup() hook must have run, since it installs the engine "
-                "provider at startup"
-            )
-            _main.update_job(job_id, status=JobStatus.FAILED.value, phase="completed", error=error)
-            # error=error (not just status_text) so the Code Review page's error column
-            # is populated on this path exactly as _record_failure does everywhere else.
-            _main.update_review(
-                job_id,
-                status=JobStatus.FAILED.value,
-                status_text="No engine provider configured",
-                error=error,
-                completed=True,
-            )
-            # Tell the PR, not just the job store: the reviewer who invoked @khala-review
-            # is watching the pull request and would otherwise wait forever on a job that
-            # silently failed. The token is already in hand, so post a scrubbed one-liner
-            # (best-effort — a GitHub outage must not turn this into an unhandled raise).
-            try:
-                with _main.GitHubClient(token=token) as client:
-                    _main._safe_comment(
-                        client,
-                        owner,
-                        repo,
-                        pr_number,
-                        f"Code review could not run: {scrub_token_from_text(error)}",
-                    )
-            except Exception as exc:  # noqa: BLE001 - notification is best-effort
-                logger.warning(
-                    "PR review %s: failed to post abort notice: %s",
-                    job_id,
-                    scrub_token_from_text(str(exc)),
-                )
-            return
-        _main.update_job(
-            job_id,
-            status=JobStatus.RUNNING.value,
-            phase="reviewing",
-            status_text="Reviewing pull request",
+    # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
+    # provider installed) must fail the job immediately instead of burning REST
+    # rate budget on PR metadata + diff assembly and then failing anyway.
+    provider = _main.get_engine_provider()
+    if provider is None:
+        logger.error("PR review %s aborted: no engine provider configured", job_id)
+        error = (
+            "code review failed: no engine provider configured — SE's own "
+            "_se_startup() hook must have run, since it installs the engine "
+            "provider at startup"
         )
+        _main.update_job(job_id, status=JobStatus.FAILED.value, phase="completed", error=error)
+        # error=error (not just status_text) so the Code Review page's error column
+        # is populated on this path exactly as _record_failure does everywhere else.
         _main.update_review(
-            job_id, status=JobStatus.RUNNING.value, status_text="Reviewing pull request"
+            job_id,
+            status=JobStatus.FAILED.value,
+            status_text="No engine provider configured",
+            error=error,
+            completed=True,
         )
-        # Continuous liveness beat for the admission guard: job updates only land at phase
-        # transitions, and a single review LLM call can run for minutes — without this, a
-        # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
-        # The context manager guarantees the beat stops on every exit path; on_error keeps
-        # a job-service blip from killing the beat thread (or the review).
-        from shared.concurrency import BackgroundHeartbeat  # noqa: I001, PLC0415 - keep module import light
-
-        review_hb = BackgroundHeartbeat(
-            lambda: heartbeat_job(job_id),
-            _REVIEW_HEARTBEAT_INTERVAL_S,
-            name=f"review-heartbeat-{job_id}",
-            beat_first=True,
-            on_error=lambda exc: logger.warning(
-                "review heartbeat error for job %s: %s",
+        # Tell the PR, not just the job store: the reviewer who invoked @khala-review
+        # is watching the pull request and would otherwise wait forever on a job that
+        # silently failed. The token is already in hand, so post a scrubbed one-liner
+        # (best-effort — a GitHub outage must not turn this into an unhandled raise).
+        try:
+            with _main.GitHubClient(token=token) as client:
+                _main._safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review could not run: {scrub_token_from_text(error)}",
+                )
+        except Exception as exc:  # noqa: BLE001 - notification is best-effort
+            logger.warning(
+                "PR review %s: failed to post abort notice: %s",
                 job_id,
                 scrub_token_from_text(str(exc)),
-            ),
-        )
-        # ``_run_pr_review_body`` already marks the job failed for exceptions raised
-        # inside the review itself. This outer guard is the last line of defense for
-        # anything that escapes it — heartbeat setup/teardown, or the body's own
-        # last-resort finalize failing — so this function honors its "never raises"
-        # contract and a hook exception can never leave the job wedged in "running".
+            )
+        return
+    _main.update_job(
+        job_id,
+        status=JobStatus.RUNNING.value,
+        phase="reviewing",
+        status_text="Reviewing pull request",
+    )
+    _main.update_review(
+        job_id, status=JobStatus.RUNNING.value, status_text="Reviewing pull request"
+    )
+    # Continuous liveness beat for the admission guard: job updates only land at phase
+    # transitions, and a single review LLM call can run for minutes — without this, a
+    # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
+    # The context manager guarantees the beat stops on every exit path; on_error keeps
+    # a job-service blip from killing the beat thread (or the review).
+    from shared.concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
+
+    review_hb = BackgroundHeartbeat(
+        lambda: heartbeat_job(job_id),
+        _REVIEW_HEARTBEAT_INTERVAL_S,
+        name=f"review-heartbeat-{job_id}",
+        beat_first=True,
+        on_error=lambda exc: logger.warning(
+            "review heartbeat error for job %s: %s",
+            job_id,
+            scrub_token_from_text(str(exc)),
+        ),
+    )
+    # ``_run_pr_review_body`` already marks the job failed for exceptions raised
+    # inside the review itself. This outer guard is the last line of defense for
+    # anything that escapes it — heartbeat setup/teardown, or the body's own
+    # last-resort finalize failing — so this function honors its "never raises"
+    # contract and a hook exception can never leave the job wedged in "running".
+    # Fully self-protected: the fallback finalize is best-effort and swallowed.
+    try:
         with review_hb:
             _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
     except Exception as exc:  # noqa: BLE001 - the daemon thread must never die with the job left running
         scrubbed_error = scrub_token_from_text(str(exc))
-        logger.exception(
+        logger.error(
             "PR review %s: unhandled exception escaped the review body: %s",
             job_id,
             scrubbed_error,
@@ -586,9 +579,12 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 phase="completed",
                 error=scrubbed_error,
             )
-        except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
-            logger.exception(
-                "PR review %s: last-resort finalize failed after escaped exception", job_id
+        except Exception as finalize_exc:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
+            safe_finalize_error = scrub_token_from_text(str(finalize_exc))
+            logger.error(
+                "PR review %s: last-resort finalize failed after escaped exception: %s",
+                job_id,
+                safe_finalize_error,
             )
         # Tell the PR too, same as the no-engine-provider path above: whoever
         # triggered the review is watching it, not the job store, and this is
@@ -634,9 +630,6 @@ def _finalize_review(
           ``.value`` for both (a single conversion point for both consumers);
           ``update_review`` additionally receives ``completed=True``.
     """
-    assert status in (JobStatus.COMPLETED, JobStatus.FAILED), (
-        f"_finalize_review requires COMPLETED or FAILED, got {status!r}"
-    )
     job_kwargs: Dict[str, Any] = {"status": status.value}
     review_kwargs: Dict[str, Any] = {"status": status.value, "completed": True}
     if status_text is not None:
@@ -835,6 +828,13 @@ def _run_reviewer(
             try:
                 output = provider.run_pr_code_review(**common, **mode_kwargs)
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
+                raw_message = str(e)
+                detail = (
+                    scrub_token_from_text(raw_message)
+                    if raw_message.strip()
+                    else f"{type(e).__name__} (no error message)"
+                )
+                logger.error("PR review agent failed: %s", detail)
                 # A reviewer-side failure (LLM outage, unrecoverable exhaustion,
                 # etc.) is not a code defect: record the detail in the job
                 # store but never post the raw exception on the PR — degrade
@@ -843,14 +843,7 @@ def _run_reviewer(
                 # timing out with no attached detail); recording just "code
                 # review failed: " is useless for later triage, so fall back
                 # to naming the exception type when it carries no message of
-                # its own. Scrub once for log + outage so a token that leaked
-                # into the exception text never reaches either sink.
-                detail = (
-                    scrub_token_from_text(str(e))
-                    if e.args
-                    else f"{type(e).__name__} (no error message)"
-                )
-                logger.exception("PR review agent failed: %s", detail)
+                # its own.
                 _main._record_review_outage(
                     client, owner, repo, pr_number, job_id, f"code review failed: {detail}"
                 )
@@ -912,7 +905,11 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
             review_comments, resolved_ids, issue_comments = (f.result() for f in futures)
         return build_existing_comments(review_comments, resolved_ids, issue_comments)
     except Exception as e:  # noqa: BLE001 - this lookup is best-effort, never fails the review
-        logger.warning("Could not fetch existing comments for PR #%s: %s", pr_number, e)
+        logger.warning(
+            "Could not fetch existing comments for PR #%s: %s",
+            pr_number,
+            scrub_token_from_text(str(e)),
+        )
         return []
 
 
@@ -959,23 +956,23 @@ def _detect_duplicate_proposals(
         logger.warning(
             "PR review #%s: could not list open issues for duplicate-detection: %s",
             pr_number,
-            e,
+            scrub_token_from_text(str(e)),
         )
         open_issues = []
-    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+    except Exception as exc:  # noqa: BLE001 - duplicate-detection must never fail the review
         logger.warning(
-            "PR review #%s: unexpected error listing open issues for duplicate-detection",
+            "PR review #%s: unexpected error listing open issues for duplicate-detection: %s",
             pr_number,
-            exc_info=True,
+            scrub_token_from_text(str(exc)),
         )
         open_issues = []
     try:
         return annotate_duplicate_proposals(proposals, open_issues)
-    except Exception:  # noqa: BLE001 - duplicate-detection must never fail the review
+    except Exception as exc:  # noqa: BLE001 - duplicate-detection must never fail the review
         logger.warning(
-            "PR review #%s: duplicate annotation failed, proceeding without duplicate detection",
+            "PR review #%s: duplicate annotation failed, proceeding without duplicate detection: %s",
             pr_number,
-            exc_info=True,
+            scrub_token_from_text(str(exc)),
         )
         # annotate_duplicate_proposals's own "no match" branch does exactly this
         # ({**p, "matched_existing": False}); mirrored here as a safety net so a
@@ -1014,7 +1011,11 @@ def _fetch_pr_metadata(
         try:
             return client.get_authenticated_login()
         except Exception as e:  # noqa: BLE001 - reviewer_login is best-effort, never fails the review
-            logger.warning("Could not resolve reviewer login for PR #%s: %s", pr_number, e)
+            logger.warning(
+                "Could not resolve reviewer login for PR #%s: %s",
+                pr_number,
+                scrub_token_from_text(str(e)),
+            )
             return ""
 
     tasks = (_get_pr, _get_files, _get_login)
@@ -1391,10 +1392,9 @@ def _post_review_comments(
     Postconditions:
         - The review body is built via ``build_review_body`` from
           ``output.summary``/``output.spec_compliance_notes``, forced to
-          ``""`` when ``partition.proposals`` is non-empty (the reviewer's
-          narrative can otherwise leak a pre-existing finding's theme/location
-          even though its own comment is suppressed; ``proposals`` is the
-          signal a human will still see something withheld from this PR). The
+          ``""`` when ``partition.preexisting_issues`` is non-empty (the
+          reviewer's narrative can otherwise leak a pre-existing finding's
+          theme/location even though its own comment is suppressed). The
           returned ``event`` is ``choose_event(partition.pr_issues,
           author=pr.author, reviewer=reviewer_login)``.
         - ``partition.line_comments`` are submitted via :func:`_submit_review`,
@@ -1705,7 +1705,7 @@ def _run_pr_review_body(
         # dies and the job is stuck in "running" forever. Mark it failed (mirroring
         # post_run) and post a best-effort, token-scrubbed PR comment.
         safe_err = scrub_token_from_text(str(review_exc))
-        logger.exception("PR review hook failed: %s", safe_err)
+        logger.error("PR review hook failed: %s", safe_err)
         try:
             with _main.GitHubClient(token=token) as client:
                 # Same graceful-degradation contract as the reviewer paths: record
@@ -1727,8 +1727,13 @@ def _run_pr_review_body(
             # self-consistent means it never depends on that.
             try:
                 _finalize_review(job_id, JobStatus.FAILED, phase="completed", error=safe_err)
-            except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do
-                logger.exception("PR review %s: last-resort finalize failed", job_id)
+            except Exception as finalize_exc:  # noqa: BLE001 - store unreachable; nothing more we can do
+                safe_finalize_err = scrub_token_from_text(str(finalize_exc))
+                logger.error(
+                    "PR review %s: last-resort finalize failed: %s",
+                    job_id,
+                    safe_finalize_err,
+                )
 
 
 def _react_to_pr(client: _main.GitHubClient, owner: str, repo: str, pr_number: int) -> None:
@@ -1740,8 +1745,12 @@ def _react_to_pr(client: _main.GitHubClient, owner: str, repo: str, pr_number: i
     """
     try:
         client.create_issue_reaction(owner, repo, pr_number, content="+1")
-    except Exception:  # noqa: BLE001 - reaction is a courtesy signal only
-        logger.warning("Could not add +1 reaction to PR #%s", pr_number, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - reaction is a courtesy signal only
+        logger.warning(
+            "Could not add +1 reaction to PR #%s: %s",
+            pr_number,
+            scrub_token_from_text(str(exc)),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1754,17 +1763,19 @@ def _safe_comment(
 ) -> bool:
     """Best-effort issue comment; never blocks the job on a failed comment.
 
-    Body is scrubbed to redact tokens that might have leaked from any source
-    (e.g., git stderr, engine output).
+    Body is scrubbed to redact tokens that might have leaked from git stderr.
 
     Postconditions:
-        - Returns True when the comment was posted, False on any failure (GitHub
-          API rejection or any other exception from ``add_issue_comment``).
+        - Returns True when the comment was posted, False when GitHub rejected it.
           Never raises — callers that must not drop a finding inspect the result.
     """
     try:
         client.add_issue_comment(owner, repo, number, scrub_token_from_text(body))
         return True
     except Exception as e:  # noqa: BLE001 - comment is best-effort, never fails the job
-        logger.warning("Failed to comment on issue #%s: %s", number, scrub_token_from_text(str(e)))
+        logger.warning(
+            "Failed to comment on issue #%s: %s",
+            number,
+            scrub_token_from_text(str(e)),
+        )
         return False
