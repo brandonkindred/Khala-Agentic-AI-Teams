@@ -225,6 +225,8 @@ def test_existing_codebase_pseudo_path_ignores_repo_reader_when_no_excerpt() -> 
     assert msg.startswith("Error")
     assert "no existing-codebase excerpt" in msg
     assert "REPO_CONTENT" not in msg
+    # resolve_path must also return None — never fall through to the repo reader
+    assert idx.resolve_path(CodebaseIndex.EXISTING_CODEBASE_PATH) is None
 
 
 def test_read_file_unique_suffix_match() -> None:

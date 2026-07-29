@@ -348,6 +348,8 @@ class CodebaseIndex:
         resolved, hits = self._resolve(key)
         if resolved is not None:
             return resolved
+        if key == self.EXISTING_CODEBASE_PATH:
+            return None
         if len(hits) > 1:
             return None
         if key and self._reader_read(key) is not None:
