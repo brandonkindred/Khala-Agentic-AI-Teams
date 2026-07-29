@@ -26,6 +26,7 @@ class _FakeModel:
 
 
 def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Happy path: structured output is available and we get the stubbed JSON."""
     client = _StubClient({"ready": True, "rationale": "ok", "issues": []})
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     monkeypatch.setattr(so_mod, "get_strands_model", lambda *_a, **_k: _FakeModel(client))
@@ -51,6 +52,7 @@ def test_invoke_structured_with_schema_happy_path(monkeypatch: pytest.MonkeyPatc
 def test_invoke_structured_with_schema_requires_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """If structured output is unavailable, the helper asserts a precondition."""
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: False)
     with pytest.raises(AssertionError, match="precondition"):
         so_mod.invoke_structured_with_schema(
@@ -70,6 +72,7 @@ def test_invoke_structured_with_schema_rejects_empty_inputs(
     monkeypatch: pytest.MonkeyPatch,
     field: str,
 ) -> None:
+    """Empty required input fields must be rejected via a precondition assert."""
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     kwargs: Dict[str, Any] = {
         "agent_key": "strategy_design",
@@ -89,6 +92,7 @@ def test_invoke_structured_with_schema_rejects_empty_inputs(
 def test_invoke_structured_with_schema_rejects_empty_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An empty mapping schema must be rejected via a precondition assert."""
     monkeypatch.setattr(so_mod, "structured_output_available", lambda: True)
     with pytest.raises(AssertionError, match="precondition"):
         so_mod.invoke_structured_with_schema(
