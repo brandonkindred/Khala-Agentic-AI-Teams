@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -60,6 +60,10 @@ from software_engineering_team.shared.context_sizing import compute_code_review_
 # ``wait(timeout=10)`` already guarantees the worker finished, so this only guards
 # against a notification queued just after that.
 _LATE_NOTIFY_GRACE_PERIOD_S = 0.1
+
+# Headroom under the map-chunk char budget so near-cap files cannot pack into
+# one chunk (forces separate map units in multi-file recovery/parallelism tests).
+_MAP_CHUNK_SEPARATION_HEADROOM = 2_000
 
 # ---------------------------------------------------------------------------
 # Pure-function tests
@@ -169,7 +173,7 @@ class _ScriptedClient(DummyLLMClient):
     in parallel.
     """
 
-    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
         super().__init__()
         self._responses = list(responses)
         self._idx = 0
@@ -180,11 +184,11 @@ class _ScriptedClient(DummyLLMClient):
         prompt: str,
         *,
         temperature: float = 0.0,
-        system_prompt: Optional[str] = None,
-        tools: Optional[list] = None,
+        system_prompt: str | None = None,
+        tools: list | None = None,
         think: bool = False,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         with self._lock:
             if self._idx < len(self._responses):
                 resp = self._responses[self._idx]
@@ -334,12 +338,16 @@ def test_chunk_prompt_includes_component_and_decision_text() -> None:
     from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
 
     class _PromptCapturingClient(DummyLLMClient):
+        """Records prompts; lock-guarded for parallel map/tail callers."""
+
         def __init__(self) -> None:
             super().__init__()
-            self.prompts: List[str] = []
+            self.prompts: list[str] = []
+            self._lock = threading.Lock()
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            self.prompts.append(prompt)
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            with self._lock:
+                self.prompts.append(prompt)
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     arch = SystemArchitecture(
@@ -505,7 +513,7 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
             super().__init__()
             self.map_calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if CODE_TO_REVIEW_HEADER in prompt:
                 self.map_calls += 1
             return super().complete_json(prompt, **kwargs)
@@ -589,7 +597,7 @@ def test_split_never_breaks_a_line_even_when_oversized() -> None:
 
 def _python_functions(n_funcs: int, body_lines: int = 8) -> str:
     """A .py file of equal-sized top-level functions, blank-line separated."""
-    parts: List[str] = []
+    parts: list[str] = []
     for f in range(1, n_funcs + 1):
         parts.append(f"def func_{f:03d}():")
         for b in range(body_lines):
@@ -600,7 +608,7 @@ def _python_functions(n_funcs: int, body_lines: int = 8) -> str:
 
 def _ts_functions(n_funcs: int, body_lines: int = 8) -> str:
     """A .ts file of equal-sized top-level functions with column-0 braces."""
-    parts: List[str] = []
+    parts: list[str] = []
     for f in range(1, n_funcs + 1):
         parts.append(f"function fn_{f:03d}() {{")
         for b in range(body_lines):
@@ -950,14 +958,14 @@ class _SelectiveRaiser(DummyLLMClient):
     with concurrent tail-pass execution.
     """
 
-    def __init__(self, marker: str, exc: Optional[Exception] = None) -> None:
+    def __init__(self, marker: str, exc: Exception | None = None) -> None:
         super().__init__()
         self.marker = marker
         self.exc = exc or _bisecting_failure("LLM output truncated")
-        self.prompts: List[str] = []
+        self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         with self._lock:
             self.prompts.append(prompt)
             if self.marker in prompt:
@@ -971,10 +979,10 @@ class _FailNTimes(DummyLLMClient):
     def __init__(self, n: int) -> None:
         super().__init__()
         self.remaining = n
-        self.prompts: List[str] = []
+        self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         with self._lock:
             self.prompts.append(prompt)
             if self.remaining > 0:
@@ -992,7 +1000,7 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
             super().__init__()
             self.calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             self.calls += 1
             # Both files in one prompt → fail; single file → succeed.
             if "### a.py ###" in prompt and "### b.py ###" in prompt:
@@ -1046,7 +1054,7 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
             self.a_failures = 0
             self.calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             self.calls += 1
             if "### a.py ###" in prompt and "### b.py ###" in prompt:
                 raise _bisecting_failure("no content")  # force bisection
@@ -1139,7 +1147,7 @@ def test_semantic_exhaustion_multi_file_still_separates_files(monkeypatch) -> No
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
 
     class _FailWhenBadPresent(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "### bad.py ###" in prompt:
                 raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
             return super().complete_json(prompt, **kwargs)
@@ -1174,7 +1182,7 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
             super().__init__()
             self.calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             self.calls += 1
             if self.calls == 1:
                 # retry_thinking_level defaults to None: no proof-of-change rung ran.
@@ -1205,7 +1213,7 @@ def test_context_chained_child_failure_is_not_misclassified_as_semantic() -> Non
             super().__init__()
             self.bad_calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "### a.py ###" in prompt and "### b.py ###" in prompt:
                 # Combined chunk semantically exhausts → split by file.
                 raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
@@ -1260,7 +1268,7 @@ def test_partial_terminal_failure_degrades_gracefully_without_blocking(monkeypat
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000  # forces the two files into separate chunks
+    filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM  # forces the two files into separate chunks
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1427,7 +1435,7 @@ def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1455,7 +1463,7 @@ def test_truncated_chunk_review_degrades_not_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1482,7 +1490,7 @@ def test_not_reviewed_ranges_populated_and_not_in_issues(monkeypatch) -> None:
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1503,7 +1511,7 @@ def test_block_on_unreviewed_env_restores_fail_closed(monkeypatch) -> None:
     monkeypatch.setenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", "true")
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
     files = {
         "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
         "good.py": "ok = 1\n".ljust(filler_size, "#"),
@@ -1529,7 +1537,7 @@ def test_total_failure_still_raises_even_with_graceful_default(monkeypatch) -> N
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    filler_size = cap - 2_000
+    filler_size = cap - _MAP_CHUNK_SEPARATION_HEADROOM
     # Two separate chunks, BOTH carrying the failure marker → nothing reviewed.
     files = {
         "bad1.py": "FAILME = True\n" + ("x = 1\n" * 20),
@@ -1563,7 +1571,7 @@ class _ThinkAwareReviewer:
         self.llm = object()
         self.fail_exc = fail_exc
         self.recover_on_think_off = recover_on_think_off
-        self.think_calls: List[Any] = []
+        self.think_calls: list[Any] = []
 
     def run(self, chunk_input: Any, think: Any = None) -> ChunkReviewOutput:
         self.think_calls.append(think)
@@ -1702,7 +1710,7 @@ def test_resolve_code_review_model_think_override(monkeypatch) -> None:
         thinking_override_supported,
     )
 
-    captured: Dict[str, Any] = {}
+    captured: dict[str, Any] = {}
 
     def _fake_get(agent_key: str, **kw: Any) -> str:
         captured["agent_key"] = agent_key
@@ -1787,6 +1795,7 @@ def test_infra_failure_fails_fast_without_retry_or_bisect() -> None:
                 language="python",
             ),
         )
+    # Exactly one map call: infra failures fail fast with no retry/bisect.
     assert len(client.prompts) == 1
 
 
@@ -1804,6 +1813,7 @@ def test_infra_failure_is_detected_through_exception_chain() -> None:
                 language="python",
             ),
         )
+    # Exactly one map call: chain-walked infra failure also fails fast.
     assert len(client.prompts) == 1
 
 
@@ -1852,9 +1862,9 @@ def test_parallel_map_failure_cancels_and_raises() -> None:
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     files = {
-        "a.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "b.py": "FAILME = 2\n".ljust(cap - 2_000, "#"),
-        "c.py": "FAILME = 3\n".ljust(cap - 2_000, "#"),
+        "a.py": "FAILME = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
+        "b.py": "FAILME = 2\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
+        "c.py": "FAILME = 3\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
     }
     client = _SelectiveRaiser("FAILME", exc=LLMRateLimitError("429"))
     with pytest.raises(CodeReviewUnavailableError):
@@ -1878,7 +1888,7 @@ def test_parallel_map_failure_does_not_wait_for_inflight_reviews(fail_first: boo
             super().__init__()
             self.slow_finished = False
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "FAILME" in prompt:
                 raise LLMRateLimitError("429")
             release.wait(timeout=10)
@@ -1888,8 +1898,8 @@ def test_parallel_map_failure_does_not_wait_for_inflight_reviews(fail_first: boo
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     contents = {
-        "fast_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "slow.py": "ok = 1\n".ljust(cap - 2_000, "#"),
+        "fast_fail.py": "FAILME = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
+        "slow.py": "ok = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
     }
     order = ["fast_fail.py", "slow.py"] if fail_first else ["slow.py", "fast_fail.py"]
     files = {name: contents[name] for name in order}
@@ -1919,7 +1929,7 @@ def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
             super().__init__()
             self.saw_second = False
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "FAILME" in prompt:
                 raise LLMRateLimitError("429")
             if "SECONDCHUNK" in prompt:
@@ -1930,8 +1940,8 @@ def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
     cap = compute_code_review_map_chunk_chars(llm_probe)
     # One ~full chunk per file, in insertion order, so the failing chunk is first.
     files = {
-        "a_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "b_second.py": "SECONDCHUNK = 1\n".ljust(cap - 2_000, "#"),
+        "a_fail.py": "FAILME = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
+        "b_second.py": "SECONDCHUNK = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
     }
     client = _FailFirstRecordLater()
     with pytest.raises(CodeReviewUnavailableError):
@@ -1974,7 +1984,7 @@ def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) 
     release = threading.Event()
 
     class _ConcurrencyProbe(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             with lock:
                 state["current"] += 1
                 state["peak"] = max(state["peak"], state["current"])
@@ -1989,7 +1999,9 @@ def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) 
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(5)}
+    files = {
+        f"f{i}.py": f"x = {i}\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#") for i in range(5)
+    }
     client = _ConcurrencyProbe()
     threading.Thread(target=_release_soon, daemon=True).start()
     try:
@@ -2011,7 +2023,7 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
     state = {"current": 0, "peak": 0}
 
     class _ConcurrencyProbe(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             with lock:
                 state["current"] += 1
                 state["peak"] = max(state["peak"], state["current"])
@@ -2022,7 +2034,9 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    files = {f"f{i}.py": f"x = {i}\n".ljust(cap - 2_000, "#") for i in range(3)}
+    files = {
+        f"f{i}.py": f"x = {i}\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#") for i in range(3)
+    }
     client = _ConcurrencyProbe()
     run_coordinator(client, CodeReviewInput(files=files, task_description="t", language="python"))
     assert 2 <= state["peak"] <= 3
@@ -2345,7 +2359,7 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
     class _RejectBWithSummaryOnly(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "### b.py ###" in prompt:
                 return {
                     "approved": False,
@@ -2361,8 +2375,8 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
             }
 
     files = {
-        "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
-        "b.py": "b = 2\n".ljust(cap - 2_000, "#"),
+        "a.py": "a = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
+        "b.py": "b = 2\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
         "empty.py": "",  # contributes the non-blocking info finding
     }
     result = run_coordinator(
@@ -2392,7 +2406,7 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
     class _SilentRejectB(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "### b.py ###" in prompt:
                 return {
                     "approved": False,
@@ -2408,8 +2422,8 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
             }
 
     files = {
-        "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
-        "b.py": "b = 2\n".ljust(cap - 2_000, "#"),
+        "a.py": "a = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
+        "b.py": "b = 2\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
     }
     result = run_coordinator(
         _SilentRejectB(),
@@ -2445,7 +2459,7 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
             super().__init__()
             self.slow_finished = threading.Event()
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "FAILME" in prompt:
                 assert slow_started.wait(timeout=10), "slow chunk must start first"
                 raise LLMRateLimitError("429")
@@ -2458,8 +2472,8 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     files = {
-        "fast_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
-        "slow.py": "ok = 1\n".ljust(cap - 2_000, "#"),
+        "fast_fail.py": "FAILME = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
+        "slow.py": "ok = 1\n".ljust(cap - _MAP_CHUNK_SEPARATION_HEADROOM, "#"),
     }
     client = _OneFailsOneBlocks()
     try:
@@ -2535,7 +2549,7 @@ def test_single_chunk_keeps_notes_after_bisection() -> None:
             super().__init__()
             self.calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             self.calls += 1
             if "### a.py ###" in prompt and "### b.py ###" in prompt:
                 raise LLMSemanticExhaustionError("no content")
@@ -2569,9 +2583,9 @@ def test_language_is_threaded_into_every_chunk_prompt() -> None:
     class _Recorder(DummyLLMClient):
         def __init__(self) -> None:
             super().__init__()
-            self.prompts: List[str] = []
+            self.prompts: list[str] = []
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             self.prompts.append(prompt)
             return super().complete_json(prompt, **kwargs)
 
@@ -2596,9 +2610,9 @@ def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
     class _Recorder(DummyLLMClient):
         def __init__(self) -> None:
             super().__init__()
-            self.prompts: List[str] = []
+            self.prompts: list[str] = []
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             self.prompts.append(prompt)
             return super().complete_json(prompt, **kwargs)
 
@@ -2623,14 +2637,19 @@ def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
 
 
 class _RecordingClient(DummyLLMClient):
-    """Delegates to Dummy but records every prompt."""
+    """Delegates to Dummy but records every prompt.
+
+    Thread-safe: map calls may append concurrently under parallelism.
+    """
 
     def __init__(self) -> None:
         super().__init__()
-        self.prompts: List[str] = []
+        self.prompts: list[str] = []
+        self._lock = threading.Lock()
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.prompts.append(prompt)
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        with self._lock:
+            self.prompts.append(prompt)
         return super().complete_json(prompt, **kwargs)
 
 
@@ -2726,7 +2745,7 @@ def test_coordinator_does_not_run_class_cohesion_pass() -> None:
             super().__init__()
             self.saw_cohesion_prompt = False
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             if "Stated purpose" in prompt:
                 self.saw_cohesion_prompt = True
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
@@ -2758,7 +2777,7 @@ def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
     """The ``repo_reader`` argument is forwarded verbatim to the false-positive filter."""
     import code_review_agent.coordinator as coord
 
-    captured: Dict[str, Any] = {}
+    captured: dict[str, Any] = {}
 
     def _spy(llm, input_data, issues, repo_reader=None, index=None):
         captured["reader"] = repo_reader
@@ -2792,9 +2811,9 @@ def test_coordinator_runs_with_submission_cache_disabled(monkeypatch) -> None:
 
 def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> None:
     """The submission is parsed into a ``CodebaseIndex`` exactly once per
-    ``run_coordinator`` call, and the same instance is forwarded to both the
-    false-positive filter and the architecture-consistency pass (rather than
-    each independently rebuilding it from the same input)."""
+    ``run_coordinator`` call, and the same instance is forwarded to the
+    false-positive filter, architecture-consistency pass, and side-effect
+    pass (rather than each independently rebuilding it from the same input)."""
     import code_review_agent.coordinator as coord
     from code_review_agent.false_positive_filter import CodebaseIndex
 
@@ -2822,8 +2841,13 @@ def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> No
         received_indexes.append(index)
         return []
 
+    def _side_effect_spy(llm, input_data, repo_reader=None, index=None):
+        received_indexes.append(index)
+        return []
+
     monkeypatch.setattr(coord, "filter_false_positives", _filter_spy)
     monkeypatch.setattr(coord, "find_architecture_and_redundancy_issues", _arch_spy)
+    monkeypatch.setattr(coord, "find_side_effect_impact_issues", _side_effect_spy)
 
     run_coordinator(
         DummyLLMClient(),
@@ -2831,7 +2855,7 @@ def test_coordinator_builds_codebase_index_once_and_shares_it(monkeypatch) -> No
     )
 
     assert len(build_calls) == 1, "CodebaseIndex.from_input should be called exactly once"
-    assert received_indexes == [build_calls[0], build_calls[0]]
+    assert received_indexes == [build_calls[0], build_calls[0], build_calls[0]]
 
 
 def test_single_chunk_summary_reflects_architecture_findings(monkeypatch) -> None:
@@ -2911,6 +2935,8 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
 
 
 def test_tail_passes_run_sequentially_for_dummy_llm() -> None:
+    """A bare ``DummyLLMClient`` forces sequential tail passes; a non-Dummy
+    stand-in (``MagicMock``) does not."""
     assert _tail_passes_run_sequentially(DummyLLMClient()) is True
     assert _tail_passes_run_sequentially(MagicMock()) is False
 
@@ -2949,7 +2975,7 @@ class _NonDummyLLMClient(LLMClient, Model):
     def update_config(self, **model_config: Any) -> None:
         self._inner.update_config(**model_config)
 
-    def get_config(self) -> Dict[str, Any]:
+    def get_config(self) -> dict[str, Any]:
         return self._inner.get_config()
 
     def structured_output(self, *args: Any, **kwargs: Any) -> Any:
@@ -2959,7 +2985,7 @@ class _NonDummyLLMClient(LLMClient, Model):
         async for event in self._inner.stream(*args, **kwargs):
             yield event
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         return self._inner.complete_json(prompt, **kwargs)
 
     def chat(self, messages: list, **kwargs: Any) -> Any:
