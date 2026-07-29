@@ -140,6 +140,8 @@ def compute_code_review_map_chunk_chars(llm: LLMClient) -> int:
 # (2 × the map-phase ``reserved_response_tokens=4096``). Also used as the
 # floor when raising a tight ``LLM_MAX_TOKENS`` for that call's output budget.
 CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS = 8192
+# Single enabled-half response reserve (one finding array).
+CODE_REVIEW_MERGED_PASS_SINGLE_RESPONSE_TOKENS = 4096
 # Minimum completion room before the merged call is skipped entirely: below
 # this, even an empty payload cannot usefully return JSON findings.
 _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS = 1024
@@ -165,6 +167,7 @@ def compute_code_review_merged_pass_budgets(
     system_prompt_chars: int,
     manifest_chars: int = 0,
     base_scaffolding_chars: int = CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
+    finding_array_count: int = 2,
 ) -> MergedPassBudgets | None:
     """Budget architecture, changed-file manifest, and code for the merged pass.
 
@@ -174,18 +177,20 @@ def compute_code_review_merged_pass_budgets(
     overflow smaller-context models. This helper:
 
     1. Reserves the (possibly half-filtered) system prompt and fixed scaffolding.
-    2. Takes up to ``CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS`` for the completion,
-       shrinking that reserve when the context cannot hold the full dual-array
-       floor — never inventing a positive content allowance once reserves already
-       exceed the window.
-    3. Splits leftover capacity across the changed-file manifest (truncated with
-       tool-reachable overflow), then the architecture body, then code inlining
-       (capped by ``CODE_REVIEW_MAP_CHUNK_CHARS``).
+    2. Takes up to a dual-array (``8192``) or single-array (``4096``) response
+       reserve based on ``finding_array_count``, shrinking that reserve when the
+       context cannot hold the full floor — never inventing a positive content
+       allowance once reserves already exceed the window.
+    3. Splits leftover capacity across the architecture body first (no tool can
+       recover an omitted document), then the changed-file manifest (truncated
+       with tool-reachable overflow via ``list_changed_files``), then code
+       inlining (capped by ``CODE_REVIEW_MAP_CHUNK_CHARS``).
 
     Preconditions:
         - ``llm.get_max_context_tokens()`` returns a positive context size.
         - Char-count arguments are non-negative sizes for the bodies that will
           be placed in the merged call.
+        - ``finding_array_count`` is ``1`` or ``2``.
 
     Postconditions:
         - Returns ``None`` when even an empty payload cannot leave a usable
@@ -194,6 +199,8 @@ def compute_code_review_merged_pass_budgets(
           ``max_inline_code_chars`` never exceeds the map-chunk absolute cap.
         - Never raises.
     """
+    if finding_array_count not in (1, 2):
+        raise ValueError(f"finding_array_count must be 1 or 2, got {finding_array_count!r}")
     ctx = llm.get_max_context_tokens()
     fixed_prompt_tokens = int(
         (max(0, system_prompt_chars) + max(0, base_scaffolding_chars)) / CHARS_PER_TOKEN
@@ -205,21 +212,24 @@ def compute_code_review_merged_pass_budgets(
     if room_after_prompt < _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS:
         return None
 
-    reserved_response = min(CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS, room_after_prompt)
+    response_floor = (
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
+        if finding_array_count == 2
+        else CODE_REVIEW_MERGED_PASS_SINGLE_RESPONSE_TOKENS
+    )
+    reserved_response = min(response_floor, room_after_prompt)
     content_tokens = room_after_prompt - reserved_response  # may be 0
     content_chars = int(content_tokens * CHARS_PER_TOKEN)
 
-    manifest_wanted = max(0, manifest_chars)
-    max_manifest = min(manifest_wanted, content_chars)
-    after_manifest = content_chars - max_manifest
-
+    # Architecture has no recovery tool; allocate it before the recoverable
+    # changed-file manifest.
     arch_wanted = max(0, architecture_chars)
-    if arch_wanted <= after_manifest:
-        max_arch = arch_wanted
-        code_room = after_manifest - arch_wanted
-    else:
-        max_arch = after_manifest
-        code_room = 0
+    max_arch = min(arch_wanted, content_chars)
+    after_arch = content_chars - max_arch
+
+    manifest_wanted = max(0, manifest_chars)
+    max_manifest = min(manifest_wanted, after_arch)
+    code_room = after_arch - max_manifest
 
     code_cap = parse_env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
     max_code = 0 if code_room <= 0 else min(code_room, code_cap)

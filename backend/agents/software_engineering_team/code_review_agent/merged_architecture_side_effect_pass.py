@@ -144,6 +144,7 @@ def _run_pass(
         system_prompt_chars=len(system_prompt),
         manifest_chars=manifest_chars,
         base_scaffolding_chars=CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
+        finding_array_count=(1 if arch_on ^ side_on else 2),
     )
     if budgets is None:
         logger.warning(

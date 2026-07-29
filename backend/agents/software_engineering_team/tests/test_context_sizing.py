@@ -205,6 +205,7 @@ def test_merged_pass_budgets_bound_manifest_within_content_room() -> None:
         manifest_chars=200_000,
     )
     assert budgets is not None
+    assert budgets.max_architecture_chars == 1_000
     assert budgets.max_manifest_chars < 200_000
     assert (
         budgets.max_manifest_chars + budgets.max_architecture_chars + budgets.max_inline_code_chars
@@ -212,6 +213,45 @@ def test_merged_pass_budgets_bound_manifest_within_content_room() -> None:
         (40_000 - int((5_000 + 1_500) / CHARS_PER_TOKEN) - budgets.reserved_response_tokens)
         * CHARS_PER_TOKEN
     ) + 1  # float rounding
+
+
+def test_merged_pass_budgets_prefer_architecture_over_recoverable_manifest() -> None:
+    """Architecture text has no retrieval tool; a huge changed-file manifest
+    must not zero out the document budget — the manifest is recoverable via
+    list_changed_files()."""
+    llm = _StubLLM(16_384)
+    budgets = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=8_000,
+        system_prompt_chars=5_000,
+        manifest_chars=200_000,
+        finding_array_count=2,
+    )
+    assert budgets is not None
+    assert budgets.max_architecture_chars == 8_000
+    assert budgets.max_manifest_chars < 200_000
+
+
+def test_merged_pass_budgets_single_half_uses_smaller_response_reserve() -> None:
+    # Context tight enough that the response-reserve difference still shows up
+    # in content room (large contexts both hit the absolute map-chunk cap).
+    llm = _StubLLM(20_000)
+    both = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=5_000,
+        finding_array_count=2,
+    )
+    one = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=5_000,
+        finding_array_count=1,
+    )
+    assert both is not None and one is not None
+    assert both.reserved_response_tokens == CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
+    assert one.reserved_response_tokens == 4096
+    assert one.max_inline_code_chars > both.max_inline_code_chars
 
 
 def test_merged_pass_response_reserve_is_dual_array_floor() -> None:
