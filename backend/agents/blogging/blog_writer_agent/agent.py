@@ -131,16 +131,24 @@ _SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
 _PARAGRAPH_SPLIT_RE = re.compile(r"\r?\n\s*\r?\n")
 
 # Protect common abbreviations / decimals before staccato sentence splitting.
-_ABBREV_PROTECT: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\be\.g\.", re.IGNORECASE), "egPLACEHOLDER"),
-    (re.compile(r"\bi\.e\.", re.IGNORECASE), "iePLACEHOLDER"),
-    (re.compile(r"\betc\.", re.IGNORECASE), "etcPLACEHOLDER"),
+# Mid-sentence forms use a negative lookahead so a real sentence-ending period
+# after ``etc.`` / ``e.g.`` / ``i.e.`` is preserved when the next token starts
+# a new sentence (whitespace + uppercase) or the abbreviation ends the text.
+_ABBREV_PROTECT_MID: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\be\.g\.(?!\s+[A-Z]|\s*$)", re.IGNORECASE), "egPLACEHOLDER"),
+    (re.compile(r"\bi\.e\.(?!\s+[A-Z]|\s*$)", re.IGNORECASE), "iePLACEHOLDER"),
+    (re.compile(r"\betc\.(?!\s+[A-Z]|\s*$)", re.IGNORECASE), "etcPLACEHOLDER"),
+    (re.compile(r"\d+\.\d+"), "NUMPLACEHOLDER"),
+)
+# Titles and multi-dot proper abbreviations are almost never sentence ends when
+# followed by a capitalized token (``Dr. Smith``, ``U.S. teams``), so always
+# protect their periods.
+_ABBREV_PROTECT_ALWAYS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bU\.S\.", re.IGNORECASE), "USPLACEHOLDER"),
     (re.compile(r"\bDr\.", re.IGNORECASE), "DrPLACEHOLDER"),
     (re.compile(r"\bMr\.", re.IGNORECASE), "MrPLACEHOLDER"),
     (re.compile(r"\bMrs\.", re.IGNORECASE), "MrsPLACEHOLDER"),
     (re.compile(r"\bMs\.", re.IGNORECASE), "MsPLACEHOLDER"),
-    (re.compile(r"\d+\.\d+"), "NUMPLACEHOLDER"),
 )
 
 # Precompiled banned-phrase patterns: leading word boundary; trailing boundary only
@@ -168,10 +176,14 @@ def _split_sentences_for_staccato(para: str) -> list[str]:
         - ``para`` is a non-empty string (caller filters empty paragraphs).
     Postconditions:
         - Returns a list of sentence strings (may be length 1 if no boundary found).
-        - Abbreviation/decimal periods are not treated as sentence boundaries.
+        - Mid-sentence abbreviation/decimal periods are not treated as sentence
+          boundaries; a real sentence-ending period after ``etc.`` / ``e.g.`` /
+          ``i.e.`` (next token capitalized, or end of text) is preserved.
     """
     protected = para
-    for pattern, token in _ABBREV_PROTECT:
+    for pattern, token in _ABBREV_PROTECT_ALWAYS:
+        protected = pattern.sub(token, protected)
+    for pattern, token in _ABBREV_PROTECT_MID:
         protected = pattern.sub(token, protected)
     return re.split(r"(?<=[.!?])\s+", protected)
 
@@ -1291,11 +1303,40 @@ class BlogWriterAgent(_BlogAgentBase):
             if not isinstance(risks_raw, list):
                 logger.warning("Revision plan 'risks' is not a list: %r", risks_raw)
                 risks_raw = []
-            return RevisionPlan(
-                summary=data.get("summary", "") or "",
-                changes=changes,
-                risks=risks_raw,
-            )
+            # Normalize model fields before RevisionPlan construction so a
+            # non-string summary / non-string risk entry is treated as a
+            # structured-response failure (plain-text fallback) rather than a
+            # programming error that aborts the draft pipeline.
+            summary_raw = data.get("summary", "")
+            if summary_raw is None:
+                summary = ""
+            elif isinstance(summary_raw, str):
+                summary = summary_raw
+            else:
+                raise LLMJsonParseError(
+                    f"Revision plan 'summary' must be a string, got {type(summary_raw).__name__}",
+                    response_preview=repr(summary_raw)[:200],
+                )
+            risks: list[str] = []
+            for risk in risks_raw:
+                if isinstance(risk, str):
+                    risks.append(risk)
+                else:
+                    raise LLMJsonParseError(
+                        f"Revision plan 'risks' entries must be strings, got {type(risk).__name__}",
+                        response_preview=repr(risk)[:200],
+                    )
+            try:
+                return RevisionPlan(
+                    summary=summary,
+                    changes=changes,
+                    risks=risks,
+                )
+            except ValidationError as plan_exc:
+                raise LLMJsonParseError(
+                    f"Revision plan failed schema validation: {plan_exc}",
+                    response_preview=repr(data)[:200],
+                ) from plan_exc
         except Exception as e:
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):

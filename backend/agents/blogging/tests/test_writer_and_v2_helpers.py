@@ -186,18 +186,33 @@ def test_writer_agent_deterministic_self_check_yourselves_counts() -> None:
 
 
 def test_writer_agent_deterministic_self_check_abbrev_not_staccato() -> None:
-    """Abbreviation periods must not create a false staccato streak."""
+    """Mid-sentence abbreviation periods must not create a false staccato streak."""
     from .conftest import make_writer_agent
 
     a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
-    # Without protection, "e.g." / "i.e." / "U.S." would fake short sentences.
+    # Long sentences with mid-sentence abbrevs; without protection these would
+    # split on the internal periods and falsely flag staccato prose.
     draft = (
-        "You should try tools, e.g. tracers. You can also use i.e. deeper probes. "
+        "You should evaluate observability tools, e.g. tracers and profilers, "
+        "before committing your team to a vendor. "
+        "You can also prefer clearer wording, i.e. deeper probes over slogans. "
         "You will see U.S. teams succeed with careful measurement across releases.\n"
     )
     out = a._deterministic_self_check(draft)
     joined = "\n".join(out)
     assert "Staccato" not in joined
+
+
+def test_writer_agent_deterministic_self_check_terminal_abbrev_preserves_boundary() -> None:
+    """A sentence-ending abbreviation period must still count as a sentence boundary."""
+    from .conftest import make_writer_agent
+
+    a = make_writer_agent(writing_style_guide_content="", brand_spec_content="")
+    # Three short sentences; the first ends with ``etc.`` — that period is real.
+    draft = "Use standards, etc. Test carefully. Ship confidently.\n"
+    out = a._deterministic_self_check(draft)
+    joined = "\n".join(out)
+    assert "Staccato" in joined
 
 
 def test_writer_agent_call_agent_rejects_empty_prompt() -> None:

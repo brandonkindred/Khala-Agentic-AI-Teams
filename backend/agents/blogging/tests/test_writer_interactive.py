@@ -1209,6 +1209,76 @@ def test_revise_generate_revision_plan_skips_malformed_change(monkeypatch) -> No
     assert out.changes[0].section == "intro"
 
 
+def test_revise_generate_revision_plan_malformed_summary_falls_back(monkeypatch) -> None:
+    """A non-string summary is a structured-response failure, not a programming abort."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_agent_json",
+        lambda self, p, **kw: {"summary": {"nested": True}, "changes": [], "risks": []},
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, **kw: "Plain text plan")
+    out = a._generate_revision_plan(
+        draft="# x",
+        feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+        revise_input=ReviseWriterInput(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert out.summary == "Plain text plan"
+
+
+def test_revise_generate_revision_plan_malformed_risk_falls_back(monkeypatch) -> None:
+    """A non-string risks entry is a structured-response failure, not a programming abort."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_agent_json",
+        lambda self, p, **kw: {"summary": "ok", "changes": [], "risks": [123]},
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, **kw: "Plain text plan")
+    out = a._generate_revision_plan(
+        draft="# x",
+        feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+        revise_input=ReviseWriterInput(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert out.summary == "Plain text plan"
+
+
 def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
     """When the structured plan fails with an LLM error, fall back to a plain text plan."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
