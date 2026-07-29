@@ -984,7 +984,7 @@ def test_parse_open_question_rejects_present_non_string_id() -> None:
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
 
-    with pytest.raises(ValueError, match="expected string id"):
+    with pytest.raises(ValueError, match="expected string"):
         agent._parse_open_question(
             {
                 "id": 0,
@@ -992,6 +992,27 @@ def test_parse_open_question_rejects_present_non_string_id() -> None:
             },
             index=0,
         )
+
+
+def test_parse_open_question_rejects_present_non_string_question_text() -> None:
+    """A present non-string question_text must raise instead of becoming blank text."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    with pytest.raises(ValueError, match="expected string"):
+        agent._parse_open_question(
+            {
+                "id": "q1",
+                "question_text": 123,
+            },
+            index=0,
+        )
+
+
+def test_parse_question_option_rejects_present_non_string_label() -> None:
+    """A present non-string option label must raise instead of becoming blank."""
+    with pytest.raises(ValueError, match="expected string"):
+        parse_question_option({"id": "opt1", "label": 5}, index=0)
 
 
 def test_parse_question_option_rejects_non_string_non_dict() -> None:
@@ -2942,6 +2963,38 @@ def test_filter_duplicate_questions_matches_five_letter_silent_e_past_tense() ->
         OpenQuestion(id="q1", question_text="Where should we move data files?")
     ]
     qa_history = "Q: Where should data files be moved?\nA: Files were moved to cold storage."
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_doubled_consonant_and_ied_past_tense() -> None:
+    """planned→plan and carried→carry so base-form questions match answered past tense."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Where should we plan data backups?")
+    ]
+    qa_history = (
+        "Q: Where should data backups be planned?\n"
+        "A: Backups were planned for the warm tier after migrations were carried over."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_es_and_ies_plurals() -> None:
+    """processes→process and policies→policy so singular questions match plural history."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which process and policy should we use?")
+    ]
+    qa_history = (
+        "Q: Which processes and policies should we use?\n"
+        "A: Follow the documented processes and security policies."
+    )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
 
