@@ -36,13 +36,18 @@ def test_relevant_code_prefers_issue_file():
 
 def test_relevant_code_bounds_large_issue_file():
     """A single issue file larger than the max-chars budget is truncated and
-    marked with a "[truncated]" suffix."""
+    marked with a "[truncated;" suffix."""
     issue = ReviewIssue(file_path="a.ts")
     big = "x" * (DEFAULT_MAX_RELEVANT_CODE_CHARS + 100)
     out = relevant_code_for_issue(issue, {"a.ts": big})
     assert len(out) == DEFAULT_MAX_RELEVANT_CODE_CHARS
     assert "[truncated;" in out
     assert big not in out
+
+
+def test_relevant_code_none_files_returns_placeholder():
+    """``current_files is None`` degrades to the same placeholder as an empty map."""
+    assert relevant_code_for_issue(ReviewIssue(file_path="a.ts"), None) == "(no code)"
 
 
 def test_relevant_code_falls_back_to_first_files():
@@ -82,6 +87,18 @@ def test_lenient_json_direct():
         '{"a": 1}', logger=logging.getLogger("t"), context="ctx", on_fail_msg="x"
     )
     assert data == {"a": 1}
+
+
+def test_lenient_json_non_object_returns_empty():
+    """A successful parse of a non-object JSON value (array/string/number) yields
+    ``{}`` so callers can rely on the dict postcondition."""
+    for raw in ("[1, 2]", '"str"', "3", "true", "null"):
+        assert (
+            lenient_json_object(
+                raw, logger=logging.getLogger("t"), context="ctx", on_fail_msg="x"
+            )
+            == {}
+        )
 
 
 def test_lenient_json_extracts_object_from_prose():
@@ -278,7 +295,7 @@ def test_review_uses_review_model_attr_for_no_model_guard(monkeypatch):
 
 def test_review_code_with_braces_reaches_llm_uncorrupted(monkeypatch):
     """Literal braces in file contents must reach the LLM uncorrupted on the
-    one-shot review path (safe placeholder substitution, not value-escaping)."""
+    one-shot review path (keyword ``str.format`` does not re-parse values)."""
     seen: list[str] = []
     code = 'cfg = {"a": 1}\nf"{x}"'
 
@@ -296,6 +313,28 @@ def test_review_code_with_braces_reaches_llm_uncorrupted(monkeypatch):
     assert len(seen) == 1
     assert code in seen[0]
     assert "{{" not in seen[0]
+
+
+def test_review_task_description_literal_code_placeholder_not_resubstituted(monkeypatch):
+    """A literal ``{code}`` inside ``task_description`` must not be replaced with
+    the file payload (chained ``str.replace`` would; keyword ``format`` does not)."""
+    seen: list[str] = []
+    task = "Document the {code} placeholder in the prompt template."
+    code = "UNIQUE_CODE_PAYLOAD"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    out = agent.review(_Input(current_files={"a.ts": code}, task_description=task))
+    assert "1 issue(s) found." in out.summary
+    assert seen[0].count(code) == 1
+    assert task in seen[0]
 
 
 def test_review_no_prompt_raises():
@@ -541,6 +580,30 @@ def test_problem_solve_fixes(monkeypatch):
         )
     )
     assert "fixed 1 of 1 issue(s) (one at a time)." in out.summary
+
+
+def test_problem_solve_none_current_files(monkeypatch):
+    """``current_files is None`` must not crash; the fix loop runs with an empty
+    merged map and still reports a per-issue outcome."""
+    agent = _make(monkeypatch, "## FILE x.ts ##\nfixed")
+    inp = _Input(review_issues=[ReviewIssue(source="demo", file_path="x.ts")])
+    inp.current_files = None
+    out = agent.problem_solve(inp)
+    assert "fixed 1 of 1" in out.summary
+    assert out.files.get("x.ts") == "fixed"
+
+
+def test_problem_solve_none_problem_solving_kwargs(monkeypatch):
+    """A ``None`` return from ``_problem_solving_kwargs`` is treated as ``{}``."""
+    agent = _make(monkeypatch, "## FILE x.ts ##\nfixed")
+    monkeypatch.setattr(agent, "_problem_solving_kwargs", lambda inp: None)
+    out = agent.problem_solve(
+        _Input(
+            current_files={"x.ts": "old"},
+            review_issues=[ReviewIssue(source="demo", file_path="x.ts")],
+        )
+    )
+    assert "fixed 1 of 1" in out.summary
 
 
 def test_problem_solve_preserves_braces_in_code(monkeypatch):

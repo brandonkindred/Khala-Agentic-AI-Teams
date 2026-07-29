@@ -71,20 +71,20 @@ _PROBLEM_SOLVE_RESERVED_KEYS = frozenset(
 
 def relevant_code_for_issue(
     issue: ReviewIssue,
-    current_files: Dict[str, str],
+    current_files: Optional[Dict[str, str]],
     max_chars: int = DEFAULT_MAX_RELEVANT_CODE_CHARS,
 ) -> str:
     """Return code context for a single issue: prefer issue's file, else all files.
 
-    Preconditions: ``current_files`` maps path -> content.
+    Preconditions: ``current_files`` is ``None`` or maps path -> content.
     Postconditions: returns a non-empty string; when ``max_chars`` is positive
         and content is available, the returned string is bounded by
-        ``max_chars``; falls back to ``"(no code)"`` when ``max_chars`` is
-        non-positive or no content can be included. Truncated context carries
-        an explicit marker so the fix agent does not mistake a prefix for the
-        complete file or submission.
+        ``max_chars``; falls back to ``"(no code)"`` when ``current_files`` is
+        empty/``None``, ``max_chars`` is non-positive, or no content can be
+        included. Truncated context carries an explicit marker so the fix agent
+        does not mistake a prefix for the complete file or submission.
     """
-    if max_chars <= 0:
+    if max_chars <= 0 or not current_files:
         return "(no code)"
     if issue.file_path and issue.file_path in current_files:
         candidates = [(issue.file_path, current_files[issue.file_path])]
@@ -125,16 +125,19 @@ def lenient_json_object(
     warning and return ``{}``.
 
     Preconditions: ``raw`` is a str; ``logger``/``context``/``on_fail_msg`` set.
-    Postconditions: returns a dict (``{}`` when no JSON object can be parsed).
+    Postconditions: returns a dict (``{}`` when no JSON object can be parsed,
+        or when the parsed JSON value is not a mapping).
     """
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
     except json.JSONDecodeError:
         start = raw.find("{")
         end = raw.rfind("}") + 1
         if start >= 0 and end > start:
             try:
-                return json.loads(raw[start:end])
+                parsed = json.loads(raw[start:end])
+                return parsed if isinstance(parsed, dict) else {}
             except json.JSONDecodeError:
                 logger.warning(
                     "%s: model output did not parse as JSON: %r; %s",
@@ -185,12 +188,13 @@ class SingleIssueProblemSolveMixin:
         Preconditions:
             - ``inp`` exposes ``review_issues`` (each with ``source``,
               ``severity``, ``description``, ``file_path``, ``recommendation``)
-              and ``current_files``.
+              and ``current_files`` (a mapping or ``None``; ``None`` is treated
+              as an empty file map).
             - The attributes listed in this mixin's class-level Preconditions
               are supplied by the combining class.
             - ``_problem_solving_kwargs(inp)`` must not return keys in
               ``_PROBLEM_SOLVE_RESERVED_KEYS`` (overlapping keys are dropped
-              with a warning rather than raising).
+              with a warning rather than raising). ``None`` is treated as ``{}``.
 
         Postconditions:
             - Returns a :class:`ToolAgentPhaseOutput`. When there is no LLM or
@@ -213,7 +217,7 @@ class SingleIssueProblemSolveMixin:
         ]
         if not issues:
             return ToolAgentPhaseOutput(summary=f"No {self.empty_label} to fix.")
-        extra = dict(self._problem_solving_kwargs(inp))
+        extra = dict(self._problem_solving_kwargs(inp) or {})
         overlapping = _PROBLEM_SOLVE_RESERVED_KEYS.intersection(extra)
         if overlapping:
             self._logger.warning(
@@ -223,7 +227,7 @@ class SingleIssueProblemSolveMixin:
             )
             for key in overlapping:
                 del extra[key]
-        merged = dict(inp.current_files)
+        merged = dict(inp.current_files or {})
         fixed_count = 0
         for issue in issues:
             relevant_code = relevant_code_for_issue(issue, merged, self.max_relevant_code_chars)
@@ -543,11 +547,13 @@ class BaseReviewToolAgent(LlmToolAgentBase):
                 "review_prompt, review_via_engine=True, or build_runner when using the "
                 "default review() path."
             )
-        # ``str.replace`` keeps braces inside ``code_text`` / task text literal;
-        # only the two known placeholders are substituted.
-        prompt = self.review_prompt.replace(
-            "{task_description}", inp.task_description or "N/A"
-        ).replace("{code}", code_text)
+        # Keyword ``str.format`` inserts values without re-scanning them, so
+        # braces in ``code_text`` / ``task_description`` stay literal and a
+        # literal ``{code}`` inside the task text is not re-substituted.
+        prompt = self.review_prompt.format(
+            task_description=inp.task_description or "N/A",
+            code=code_text,
+        )
         status, result = self._call_with_single_fallback(
             lambda: self._invoke_llm(model, prompt),
             log_label=review_label,

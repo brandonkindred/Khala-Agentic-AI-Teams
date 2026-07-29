@@ -289,7 +289,7 @@ class TestFEBuildSpecialist:
         a, _ = self._agent()
         out = a.review(_fe_phase_input(repo_path=str(tmp_path)))
         # Project not detected -> empty issues
-        assert isinstance(out.issues, list)
+        assert out.issues == []
 
     def test_problem_solve_no_model(self):
         a, _ = self._agent()
@@ -384,7 +384,7 @@ class TestBEBuildSpecialist:
     def test_review_no_python_files(self, tmp_path: Path):
         a, _ = self._agent()
         out = a.review(_be_phase_input(repo_path=str(tmp_path)))
-        assert isinstance(out.issues, list)
+        assert out.issues == []
 
     def test_problem_solve_no_model(self):
         a, _ = self._agent()
