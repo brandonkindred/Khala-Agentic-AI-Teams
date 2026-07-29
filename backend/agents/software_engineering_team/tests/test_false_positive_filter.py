@@ -15,6 +15,7 @@ chunk review and the verification call in an end-to-end run.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
@@ -176,7 +177,7 @@ def test_codebase_index_is_frozen_and_isolates_files_dict() -> None:
     idx = CodebaseIndex(files=src)
     src["a.py"] = "mutated"
     assert idx.files["a.py"] == "x"
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         idx.files = {}  # type: ignore[misc]
 
 
@@ -210,6 +211,20 @@ def test_read_file_blank_and_missing() -> None:
     assert "not found" in idx.read_file("does/not/exist.py")
     # Existing-codebase pseudo-path with no excerpt is an error, not an empty hit.
     assert idx.read_file(CodebaseIndex.EXISTING_CODEBASE_PATH).startswith("Error")
+
+
+def test_existing_codebase_pseudo_path_ignores_repo_reader_when_no_excerpt() -> None:
+    """The existing-codebase pseudo-path never consults the repo reader when the excerpt is missing."""
+    reader = _FakeReader({CodebaseIndex.EXISTING_CODEBASE_PATH: "REPO_CONTENT"})
+    idx = CodebaseIndex(
+        files={"app/main.py": "BODY"},
+        existing_codebase="",
+        repo_reader=reader,  # type: ignore[arg-type]
+    )
+    msg = idx.read_file(CodebaseIndex.EXISTING_CODEBASE_PATH)
+    assert msg.startswith("Error")
+    assert "no existing-codebase excerpt" in msg
+    assert "REPO_CONTENT" not in msg
 
 
 def test_read_file_unique_suffix_match() -> None:
@@ -315,6 +330,8 @@ def test_truncate_for_log_caps_length() -> None:
     assert _truncate_for_log(None, 10) == ""
     assert len(_truncate_for_log("x" * 500, 400)) == 403  # 400 + "..."
     assert _truncate_for_log("x" * 500, 400).endswith("...")
+    with pytest.raises(ValueError):
+        _truncate_for_log("x", 0)
 
 
 def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
@@ -548,6 +565,15 @@ def test_find_heuristic_beyond_eof() -> None:
     content = "function alpha() {\n  return 1;\n}\n"
     msg = _find_heuristic_function_at_line(content, 99, "app.ts")
     assert "beyond" in msg.lower()
+
+
+def test_find_function_at_line_python_beyond_eof() -> None:
+    """Python AST finder returns an explicit beyond-EOF message for out-of-range lines."""
+    idx = CodebaseIndex(files={"app/main.py": "def alpha():\n    return 1\n"})
+    _, _, _, find_fn = _build_tools(idx)
+    msg = find_fn("app/main.py", 99)
+    assert "beyond the end" in msg.lower()
+    assert "file has" in msg.lower()
 
 
 def test_find_function_at_line_pre_numbered_python() -> None:
@@ -831,6 +857,17 @@ def test_resolve_preserves_hidden_file_basename() -> None:
     assert idx.resolve_path(".env") == "config/.env"
     assert idx.resolve_path("./.env") == "config/.env"
     assert idx.read_file(".env") == "SECRET=1\n"
+
+
+def test_resolve_preserves_stored_leading_dot_slash_and_absolute_prefix() -> None:
+    """Bare-name resolution should ignore stored leading ``./`` and single leading ``/``."""
+    idx = CodebaseIndex(files={"./main.py": "BODY"})
+    assert idx.resolve_path("main.py") == "./main.py"
+    assert idx.read_file("main.py") == "BODY"
+
+    idx2 = CodebaseIndex(files={"/app/main.py": "BODY2"})
+    assert idx2.resolve_path("main.py") == "/app/main.py"
+    assert idx2.read_file("main.py") == "BODY2"
 
 
 def test_ambiguous_submission_does_not_fall_through_to_reader() -> None:

@@ -304,7 +304,20 @@ class CodebaseIndex:
             normalized = normalized[2:]
         if normalized.startswith("/"):
             normalized = normalized[1:]
-        hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+
+        def _final_segment(p: str) -> str:
+            seg = p
+            while seg.startswith("./"):
+                seg = seg[2:]
+            if seg.startswith("/"):
+                seg = seg[1:]
+            return seg.rsplit("/", 1)[-1]
+
+        if "/" in normalized:
+            hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+        else:
+            hits = [p for p in self.files if _final_segment(p) == normalized]
+
         return (hits[0] if len(hits) == 1 else None), hits
 
     def resolve_path(self, path: str) -> Optional[str]:
@@ -373,11 +386,12 @@ class CodebaseIndex:
         # This is what lets the verifier confirm a file a finding calls "missing"
         # actually exists in the repository. Ambiguous submission hits never
         # reach here.
+        if key == self.EXISTING_CODEBASE_PATH:
+            return None, "Error: no existing-codebase excerpt available."
+
         reader_content = self._reader_read(key)
         if reader_content is not None:
             return reader_content, None
-        if key == self.EXISTING_CODEBASE_PATH:
-            return None, "Error: no existing-codebase excerpt available."
         return None, f"Error: file not found: {path}. Use list_files() to see available paths."
 
     def read_file(self, path: str) -> str:
@@ -551,6 +565,11 @@ def _find_python_function_at_line(
         raise ValueError("content must be a non-empty string")
     if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
         raise ValueError("line_number must be a positive integer")
+    shown = display_line if display_line is not None else line_number
+    lines = content.splitlines()
+    if line_number > len(lines):
+        return f"Line {shown} is beyond the end of {path} (file has {len(lines)} lines)."
+
     try:
         tree = ast.parse(content)
     except Exception as exc:
@@ -568,8 +587,6 @@ def _find_python_function_at_line(
         if start_line <= line_number <= end_line:
             kind = "class" if isinstance(node, ast.ClassDef) else "function"
             candidates.append((end_line - start_line, start_line, end_line, node.name, kind))
-
-    shown = display_line if display_line is not None else line_number
 
     if not candidates:
         return (
@@ -674,7 +691,8 @@ def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
         - Returns ``text`` unchanged when ``len(text) <= max_len``.
         - Otherwise returns ``text[:max_len] + "..."``.
     """
-    assert max_len >= 1
+    if max_len < 1:
+        raise ValueError("max_len must be >= 1")
     if not text:
         return ""
     if len(text) <= max_len:
@@ -1195,7 +1213,16 @@ def _verify_and_filter(
     removed_indices: set[int] = set()
     for (file_path, group), verdicts in zip(group_items, group_verdicts):
         orig_indices = group_orig_indices[file_path]
+        group_len = len(group)
         for idx, verdict in verdicts.items():
+            if not isinstance(idx, int) or idx < 0 or idx >= group_len:
+                logger.warning(
+                    "FalsePositiveFilter: ignoring out-of-range verdict index %r for %s (group size %s)",
+                    idx,
+                    file_path,
+                    group_len,
+                )
+                continue
             if verdict.is_false_positive:
                 issue = group[idx]
                 removed_indices.add(orig_indices[idx])
