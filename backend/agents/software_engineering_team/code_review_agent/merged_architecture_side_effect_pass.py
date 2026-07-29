@@ -26,7 +26,7 @@ import json
 import logging
 from typing import Callable, List, Optional, Tuple, Union
 
-from strands import Agent
+from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient, LLMClientModel
@@ -165,11 +165,10 @@ def _run_pass(
         arch_on=arch_on,
         side_on=side_on,
     )
-    tools = side_pass.build_side_effect_tools(index) if side_on else _build_tools(index)
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
+        tools=_build_merged_pass_tools(index, side_on=side_on),
     )
     raw = str(agent(prompt)).strip()
     data = json.loads(raw)
@@ -217,6 +216,37 @@ def _manifest_chars(paths: List[str]) -> int:
     return len(header) + sum(len(p) + 1 for p in paths)
 
 
+def _build_merged_pass_tools(index: CodebaseIndex, *, side_on: bool) -> list:
+    """Tools for the merged pass, including a changed-files-only listing.
+
+    Postconditions:
+        - Returns the side-effect tool set when ``side_on``, else the shared
+          architecture/false-positive tool set, plus ``list_changed_files`` so
+          truncated manifests remain recoverable without confusing submission
+          paths with repository paths from ``list_files()``.
+    """
+    base = side_pass.build_side_effect_tools(index) if side_on else _build_tools(index)
+
+    @tool
+    def list_changed_files() -> str:
+        """List every changed file path in this submission only.
+
+        Unlike ``list_files()``, this never includes repository paths outside
+        the submission. Use it when the changed-file manifest in the prompt was
+        truncated, then ``read_file(path)`` for any omitted path.
+
+        Returns:
+            One submission path per line, or a message when none are available.
+        """
+        try:
+            paths = list(index.files.keys())
+            return "\n".join(paths) if paths else "(no changed files)"
+        except Exception as exc:  # noqa: BLE001 - tool errors become tool messages
+            return f"Error: could not list changed files: {type(exc).__name__}: {exc}"
+
+    return [*base, list_changed_files]
+
+
 def _with_merged_pass_output_budget(
     model: "Union[LLMClient, _StrandsModel]",
     *,
@@ -231,11 +261,15 @@ def _with_merged_pass_output_budget(
 
     Postconditions:
         - When ``model`` is an ``LLMClientModel``:
-          - If ``LLM_MAX_TOKENS`` / pinned ``max_tokens`` is set below
-            ``response_tokens``, clones with ``max_tokens=response_tokens``.
-          - If the reserve was shrunk below the dual-array floor for a small
-            context (and no tighter pin is set), clones with that shrunk value
-            so the completion request cannot exceed the input budget's reserve.
+          - The model's pinned ``max_tokens`` takes precedence over
+            ``LLM_MAX_TOKENS`` when determining the effective cap (matching how
+            the adapter passes an explicit per-call argument to providers).
+          - If the reserve was shrunk below the dual-array floor, clones with
+            ``max_tokens=response_tokens`` whenever the effective cap differs
+            (including when it is larger), so the completion cannot exceed the
+            input budget's reserve.
+          - If the reserve is the full dual-array floor and the effective cap is
+            a positive value below that floor, clones upward to ``response_tokens``.
           - Otherwise returns ``model`` unchanged.
         - Injected non-``LLMClientModel`` test models are returned unchanged.
         - Never mutates ``model``.
@@ -245,10 +279,13 @@ def _with_merged_pass_output_budget(
     configured = resolve_max_tokens()
     pinned = model.get_config().get("max_tokens")
     pinned_int = pinned if isinstance(pinned, int) and pinned > 0 else 0
-    effective = configured if configured > 0 else pinned_int
+    # Match provider precedence: an explicit model pin wins over the env cap.
+    effective = pinned_int if pinned_int > 0 else configured
+    if response_tokens < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS:
+        if effective != response_tokens:
+            return model.clone(max_tokens=response_tokens)
+        return model
     if 0 < effective < response_tokens:
-        return model.clone(max_tokens=response_tokens)
-    if effective == 0 and response_tokens < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS:
         return model.clone(max_tokens=response_tokens)
     return model
 
@@ -381,48 +418,88 @@ def _build_prompt(
         # Fence length is content-dependent; reserve a small worst-case fence so
         # heading + fences never push the block past ``remaining``.
         fence_reserve = 8
-        overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
-        if remaining <= overhead:
+        base_overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
+        # Reserve the truncation note whenever the file may not fit in full —
+        # otherwise body consumes the remainder and the appended note overflows,
+        # causing this branch to drop the file entirely.
+        note_reserve = (
+            len(
+                f"(Only the first {remaining} characters of `{path}` are shown above; call "
+                "read_file to see the rest.)"
+            )
+            + 1
+        )
+        if base_overhead >= remaining:
             omitted = len(changed_files) - i
             break
-        body = content[: remaining - overhead]
+        if base_overhead + len(content) <= remaining:
+            overhead = base_overhead
+            body = content
+            include_note = False
+        else:
+            overhead = base_overhead + note_reserve
+            if remaining <= overhead:
+                omitted = len(changed_files) - i
+                break
+            body = content[: remaining - overhead]
+            include_note = True
         body_fence = code_fence_for(body)
         block_lines = [heading, body_fence, body, body_fence]
-        if len(body) < len(content):
+        if include_note:
             block_lines.append(
                 f"(Only the first {len(body)} characters of `{path}` are shown above; call "
                 "read_file to see the rest.)"
             )
         block = "\n".join(block_lines)
         if len(block) > remaining:
-            # Rare: actual fence longer than reserve — drop this file rather than
-            # overflow the budget.
-            omitted = len(changed_files) - i
-            break
+            # Actual fence longer than reserve: shrink the body rather than drop
+            # the file (and every subsequent file) when a prefix would still fit.
+            excess = len(block) - remaining
+            if include_note and len(body) > excess:
+                body = body[: len(body) - excess]
+                body_fence = code_fence_for(body)
+                block_lines = [
+                    heading,
+                    body_fence,
+                    body,
+                    body_fence,
+                    (
+                        f"(Only the first {len(body)} characters of `{path}` are shown above; call "
+                        "read_file to see the rest.)"
+                    ),
+                ]
+                block = "\n".join(block_lines)
+            if len(block) > remaining:
+                omitted = len(changed_files) - i
+                break
         parts.extend(block_lines)
         remaining -= len(block) + 1  # +1 for the join newline before the next block
     if omitted:
         parts.append(
-            f"... and {omitted} more changed file(s) not shown above; use read_file(path) or "
-            "list_files() to see them."
+            f"... and {omitted} more changed file(s) not shown above; call "
+            "list_changed_files()/read_file(path) to see them."
         )
     parts.append("")
 
     if arch_on and side_on:
         parts.append(
-            "Use list_files()/read_file()/search_codebase()/search_repository()/"
-            "find_function_at_line() as each part's instructions require. Address "
-            "Part 1 and Part 2 independently."
+            "Use list_changed_files()/list_files()/read_file()/search_codebase()/"
+            "search_repository()/find_function_at_line() as each part's instructions "
+            "require. Address Part 1 and Part 2 independently. Prefer "
+            "list_changed_files() when recovering omitted submission paths."
         )
     elif arch_on:
         parts.append(
-            "Use list_files()/read_file()/search_codebase()/find_function_at_line() as "
-            "Part 1 requires. Do not run side-effect analysis."
+            "Use list_changed_files()/list_files()/read_file()/search_codebase()/"
+            "find_function_at_line() as Part 1 requires. Prefer list_changed_files() "
+            "when recovering omitted submission paths. Do not run side-effect analysis."
         )
     else:
         parts.append(
-            "Use list_files()/read_file()/search_codebase()/search_repository()/"
-            "find_function_at_line() as Part 2 requires. Do not run architecture analysis."
+            "Use list_changed_files()/list_files()/read_file()/search_codebase()/"
+            "search_repository()/find_function_at_line() as Part 2 requires. Prefer "
+            "list_changed_files() when recovering omitted submission paths. Do not run "
+            "architecture analysis."
         )
     parts.append(
         'Return a single JSON object with "architecture_findings"/"side_effect_findings" '
@@ -448,7 +525,7 @@ def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
         line_cost = len(path) + 1
         overflow_note = (
             f"... and {len(paths) - shown} more changed path(s) not listed; "
-            "use list_files()/read_file() to reach them."
+            "call list_changed_files() then read_file(path) to reach them."
         )
         # Leave room for an overflow note if this isn't the last path.
         need_note_room = shown + 1 < len(paths)
@@ -456,14 +533,14 @@ def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
         if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
             lines.append(
                 f"... and {len(paths) - shown} more changed path(s) not listed; "
-                "use list_files()/read_file() to reach them."
+                "call list_changed_files() then read_file(path) to reach them."
             )
             break
         if used + line_cost > max_manifest_chars and shown == 0:
             # Budget too tight for even one path: header + overflow only.
             lines.append(
                 f"... and {len(paths)} more changed path(s) not listed; "
-                "use list_files()/read_file() to reach them."
+                "call list_changed_files() then read_file(path) to reach them."
             )
             break
         lines.append(path)

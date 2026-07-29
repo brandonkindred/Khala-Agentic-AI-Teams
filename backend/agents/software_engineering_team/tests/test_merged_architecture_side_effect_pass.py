@@ -398,6 +398,7 @@ def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) 
     assert prompts
     manifest_section = prompts[0].split("**Full content of the changed files:**", 1)[0]
     assert "more changed path(s) not listed" in manifest_section
+    assert "list_changed_files()" in manifest_section
     assert manifest_section.count("pkg/module_") < 400
 
 
@@ -434,3 +435,119 @@ def test_raises_tight_output_cap_for_dual_finding_arrays(
 
     find_architecture_and_side_effect_issues(backing, _input())
     assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
+
+
+def test_model_pin_takes_precedence_over_env_max_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pinned max_tokens of 4096 must be raised even when LLM_MAX_TOKENS is
+    already generous — the pin is what the adapter actually sends."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from llm_service import LLMClientModel
+    from software_engineering_team.shared.context_sizing import (
+        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
+    )
+
+    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+    clones: list = []
+
+    class _Empty(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    class _RecordingModel(LLMClientModel):
+        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
+            clones.append(overrides)
+            return super().clone(**overrides)
+
+    backing = _Empty()
+    base = _RecordingModel(backing, agent_key="code_review", max_tokens=4096)
+    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+
+    find_architecture_and_side_effect_issues(backing, _input())
+    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
+
+
+def test_clamps_oversized_cap_to_shrunk_response_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the response reserve shrinks for a small context, an oversized
+    LLM_MAX_TOKENS must be clamped down to that reserve."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    from llm_service import LLMClientModel
+
+    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+    clones: list = []
+
+    class _SmallCtx(DummyLLMClient):
+        def get_max_context_tokens(self) -> int:
+            return 8_192
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    class _RecordingModel(LLMClientModel):
+        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
+            clones.append(overrides)
+            return super().clone(**overrides)
+
+    backing = _SmallCtx()
+    base = _RecordingModel(backing, agent_key="code_review")
+    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+
+    find_architecture_and_side_effect_issues(backing, _input())
+    assert len(clones) == 1
+    assert clones[0]["max_tokens"] < 8192
+    assert clones[0]["max_tokens"] >= 1024
+
+
+def test_truncation_note_is_reserved_so_large_file_still_inlines() -> None:
+    """A file larger than the inline budget must keep a prefix plus note, not
+    drop the whole file (and later files) because the note overflowed."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    index = CodebaseIndex.from_input(
+        _input(files={"big.py": "X" * 5_000, "small.py": "def ok():\n    return 1\n"})
+    )
+    prompt = pass_mod._build_prompt(
+        index,
+        "",
+        400,
+        max_architecture_chars=0,
+        max_manifest_chars=2_000,
+        arch_on=False,
+        side_on=True,
+    )
+    assert "### big.py ###" in prompt
+    assert "Only the first" in prompt
+    assert "### small.py ###" in prompt or "list_changed_files()" in prompt
+
+
+def test_list_changed_files_tool_returns_submission_paths_only() -> None:
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    index = CodebaseIndex.from_input(_input(files={"a.py": "a", "b.py": "b"}))
+    tools = pass_mod._build_merged_pass_tools(index, side_on=False)
+    names = {getattr(t, "__name__", getattr(t, "tool_name", "")) for t in tools}
+    # strands @tool may wrap the name on .tool_name / .name
+    tool_ids = set()
+    for t in tools:
+        tool_ids.add(getattr(t, "__name__", None) or getattr(t, "name", None) or str(t))
+    assert any("list_changed_files" in str(x) for x in tool_ids | names)
+    changed = next(
+        t
+        for t in tools
+        if "list_changed_files" in (getattr(t, "__name__", "") or getattr(t, "name", "") or str(t))
+    )
+    # Prefer calling the underlying function if strands wrapped it.
+    fn = getattr(changed, "fn", None) or getattr(changed, "_fn", None) or changed
+    result = fn() if callable(fn) else changed()
+    assert "a.py" in result and "b.py" in result
