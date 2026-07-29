@@ -144,13 +144,30 @@ def test_identify_uncertainty_questions_llm_error(monkeypatch) -> None:
     """Non-transient LLM failure → empty list."""
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
 
+    from llm_service import LLMJsonParseError
+
     a = _make_agent()
 
     def boom(self, prompt, system_prompt=""):
-        raise RuntimeError("nope")
+        raise LLMJsonParseError("nope", response_preview="x")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
     assert a.identify_uncertainty_questions("d", "p") == []
+
+
+def test_identify_uncertainty_questions_programming_error_propagates(monkeypatch) -> None:
+    """Unexpected programming errors must not be soft-failed to []."""
+    import pytest
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+
+    def boom(self, prompt, system_prompt=""):
+        raise RuntimeError("programmer bug")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_text", boom)
+    with pytest.raises(RuntimeError, match="programmer bug"):
+        a.identify_uncertainty_questions("d", "p")
 
 
 def test_identify_uncertainty_questions_rate_limit_reraises(monkeypatch) -> None:
@@ -251,6 +268,19 @@ def test_analyze_feedback_malformed_skipped(monkeypatch) -> None:
     )
     out = a.analyze_user_feedback_for_guideline_updates("fb", "g")
     assert len(out) == 1
+
+
+def test_analyze_feedback_updates_not_list(monkeypatch) -> None:
+    """A non-list ``updates`` field soft-fails to an empty list."""
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+
+    a = _make_agent()
+    monkeypatch.setattr(
+        BlogWriterAgent,
+        "_call_agent_json",
+        lambda self, p, **kw: {"has_guideline_updates": True, "updates": "not-a-list"},
+    )
+    assert a.analyze_user_feedback_for_guideline_updates("fb", "g") == []
 
 
 def test_analyze_feedback_json_parse_error(monkeypatch) -> None:
@@ -1067,7 +1097,7 @@ def test_revise_generate_revision_plan_rate_limit_reraises(monkeypatch) -> None:
 
 
 def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
-    """_generate_revision_plan returns a fallback summary when the structured response is empty."""
+    """An empty JSON object is a valid structured response (empty summary/changes)."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
@@ -1083,6 +1113,38 @@ def test_revise_generate_revision_plan_empty_response(monkeypatch) -> None:
         title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
     )
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: {})
+    out = a._generate_revision_plan(
+        draft="# x",
+        feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+        revise_input=ReviseWriterInput(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            feedback_summary="s",
+            content_plan=plan,
+        ),
+    )
+    assert out.summary == ""
+    assert out.changes == []
+    assert out.risks == []
+
+
+def test_revise_generate_revision_plan_none_response(monkeypatch) -> None:
+    """A None / non-dict structured response yields the 'no output' fallback plan."""
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", lambda self, p, **kw: None)
     out = a._generate_revision_plan(
         draft="# x",
         feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
@@ -1148,11 +1210,13 @@ def test_revise_generate_revision_plan_skips_malformed_change(monkeypatch) -> No
 
 
 def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
-    """When the structured plan fails, fall back to a plain text plan."""
+    """When the structured plan fails with an LLM error, fall back to a plain text plan."""
     from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
     from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from llm_service import LLMJsonParseError
 
     from ._content_plan_test_utils import make_content_plan
 
@@ -1165,7 +1229,7 @@ def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
     )
 
     def boom_json(self, p, **kw):
-        raise RuntimeError("nope")
+        raise LLMJsonParseError("nope", response_preview="x")
 
     monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
     monkeypatch.setattr(BlogWriterAgent, "_call_text", lambda self, p, **kw: "Plain text plan")
@@ -1182,6 +1246,41 @@ def test_revise_generate_revision_plan_error_falls_back(monkeypatch) -> None:
     assert out.summary == "Plain text plan"
 
 
+def test_revise_generate_revision_plan_programming_error_propagates(monkeypatch) -> None:
+    """Unexpected programming errors must not fall back to an unstructured plan."""
+    import pytest
+    from agents.blogging.blog_copy_editor_agent.models import FeedbackItem
+    from agents.blogging.blog_writer_agent.agent import BlogWriterAgent
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent()
+    plan = make_content_plan(
+        overarching_topic="x",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+
+    def boom_json(self, p, **kw):
+        raise RuntimeError("programmer bug")
+
+    monkeypatch.setattr(BlogWriterAgent, "_call_agent_json", boom_json)
+    with pytest.raises(RuntimeError, match="programmer bug"):
+        a._generate_revision_plan(
+            draft="# x",
+            feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+            revise_input=ReviseWriterInput(
+                draft="# x",
+                feedback_items=[FeedbackItem(category="t", severity="minor", issue="i")],
+                feedback_summary="s",
+                content_plan=plan,
+            ),
+        )
+
+
 def test_revise_generate_revision_plan_fallback_rate_limit_reraises(monkeypatch) -> None:
     """A transient LLM error from the plain-text fallback itself must also re-raise.
 
@@ -1196,7 +1295,7 @@ def test_revise_generate_revision_plan_fallback_rate_limit_reraises(monkeypatch)
     from agents.blogging.blog_writer_agent.models import ReviseWriterInput
     from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
 
-    from llm_service import LLMRateLimitError
+    from llm_service import LLMJsonParseError, LLMRateLimitError
 
     from ._content_plan_test_utils import make_content_plan
 
@@ -1209,7 +1308,7 @@ def test_revise_generate_revision_plan_fallback_rate_limit_reraises(monkeypatch)
     )
 
     def boom_json(self, p, **kw):
-        raise RuntimeError("nope")
+        raise LLMJsonParseError("nope", response_preview="x")
 
     def boom_text(self, p, **kw):
         raise LLMRateLimitError("rate limited")

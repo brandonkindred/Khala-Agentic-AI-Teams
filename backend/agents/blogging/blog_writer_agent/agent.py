@@ -23,6 +23,7 @@ from agents.blogging.shared.content_planning_loop import (
 )
 from agents.blogging.shared.content_profile import LengthPolicy
 from agents.blogging.shared.json_retry import call_json_with_retry
+from pydantic import ValidationError
 from strands import Agent
 from strands.types.exceptions import EventLoopException
 
@@ -34,6 +35,11 @@ from llm_service import (
     compact_text,
     extract_json_from_response,
 )
+
+try:
+    from llm_service.strands_adapter import LLMClientModel
+except ImportError:  # pragma: no cover - optional adapter absent in some test harnesses
+    LLMClientModel = None  # type: ignore[misc, assignment]
 
 from .feedback_tracker import MAX_PREVIOUS_FEEDBACK_ITEMS, PersistentFeedbackItem
 from .models import (
@@ -106,11 +112,68 @@ VAGUE_CITATION_PATTERNS = [
     r"[Ii]t'?s widely recognized",
 ]
 
+# Deterministic self-check thresholds (named so rules stay tunable in one place).
+CITATION_LOOKAHEAD_CHARS = 150
+STACCATO_MAX_WORDS = 7
+STACCATO_MIN_STREAK = 3
+MIN_READER_ADDRESS_COUNT = 3
+
+# Source/link markers that clear a vague-citation flag within the lookahead window.
+_CITATION_SOURCE_RE = re.compile(r"\[CLAIM:|https?://|\]\(https?://")
+
+# Reader-address forms counted toward the minimum (includes plural reflexive).
+_READER_ADDRESS_RE = re.compile(r"\byou(?:r|rs|rself|rselves)?\b")
+
+# Soft JSON instruction appended on JSON-oriented LLM calls (shared to avoid drift).
+_SOFT_JSON_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
+
+# Paragraph split: one-or-more blank lines, tolerant of ``\r\n`` line endings.
+_PARAGRAPH_SPLIT_RE = re.compile(r"\r?\n\s*\r?\n")
+
+# Protect common abbreviations / decimals before staccato sentence splitting.
+_ABBREV_PROTECT: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\be\.g\.", re.IGNORECASE), "egPLACEHOLDER"),
+    (re.compile(r"\bi\.e\.", re.IGNORECASE), "iePLACEHOLDER"),
+    (re.compile(r"\betc\.", re.IGNORECASE), "etcPLACEHOLDER"),
+    (re.compile(r"\bU\.S\.", re.IGNORECASE), "USPLACEHOLDER"),
+    (re.compile(r"\bDr\.", re.IGNORECASE), "DrPLACEHOLDER"),
+    (re.compile(r"\bMr\.", re.IGNORECASE), "MrPLACEHOLDER"),
+    (re.compile(r"\bMrs\.", re.IGNORECASE), "MrsPLACEHOLDER"),
+    (re.compile(r"\bMs\.", re.IGNORECASE), "MsPLACEHOLDER"),
+    (re.compile(r"\d+\.\d+"), "NUMPLACEHOLDER"),
+)
+
+# Precompiled banned-phrase patterns: leading word boundary; trailing boundary only
+# when the phrase ends in an alphanumeric (phrases that end in punctuation, e.g.
+# ``"Of course,"``, keep the punctuation and skip a trailing ``\b``).
+_BANNED_PHRASE_PATTERNS: list[tuple[str, re.Pattern[str]]] = []
+for _phrase in BANNED_PHRASES:
+    _escaped = re.escape(_phrase.lower())
+    if _phrase[-1].isalnum():
+        _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}\b")))
+    else:
+        _BANNED_PHRASE_PATTERNS.append((_phrase, re.compile(rf"\b{_escaped}")))
+
 # Context budget for compaction — content exceeding these thresholds is compacted
 # (LLM-summarised) rather than naively truncated, preserving technical detail.
 # The model context (e.g. 262K tokens ≈ 917K chars) is large enough that
 # compaction should rarely be needed.
 COMPACT_OUTLINE_CHARS = 200_000
+
+
+def _split_sentences_for_staccato(para: str) -> list[str]:
+    """Split ``para`` into sentence-like units, protecting common abbreviations.
+
+    Preconditions:
+        - ``para`` is a non-empty string (caller filters empty paragraphs).
+    Postconditions:
+        - Returns a list of sentence strings (may be length 1 if no boundary found).
+        - Abbreviation/decimal periods are not treated as sentence boundaries.
+    """
+    protected = para
+    for pattern, token in _ABBREV_PROTECT:
+        protected = pattern.sub(token, protected)
+    return re.split(r"(?<=[.!?])\s+", protected)
 
 
 def _unwrap_llm_cause(exc: BaseException) -> BaseException:
@@ -247,6 +310,7 @@ def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
     Preconditions:
         - ``draft`` must be a string (may be empty).
         - ``path`` must be a ``str`` or ``pathlib.Path``.
+        - ``path`` must not contain ``..`` components (rejects path traversal).
     Postconditions:
         - Parent directories of ``path`` exist.
         - The resolved path contains ``draft`` as UTF-8 text.
@@ -256,7 +320,10 @@ def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
         raise TypeError(f"draft must be a string, got {type(draft).__name__}")
     if not isinstance(path, (str, Path)):
         raise TypeError(f"path must be a str or Path, got {type(path).__name__}")
-    p = Path(path).resolve()
+    raw = Path(path)
+    if ".." in raw.parts:
+        raise ValueError(f"Draft path must not contain '..' components: {path!r}")
+    p = raw.expanduser().resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(draft, encoding="utf-8")
     logger.info("Draft written to %s", p)
@@ -293,15 +360,11 @@ class BlogWriterAgent(_BlogAgentBase):
         # text-mode sibling from the injected model when possible; fall back
         # to the passed model so test fixtures (MagicMock, fakes) continue to
         # work. ``_call_json_raw`` / ``_call_agent_json`` use ``self._model``
-        # directly for structured helpers.
-        try:
-            from llm_service.strands_adapter import LLMClientModel  # noqa: PLC0415
-
-            if isinstance(llm_client, LLMClientModel):
-                self._text_model = llm_client.clone(response_format="text")
-            else:
-                self._text_model = llm_client
-        except ImportError:
+        # directly for structured helpers. ``LLMClientModel`` is imported at
+        # module level (optional: ``None`` when the adapter is absent).
+        if LLMClientModel is not None and isinstance(llm_client, LLMClientModel):
+            self._text_model = llm_client.clone(response_format="text")
+        else:
             self._text_model = llm_client
         self._writing_style_prompt = (writing_style_guide_content or "").strip()
         self._brand_spec_prompt = (brand_spec_content or "").strip()
@@ -323,7 +386,11 @@ class BlogWriterAgent(_BlogAgentBase):
             - ``prompt`` is a non-empty string.
         Postconditions:
             - Returns the agent's response as a stripped string.
+        Raises:
+            ValueError: if ``prompt`` is not a non-empty string.
         """
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
         agent = Agent(model=model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
         return str(agent(prompt)).strip()
 
@@ -333,6 +400,9 @@ class BlogWriterAgent(_BlogAgentBase):
         Used for drafting and revision paths that emit the ``---DRAFT---``
         marker + Markdown hybrid format. The text-mode sibling avoids forcing
         ``response_format=json_object`` on the wire so the marker survives.
+
+        Preconditions:
+            - ``prompt`` is a non-empty string (enforced by ``_call_agent``).
         """
         return self._call_agent(self._text_model, prompt, system_prompt)
 
@@ -345,6 +415,9 @@ class BlogWriterAgent(_BlogAgentBase):
         format must configure that on the injected client. Prefer this over
         parsing when a caller needs to extract JSON itself (e.g. planning paths
         that call ``extract_json_from_response``).
+
+        Preconditions:
+            - ``prompt`` is a non-empty string (enforced by ``_call_agent``).
         """
         return self._call_agent(self._model, prompt, system_prompt)
 
@@ -356,12 +429,18 @@ class BlogWriterAgent(_BlogAgentBase):
         already being suitable for structured replies; this method does not force
         ``response_format=json_object`` on the wire.
 
+        Preconditions:
+            - ``prompt`` is a non-empty string (enforced by ``_call_agent`` via
+              ``_call_json_raw``).
+        Postconditions:
+            - Returns a parsed JSON **object** (``dict``). Non-dict JSON values
+              raise ``LLMJsonParseError``.
         Raises:
             ``LLMJsonParseError`` when the response contains no extractable JSON,
             or when the extracted JSON parses to something other than a dict.
         """
         raw = self._call_json_raw(
-            prompt + "\n\nRespond with valid JSON only, no markdown fences.",
+            prompt + _SOFT_JSON_INSTRUCTION,
             system_prompt,
         )
         data = extract_json_from_response(raw)
@@ -385,11 +464,12 @@ class BlogWriterAgent(_BlogAgentBase):
               ``LLMTemporaryError``), including when strands wraps them in
               ``EventLoopException``, propagate unwrapped from
               ``call_json_with_retry`` so the draft-stage retry funnel can catch them.
+        Raises:
+            ValueError: if ``prompt`` is not a non-empty string.
         """
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
 
-        soft_json_instruction = "\n\nRespond with valid JSON only, no markdown fences."
         strict_json_suffix = (
             "\n\nRespond with a single JSON object only (no markdown, no code fence). "
             'Keys: "draft" (string — the full revised blog post in Markdown).'
@@ -416,7 +496,7 @@ class BlogWriterAgent(_BlogAgentBase):
 
         data = call_json_with_retry(
             _agent_factory,
-            prompt + soft_json_instruction,
+            prompt + _SOFT_JSON_INSTRUCTION,
             max_attempts=2,
             strict_json_suffix=strict_json_suffix,
             unwrap_exception=_unwrap,
@@ -428,6 +508,19 @@ class BlogWriterAgent(_BlogAgentBase):
         if isinstance(raw_draft, str) and raw_draft.strip():
             return raw_draft.strip()
         return None
+
+    def _brand_section_for_prompt(self) -> str:
+        """Return the brand-spec block for revision prompts, or a fallback string.
+
+        Postconditions:
+            - Returns ``self._brand_spec_prompt`` when non-empty; otherwise a
+              fixed fallback instructing the model to follow the style guide.
+        """
+        return (
+            self._brand_spec_prompt
+            if self._brand_spec_prompt
+            else "No brand specification was provided. Follow the style guide below."
+        )
 
     def _assert_guidelines_present(self) -> None:
         """Require both brand and writing guideline inputs before drafting/revising."""
@@ -526,63 +619,70 @@ class BlogWriterAgent(_BlogAgentBase):
         """Scan draft for mechanical violations. Returns list of violation descriptions.
 
         Checks: em/en dashes, banned phrases (``BANNED_PHRASES``), vague citation
-        patterns not followed by a source/link, reader-address
-        (``you``/``your``/``yours``/``yourself``) count below 3, and staccato
-        prose (3+ consecutive short sentences).
+        patterns not followed by a source/link within ``CITATION_LOOKAHEAD_CHARS``,
+        reader-address (``you``/``your``/``yours``/``yourself``/``yourselves``)
+        count below ``MIN_READER_ADDRESS_COUNT``, and staccato prose
+        (``STACCATO_MIN_STREAK``+ consecutive sentences with
+        ``<= STACCATO_MAX_WORDS`` words).
+
+        Preconditions:
+            - ``draft`` is a string (may be empty).
+        Raises:
+            TypeError: if ``draft`` is not a string.
         """
+        if not isinstance(draft, str):
+            raise TypeError(f"draft must be a string, got {type(draft).__name__}")
         violations: list[str] = []
         draft_lower = draft.lower()
-        paragraphs = [p.strip() for p in draft.split("\n\n") if p.strip()]
+        paragraphs = [p.strip() for p in _PARAGRAPH_SPLIT_RE.split(draft) if p.strip()]
 
         # 1. Em/en dashes
         for i, para in enumerate(paragraphs, 1):
             if "\u2014" in para or "\u2013" in para:
                 violations.append(f"Em/en dash found in paragraph {i}")
 
-        # 2. Banned phrases
-        for phrase in BANNED_PHRASES:
-            if phrase.lower() in draft_lower:
+        # 2. Banned phrases (word-boundary aware; see ``_BANNED_PHRASE_PATTERNS``)
+        for phrase, pattern in _BANNED_PHRASE_PATTERNS:
+            if pattern.search(draft_lower):
                 violations.append(f"Banned phrase found: '{phrase}'")
 
-        # 3. Vague citation patterns — only flag if NOT followed by a source/link within ~150 chars
+        # 3. Vague citation patterns — only flag if NOT followed by a source/link
         for pattern in VAGUE_CITATION_PATTERNS:
             for match in re.finditer(pattern, draft):
-                after = draft[match.end() : match.end() + 150]
-                # Skip if followed by an inline link, [CLAIM:] tag, or URL
-                if (
-                    re.search(r"\[CLAIM:", after)
-                    or re.search(r"https?://", after)
-                    or re.search(r"\]\(https?://", after)
-                ):
+                after = draft[match.end() : match.end() + CITATION_LOOKAHEAD_CHARS]
+                if _CITATION_SOURCE_RE.search(after):
                     continue
                 violations.append(
                     f"Vague citation: '{match.group()}' — add an inline link or name a specific source"
                 )
 
         # 4. Reader address count
-        you_count = len(re.findall(r"\byou(?:r|rs|rself)?\b", draft_lower))
-        if you_count < 3:
+        you_count = len(_READER_ADDRESS_RE.findall(draft_lower))
+        if you_count < MIN_READER_ADDRESS_COUNT:
             violations.append(
-                f"Reader address 'you/your' appears only {you_count} time(s) — need at least 3"
+                f"Reader address 'you/your' appears only {you_count} time(s) — "
+                f"need at least {MIN_READER_ADDRESS_COUNT}"
             )
 
-        # 5. Staccato detection — 3+ consecutive sentences with ≤ 7 words
+        # 5. Staccato detection — consecutive short sentences (once per paragraph streak)
         for i, para in enumerate(paragraphs, 1):
             if para.startswith("#"):
                 continue
-            sentences = re.split(r"(?<=[.!?])\s+", para)
+            sentences = _split_sentences_for_staccato(para)
             streak = 0
+            flagged = False
             for sent in sentences:
                 word_count = len(sent.split())
-                if word_count <= 7:
+                if word_count <= STACCATO_MAX_WORDS:
                     streak += 1
-                    if streak >= 3:
+                    if streak >= STACCATO_MIN_STREAK and not flagged:
                         violations.append(
                             f"Staccato prose in paragraph {i}: {streak}+ consecutive short sentences"
                         )
-                        break
+                        flagged = True
                 else:
                     streak = 0
+                    flagged = False
 
         return violations
 
@@ -679,7 +779,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 logger.info("LLM self-review: no issues found (response was not a JSON array)")
                 return draft
             if not issues:
-                logger.info("LLM self-review: draft passed all 5 checks")
+                logger.info("LLM self-review: draft passed all checks")
                 return draft
 
             logger.info("LLM self-review found %s issue(s); applying fixes", len(issues))
@@ -908,7 +1008,12 @@ class BlogWriterAgent(_BlogAgentBase):
         Postconditions:
             Returns a numbered feedback line; includes a location bracket and a
             suggestion sub-line when those optional fields are present.
+        Raises:
+            ValueError: if ``index`` is not a positive int, or required item
+                fields are missing.
         """
+        if not isinstance(index, int) or index <= 0:
+            raise ValueError(f"index must be a positive int, got {index!r}")
         severity = getattr(item, "severity", None)
         category = getattr(item, "category", None)
         issue = getattr(item, "issue", None)
@@ -943,14 +1048,10 @@ class BlogWriterAgent(_BlogAgentBase):
               ``selected_title`` and ``elicited_stories`` are each appended as
               their own labeled section near the end (title before stories);
               and ``tone_or_purpose`` / ``audience`` are each prepended as a
-              single labeled line at the very front (tone_or_purpose ends up
-              before audience). Absent fields are omitted rather than left blank.
+              single labeled line at the very front (tone_or_purpose before
+              audience). Absent fields are omitted rather than left blank.
         """
-        brand_section = (
-            self._brand_spec_prompt
-            if self._brand_spec_prompt
-            else "No brand specification was provided. Follow the style guide below."
-        )
+        brand_section = self._brand_section_for_prompt()
         feedback_lines = [
             self._format_feedback_item_line(item, i)
             for i, item in enumerate(feedback_items, start=1)
@@ -1035,7 +1136,7 @@ class BlogWriterAgent(_BlogAgentBase):
                     "---",
                     "RECENTLY RESOLVED FEEDBACK (do NOT regress on these):",
                     "---",
-                    "\n".join(prev_lines),
+                    "\n\n".join(prev_lines),
                     "",
                 ]
             )
@@ -1047,10 +1148,13 @@ class BlogWriterAgent(_BlogAgentBase):
                 draft,
             ]
         )
-        if revise_input.audience:  # pragma: no cover - prompt-assembly branch when audience is supplied; covered by integration tests.
-            prompt_parts.insert(0, f"Audience: {revise_input.audience}\n")
+        prefixes: list[str] = []
         if revise_input.tone_or_purpose:  # pragma: no cover - prompt-assembly branch when tone_or_purpose is supplied; covered by integration tests.
-            prompt_parts.insert(0, f"Tone/Purpose: {revise_input.tone_or_purpose}\n")
+            prefixes.append(f"Tone/Purpose: {revise_input.tone_or_purpose}\n")
+        if revise_input.audience:  # pragma: no cover - prompt-assembly branch when audience is supplied; covered by integration tests.
+            prefixes.append(f"Audience: {revise_input.audience}\n")
+        if prefixes:
+            prompt_parts = prefixes + prompt_parts
         if revise_input.selected_title:  # pragma: no cover - prompt-assembly branch when selected_title is supplied; covered by integration tests.
             prompt_parts.extend(
                 [
@@ -1160,35 +1264,46 @@ class BlogWriterAgent(_BlogAgentBase):
         """Build a structured revision plan, with a plain-text fallback.
 
         Calls the JSON-oriented LLM path first and converts its response to a
-        ``RevisionPlan``. Any non-transient failure — including an unexpected
-        programming error, not only LLM/structured-call failures — falls back to
-        a plain-text plan; transient LLM errors are unwrapped and re-raised.
+        ``RevisionPlan``. Non-transient LLM/parse failures fall back to a
+        plain-text plan; transient LLM errors are unwrapped and re-raised.
+        Unexpected programming errors (non-``LLMError``) propagate rather than
+        being swallowed into the unstructured fallback.
         """
         prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
         try:
             data = self._call_agent_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
-            if not data or not isinstance(data, dict):
+            if data is None or not isinstance(data, dict):
                 return RevisionPlan(summary="Planning produced no output.", changes=[], risks=[])
             changes: list[RevisionPlanChange] = []
-            for c in data.get("changes") or []:
+            changes_raw = data.get("changes") or []
+            if not isinstance(changes_raw, list):
+                logger.warning("Revision plan 'changes' is not a list: %r", changes_raw)
+                changes_raw = []
+            for c in changes_raw:
                 if not isinstance(c, dict):
                     continue
                 try:
                     changes.append(RevisionPlanChange(**c))
-                except (TypeError, ValueError) as change_exc:
+                except (TypeError, ValueError, ValidationError) as change_exc:
                     logger.debug("Skipping malformed revision plan change: %s", change_exc)
                     continue
+            risks_raw = data.get("risks") or []
+            if not isinstance(risks_raw, list):
+                logger.warning("Revision plan 'risks' is not a list: %r", risks_raw)
+                risks_raw = []
             return RevisionPlan(
-                summary=data.get("summary", ""),
+                summary=data.get("summary", "") or "",
                 changes=changes,
-                risks=data.get("risks") or [],
+                risks=risks_raw,
             )
         except Exception as e:
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
+            if not isinstance(cause, LLMError):
+                raise
             logger.warning(
-                "Structured revision planning failed: %s — falling back to unstructured", e
+                "Structured revision planning failed: %s — falling back to unstructured", cause
             )
             # Graceful degradation: try plain-text plan
             try:
@@ -1198,6 +1313,8 @@ class BlogWriterAgent(_BlogAgentBase):
                 fallback_cause = _unwrap_llm_cause(fallback_exc)
                 if isinstance(fallback_cause, (LLMRateLimitError, LLMTemporaryError)):
                     raise fallback_cause
+                if not isinstance(fallback_cause, LLMError):
+                    raise
                 return RevisionPlan(summary="Revision planning failed.", changes=[], risks=[])
 
     def _build_revise_single_item_prompt(
@@ -1217,11 +1334,7 @@ class BlogWriterAgent(_BlogAgentBase):
               ``_format_feedback_item_line``, and the current draft, instructing
               the model to change only that one issue.
         """
-        brand_section = (
-            self._brand_spec_prompt
-            if self._brand_spec_prompt
-            else "No brand specification was provided. Follow the style guide below."
-        )
+        brand_section = self._brand_section_for_prompt()
         feedback_line = self._format_feedback_item_line(item, 1)
         cp = compact_text(
             revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self._model, "content plan"
@@ -1341,14 +1454,15 @@ class BlogWriterAgent(_BlogAgentBase):
             fallback = self._fallback_draft_via_json(prompt, system_prompt=WRITING_SYSTEM_PROMPT)
             if fallback:
                 return fallback
-        except (LLMRateLimitError, LLMTemporaryError):
-            raise
         except Exception as e:
+            cause = _unwrap_llm_cause(e)
+            if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                raise cause
             logger.warning(
                 "Revise item %s/%s: JSON fallback failed: %s; keeping draft as-is.",
                 item_index,
                 total_items,
-                e,
+                cause,
             )
         logger.warning(
             "Revise item %s/%s: could not produce revision; keeping draft as-is.",
@@ -1388,12 +1502,17 @@ class BlogWriterAgent(_BlogAgentBase):
               unchanged (preserves the caller's original whitespace-only text).
             - Otherwise returns a ``WriterOutput`` whose draft is the revised text,
               the stripped draft when feedback is empty, or the stripped draft when
-              the text path and JSON fallback both fail to produce a usable draft.
+              the batch revise path and JSON fallback both fail to produce a usable
+              draft.
             - During batch execute retries, unwrapped ``LLMJsonParseError``
               (including ``EventLoopException`` wrappers) retries without a
               backoff sleep, and unwrapped ``LLMRateLimitError`` /
               ``LLMTemporaryError`` (including wrappers) retry with backoff;
               unexpected exceptions propagate immediately.
+            - Transient errors raised by the JSON fallback path (including when
+              wrapped in ``EventLoopException``) propagate so Temporal can retry.
+            - When ``draft_output_path`` is provided, writes the final draft to
+              that path before returning.
         """
         self._assert_guidelines_present()
         original_draft = revise_input.draft or ""
@@ -1438,18 +1557,21 @@ class BlogWriterAgent(_BlogAgentBase):
         # ── Step 3: Execute the plan ────────────────────────────────────────
         if on_llm_request:
             on_llm_request(f"Executing revision plan ({len(revision_plan.changes)} changes)...")
-        # Serialise the structured plan for the LLM prompt
-        plan_text = revision_plan.summary
+        # Serialise the structured plan for the LLM prompt (list + join, not += in a loop)
+        plan_parts: list[str] = [revision_plan.summary]
         if revision_plan.changes:
-            plan_text += "\n\nPLANNED CHANGES (execute in order):\n"
+            plan_parts.append("\n\nPLANNED CHANGES (execute in order):\n")
             for i, ch in enumerate(revision_plan.changes, 1):
                 ids = ", ".join(str(fid) for fid in ch.feedback_ids)
-                plan_text += f"\n{i}. [{ch.action.upper()}] {ch.section}"
+                plan_parts.append(f"\n{i}. [{ch.action.upper()}] {ch.section}")
                 if ids:
-                    plan_text += f"  (feedback #{ids})"
-                plan_text += f"\n   {ch.rationale}"
+                    plan_parts.append(f"  (feedback #{ids})")
+                plan_parts.append(f"\n   {ch.rationale}")
         if revision_plan.risks:
-            plan_text += "\n\nRISKS TO WATCH:\n" + "\n".join(f"- {r}" for r in revision_plan.risks)
+            plan_parts.append(
+                "\n\nRISKS TO WATCH:\n" + "\n".join(f"- {r}" for r in revision_plan.risks)
+            )
+        plan_text = "".join(plan_parts)
 
         prompt = self._build_revise_all_items_prompt(
             draft,
@@ -1468,7 +1590,7 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
-            # See _revise_one_item: LLMJsonParseError from the Strands Agent call
+            # See _revise_single_item: LLMJsonParseError from the Strands Agent call
             # retries without the transient backoff sleep.
             except LLMJsonParseError as e:
                 logger.warning(
@@ -1503,10 +1625,13 @@ class BlogWriterAgent(_BlogAgentBase):
                 )
                 if fallback:
                     current_draft = fallback
-            except (LLMRateLimitError, LLMTemporaryError):
-                raise
             except Exception as e:
-                logger.warning("Batch revise JSON fallback failed: %s; keeping original draft.", e)
+                cause = _unwrap_llm_cause(e)
+                if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
+                    raise cause
+                logger.warning(
+                    "Batch revise JSON fallback failed: %s; keeping original draft.", cause
+                )
 
         logger.info(
             "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
@@ -1527,11 +1652,11 @@ class BlogWriterAgent(_BlogAgentBase):
         """Scan a draft for areas of high uncertainty that need user input.
 
         Returns a list of UncertaintyQuestion objects. An empty list means the
-        agent is confident in the draft, the model returned no questions, or any
-        other non-transient failure (LLM/parse error or unexpected exception) was
-        soft-failed after logging. Transient ``LLMRateLimitError`` /
-        ``LLMTemporaryError`` (including when wrapped in ``EventLoopException``)
-        propagate so Temporal can retry the draft stage.
+        agent is confident in the draft, the model returned no questions, or an
+        expected LLM/parse failure was soft-failed after logging. Transient
+        ``LLMRateLimitError`` / ``LLMTemporaryError`` (including when wrapped in
+        ``EventLoopException``) propagate so Temporal can retry the draft stage.
+        Unexpected programming errors propagate rather than being swallowed.
         """
         prompt = UNCERTAINTY_DETECTION_PROMPT.format(
             content_plan=content_plan_text,
@@ -1553,6 +1678,9 @@ class BlogWriterAgent(_BlogAgentBase):
                 return []
             questions = []
             for item in items:
+                if not isinstance(item, dict):
+                    logger.warning("Skipping non-dict uncertainty question item: %s", item)
+                    continue
                 try:
                     questions.append(
                         UncertaintyQuestion(
@@ -1562,7 +1690,7 @@ class BlogWriterAgent(_BlogAgentBase):
                             section=item.get("section"),
                         )
                     )
-                except (KeyError, TypeError) as e:
+                except (KeyError, TypeError, AttributeError, ValidationError) as e:
                     logger.warning("Skipping malformed uncertainty question: %s", e)
             logger.info("Identified %s uncertainty question(s) in draft", len(questions))
             return questions
@@ -1570,7 +1698,9 @@ class BlogWriterAgent(_BlogAgentBase):
             cause = _unwrap_llm_cause(e)
             if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                 raise cause
-            logger.warning("Uncertainty detection failed: %s", e)
+            if not isinstance(cause, (LLMError, json.JSONDecodeError, TypeError, ValueError)):
+                raise
+            logger.warning("Uncertainty detection failed: %s", cause)
             return []
 
     def analyze_user_feedback_for_guideline_updates(
@@ -1606,7 +1736,14 @@ class BlogWriterAgent(_BlogAgentBase):
                 logger.info("User feedback contains no guideline updates")
                 return []
             updates = []
-            for item in data.get("updates", []):
+            updates_data = data.get("updates", [])
+            if not isinstance(updates_data, list):
+                logger.warning(
+                    "Expected 'updates' to be a list, got %s; returning no guideline updates",
+                    type(updates_data).__name__,
+                )
+                return []
+            for item in updates_data:
                 try:
                     updates.append(
                         WritingGuidelineUpdate(
@@ -1615,7 +1752,7 @@ class BlogWriterAgent(_BlogAgentBase):
                             guideline_text=item["guideline_text"],
                         )
                     )
-                except (KeyError, TypeError) as e:
+                except (KeyError, TypeError, ValidationError) as e:
                     logger.warning("Skipping malformed guideline update: %s", e)
             logger.info("Extracted %s writing guideline update(s) from user feedback", len(updates))
             return updates
@@ -1653,24 +1790,26 @@ class BlogWriterAgent(_BlogAgentBase):
         Postconditions:
             - Returns a ``WriterOutput`` whose ``draft`` field is the original
               ``draft`` unchanged when it is blank.
-            - Otherwise retries the text-completion path up to 3 times: an
-              unwrapped ``LLMJsonParseError`` (including ``EventLoopException``
-              wrappers) retries without a backoff sleep, and an unwrapped
+            - Otherwise retries the text-completion path up to
+              ``BATCH_EXECUTE_MAX_RETRIES`` times: an unwrapped
+              ``LLMJsonParseError`` (including ``EventLoopException`` wrappers)
+              retries without a backoff sleep, and an unwrapped
               ``LLMRateLimitError`` / ``LLMTemporaryError`` (including wrappers)
               retries with backoff. If all attempts fail, falls back to
               ``_fallback_draft_via_json``; if both paths fail to produce a
               usable draft, returns the original ``draft`` unchanged.
+            - Transient errors raised by the fallback path propagate so the
+              caller (e.g. Temporal) can retry.
+            - Unexpected non-LLM programming errors propagate.
+            - When ``draft_output_path`` is provided, writes the final draft to
+              that path before returning.
         """
         self._assert_guidelines_present()
         if not draft.strip():
             return WriterOutput(draft=draft)
 
         style_guide_text = self._style_prompt
-        brand_section = (
-            self._brand_spec_prompt
-            if self._brand_spec_prompt
-            else "No brand specification was provided. Follow the style guide below."
-        )
+        brand_section = self._brand_section_for_prompt()
 
         prompt_parts = [
             USER_FEEDBACK_REVISION_INSTRUCTIONS.replace("{user_feedback}", user_feedback),
@@ -1755,7 +1894,7 @@ class BlogWriterAgent(_BlogAgentBase):
                     current_draft = revised.strip()
                     primary_succeeded = True
                     break
-            # See _revise_one_item: LLMJsonParseError from the Strands Agent call
+            # See _revise_single_item: LLMJsonParseError from the Strands Agent call
             # retries without the transient backoff sleep (test_revise_from_user_feedback_json_parse_error_skips_sleep).
             except LLMJsonParseError as e:
                 logger.warning(
@@ -1795,9 +1934,11 @@ class BlogWriterAgent(_BlogAgentBase):
                 cause = _unwrap_llm_cause(e)
                 if isinstance(cause, (LLMRateLimitError, LLMTemporaryError)):
                     raise cause
+                if not isinstance(cause, LLMError):
+                    raise
                 logger.warning(
                     "User-feedback JSON fallback failed after retries; keeping original draft: %s",
-                    e,
+                    cause,
                 )
 
         logger.info("User-feedback revision complete, final length=%s", len(current_draft))
@@ -1848,7 +1989,7 @@ class BlogWriterAgent(_BlogAgentBase):
                 raise cause
             if not isinstance(cause, LLMError):
                 raise
-            logger.warning("Escalation summary generation failed: %s", e)
+            logger.warning("Escalation summary generation failed: %s", cause)
             return (
                 f"The draft has been through {revision_count} automated revision cycles "
                 "without reaching approval. Please review the current draft and provide feedback."
