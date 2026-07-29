@@ -922,6 +922,11 @@ def test_run_publication_agent_main_smoke(monkeypatch, capsys, tmp_path) -> None
 
 
 def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
+    """run_writer_agent.main runs end-to-end with a stubbed BlogWriterAgent.
+
+    Verifies that main constructs a valid WriterInput/ContentPlan (so
+    WriterInput validation is exercised for real) and prints the generated draft.
+    """
     import agents.blogging.agent_implementations.run_writer_agent as mod
 
     from llm_service import DummyLLMClient
@@ -938,7 +943,7 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
     # for real rather than mocked away.
     captured_input: dict = {}
 
-    class _Stub:
+    class _StubBlogWriterAgent:
         def __init__(self, *a, **kw):
             pass
 
@@ -946,7 +951,7 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
             captured_input["inp"] = inp
             return WriterOutput(draft=stub_writer_draft)
 
-    monkeypatch.setattr(mod, "BlogWriterAgent", _Stub)
+    monkeypatch.setattr(mod, "BlogWriterAgent", _StubBlogWriterAgent)
 
     mod.main()
     captured = capsys.readouterr()
