@@ -1096,6 +1096,15 @@ def test_write_files_and_commit_reports_unsafe_path_as_failure(tmp_path: Path):
 # --- problem-solving cleanup helpers / batch / runners ----------------------
 
 
+def test_format_summary_for_log_collapses_and_bounds():
+    long = "line1\nline2 " + ("x" * 200)
+    out = sh_ps._format_summary_for_log(long, max_chars=40)
+    assert "\n" not in out
+    assert len(out) == 40
+    assert out.endswith("…")
+    assert "line1 line2" in out
+
+
 def test_fill_named_placeholders_preserves_unrelated_braces():
     out = sh_ps._fill_named_placeholders(
         "conv={language_conventions} code={current_code}",

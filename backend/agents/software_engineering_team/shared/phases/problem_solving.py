@@ -79,6 +79,8 @@ def _attr_or(obj: Any, name: str, default: Any) -> Any:
 
 _ACTIONABLE_SEVERITIES = frozenset({"critical", "high", "medium"})
 _ADVISORY_FIX_MARKER = "recommendation"
+# Logging bound only — the returned ``summary`` field stays full-length.
+_LOG_SUMMARY_MAX_CHARS = 120
 
 
 def _issue_severity(issue: Any) -> str:
@@ -110,6 +112,24 @@ def _applied_fix_count(fixes_applied: List[Dict[str, Any]]) -> int:
         Returns the number of entries whose ``fix`` is not the advisory marker.
     """
     return sum(1 for entry in fixes_applied if entry.get("fix") != _ADVISORY_FIX_MARKER)
+
+
+def _format_summary_for_log(summary: object, max_chars: int = _LOG_SUMMARY_MAX_CHARS) -> str:
+    """Collapse whitespace and bound length for a single log line.
+
+    Preconditions:
+        ``max_chars`` > 0.
+    Postconditions:
+        Returns a single-line string of length ≤ ``max_chars``. The caller's
+        full ``summary`` value is left unchanged — this is log-only.
+    """
+    assert max_chars > 0, "max_chars must be greater than 0"
+    compact = " ".join(str(summary).split())
+    if len(compact) <= max_chars:
+        return compact
+    if max_chars == 1:
+        return "…"
+    return compact[: max_chars - 1] + "…"
 
 
 def _format_all_code(
@@ -712,7 +732,7 @@ def run_problem_solving_impl(
         "[%s] Problem-solving: %s — %s (%d unresolved)",
         task_id,
         "resolved" if resolved else "partial",
-        summary,
+        _format_summary_for_log(summary),
         len(unresolved_issues),
     )
     return problem_solving_result_cls(
@@ -811,7 +831,7 @@ def run_problem_solving_for_microtask_impl(
         f"{len(unresolved_issues)} unresolved."
     )
     summary = " ".join([base_summary] + summary_parts) if summary_parts else base_summary
-    logger.info("[%s] %s", task_id, summary)
+    logger.info("[%s] %s", task_id, _format_summary_for_log(summary))
 
     return problem_solving_result_cls(
         fixes_applied=fixes_applied,
