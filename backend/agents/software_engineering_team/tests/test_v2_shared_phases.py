@@ -1324,6 +1324,47 @@ def test_run_batch_coding_fixes_impl_treats_empty_severity_as_actionable():
     assert any("Fixing all 1" in d for d in captured)
 
 
+def test_tool_file_rewrite_counts_as_applied_even_with_recommendations():
+    """Tool file updates count as applied; recommendations still do not."""
+
+    class _Agent:
+        def problem_solve(self, _inp):
+            return SimpleNamespace(
+                files={"a.py": "x = 1\n"},
+                recommendations=["also consider Y"],
+                summary="tool rewrite",
+            )
+
+    parses = iter(
+        [
+            {
+                "files": {"a.py": "llm = 1\n"},
+                "resolved": True,
+                "summary": "llm fix",
+                "root_cause": "",
+            }
+        ]
+    )
+    kind = be_models.ToolAgentKind.GENERAL
+    result = sh_ps.run_problem_solving_impl(
+        llm=object(),
+        task=_task(),
+        review_result=SimpleNamespace(issues=[_issue()]),
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="/tmp",
+        tool_agents={kind: _Agent()},
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        single_issue_prompt="{language_conventions}{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        runner=_runner("## FILE ##"),
+    )
+    assert result.summary.startswith("Applied 2 fix(s);")
+    assert sum(1 for e in result.fixes_applied if e.get("fix") == "recommendation") == 1
+    assert sum(1 for e in result.fixes_applied if str(e.get("fix", "")).startswith("updated ")) == 1
+
+
 def test_recommendation_only_tool_does_not_inflate_applied_fix_count():
     class _Agent:
         def problem_solve(self, _inp):
@@ -1466,6 +1507,9 @@ def test_apply_tool_agents_files_only_updates_summary_and_schema():
     assert merged["a.py"].startswith("x")
     assert any("Tool" in p for p in parts)
     assert parts
+    assert len(fixes) == 1
+    assert fixes[0]["fix"].startswith("updated ")
+    assert fixes[0]["fix"] != "recommendation"
 
 
 def test_apply_tool_agents_recommendation_schema_includes_llm_keys():

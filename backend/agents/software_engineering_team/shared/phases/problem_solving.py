@@ -601,7 +601,7 @@ def _apply_tool_agents_problem_solve(
         failing agent is logged and skipped. A ``.py`` file a tool agent
         returns that fails to parse is discarded before merging -- the prior
         version of that file in ``merged`` is left untouched. Summary parts are
-        appended when the agent returns files and/or recommendations. Recommendation entries are recorded with ``fix="recommendation"`` so they are excluded from applied-fix counts.
+        appended when the agent returns files and/or recommendations. File rewrites append a counted applied-fix entry; recommendation-only entries use ``fix="recommendation"`` and are excluded from applied-fix counts.
     """
     for kind, agent in tool_agents.items():
         if not hasattr(agent, "problem_solve"):
@@ -610,6 +610,7 @@ def _apply_tool_agents_problem_solve(
             out = agent.problem_solve(phase_inp)
             tool_summary = f"Tool {kind.value}: {out.summary or 'suggestions applied.'}"
             wrote_files = False
+            files_written = 0
             if out.files:
                 valid_files, rejected_files = reject_invalid_python(out.files)
                 if rejected_files:
@@ -625,6 +626,19 @@ def _apply_tool_agents_problem_solve(
                 if valid_files:
                     merged.update(valid_files)
                     wrote_files = True
+                    files_written = len(valid_files)
+            if wrote_files:
+                # File-producing tool results are applied fixes (counted), distinct
+                # from advisory recommendation entries below.
+                file_entry: Dict[str, Any] = {
+                    "source": kind.value,
+                    "issue": out.summary or f"Tool {kind.value} file updates",
+                    "fix": f"updated {files_written} file(s)",
+                    "root_cause": "",
+                }
+                if microtask_id:
+                    file_entry["microtask"] = microtask_id
+                fixes_applied.append(file_entry)
             if out.recommendations:
                 for r in out.recommendations:
                     entry: Dict[str, Any] = {
