@@ -92,13 +92,15 @@ def filter_duplicate_questions(
             (``carried`` -> ``carry``), inflectional consonant doubling
             (``planned`` -> ``plan``, ``controlled`` -> ``control``,
             ``signalled`` -> ``signal``), lexical doubles that must be preserved
-            (``installed`` -> ``install``, ``filled`` -> ``fill``), and
-            spelling-only ``k`` insertion (``mimicked`` -> ``mimic``).
+            (``installed`` -> ``install``, ``filled`` -> ``fill``,
+            ``sniffed`` -> ``sniff``), and spelling-only ``k`` insertion
+            (``mimicked`` -> ``mimic``; compounds like ``handpicked`` keep
+            lexical ``pick``).
             Always strip ``ed`` (not just ``d``) so regular CVC pasts like
             ``fixed`` -> ``fix`` while silent-e pasts like ``moved``/``freed``
             still match via the silent-e flag.
             Plurals: ``ies`` -> ``y``, ``-es`` after s/x/z/ch/sh/o (including
-            ``statuses`` and ``echoes``), else trailing ``s``.
+            ``statuses`` and ``echoes``), ``uses`` -> ``use``, else trailing ``s``.
         """
         w = w.strip()
         vowels = set("aeiou")
@@ -143,14 +145,15 @@ def filter_duplicate_questions(
 
             Undouble trailing CC when the base is long enough that the double
             is inflectional (``planned``/``running``), not lexical (``added``).
-            Never undouble ``s``/``z``. Undouble ``l`` unless the ``ll`` stem
-            is a known lexical base (``install``/``fill``), so inflectional
-            forms like ``signalled``/``controlled`` still collapse.
+            Never undouble ``f``/``s``/``z`` (``sniffed``/``staffed`` keep
+            ``ff``; ``addressed`` keeps ``ss``). Undouble ``l`` unless the
+            ``ll`` stem is a known lexical base (``install``/``fill``).
             """
             if len(base) < 4 or base[-1] != base[-2] or base[-1] in vowels:
                 return base
             doubled = base[-1]
-            if doubled in "sz":
+            # Lexical doubles that English does not form by suffix doubling.
+            if doubled in "fsz":
                 return base
             if doubled == "l":
                 if base in lexical_ll:
@@ -159,13 +162,23 @@ def filter_duplicate_questions(
             return base[:-1]
 
         def _strip_inserted_ck(base: str) -> str:
-            """Remove spelling-only k after -c verbs (mimick→mimic), keep click."""
+            """Remove spelling-only k after -c verbs (mimick→mimic).
+
+            Keep monosyllabic ``click``/``pick`` and compound ``-pick`` verbs
+            (``handpick``, ``nitpick``) whose ``k`` is lexical.
+            """
+            if base.endswith("pick"):
+                return base
             if (
                 base.endswith("ick")
                 and sum(1 for c in base if c in vowels) >= 2
             ):
                 return base[:-1]
             return base
+
+        if w == "uses":
+            # Third-person verb (len 4) must not fall through the short-token guard.
+            return "use", False
 
         if len(w) <= 4:
             return w, False
@@ -195,8 +208,8 @@ def filter_duplicate_questions(
                 silent_e = base == raw
                 return base, silent_e
 
-        # Plurals: policies→policy, processes→process, statuses→status,
-        # echoes→echo, tokens→token.
+        # Plurals / 3rd-person: policies→policy, processes→process,
+        # statuses→status, echoes→echo, tokens→token.
         if w.endswith("ies") and len(w) > 4 and w[-4] not in vowels:
             return w[:-3] + "y", False
         if w.endswith(("sses", "xes", "zes", "ches", "shes")) and len(w) > 4:
@@ -239,10 +252,12 @@ def filter_duplicate_questions(
             return True
         return False
 
+    # Include length-3 history tokens so short bases (fix/add/map/use) remain
+    # matchable against past-tense/3rd-person question stems (fixed/uses).
     qa_stem_infos = [
         _stem_info(tok)
         for tok in re.findall(r"[a-z0-9]+", qa_history_lower)
-        if len(tok) > 3
+        if len(tok) >= 3
     ]
     qa_stems = {stem for stem, _ in qa_stem_infos}
     qa_silent_e_stubs = {stem for stem, silent_e in qa_stem_infos if silent_e}

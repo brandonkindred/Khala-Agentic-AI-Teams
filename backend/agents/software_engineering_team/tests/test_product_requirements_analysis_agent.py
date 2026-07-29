@@ -3045,6 +3045,22 @@ def test_filter_duplicate_questions_preserves_lexical_doubled_consonants() -> No
     assert duplicates == questions
 
 
+def test_filter_duplicate_questions_preserves_lexical_ff_doubles() -> None:
+    """sniffed/staffed keep lexical ff (not sniff→snif / staff→staf)."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which probes sniff staff traffic?")
+    ]
+    qa_history = (
+        "Q: Which probes sniffed staff traffic during soak tests?\n"
+        "A: Edge probes sniffed staff traffic before the soak window closed."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
 def test_filter_duplicate_questions_matches_inflectional_doubled_l() -> None:
     """controlled/signalled/equalled collapse while install/fill stay lexical."""
     questions = [
@@ -3085,6 +3101,22 @@ def test_filter_duplicate_questions_matches_inserted_ck_verbs() -> None:
     qa_history = (
         "Q: Which services mimicked panic behavior while mimicking outages?\n"
         "A: Edge services mimicked failures after operators panicked."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_keeps_lexical_pick_compounds() -> None:
+    """handpicked/nitpicked keep lexical -pick (not handpic/nitpic)."""
+    questions = [
+        OpenQuestion(id="q1", question_text="Which reviewers handpick nitpick findings?")
+    ]
+    qa_history = (
+        "Q: Which reviewers handpicked nitpick findings during triage?\n"
+        "A: Senior reviewers handpicked nitpick findings before merge."
     )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
@@ -3155,6 +3187,44 @@ def test_filter_duplicate_questions_matches_oes_plurals() -> None:
     qa_history = (
         "Q: Which services echoes health checks for heroes dashboards?\n"
         "A: Edge services echoes health checks used by heroes dashboards."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_stems_uses_to_use() -> None:
+    """Third-person uses→use (not us via the -ses plural rule)."""
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which component uses Redis storage?",
+        )
+    ]
+    qa_history = (
+        "Q: Which component should use Redis storage?\n"
+        "A: The cache component should use Redis storage for sessions."
+    )
+
+    filtered, duplicates = filter_duplicate_questions(questions, qa_history)
+
+    assert filtered == []
+    assert duplicates == questions
+
+
+def test_filter_duplicate_questions_matches_short_history_base_verbs() -> None:
+    """History retains length-3 bases so fixed/added match fix/add in answers."""
+    questions = [
+        OpenQuestion(
+            id="q1",
+            question_text="Which defects get fixing after mapping?",
+        )
+    ]
+    qa_history = (
+        "Q: Which defects get a fix after map work?\n"
+        "A: Critical defects get a fix after map work lands."
     )
 
     filtered, duplicates = filter_duplicate_questions(questions, qa_history)
